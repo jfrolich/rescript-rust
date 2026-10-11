@@ -37,7 +37,9 @@ pub fn subst_lambda(s: &Subst, lam: Lambda) -> Lambda {
                 Some(value) => (value.clone(), true),
                 None => (lam, false),
             },
-            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| go(s, inner)),
+            lam => {
+                crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| go(s, inner))
+            }
         }
     }
     go(s, lam).0

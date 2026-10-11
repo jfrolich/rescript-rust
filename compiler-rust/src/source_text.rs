@@ -25,9 +25,16 @@ pub fn latin1_slice(source: &str, start: usize, end: usize) -> Option<&str> {
     if start > end {
         return None;
     }
-    let mut indices = source.char_indices().map(|(i, _)| i).chain(std::iter::once(source.len()));
+    let mut indices = source
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(source.len()));
     let start_byte = indices.nth(start)?;
-    let end_byte = if end == start { start_byte } else { indices.nth(end - start - 1)? };
+    let end_byte = if end == start {
+        start_byte
+    } else {
+        indices.nth(end - start - 1)?
+    };
     source.get(start_byte..end_byte)
 }
 

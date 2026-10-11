@@ -870,7 +870,8 @@ fn get_field_types(
                 crate::types::asttypes::MutableFlag::Mutable => Mutable::Mutable,
                 crate::types::asttypes::MutableFlag::Immutable => Mutable::Immutable,
             };
-            let translation = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
+            let translation =
+                translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
             fields.insert(0, (name, mutable_, translation));
             (closed_flag, fields)
         }

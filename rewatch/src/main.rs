@@ -17,6 +17,20 @@ use rescript::{
 };
 
 fn main() {
+    // Invoked as `bsc` or `res_parser_rust` (through a symlink), run that
+    // file-at-a-time command of the linked compiler instead. The parity test
+    // scripts use this to compare it against the OCaml reference compiler.
+    match invoked_name().as_deref() {
+        Some("bsc") => {
+            rescript_compiler::cli::bsc::main();
+            std::process::exit(0);
+        }
+        Some("res_parser_rust") => {
+            rescript_compiler::cli::res_parser::main();
+            std::process::exit(0);
+        }
+        _ => {}
+    }
     rescript::build::phase_mark("main");
     rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     let telemetry_guard = telemetry::init_telemetry();
@@ -31,6 +45,12 @@ fn main() {
     rescript::build::phase_mark("run-main-end");
     drop(telemetry_guard);
     std::process::exit(exit_code);
+}
+
+/// The file stem this executable was invoked as (`argv[0]`).
+fn invoked_name() -> Option<String> {
+    let arg0 = std::env::args_os().next()?;
+    Some(Path::new(&arg0).file_stem()?.to_string_lossy().into_owned())
 }
 
 fn run_main(otel_enabled: bool) -> Result<()> {

@@ -287,7 +287,8 @@ impl UsageTables {
             return None;
         }
         let cell = self.new_cell();
-        self.module_declarations.insert((name.to_string(), loc), cell);
+        self.module_declarations
+            .insert((name.to_string(), loc), cell);
         Some(cell)
     }
 
@@ -387,7 +388,10 @@ impl UsageTables {
         loc: Location,
         cstr_name: &str,
     ) {
-        if let Some(cell) = self.used_constructors.get(&NameLocName(ty_name, loc, cstr_name)) {
+        if let Some(cell) = self
+            .used_constructors
+            .get(&NameLocName(ty_name, loc, cstr_name))
+        {
             let cu = &mut self.constructor_usages[cell.0 as usize];
             match usage {
                 ConstructorUsage::Positive => cu.cu_positive = true,

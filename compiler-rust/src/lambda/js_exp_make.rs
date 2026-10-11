@@ -60,7 +60,11 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
             // cannot throw is taken as pure.
             let safe_literal = match &right.desc {
                 ExpressionDesc::Number(Number::BigInt(lit)) => {
-                    if *op == BinOp::Pow { lit.positive } else { lit.value != "0" }
+                    if *op == BinOp::Pow {
+                        lit.positive
+                    } else {
+                        lit.value != "0"
+                    }
                 }
                 ExpressionDesc::Number(Number::Int { i, .. }) => *op == BinOp::Pow || *i != 0,
                 ExpressionDesc::Number(Number::Float(_)) => true,
@@ -72,8 +76,7 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
             js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            js_expr_no_side_effects(tag)
-                && values.iter().all(js_expr_no_side_effects)
+            js_expr_no_side_effects(tag) && values.iter().all(js_expr_no_side_effects)
         }
         ExpressionDesc::InterpolatedTemplate { values, .. } => {
             values.iter().all(js_expr_no_side_effects)
@@ -322,7 +325,10 @@ pub(crate) fn runtime_compare_call_args(expr: &Expression) -> Option<(&Expressio
 /// js_exp_make.ml `string_comp`: literal operands fold by comparing their
 /// semantic values.
 pub(crate) fn compare_string_literals(left: &Expression, right: &Expression) -> Option<bool> {
-    match (left.string_literal_semantic(), right.string_literal_semantic()) {
+    match (
+        left.string_literal_semantic(),
+        right.string_literal_semantic(),
+    ) {
         (Some(left), Some(right)) => Some(left == right),
         _ => None,
     }
@@ -429,8 +435,13 @@ pub(crate) fn both_bigint_literals(left: &Expression, right: &Expression) -> boo
 }
 
 pub(crate) fn both_string_literals(left: &Expression, right: &Expression) -> bool {
-    matches!(left.desc, ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_))
-        && matches!(right.desc, ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_))
+    matches!(
+        left.desc,
+        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_)
+    ) && matches!(
+        right.desc,
+        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_)
+    )
 }
 
 pub(crate) fn int_expr(value: i32) -> Expression {
@@ -839,9 +850,17 @@ pub(crate) fn interpolated_template(
             _ => None,
         }
     }
-    assert_eq!(segments.len(), values.len() + 1, "a template has one more segment than value");
+    assert_eq!(
+        segments.len(),
+        values.len() + 1,
+        "a template has one more segment than value"
+    );
     let mut segments = segments.into_iter();
-    let mut parts = vec![segments.next().expect("a template has at least one segment")];
+    let mut parts = vec![
+        segments
+            .next()
+            .expect("a template has at least one segment"),
+    ];
     let mut merged_segments = Vec::new();
     let mut merged_values = Vec::new();
     for (next_segment, value) in segments.zip(values) {
@@ -859,7 +878,9 @@ pub(crate) fn interpolated_template(
     }
     merged_segments.push(concat_template(&parts));
     if merged_segments.len() == 1 && merged_values.is_empty() {
-        Expression::new(ExpressionDesc::TemplateLiteral(merged_segments.pop().expect("one segment")))
+        Expression::new(ExpressionDesc::TemplateLiteral(
+            merged_segments.pop().expect("one segment"),
+        ))
     } else {
         Expression::new(ExpressionDesc::InterpolatedTemplate {
             segments: merged_segments,

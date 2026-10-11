@@ -1399,10 +1399,16 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_for_await_of(_, _, _, _) => {
             Sexp::list(vec![Sexp::atom("Texp_for_await_of")])
         }
-        ExpressionDesc::Texp_tagged_template { tag, raw_sources, values } => {
+        ExpressionDesc::Texp_tagged_template {
+            tag,
+            raw_sources,
+            values,
+        } => {
             let tag_sexp = sexp_expression(arena, ctx, with_locs, dedup, tag);
-            let values_sexp: Vec<Sexp> =
-                values.iter().map(|value| sexp_expression(arena, ctx, with_locs, dedup, value)).collect();
+            let values_sexp: Vec<Sexp> = values
+                .iter()
+                .map(|value| sexp_expression(arena, ctx, with_locs, dedup, value))
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Texp_tagged_template"),
                 tag_sexp,
@@ -1411,14 +1417,18 @@ fn sexp_expression_desc(
             ])
         }
         ExpressionDesc::Texp_template { segments, values } => {
-            let values_sexp: Vec<Sexp> =
-                values.iter().map(|value| sexp_expression(arena, ctx, with_locs, dedup, value)).collect();
+            let values_sexp: Vec<Sexp> = values
+                .iter()
+                .map(|value| sexp_expression(arena, ctx, with_locs, dedup, value))
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Texp_template"),
                 Sexp::list(
                     segments
                         .iter()
-                        .map(|segment| Sexp::list(vec![string(segment.source()), string(segment.semantic())]))
+                        .map(|segment| {
+                            Sexp::list(vec![string(segment.source()), string(segment.semantic())])
+                        })
                         .collect(),
                 ),
                 Sexp::list(values_sexp),
@@ -1426,7 +1436,11 @@ fn sexp_expression_desc(
         }
         ExpressionDesc::Texp_object_get(e, name) => {
             let e_sexp = sexp_expression(arena, ctx, with_locs, dedup, e);
-            Sexp::list(vec![Sexp::atom("Texp_object_get"), e_sexp, string(&name.txt)])
+            Sexp::list(vec![
+                Sexp::atom("Texp_object_get"),
+                e_sexp,
+                string(&name.txt),
+            ])
         }
         ExpressionDesc::Texp_object_set(e1, name, e2) => {
             let e1_sexp = sexp_expression(arena, ctx, with_locs, dedup, e1);

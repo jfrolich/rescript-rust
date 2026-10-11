@@ -262,7 +262,10 @@ mod tests {
                     reference.clone(),
                     Lambda::prim(
                         Primitive::Paddint,
-                        vec![Lambda::var(reference.clone()), Lambda::const_(Constant::int(1))],
+                        vec![
+                            Lambda::var(reference.clone()),
+                            Lambda::const_(Constant::int(1)),
+                        ],
                         Location::none(),
                     ),
                 ),

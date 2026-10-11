@@ -7,8 +7,7 @@ use crate::fast_hash::AHashSet as HashSet;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    Attribute, ConstructorArguments, ConstructorDescription, INTERNAL_OPTIONAL_ATTR_NAME,
-    TypeKind,
+    Attribute, ConstructorArguments, ConstructorDescription, INTERNAL_OPTIONAL_ATTR_NAME, TypeKind,
 };
 use crate::types::env::Env;
 use crate::types::path::Path;
@@ -108,7 +107,8 @@ fn type_cannot_contain_undefined_rec(
                                     }
                                 ))
                             ) || case.is_none()
-                                && cd.cd_runtime_tag == Some(crate::types::VariantLiteralTag::Undefined);
+                                && cd.cd_runtime_tag
+                                    == Some(crate::types::VariantLiteralTag::Undefined);
                             let untagged = matches!(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Block(
@@ -491,12 +491,12 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
 
 #[cfg(test)]
 mod tests {
-    use crate::types::decl::TypeDeclaration;
     use super::*;
     use crate::context::IdGenerator;
     use crate::ident::Ident;
     use crate::location::Location;
     use crate::types::asttypes::PrivateFlag;
+    use crate::types::decl::TypeDeclaration;
 
     #[test]
     fn builtin_object_recognizes_object_types() {

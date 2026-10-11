@@ -118,9 +118,7 @@ fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag
         Some(crate::types::VariantLiteralTag::Bool(value)) => LabelJs::BoolLabel(*value),
         Some(crate::types::VariantLiteralTag::Null) => LabelJs::NullLabel,
         Some(crate::types::VariantLiteralTag::Undefined) => LabelJs::UndefinedLabel,
-        None => {
-            LabelJs::StringLabel(label.to_string())
-        }
+        None => LabelJs::StringLabel(label.to_string()),
     };
     VariantCase { label_js }
 }

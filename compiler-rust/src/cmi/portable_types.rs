@@ -30,8 +30,8 @@ use crate::types::decl::{
 use crate::types::path::Path;
 use crate::types::thread_store::ThreadTypeStore;
 use crate::types::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, RowFieldRef, TypeArg,
-    TypeDesc, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, RowFieldRef,
+    TypeArg, TypeDesc, TypeExprRef,
 };
 
 use super::persistent_env::PersStruct;
@@ -509,11 +509,7 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &Hash
     }
 }
 
-fn hash_type_expr_refs(
-    hasher: &mut impl Hasher,
-    refs: &[TypeExprRef],
-    entries: &HashGraph<'_>,
-) {
+fn hash_type_expr_refs(hasher: &mut impl Hasher, refs: &[TypeExprRef], entries: &HashGraph<'_>) {
     refs.len().hash(hasher);
     for r in refs {
         hash_type_ref(hasher, r.index(), entries, &mut Vec::new());
@@ -531,10 +527,17 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph
             std::mem::discriminant(repr).hash(hasher);
             match repr {
                 crate::types::decl::RecordRepresentation::RecordUnboxed(flag) => flag.hash(hasher),
-                crate::types::decl::RecordRepresentation::RecordInlined { name, representation } => {
+                crate::types::decl::RecordRepresentation::RecordInlined {
+                    name,
+                    representation,
+                } => {
                     name.hash(hasher);
                     representation.position.hash(hasher);
-                    format!("{:?}", entries.layouts.get(representation.variant.0 as usize)).hash(hasher);
+                    format!(
+                        "{:?}",
+                        entries.layouts.get(representation.variant.0 as usize)
+                    )
+                    .hash(hasher);
                 }
                 _ => {}
             }
@@ -607,11 +610,7 @@ fn hash_extension_constructor(
     ext.ext_is_exception.hash(hasher);
 }
 
-fn hash_modtype_decl(
-    hasher: &mut impl Hasher,
-    mtd: &ModtypeDeclaration,
-    entries: &HashGraph<'_>,
-) {
+fn hash_modtype_decl(hasher: &mut impl Hasher, mtd: &ModtypeDeclaration, entries: &HashGraph<'_>) {
     hash_attributes(hasher, &mtd.mtd_attributes);
     if let Some(mty) = &mtd.mtd_type {
         true.hash(hasher);
@@ -1034,7 +1033,9 @@ impl<'a> TypeGraphSerializer<'a> {
 
     fn remap_module_type(&mut self, mt: &mut ModuleType) {
         match mt {
-            ModuleType::MtySignature(sig) => self.remap_signature(crate::types::decl::signature_mut(sig)),
+            ModuleType::MtySignature(sig) => {
+                self.remap_signature(crate::types::decl::signature_mut(sig))
+            }
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {
@@ -1066,8 +1067,15 @@ pub(crate) trait TypeNodeSink {
 }
 
 /// The cells of an internalized graph, one per saved cell class.
-fn internalize_mutabilities<S: TypeNodeSink>(graph: &PortableTypeGraph, sink: &S) -> Vec<MutabilityRef> {
-    graph.mutabilities.iter().map(|flag| sink.new_mutability(*flag)).collect()
+fn internalize_mutabilities<S: TypeNodeSink>(
+    graph: &PortableTypeGraph,
+    sink: &S,
+) -> Vec<MutabilityRef> {
+    graph
+        .mutabilities
+        .iter()
+        .map(|flag| sink.new_mutability(*flag))
+        .collect()
 }
 
 impl TypeNodeSink for TypeContext {
@@ -1331,11 +1339,8 @@ pub(crate) fn internalize_raw_signature(
     pps: &PortablePersStruct,
     ctx: &TypeContext,
 ) -> Option<Signature> {
-    let mut sig = internalize_signature(
-        pps.raw_ps_sig.as_ref()?,
-        pps.raw_type_graph.as_ref()?,
-        ctx,
-    );
+    let mut sig =
+        internalize_signature(pps.raw_ps_sig.as_ref()?, pps.raw_type_graph.as_ref()?, ctx);
     remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
         ctx.intern_cmi_longident_name(name)
     });
@@ -1350,15 +1355,16 @@ fn remap_signature_file_names(
     names: &[(u32, String)],
     intern: &dyn Fn(&str) -> crate::intern::StrIdx,
 ) {
-    let names: HashMap<u32, &str> = names.iter().map(|(raw, name)| (*raw, name.as_str())).collect();
+    let names: HashMap<u32, &str> = names
+        .iter()
+        .map(|(raw, name)| (*raw, name.as_str()))
+        .collect();
     let mut fresh: HashMap<u32, crate::intern::StrIdx> = HashMap::new();
     crate::types::decl::for_each_signature_location(sig, &mut |loc| {
         for pos in [&mut loc.loc_start, &mut loc.loc_end] {
             let raw = pos.file_name.raw();
             if let Some(name) = names.get(&raw) {
-                pos.file_name = *fresh
-                    .entry(raw)
-                    .or_insert_with(|| intern(name));
+                pos.file_name = *fresh.entry(raw).or_insert_with(|| intern(name));
             }
         }
     });
@@ -1545,7 +1551,9 @@ fn remap_sig_item_refs(
 ) {
     match item {
         SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, remap),
-        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(std::sync::Arc::make_mut(td), remap, layout_remap),
+        SignatureItem::SigType(_, td, _) => {
+            remap_type_decl_refs(std::sync::Arc::make_mut(td), remap, layout_remap)
+        }
         SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, remap),
         SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap, layout_remap),
         SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap, layout_remap),
@@ -1662,7 +1670,9 @@ fn remap_module_type_refs(
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     match mt {
-        ModuleType::MtySignature(sig) => remap_signature_refs(crate::types::decl::signature_mut(sig), remap, layout_remap),
+        ModuleType::MtySignature(sig) => {
+            remap_signature_refs(crate::types::decl::signature_mut(sig), remap, layout_remap)
+        }
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
@@ -1702,12 +1712,21 @@ mod type_arg_tests {
                 TypeArg::unlabeled(shared),
                 TypeArg::new(labels[1].clone(), shared),
                 TypeArg::new(labels[2].clone(), distinct),
-            ].into(),
+            ]
+            .into(),
             ret: shared,
         });
-        let mut ser = TypeGraphSerializer { ctx: &ctx, arena: None, entries: Vec::new(),
-            cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new(),
-            file_name_cache: HashMap::new(), mutabilities: Vec::new(), mutability_cache: HashMap::new() };
+        let mut ser = TypeGraphSerializer {
+            ctx: &ctx,
+            arena: None,
+            entries: Vec::new(),
+            cache: HashMap::new(),
+            variant_layouts: Vec::new(),
+            variant_layout_cache: HashMap::new(),
+            file_name_cache: HashMap::new(),
+            mutabilities: Vec::new(),
+            mutability_cache: HashMap::new(),
+        };
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {
             panic!("not arrow")

@@ -356,7 +356,10 @@ fn rewrite_expression(
                 .iter()
                 .map(|idx| rewrite_expr_idx(*idx, arena, let_unwrap_enabled))
                 .collect::<Result<Vec<_>, _>>()?;
-            ExpressionDesc::Pexp_variant(Box::new((label.clone(), Located::new(rewritten, args.loc))))
+            ExpressionDesc::Pexp_variant(Box::new((
+                label.clone(),
+                Located::new(rewritten, args.loc),
+            )))
         }
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, spread) = &**inner;
@@ -475,12 +478,19 @@ fn rewrite_expression(
             let (subject, name, value) = &**inner;
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;
             let rewritten_value = rewrite_expr_idx(*value, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_object_set(Box::new((rewritten_subject, name.clone(), rewritten_value)))
+            ExpressionDesc::Pexp_object_set(Box::new((
+                rewritten_subject,
+                name.clone(),
+                rewritten_value,
+            )))
         }
         ExpressionDesc::Pexp_object_literal(fields) => {
             let mut rewritten = Vec::with_capacity(fields.len());
             for (name, value) in fields.iter() {
-                rewritten.push((name.clone(), rewrite_expr_idx(*value, arena, let_unwrap_enabled)?));
+                rewritten.push((
+                    name.clone(),
+                    rewrite_expr_idx(*value, arena, let_unwrap_enabled)?,
+                ));
             }
             ExpressionDesc::Pexp_object_literal(Box::new(rewritten))
         }

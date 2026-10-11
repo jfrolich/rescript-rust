@@ -1898,10 +1898,7 @@ mod tests {
         );
         assert_eq!(
             trace,
-            vec![
-                ("First".into(), "a".into()),
-                ("Second".into(), "b".into())
-            ]
+            vec![("First".into(), "a".into()), ("Second".into(), "b".into())]
         );
         trace.clear();
         {

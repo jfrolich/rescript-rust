@@ -21,7 +21,9 @@ pub enum ParenKind {
 
 #[inline]
 fn braces_from_attr(arena: &ParseArena, expr: &Expression) -> Option<ParenKind> {
-    parsetree_viewer::process_braces(arena, expr).0.map(ParenKind::Braced)
+    parsetree_viewer::process_braces(arena, expr)
+        .0
+        .map(ParenKind::Braced)
 }
 
 #[inline]
@@ -40,7 +42,11 @@ fn is_module_pack_constraint(arena: &ParseArena, expr: &Expression) -> bool {
 }
 
 /// res_parens.ml `expr_with_coercion_kind`.
-fn expr_with_coercion_kind(arena: &ParseArena, coercion_kind: ParenKind, expr: &Expression) -> ParenKind {
+fn expr_with_coercion_kind(
+    arena: &ParseArena,
+    coercion_kind: ParenKind,
+    expr: &Expression,
+) -> ParenKind {
     if let Some(kind) = braces_from_attr(arena, expr) {
         return kind;
     }
@@ -68,9 +74,9 @@ pub fn expr_record_row_rhs(arena: &ParseArena, optional: bool, e: &Expression) -
     let kind = expr(arena, e);
     match kind {
         ParenKind::Nothing if optional => match &*e.pexp_desc {
-            ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_ternary(_) | ExpressionDesc::Pexp_fun(_) => {
-                ParenKind::Parenthesized
-            }
+            ExpressionDesc::Pexp_ifthenelse(_)
+            | ExpressionDesc::Pexp_ternary(_)
+            | ExpressionDesc::Pexp_fun(_) => ParenKind::Parenthesized,
             _ if parsetree_viewer::is_binary_expression(arena, e) => ParenKind::Parenthesized,
             _ => kind,
         },
@@ -133,7 +139,9 @@ pub fn structure_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             ParenKind::Parenthesized
         }
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => {
+            ParenKind::Parenthesized
+        }
         _ => ParenKind::Nothing,
     }
 }
@@ -242,7 +250,10 @@ pub fn rhs_binary_expr_operand(
                 ExpressionDesc::Pexp_ident(ident) if funct_expr.pexp_attributes.is_empty() => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
-                        if parsetree_viewer::not_ghost_operator(operator, arena.loc_ghost(ident.loc)) {
+                        if parsetree_viewer::not_ghost_operator(
+                            operator,
+                            arena.loc_ghost(ident.loc),
+                        ) {
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
@@ -279,7 +290,10 @@ pub fn flatten_operand_rhs(
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
-                        if parsetree_viewer::not_ghost_operator(operator, arena.loc_ghost(ident.loc)) {
+                        if parsetree_viewer::not_ghost_operator(
+                            operator,
+                            arena.loc_ghost(ident.loc),
+                        ) {
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
@@ -344,7 +358,10 @@ pub fn flatten_operand_rhs_without_attrs(
                 ExpressionDesc::Pexp_ident(ident) => {
                     if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
                         let operator = arena.get_string(*op_idx);
-                        if parsetree_viewer::not_ghost_operator(operator, arena.loc_ghost(ident.loc)) {
+                        if parsetree_viewer::not_ghost_operator(
+                            operator,
+                            arena.loc_ghost(ident.loc),
+                        ) {
                             let prec_parent =
                                 parsetree_viewer::operator_precedence(parent_operator);
                             let prec_child = parsetree_viewer::operator_precedence(operator);
@@ -519,11 +536,15 @@ pub fn ternary_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
     match &*expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_ternary(_) => ParenKind::Parenthesized,
-        ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => {
+            ParenKind::Parenthesized
+        }
         _ if parsetree_viewer::is_fun_newtype(arena, expr) => {
             let (_, _, return_expr) = parsetree_viewer::fun_expr(arena, expr);
             match &*return_expr.pexp_desc {
-                ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => ParenKind::Parenthesized,
+                ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => {
+                    ParenKind::Parenthesized
+                }
                 _ => ParenKind::Nothing,
             }
         }

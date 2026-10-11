@@ -31,9 +31,14 @@ pub fn is_braced_expr(expr: &Expression) -> bool {
 
 /// res_parsetree_viewer.ml `process_braces`: the braces location and the
 /// enclosed expression of an explicit braces node.
-pub fn process_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (Option<LocIdx>, &'a Expression) {
+pub fn process_braces<'a>(
+    arena: &'a ParseArena,
+    expr: &'a Expression,
+) -> (Option<LocIdx>, &'a Expression) {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_braces(braces) => (Some(braces.braces_loc), arena.get_expr(braces.expr)),
+        ExpressionDesc::Pexp_braces(braces) => {
+            (Some(braces.braces_loc), arena.get_expr(braces.expr))
+        }
         _ => (None, expr),
     }
 }
@@ -200,7 +205,11 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 2
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -232,7 +241,11 @@ pub fn get_binary_operator(
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 2
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return None;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -427,7 +440,11 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) => true,
+        ExpressionDesc::Pexp_constant(c)
+            if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) =>
+        {
+            true
+        }
         ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -530,7 +547,11 @@ pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 1 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 1
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -751,7 +772,9 @@ pub fn collect_list_expressions<'a>(
                 let pair = match args.txt.as_slice() {
                     [head, tail] => Some((*head, *tail)),
                     [arg] => match &*arena.get_expr(*arg).pexp_desc {
-                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => Some((exprs[0], exprs[1])),
+                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => {
+                            Some((exprs[0], exprs[1]))
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -1537,7 +1560,11 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 2
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1565,7 +1592,11 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 3 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 3
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);

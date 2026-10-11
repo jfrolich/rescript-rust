@@ -286,11 +286,14 @@ impl RawLambda {
     /// the form OCaml builds them (raw constants keep a few encodings, such
     /// as an int-named polymorphic variant, until they are lowered).
     pub fn prim_folded(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
-        if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_))) {
+        if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_)))
+        {
             let consts = args
                 .iter()
                 .map(|arg| match arg {
-                    RawLambda::Lconst(c) => Lambda::Lconst(crate::raw_lambda::lower::lower_constant(c.clone())),
+                    RawLambda::Lconst(c) => {
+                        Lambda::Lconst(crate::raw_lambda::lower::lower_constant(c.clone()))
+                    }
                     _ => unreachable!(),
                 })
                 .collect();
@@ -328,14 +331,20 @@ impl RawLambda {
             // `if a then false else true` is `not a`, when `a` is boolean.
             cond if matches!(
                 (&then_, &else_),
-                (RawLambda::Lconst(Constant::JsTrue), RawLambda::Lconst(Constant::JsFalse))
+                (
+                    RawLambda::Lconst(Constant::JsTrue),
+                    RawLambda::Lconst(Constant::JsFalse)
+                )
             ) && raw_has_boolean_type(&cond).is_some() =>
             {
                 cond
             }
             cond if matches!(
                 (&then_, &else_),
-                (RawLambda::Lconst(Constant::JsFalse), RawLambda::Lconst(Constant::JsTrue))
+                (
+                    RawLambda::Lconst(Constant::JsFalse),
+                    RawLambda::Lconst(Constant::JsTrue)
+                )
             ) && raw_has_boolean_type(&cond).is_some() =>
             {
                 let loc = raw_has_boolean_type(&cond).expect("checked above");
@@ -488,9 +497,7 @@ impl RawLambda {
         match self {
             RawLambda::Lshared(inner) => std::sync::Arc::unwrap_or_clone(inner).into_lowered(),
             RawLambda::Lvar(id) => Lambda::Lvar(id),
-            RawLambda::LglobalModule(id) => {
-                Lambda::LglobalModule(id)
-            }
+            RawLambda::LglobalModule(id) => Lambda::LglobalModule(id),
             RawLambda::Lconst(c) => Lambda::Lconst(c),
             RawLambda::Lapply(apply) => Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(apply.ap_func.into_lowered()),
@@ -632,7 +639,9 @@ fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
 /// `Lambda.not_` (`compiler/ml/lambda.ml:1131-1135`).
 fn raw_not(loc: Location, lam: RawLambda) -> RawLambda {
     match lam {
-        RawLambda::Lprim(mut info) if matches!(info.primitive, Primitive::Pintcomp(Comparison::Neq)) => {
+        RawLambda::Lprim(mut info)
+            if matches!(info.primitive, Primitive::Pintcomp(Comparison::Neq)) =>
+        {
             info.primitive = Primitive::Pintcomp(Comparison::Eq);
             RawLambda::Lprim(info)
         }

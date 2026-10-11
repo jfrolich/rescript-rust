@@ -615,7 +615,9 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
                 let pair = match args.txt.as_slice() {
                     [pat, rest] => Some((*pat, *rest)),
                     [arg] => match &*arena.get_pat(*arg).ppat_desc {
-                        PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => Some((tuple[0], tuple[1])),
+                        PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => {
+                            Some((tuple[0], tuple[1]))
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -628,7 +630,9 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
                 acc.push(current.clone());
                 break;
             }
-            PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "[]") && args.txt.is_empty() => {
+            PatternDesc::Ppat_construct(name, args)
+                if arena.is_lident(name.txt, "[]") && args.txt.is_empty() =>
+            {
                 break;
             }
             _ => {
@@ -653,7 +657,9 @@ fn collect_list_exprs(arena: &ParseArena, expr: &Expression) -> Vec<Expression> 
                 let pair = match args.txt.as_slice() {
                     [expr, rest] => Some((*expr, *rest)),
                     [arg] => match &*arena.get_expr(*arg).pexp_desc {
-                        ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => Some((tuple[0], tuple[1])),
+                        ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => {
+                            Some((tuple[0], tuple[1]))
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -1292,8 +1298,11 @@ fn walk_value_binding(
         let (before_expr, inside_expr, after_expr) =
             partition_by_loc(surrounding_expr, expr.pexp_loc, arena);
         if is_block_expr(arena, &expr) {
-            let combined: Vec<Comment> =
-                before_expr.into_iter().chain(inside_expr).chain(after_expr).collect();
+            let combined: Vec<Comment> = before_expr
+                .into_iter()
+                .chain(inside_expr)
+                .chain(after_expr)
+                .collect();
             walk_expression(&expr, t, combined, arena);
         } else {
             t.attach_leading(expr.pexp_loc, before_expr, arena);
@@ -1679,11 +1688,19 @@ fn walk_expression(
                 .map(|(name, e)| {
                     let name_idx = arena.intern(&name.txt);
                     let lid = arena.push_longident(Longident::Lident(name_idx));
-                    (Loc { txt: lid, loc: name.loc }, *e)
+                    (
+                        Loc {
+                            txt: lid,
+                            loc: name.loc,
+                        },
+                        *e,
+                    )
                 })
                 .collect();
-            let nodes: Vec<Node<'_>> =
-                rows.iter().map(|(lid, e)| Node::ExprRecordRow(lid, *e)).collect();
+            let nodes: Vec<Node<'_>> = rows
+                .iter()
+                .map(|(lid, e)| Node::ExprRecordRow(lid, *e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_extension(ext) => walk_extension(ext, t, comments, arena),
@@ -1824,14 +1841,21 @@ fn walk_expression(
             if args.txt.is_empty() {
                 t.attach_trailing(name.loc, trailing, arena);
             } else {
-                let (after_longident, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
+                let (after_longident, rest) =
+                    partition_adjacent_trailing(name.loc, trailing, arena);
                 t.attach_trailing(name.loc, after_longident, arena);
-                let nodes: Vec<Node<'_>> = args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+                let nodes: Vec<Node<'_>> =
+                    args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
                 walk_list(&nodes, t, rest, arena);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let nodes: Vec<Node<'_>> = inner.1.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+            let nodes: Vec<Node<'_>> = inner
+                .1
+                .txt
+                .iter()
+                .map(|e| Node::ExpressionIdx(*e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
@@ -2614,8 +2638,11 @@ fn walk_expression(
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_template(template) => {
-            let exprs: Vec<Expression> =
-                template.values.iter().map(|idx| arena.get_expr(*idx).clone()).collect();
+            let exprs: Vec<Expression> = template
+                .values
+                .iter()
+                .map(|idx| arena.get_expr(*idx).clone())
+                .collect();
             let nodes: Vec<Node<'_>> = exprs.iter().map(Node::Expression).collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -3060,7 +3087,8 @@ fn walk_pattern(
                         partition_adjacent_trailing(name.loc, trailing, arena);
                     t.attach_trailing(name.loc, after_longident, arena);
                     let arg_pat = arena.get_pat(*arg_pat_idx).clone();
-                    let (leading, inside, trailing) = partition_by_loc(rest, arg_pat.ppat_loc, arena);
+                    let (leading, inside, trailing) =
+                        partition_by_loc(rest, arg_pat.ppat_loc, arena);
                     t.attach_leading(arg_pat.ppat_loc, leading, arena);
                     walk_pattern(&arg_pat, t, inside, arena);
                     t.attach_trailing(arg_pat.ppat_loc, trailing, arena);
@@ -3187,7 +3215,8 @@ fn walk_pattern_record_rest(
                 partition_by_loc(comments, typ.ptyp_loc, arena);
             t.attach_leading(typ.ptyp_loc, before_typ, arena);
             walk_core_type(&typ, t, inside_typ, arena);
-            let (after_typ, remaining) = partition_adjacent_trailing(typ.ptyp_loc, after_typ, arena);
+            let (after_typ, remaining) =
+                partition_adjacent_trailing(typ.ptyp_loc, after_typ, arena);
             t.attach_trailing(typ.ptyp_loc, after_typ, arena);
             attach_rest_name(rest, t, remaining, arena);
         }

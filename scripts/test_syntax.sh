@@ -11,11 +11,26 @@ scriptDir=`dirname $0`
 PROJECT_ROOT=`cd "$scriptDir/.."; pwd -P`
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
-RES_PARSER="$DUNE_BIN_DIR/res_parser"
-if [[ ! -x "$RES_PARSER" ]]; then
-  echo "Error: OCaml parser not found at $RES_PARSER"
-  echo "Run 'make' first to build the OCaml parser."
-  exit 1
+# Allow switching between OCaml and Rust parsers via PARSER environment variable
+# Usage: PARSER=rust ./scripts/test_syntax.sh
+if [[ "$PARSER" == "rust" ]]; then
+  RUST_TARGET="${RUST_TARGET:-debug}"
+  RES_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
+  if [[ ! -x "$RES_PARSER" ]]; then
+    echo "Error: Rust parser not found at $RES_PARSER"
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "This syntax script expects debug artifacts for iteration."
+    exit 1
+  fi
+  echo "Using Rust parser: $RES_PARSER"
+  echo "Rust target: $RUST_TARGET"
+else
+  RES_PARSER="$DUNE_BIN_DIR/res_parser"
+  if [[ ! -x "$RES_PARSER" ]]; then
+    echo "Error: OCaml parser not found at $RES_PARSER"
+    echo "Run 'make' first to build the OCaml parser."
+    exit 1
+  fi
 fi
 
 legacyJsReferences=$(find syntax_tests/data syntax_benchmarks/data \( -name "*.res" -o -name "*.resi" \) -exec grep -nHE '(^|[^[:alnum:]_])Js\.' {} + || true)
@@ -54,9 +69,21 @@ fi
 rm -rf temp
 mkdir temp
 
-function out {
-  exp $1
-}
+# When using Rust parser, write to temp files and compare against expected files
+# instead of overwriting them. This preserves the OCaml reference output.
+if [[ "$PARSER" == "rust" ]]; then
+  function out {
+    # Output to temp directory, mirroring the expected file structure
+    local expected=$(exp $1)
+    local temp_out="temp/$expected"
+    mkdir -p "$(dirname $temp_out)"
+    echo "$temp_out"
+  }
+else
+  function out {
+    exp $1
+  }
+fi
 
 # parsing
 find syntax_tests/data/parsing/{errors,infiniteLoops,recovery} -name "*.res" -o -name "*.resi" >temp/files.txt
@@ -92,14 +119,115 @@ warningYellow='\033[0;33m'
 successGreen='\033[0;32m'
 reset='\033[0m'
 
-git diff --ignore-cr-at-eol $(find syntax_tests -name expected) >temp/diff.txt
-diff=$(cat temp/diff.txt)
-if [[ $diff = "" ]]; then
-  printf "${successGreen}✅ No unstaged tests difference.${reset}\n"
+if [[ "$PARSER" == "rust" ]]; then
+  # Compare temp output against expected files without modifying expected files
+  # Use files instead of associative arrays for bash 3 compatibility
+  mkdir -p temp/categories
+
+  find temp/syntax_tests -name "*.txt" >temp/comparison_files.txt
+
+  # Collect pass/fail results
+  while read temp_file; do
+    expected_file="${temp_file#temp/}"
+    if [[ -f "$expected_file" ]]; then
+      # Extract category from path: syntax_tests/data/CATEGORY/...
+      category=$(echo "$expected_file" | sed 's|syntax_tests/data/||' | cut -d'/' -f1-2 | sed 's|/expected.*||')
+      # Simplify nested categories
+      case "$category" in
+        parsing/*) category="parsing_$(echo $category | cut -d'/' -f2)" ;;
+        ppx/*) category="ppx_$(echo $category | cut -d'/' -f2)" ;;
+        */*) category=$(echo $category | cut -d'/' -f1) ;;
+      esac
+
+      if diff -q "$expected_file" "$temp_file" >/dev/null 2>&1; then
+        echo "1" >> "temp/categories/${category}_passed.txt"
+        echo "PASS:$expected_file" >> temp/results.txt
+      else
+        echo "1" >> "temp/categories/${category}_failed.txt"
+        echo "FAIL:$expected_file" >> temp/results.txt
+      fi
+    fi
+  done <temp/comparison_files.txt
+
+  # Print summary
+  echo ""
+  echo "=== Rust Parser Syntax Test Results ==="
+  echo ""
+  printf "%-25s %6s %6s %6s\n" "Category" "Passed" "Failed" "Total"
+  printf "%-25s %6s %6s %6s\n" "--------" "------" "------" "-----"
+
+  total_passed=0
+  total_failed=0
+
+  # Get all categories from the files
+  for passed_file in temp/categories/*_passed.txt temp/categories/*_failed.txt; do
+    [[ -f "$passed_file" ]] || continue
+    cat_name=$(basename "$passed_file" | sed 's/_passed.txt$//' | sed 's/_failed.txt$//')
+    echo "$cat_name"
+  done | sort -u > temp/all_categories.txt
+
+  while read cat; do
+    p=0
+    f=0
+    [[ -f "temp/categories/${cat}_passed.txt" ]] && p=$(wc -l < "temp/categories/${cat}_passed.txt" | tr -d ' ')
+    [[ -f "temp/categories/${cat}_failed.txt" ]] && f=$(wc -l < "temp/categories/${cat}_failed.txt" | tr -d ' ')
+    t=$((p + f))
+    if [[ $t -gt 0 ]]; then
+      pct=$((p * 100 / t))
+      # Convert underscore back to slash for display
+      display_cat=$(echo "$cat" | sed 's/_/\//')
+      printf "%-25s %6d %6d %6d  (%2d%%)\n" "$display_cat" "$p" "$f" "$t" "$pct"
+      total_passed=$((total_passed + p))
+      total_failed=$((total_failed + f))
+    fi
+  done < temp/all_categories.txt
+
+  total=$((total_passed + total_failed))
+  printf "%-25s %6s %6s %6s\n" "--------" "------" "------" "-----"
+  if [[ $total -gt 0 ]]; then
+    pct=$((total_passed * 100 / total))
+    printf "%-25s %6d %6d %6d  (%2d%%)\n" "TOTAL" "$total_passed" "$total_failed" "$total" "$pct"
+  fi
+  echo ""
+
+  if [[ $total_failed -eq 0 ]]; then
+    printf "${successGreen}✅ Rust parser output matches all expected files.${reset}\n"
+    rm -r temp/
+  else
+    printf "${warningYellow}⚠️ $total_failed tests have differences${reset}\n"
+    echo ""
+    echo "Test artifacts preserved in tests/temp/"
+    echo ""
+    echo "To view a specific diff:"
+    echo "  diff tests/syntax_tests/data/PATH/expected/FILE.txt tests/temp/syntax_tests/data/PATH/expected/FILE.txt"
+    echo ""
+    echo "To list all failing tests:"
+    echo "  grep '^FAIL:' tests/temp/results.txt | cut -d: -f2"
+    echo ""
+    echo "To view first failing diff:"
+    first_fail=$(grep '^FAIL:' temp/results.txt | head -1 | cut -d: -f2)
+    if [[ -n "$first_fail" ]]; then
+      echo "  diff $first_fail temp/$first_fail"
+      echo ""
+      echo "--- First failing test: $first_fail ---"
+      diff --unified "$first_fail" "temp/$first_fail" | head -50
+      diff_lines=$(diff --unified "$first_fail" "temp/$first_fail" | wc -l)
+      if [[ $diff_lines -gt 50 ]]; then
+        echo "... ($((diff_lines - 50)) more lines)"
+      fi
+    fi
+    exit 1
+  fi
 else
-  printf "${warningYellow}⚠️ There are unstaged differences in syntax_tests/data/! Did you break a test?\n${diff}\n${reset}"
-  rm -r temp/
-  exit 1
+  git diff --ignore-cr-at-eol $(find syntax_tests -name expected) >temp/diff.txt
+  diff=$(cat temp/diff.txt)
+  if [[ $diff = "" ]]; then
+    printf "${successGreen}✅ No unstaged tests difference.${reset}\n"
+  else
+    printf "${warningYellow}⚠️ There are unstaged differences in syntax_tests/data/! Did you break a test?\n${diff}\n${reset}"
+    rm -r temp/
+    exit 1
+  fi
 fi
 
 # roundtrip tests

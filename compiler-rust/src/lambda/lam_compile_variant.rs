@@ -11,15 +11,13 @@ use super::js_stmt_make::{block_terminates, strict_single_return_expr};
 use super::lam_coercion::push_s_exp;
 use super::lam_compile::{
     Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, compiled_from_effect_block,
-    pointer_info_comment_text,
-    trailing_return_expression,
+    pointer_info_comment_text, trailing_return_expression,
 };
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement,
-    StatementDesc, StringClause, VIdent, VariableDeclaration, expression_has_no_side_effects,
-    ocaml_eq_expression,
+    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
+    StringClause, VIdent, VariableDeclaration, expression_has_no_side_effects, ocaml_eq_expression,
 };
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
@@ -350,7 +348,9 @@ impl LambdaCompiler {
     fn literal_tag_value(tag: &crate::types::VariantLiteralTag) -> SwitchCaseTag {
         match tag {
             crate::types::VariantLiteralTag::String(value) => SwitchCaseTag::String(value.clone()),
-            crate::types::VariantLiteralTag::Int(value) => SwitchCaseTag::Int(i64::from(*value as i32)),
+            crate::types::VariantLiteralTag::Int(value) => {
+                SwitchCaseTag::Int(i64::from(*value as i32))
+            }
             crate::types::VariantLiteralTag::Float(value) => SwitchCaseTag::Float(value.clone()),
             crate::types::VariantLiteralTag::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
             crate::types::VariantLiteralTag::Bool(value) => SwitchCaseTag::Bool(*value),
@@ -786,7 +786,10 @@ impl LambdaCompiler {
             && self.block_switch_complete(switch)
             && block_cases.len() == 1
             && default_block.is_empty()
-            && matches!(block_cases[0].0.block_type(), Some(VariantBlockType::Unknown))
+            && matches!(
+                block_cases[0].0.block_type(),
+                Some(VariantBlockType::Unknown)
+            )
         {
             return Some(build_body(self, block_cases[0].1));
         }

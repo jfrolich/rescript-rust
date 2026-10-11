@@ -2403,7 +2403,9 @@ impl ParseArena {
         &self,
         arg: &crate::parser::ast::TypeArg,
     ) -> Option<&[crate::parser::ast::TypeArg]> {
-        self.nary_arrow_args_by_first_type.get(&arg.typ).map(|args| &args[..])
+        self.nary_arrow_args_by_first_type
+            .get(&arg.typ)
+            .map(|args| &args[..])
     }
 
     pub fn nary_arrow_args<'a>(
@@ -2448,7 +2450,10 @@ impl ParseArena {
         // earlier preparation can sit above a previous synthetic base.
         for i in 0..self.patterns.len() {
             let pat = self.patterns.get(PatIdx(i as u32));
-            if !matches!(&*pat.ppat_desc, crate::parser::ast::PatternDesc::Ppat_interval(_)) {
+            if !matches!(
+                &*pat.ppat_desc,
+                crate::parser::ast::PatternDesc::Ppat_interval(_)
+            ) {
                 continue;
             }
             let loc = pat.ppat_loc;
@@ -2525,8 +2530,10 @@ impl ParseArena {
             Ok(body) => body,
             Err(error_loc) => {
                 // Keep the wire constraint; typing raises the error later.
-                self.value_constraint_varify_errors.insert(pattern, error_loc);
-                self.value_constraints_by_pattern.insert(pattern, constraint);
+                self.value_constraint_varify_errors
+                    .insert(pattern, error_loc);
+                self.value_constraints_by_pattern
+                    .insert(pattern, constraint);
                 return;
             }
         };
@@ -2731,7 +2738,10 @@ impl ParseArena {
 
     /// Attach sparse record spread/base expression data to a record expression node.
     pub fn set_record_spread(&mut self, owner: ExprIdx, value: Option<ExprIdx>) {
-        self.expr_overrides.entry(owner.0).or_default().record_spread = value;
+        self.expr_overrides
+            .entry(owner.0)
+            .or_default()
+            .record_spread = value;
     }
 
     /// Get sparse record spread/base expression data for a `Pexp_record` expression node.
@@ -2750,7 +2760,10 @@ impl ParseArena {
 
     /// Attach sparse else-branch expression data to an if-then-else expression node.
     pub fn set_if_else_branch(&mut self, owner: ExprIdx, value: Option<ExprIdx>) {
-        self.expr_overrides.entry(owner.0).or_default().if_else_branch = value;
+        self.expr_overrides
+            .entry(owner.0)
+            .or_default()
+            .if_else_branch = value;
     }
 
     /// Get sparse else-branch expression data for a `Pexp_ifthenelse` expression node.
@@ -2769,7 +2782,10 @@ impl ParseArena {
 
     /// Attach sparse source type data to a coerce expression node.
     pub fn set_coerce_from_type(&mut self, owner: ExprIdx, value: Option<CoreTypeIdx>) {
-        self.expr_overrides.entry(owner.0).or_default().coerce_from_type = value;
+        self.expr_overrides
+            .entry(owner.0)
+            .or_default()
+            .coerce_from_type = value;
     }
 
     /// Get sparse source type data for a `Pexp_coerce` expression node.

@@ -37,14 +37,14 @@ pub mod context;
 pub mod ctype;
 pub mod decl;
 pub mod env;
-pub mod external_ffi_types;
 pub(crate) mod env_lazy;
+pub mod external_ffi_types;
 pub mod includemod;
 pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
-pub mod record_runtime;
 pub mod printtyp;
+pub mod record_runtime;
 pub mod sexp_typedtree;
 pub mod shared_store;
 pub mod tast_iterator;
@@ -81,11 +81,11 @@ pub use type_expr::{
 };
 pub use variance::{Variance, VarianceFlag};
 pub use variant_runtime::{
-    Block as VariantBlock, BlockType as VariantBlockType, TaggedBlock,
-    Configuration as VariantConfiguration, ConstructorCase as VariantConstructorCase,
-    ConstructorReference, Instance as VariantInstance, Layout as VariantLayout,
-    LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
-    TagType as VariantTagType, LiteralTag as VariantLiteralTag, MatchableTag as VariantMatchableTag,
+    Block as VariantBlock, BlockType as VariantBlockType, Configuration as VariantConfiguration,
+    ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
+    Layout as VariantLayout, LayoutRef as VariantLayoutRef, LiteralTag as VariantLiteralTag,
+    MatchableTag as VariantMatchableTag, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
+    TagType as VariantTagType, TaggedBlock,
 };
 
 // btype exports

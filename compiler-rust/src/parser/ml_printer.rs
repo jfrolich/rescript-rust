@@ -363,6 +363,30 @@ fn collect_list_elements<'a>(
 // Public API
 // ============================================================================
 
+/// Print structure in ML format (like Pprintast in OCaml)
+pub fn print_structure_ml(structure: &Structure, arena: &ParseArena, out: &mut impl Write) {
+    let mut f = Formatter::new(out);
+    for (i, item) in structure.iter().enumerate() {
+        if i > 0 {
+            f.newline();
+        }
+        print_structure_item(&mut f, arena, item);
+    }
+    f.flush();
+}
+
+/// Print signature in ML format
+pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: &mut impl Write) {
+    let mut f = Formatter::new(out);
+    for (i, item) in signature.iter().enumerate() {
+        if i > 0 {
+            f.newline(); // Top-level items on separate lines
+        }
+        print_signature_item(&mut f, arena, item);
+    }
+    f.flush();
+}
+
 // ============================================================================
 // Structure items
 // ============================================================================
@@ -395,12 +419,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 } else {
                     f.string(rec_str);
                 }
-                print_value_binding(
-                    f,
-                    arena,
-                    binding.pvb_pat,
-                    arena.get_expr(binding.pvb_expr),
-                );
+                print_value_binding(f, arena, binding.pvb_pat, arena.get_expr(binding.pvb_expr));
                 f.close_box();
                 // Item attributes are OUTSIDE the box in OCaml
                 print_item_attributes(f, arena, &binding.pvb_attributes);
@@ -1047,11 +1066,23 @@ fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, 
     }
     if let Some(params) = arena.stored_nary_fun_params(inner) {
         for param in params {
-            print_inline_param(f, arena, &param.p_lbl, &param.p_default, arena.get_pat(param.p_pat));
+            print_inline_param(
+                f,
+                arena,
+                &param.p_lbl,
+                &param.p_default,
+                arena.get_pat(param.p_pat),
+            );
             f.space();
         }
     } else {
-        print_inline_param(f, arena, &inner.arg_label, &inner.default, arena.get_pat(inner.lhs));
+        print_inline_param(
+            f,
+            arena,
+            &inner.arg_label,
+            &inner.default,
+            arena.get_pat(inner.lhs),
+        );
         f.space();
     }
 }
@@ -1433,12 +1464,7 @@ fn print_expression_inner<W: Write>(
                 } else {
                     f.string(rec_str);
                 }
-                print_value_binding(
-                    f,
-                    arena,
-                    binding.pvb_pat,
-                    arena.get_expr(binding.pvb_expr),
-                );
+                print_value_binding(f, arena, binding.pvb_pat, arena.get_expr(binding.pvb_expr));
                 f.close_box();
                 // Item attributes are outside the binding box in OCaml
                 print_item_attributes(f, arena, &binding.pvb_attributes);
@@ -3001,9 +3027,9 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                                         [t] => print_core_type(f, arena, arena.get_core_type(*t)),
                                         types => {
                                             let tuple = arena.push_shared_core_type(CoreType {
-                                                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(Box::new(
-                                                    types.to_vec(),
-                                                ))),
+                                                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_tuple(
+                                                    Box::new(types.to_vec()),
+                                                )),
                                                 ptyp_loc: group.loc,
                                                 ptyp_attributes: Attributes::new(),
                                             });
@@ -3357,7 +3383,11 @@ fn print_record_declaration<W: Write>(
         f.space();
         print_core_type(f, arena, arena.get_core_type(field.pld_type));
         f.space();
-        print_attributes(f, arena, &crate::ast_helper_type::field_attributes(arena, field));
+        print_attributes(
+            f,
+            arena,
+            &crate::ast_helper_type::field_attributes(arena, field),
+        );
         f.close_box();
         if i < fields.len() - 1 {
             f.string(";");
@@ -3494,7 +3524,11 @@ fn print_type_declaration<W: Write>(
                 }
                 // OCaml: @;%a for attrs (break hint before attrs)
                 f.space();
-                print_attributes(f, arena, &crate::ast_helper_type::constructor_attributes(arena, ctor));
+                print_attributes(
+                    f,
+                    arena,
+                    &crate::ast_helper_type::constructor_attributes(arena, ctor),
+                );
             }
         }
         TypeKind::Ptype_record(fields) => {
@@ -4239,7 +4273,12 @@ fn print_attributes<W: Write>(
 
 /// `simple_expr` of a `Pexp_tuple`: also prints a multi-argument constructor
 /// payload, which pprintast.ml rebuilds with `Ast_helper.Exp.tuple`.
-fn print_expr_tuple<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, exprs: &[ExprIdx], ctx: PrintCtx) {
+fn print_expr_tuple<W: Write>(
+    f: &mut Formatter<W>,
+    arena: &ParseArena,
+    exprs: &[ExprIdx],
+    ctx: PrintCtx,
+) {
     // OCaml: @[<hov2>(%a)@] with (list (simple_expr ctxt) ~sep:",@;")
     f.open_box(BoxKind::HOV, 2);
     f.string("(");

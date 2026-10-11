@@ -79,7 +79,9 @@ struct ExtractedType {
 
 /// `Res_parsetree_viewer.has_inline_record_definition_attribute`.
 fn has_inline_record_definition_attribute(attrs: &[decl::Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.attr_name.txt == "res.inlineRecordDefinition")
+    attrs
+        .iter()
+        .any(|attr| attr.attr_name.txt == "res.inlineRecordDefinition")
 }
 
 impl Hover<'_, '_> {
@@ -88,22 +90,38 @@ impl Hover<'_, '_> {
     }
 
     /// `show_module_top_level`; the items' types are `module`'s.
-    fn show_module_top_level(&self, module: ModuleId, docstring: &[String], is_type: bool, name: &str, top_level: &[ModuleItem]) -> String {
+    fn show_module_top_level(
+        &self,
+        module: ModuleId,
+        docstring: &[String],
+        is_type: bool,
+        name: &str,
+        top_level: &[ModuleItem],
+    ) -> String {
         let types = self.session.types(module);
         let contents: Vec<String> = top_level
             .iter()
             .map(|item| match &item.kind {
                 ModuleItemKind::Type(t, rec_status) => {
-                    format!("  {}", decl_to_string(types, &item.name, &t.decl, *rec_status, false))
+                    format!(
+                        "  {}",
+                        decl_to_string(types, &item.name, &t.decl, *rec_status, false)
+                    )
                 }
                 ModuleItemKind::Module { .. } => format!("  module {}", item.name),
-                ModuleItemKind::Value(typ) => format!("  let {}: {}", item.name, type_to_string(types, *typ, 60)),
+                ModuleItemKind::Value(typ) => {
+                    format!("  let {}: {}", item.name, type_to_string(types, *typ, 60))
+                }
             })
             .collect();
         let name = shared::cut_after_dash(name);
         let full = code_block(&format!(
             "module {}{{\n{}\n}}",
-            if is_type { format!("type {name} = ") } else { format!("{name}: ") },
+            if is_type {
+                format!("type {name} = ")
+            } else {
+                format!("{name}: ")
+            },
             contents.join("\n")
         ));
         let doc = if docstring.is_empty() {
@@ -126,13 +144,22 @@ impl Hover<'_, '_> {
         declared: Option<&Declared<Module>>,
     ) -> Option<String> {
         match declared {
-            None => Some(self.show_module_top_level(file.module, docstring, false, name, &file.structure.items)),
+            None => Some(self.show_module_top_level(
+                file.module,
+                docstring,
+                false,
+                name,
+                &file.structure.items,
+            )),
             Some(Declared {
                 item: Module::Structure(structure),
                 module_path,
                 ..
             }) => {
-                let is_type = matches!(module_path, ModulePath::ExportedModule { is_type: true, .. });
+                let is_type = matches!(
+                    module_path,
+                    ModulePath::ExportedModule { is_type: true, .. }
+                );
                 Some(self.show_module_top_level(owner, docstring, is_type, name, &structure.items))
             }
             Some(
@@ -154,8 +181,13 @@ impl Hover<'_, '_> {
                     ..
                 },
             ) => match references::resolve_module_reference(self.session, file, declared, &[]) {
-                None => Some(format!("Unable to resolve module reference {}", path.name())),
-                Some((resolved, declared)) => self.show_module(docstring, file, resolved.module, name, declared.as_ref()),
+                None => Some(format!(
+                    "Unable to resolve module reference {}",
+                    path.name()
+                )),
+                Some((resolved, declared)) => {
+                    self.show_module(docstring, file, resolved.module, name, declared.as_ref())
+                }
             },
         }
     }
@@ -171,8 +203,11 @@ impl Hover<'_, '_> {
                     None => (env, vec![(file.module, typ)]),
                     Some((env1, declared)) => {
                         let decl_module = env1.file;
-                        let label_types =
-                            |lds: &[decl::LabelDeclaration]| lds.iter().map(|ld| (decl_module, ld.ld_type)).collect::<Vec<_>>();
+                        let label_types = |lds: &[decl::LabelDeclaration]| {
+                            lds.iter()
+                                .map(|ld| (decl_module, ld.ld_type))
+                                .collect::<Vec<_>>()
+                        };
                         match &declared.item.decl.type_kind {
                             decl::TypeKind::TypeRecord(lds, _) => {
                                 let mut all = vec![(file.module, typ)];
@@ -182,11 +217,14 @@ impl Hover<'_, '_> {
                             decl::TypeKind::TypeVariant(cds, _) => {
                                 let mut all = Vec::new();
                                 for cd in cds.iter() {
-                                    let from_args: Vec<(ModuleId, TypeExprRef)> = match &cd.cd_args {
+                                    let from_args: Vec<(ModuleId, TypeExprRef)> = match &cd.cd_args
+                                    {
                                         decl::ConstructorArguments::CstrTuple(ts) => {
                                             ts.iter().map(|t| (decl_module, *t)).collect()
                                         }
-                                        decl::ConstructorArguments::CstrRecord(lds) => label_types(lds),
+                                        decl::ConstructorArguments::CstrRecord(lds) => {
+                                            label_types(lds)
+                                        }
                                     };
                                     all.push((file.module, typ));
                                     if let Some(t) = cd.cd_res {
@@ -209,7 +247,8 @@ impl Hover<'_, '_> {
         constructors
             .into_iter()
             .filter_map(|path| {
-                let (env, declared) = references::dig_constructor(self.session, &env_to_search, &path)?;
+                let (env, declared) =
+                    references::dig_constructor(self.session, &env_to_search, &path)?;
                 if shared::is_uncurried_internal(&path) {
                     None
                 } else {
@@ -237,7 +276,13 @@ impl Hover<'_, '_> {
             let types = self.session.types(first.env.file);
             let name = shared::path_ident_to_string(&first.path);
             return (
-                vec![code_block(&decl_to_string(types, &name, &first.decl, RecStatus::TrecNot, true))],
+                vec![code_block(&decl_to_string(
+                    types,
+                    &name,
+                    &first.decl,
+                    RecStatus::TrecNot,
+                    true,
+                ))],
                 true,
             );
         }
@@ -253,7 +298,9 @@ impl Hover<'_, '_> {
             })
             .map(|t| {
                 let file = self.session.file(t.env.file);
-                let link = if self.supports_markdown_links && !has_inline_record_definition_attribute(&t.decl.type_attributes) {
+                let link = if self.supports_markdown_links
+                    && !has_inline_record_definition_attribute(&t.decl.type_attributes)
+                {
                     go_to_definition_text(self.style, &file.uri, t.loc.start)
                 } else {
                     String::new()
@@ -262,8 +309,18 @@ impl Hover<'_, '_> {
                 let name = shared::path_ident_to_string(&t.path);
                 format!(
                     "{DIVIDER}{}{}{link}\n",
-                    if self.supports_markdown_links { SPACING } else { "" },
-                    code_block(&decl_to_string(types, &name, &t.decl, RecStatus::TrecNot, true))
+                    if self.supports_markdown_links {
+                        SPACING
+                    } else {
+                        ""
+                    },
+                    code_block(&decl_to_string(
+                        types,
+                        &name,
+                        &t.decl,
+                        RecStatus::TrecNot,
+                        true
+                    ))
                 )
             })
             .collect();
@@ -295,7 +352,10 @@ impl Hover<'_, '_> {
                 format!("({{{}}})", fields.join(", "))
             }
             ConstructorArgs::Args(args) => {
-                let args: Vec<String> = args.iter().map(|(t, _)| type_to_string(types, *t, 60)).collect();
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|(t, _)| type_to_string(types, *t, 60))
+                    .collect();
                 format!("({})", args.join(", "))
             }
         };
@@ -320,11 +380,18 @@ impl Hover<'_, '_> {
         }
         let mut type_string = self.type_string(file.module, typ);
         if let Some((constructor, module)) = constructor {
-            type_string = format!("{type_string}\n{}", self.show_constructor(module, constructor));
+            type_string = format!(
+                "{type_string}\n{}",
+                self.show_constructor(module, constructor)
+            );
         }
         let type_string = match docstring {
             Some(docstring) if !docstring.is_empty() => {
-                format!("{}{DIVIDER}{}", code_block(&type_string), docstring.join("\n"))
+                format!(
+                    "{}{DIVIDER}{}",
+                    code_block(&type_string),
+                    docstring.join("\n")
+                )
             }
             _ => code_block(&type_string),
         };
@@ -350,7 +417,13 @@ impl Hover<'_, '_> {
         match &loc_item.loc_type {
             LocType::TypeDefinition(name, decl, _) => {
                 let types = self.session.types(file.module);
-                let type_def = code_block(&decl_to_string(types, name, decl, RecStatus::TrecNot, false));
+                let type_def = code_block(&decl_to_string(
+                    types,
+                    name,
+                    decl,
+                    RecStatus::TrecNot,
+                    false,
+                ));
                 match decl.type_manifest {
                     None => Some(type_def),
                     Some(typ) => {
@@ -377,9 +450,17 @@ impl Hover<'_, '_> {
             LocType::LModule(LocKind::NotFound) => None,
             LocType::TopLevelModule(name) => {
                 let file = self.session.file_for_module(name)?;
-                self.show_module(&file.structure.docstring, file, file.module, &file.module_name, None)
+                self.show_module(
+                    &file.structure.docstring,
+                    file,
+                    file.module,
+                    &file.module_name,
+                    None,
+                )
             }
-            LocType::Typed(_, _, LocKind::Definition(_, Tip::Field(_) | Tip::Constructor(_))) => None,
+            LocType::Typed(_, _, LocKind::Definition(_, Tip::Field(_) | Tip::Constructor(_))) => {
+                None
+            }
             LocType::Constant(t) => Some(code_block(match t {
                 Constant::Int(_) => "int",
                 Constant::Char(_) => "char",
@@ -394,7 +475,11 @@ impl Hover<'_, '_> {
                 let t = shared::dig(types, *t);
                 if let TypeDesc::Tpackage { path, .. } = &*types.get_desc(t) {
                     let env = QueryEnv::from_file(file);
-                    return match resolve_path::resolve_module_from_compiler_path(self.session, &env, path) {
+                    return match resolve_path::resolve_module_from_compiler_path(
+                        self.session,
+                        &env,
+                        path,
+                    ) {
                         Some((env_for_module, Some(declared))) => self.show_module(
                             &declared.docstring,
                             self.session.file(env_for_module.file),
@@ -405,18 +490,21 @@ impl Hover<'_, '_> {
                         _ => Some(self.hover_with_expanded_types(file, None, None, t)),
                     };
                 }
-                Some(match references::defined_for_loc(self.session, file, loc_kind) {
-                    None => self.hover_with_expanded_types(file, None, None, t),
-                    Some((docstring, Defined::Declared | Defined::Field)) => {
-                        self.hover_with_expanded_types(file, Some(&docstring), None, t)
-                    }
-                    Some((_, Defined::Constructor(constructor, module))) => self.hover_with_expanded_types(
-                        file,
-                        Some(&constructor.docstring),
-                        Some((&constructor, module)),
-                        t,
-                    ),
-                })
+                Some(
+                    match references::defined_for_loc(self.session, file, loc_kind) {
+                        None => self.hover_with_expanded_types(file, None, None, t),
+                        Some((docstring, Defined::Declared | Defined::Field)) => {
+                            self.hover_with_expanded_types(file, Some(&docstring), None, t)
+                        }
+                        Some((_, Defined::Constructor(constructor, module))) => self
+                            .hover_with_expanded_types(
+                                file,
+                                Some(&constructor.docstring),
+                                Some((&constructor, module)),
+                                t,
+                            ),
+                    },
+                )
             }
         }
     }

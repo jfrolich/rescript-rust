@@ -222,12 +222,18 @@ fn rewrite_statement(mut statement: Statement) -> Statement {
             dir,
             rewrite_block(body),
         ),
-        StatementDesc::ForOf(label, ident, expr, body) => {
-            StatementDesc::ForOf(label, ident, Box::new(rewrite_expression(*expr)), rewrite_block(body))
-        }
-        StatementDesc::ForAwaitOf(label, ident, expr, body) => {
-            StatementDesc::ForAwaitOf(label, ident, Box::new(rewrite_expression(*expr)), rewrite_block(body))
-        }
+        StatementDesc::ForOf(label, ident, expr, body) => StatementDesc::ForOf(
+            label,
+            ident,
+            Box::new(rewrite_expression(*expr)),
+            rewrite_block(body),
+        ),
+        StatementDesc::ForAwaitOf(label, ident, expr, body) => StatementDesc::ForAwaitOf(
+            label,
+            ident,
+            Box::new(rewrite_expression(*expr)),
+            rewrite_block(body),
+        ),
         StatementDesc::IntSwitch(expr, clauses, default) => StatementDesc::IntSwitch(
             rewrite_expression(expr),
             clauses
@@ -341,10 +347,12 @@ fn rewrite_expression(mut expression: Expression) -> Expression {
             strings,
             values.into_iter().map(rewrite_expression).collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values.into_iter().map(rewrite_expression).collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values.into_iter().map(rewrite_expression).collect(),
+            }
+        }
         ExpressionDesc::Array(items, mutable) => {
             ExpressionDesc::Array(items.into_iter().map(rewrite_expression).collect(), mutable)
         }

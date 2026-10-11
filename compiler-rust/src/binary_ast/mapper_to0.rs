@@ -54,7 +54,10 @@ const CONSTRUCTOR_ARGS_ATTR: &str = "_res.constructor_args";
 
 impl<'a> Mapper<'a> {
     pub fn new(arena: &'a mut ParseArena) -> Self {
-        Self { arena, constructor_args_marker: false }
+        Self {
+            arena,
+            constructor_args_marker: false,
+        }
     }
 
     /// `Ast_mapper_to0.add_constructor_args_attr` for the node being built,
@@ -100,7 +103,8 @@ impl<'a> Mapper<'a> {
         mark_args: bool,
     ) -> Option<Box<pt0::Expression>> {
         let args_loc = self.loc(args.loc);
-        let mut mapped: Vec<pt0::Expression> = args.txt.iter().map(|e| self.map_expr_idx(*e)).collect();
+        let mut mapped: Vec<pt0::Expression> =
+            args.txt.iter().map(|e| self.map_expr_idx(*e)).collect();
         match mapped.len() {
             0 => None,
             1 => Some(Box::new(mapped.pop().expect("one argument"))),
@@ -504,8 +508,12 @@ impl<'a> Mapper<'a> {
             current::Constant::String(payload) => {
                 pt0::Constant::String(payload.source().to_string(), Some("js".to_string()))
             }
-            current::Constant::RawSource(s) => pt0::Constant::String(s.to_string(), Some("js".to_string())),
-            current::Constant::Json(s) => pt0::Constant::String(s.to_string(), Some("json".to_string())),
+            current::Constant::RawSource(s) => {
+                pt0::Constant::String(s.to_string(), Some("js".to_string()))
+            }
+            current::Constant::Json(s) => {
+                pt0::Constant::String(s.to_string(), Some("json".to_string()))
+            }
             current::Constant::Float(s, opt) => pt0::Constant::Float(s.to_string(), *opt),
         }
     }
@@ -637,7 +645,10 @@ impl<'a> Mapper<'a> {
 
     /// An attribute `(mknoloc name, PStr [])`.
     fn internal_attr(&mut self, name: &str) -> pt0::Attribute {
-        (OldLocated::new(name.to_string(), self.noloc()), pt0::Payload::PStr(vec![]))
+        (
+            OldLocated::new(name.to_string(), self.noloc()),
+            pt0::Payload::PStr(vec![]),
+        )
     }
 
     /// `Parsetree0.add_optional_attr ~optional attrs`.
@@ -731,8 +742,11 @@ impl<'a> Mapper<'a> {
                     .iter()
                     .map(|group| {
                         let loc = self.loc(group.loc);
-                        let mut args: Vec<pt0::CoreType> =
-                            group.txt.iter().map(|t| self.map_core_type_idx(*t)).collect();
+                        let mut args: Vec<pt0::CoreType> = group
+                            .txt
+                            .iter()
+                            .map(|t| self.map_core_type_idx(*t))
+                            .collect();
                         if args.len() == 1 {
                             args.pop().expect("one type")
                         } else {
@@ -822,7 +836,11 @@ impl<'a> Mapper<'a> {
 
     /// ast_mapper_to0.ml E.map Pexp_jsx_element: JSX becomes a `[@JSX]`
     /// application of the tag (or, for a fragment, a `[@JSX]` list).
-    fn map_jsx(&mut self, expr: &current::Expression, jsx: &current::JsxElement) -> pt0::Expression {
+    fn map_jsx(
+        &mut self,
+        expr: &current::Expression,
+        jsx: &current::JsxElement,
+    ) -> pt0::Expression {
         let loc = self.loc(expr.pexp_loc);
         let mut attrs = vec![self.internal_attr("JSX")];
         attrs.extend(self.map_attributes(&expr.pexp_attributes));
@@ -850,7 +868,10 @@ impl<'a> Mapper<'a> {
                 let children_idx = self.intern("children");
                 args.push((pt0::ArgLabel::Labelled(children_idx), nil));
                 let noloc = self.noloc();
-                args.push((pt0::ArgLabel::Nolabel, self.construct_noarg("()", &noloc, &noloc)));
+                args.push((
+                    pt0::ArgLabel::Nolabel,
+                    self.construct_noarg("()", &noloc, &noloc),
+                ));
                 pt0::Expression {
                     pexp_desc: pt0::ExpressionDesc::Apply(Box::new(tag), args),
                     pexp_loc: loc,
@@ -864,7 +885,10 @@ impl<'a> Mapper<'a> {
                 let children_idx = self.intern("children");
                 args.push((pt0::ArgLabel::Labelled(children_idx), children));
                 let noloc = self.noloc();
-                args.push((pt0::ArgLabel::Nolabel, self.construct_noarg("()", &noloc, &noloc)));
+                args.push((
+                    pt0::ArgLabel::Nolabel,
+                    self.construct_noarg("()", &noloc, &noloc),
+                ));
                 pt0::Expression {
                     pexp_desc: pt0::ExpressionDesc::Apply(Box::new(tag), args),
                     pexp_loc: loc,
@@ -886,10 +910,18 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    fn construct_noarg(&mut self, name: &str, lid_loc: &FullLocation, loc: &FullLocation) -> pt0::Expression {
+    fn construct_noarg(
+        &mut self,
+        name: &str,
+        lid_loc: &FullLocation,
+        loc: &FullLocation,
+    ) -> pt0::Expression {
         let idx = self.intern(name);
         pt0::Expression {
-            pexp_desc: pt0::ExpressionDesc::Construct(OldLocated::new(Longident::Lident(idx), lid_loc.clone()), None),
+            pexp_desc: pt0::ExpressionDesc::Construct(
+                OldLocated::new(Longident::Lident(idx), lid_loc.clone()),
+                None,
+            ),
             pexp_loc: loc.clone(),
             pexp_attributes: vec![],
         }
@@ -956,7 +988,11 @@ impl<'a> Mapper<'a> {
         }
         let body = self.arena.nary_fun_body(fun);
         let newtypes = self.arena.nary_fun_newtypes(fun).to_vec();
-        let head_attrs = if newtypes.is_empty() { attrs.clone() } else { Vec::new() };
+        let head_attrs = if newtypes.is_empty() {
+            attrs.clone()
+        } else {
+            Vec::new()
+        };
         let e = self.build_fun_chain(&params, body, &loc, head_attrs, fun.is_async, true);
         let noloc = self.noloc();
         let arity_attr = (
@@ -1006,7 +1042,10 @@ impl<'a> Mapper<'a> {
             outer
         };
         pt0::Expression {
-            pexp_desc: pt0::ExpressionDesc::Newtype(self.map_string_loc(first_name), Box::new(inner)),
+            pexp_desc: pt0::ExpressionDesc::Newtype(
+                self.map_string_loc(first_name),
+                Box::new(inner),
+            ),
             pexp_loc: loc,
             pexp_attributes: outer_attrs,
         }
@@ -1252,11 +1291,18 @@ impl<'a> Mapper<'a> {
 
     /// ast_mapper_to0.ml `Pexp_template`: segments and values joined by `^`
     /// applications marked `res.template`.
-    fn map_template(&mut self, expr: &current::Expression, template: &current::PexpTemplate) -> pt0::Expression {
+    fn map_template(
+        &mut self,
+        expr: &current::Expression,
+        template: &current::PexpTemplate,
+    ) -> pt0::Expression {
         let loc = self.loc(expr.pexp_loc);
         let attrs = self.map_attributes(&expr.pexp_attributes);
-        let segments: Vec<pt0::Expression> =
-            template.source_segments.iter().map(|source| self.template_segment(source)).collect();
+        let segments: Vec<pt0::Expression> = template
+            .source_segments
+            .iter()
+            .map(|source| self.template_segment(source))
+            .collect();
         let mut parts = Vec::with_capacity(segments.len() + template.values.len());
         let mut values = template.values.iter();
         for segment in segments {
@@ -1273,14 +1319,20 @@ impl<'a> Mapper<'a> {
             let caret = self.intern("^");
             let none = self.noloc();
             let op = pt0::Expression {
-                pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(Longident::Lident(caret), none)),
+                pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
+                    Longident::Lident(caret),
+                    none,
+                )),
                 pexp_loc: loc.clone(),
                 pexp_attributes: vec![],
             };
             expression = pt0::Expression {
                 pexp_desc: pt0::ExpressionDesc::Apply(
                     Box::new(op),
-                    vec![(pt0::ArgLabel::Nolabel, expression), (pt0::ArgLabel::Nolabel, rhs)],
+                    vec![
+                        (pt0::ArgLabel::Nolabel, expression),
+                        (pt0::ArgLabel::Nolabel, rhs),
+                    ],
                 ),
                 pexp_loc: loc.clone(),
                 pexp_attributes: vec![template_attr],
@@ -1305,9 +1357,16 @@ impl<'a> Mapper<'a> {
     ) -> pt0::Expression {
         let loc = self.loc(expr.pexp_loc);
         let attrs = self.map_attributes(&expr.pexp_attributes);
-        let segments: Vec<pt0::Expression> =
-            template.raw_sources.iter().map(|source| self.template_segment(source)).collect();
-        let values: Vec<pt0::Expression> = template.values.iter().map(|value| self.map_expr_idx(*value)).collect();
+        let segments: Vec<pt0::Expression> = template
+            .raw_sources
+            .iter()
+            .map(|source| self.template_segment(source))
+            .collect();
+        let values: Vec<pt0::Expression> = template
+            .values
+            .iter()
+            .map(|value| self.map_expr_idx(*value))
+            .collect();
         let values = pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Array(values),
             pexp_loc: loc.clone(),
@@ -1324,7 +1383,10 @@ impl<'a> Mapper<'a> {
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Apply(
                 Box::new(tag),
-                vec![(pt0::ArgLabel::Nolabel, segments), (pt0::ArgLabel::Nolabel, values)],
+                vec![
+                    (pt0::ArgLabel::Nolabel, segments),
+                    (pt0::ArgLabel::Nolabel, values),
+                ],
             ),
             pexp_loc: loc,
             pexp_attributes: all_attrs,
@@ -1378,7 +1440,8 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_fun(_) => {
                 unreachable!("functions are mapped by map_expression_with_owner")
             }
-            current::ExpressionDesc::Pexp_template(_) | current::ExpressionDesc::Pexp_tagged_template(_) => {
+            current::ExpressionDesc::Pexp_template(_)
+            | current::ExpressionDesc::Pexp_tagged_template(_) => {
                 unreachable!("templates are mapped by map_expression_with_owner")
             }
             current::ExpressionDesc::Pexp_apply(inner) => {
@@ -2194,7 +2257,10 @@ impl<'a> Mapper<'a> {
             pval_prim: match &vd.pval_prim {
                 None => vec![],
                 Some(current::PrimitiveRepr::PrimName(idx)) => vec![self.get_str(*idx).to_string()],
-                Some(current::PrimitiveRepr::PrimFfi { .. } | current::PrimitiveRepr::PrimInlineConst(_)) => {
+                Some(
+                    current::PrimitiveRepr::PrimFfi { .. }
+                    | current::PrimitiveRepr::PrimInlineConst(_),
+                ) => {
                     panic!(
                         "External declarations already processed for compilation cannot be converted for an external PPX"
                     )

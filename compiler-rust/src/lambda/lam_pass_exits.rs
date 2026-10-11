@@ -262,7 +262,9 @@ fn subst_helper_owned(
                 return (subst_helper_owned(subst, counts, id_gen, *l1).0, true);
             }
             // (_, Lvar _) | (_, Lconst _) and (1, _) when i >= 0
-            if matches!(l2.as_ref(), Lambda::Lvar(_) | Lambda::Lconst(_)) || (i_occur == 1 && i >= 0) {
+            if matches!(l2.as_ref(), Lambda::Lvar(_) | Lambda::Lconst(_))
+                || (i_occur == 1 && i >= 0)
+            {
                 let simplified_l2 = subst_helper_owned(subst, counts, id_gen, *l2).0;
                 subst.insert(i, (xs, simplified_l2));
                 return (subst_helper_owned(subst, counts, id_gen, *l1).0, true);
@@ -320,7 +322,9 @@ fn subst_helper_owned(
             }
         }
         // lam_pass_exits.ml:204
-        lam => shallow_map_sharing(lam, &mut |inner| subst_helper_owned(subst, counts, id_gen, inner)),
+        lam => shallow_map_sharing(lam, &mut |inner| {
+            subst_helper_owned(subst, counts, id_gen, inner)
+        }),
     }
 }
 

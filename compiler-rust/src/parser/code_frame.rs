@@ -191,6 +191,15 @@ pub fn apply_message_styles(message: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
+    match value {
+        "auto" => Some(ColorMode::Auto),
+        "always" => Some(ColorMode::Always),
+        "never" => Some(ColorMode::Never),
+        _ => None,
+    }
+}
+
 pub fn set_color_mode(mode: ColorMode) {
     COLOR_MODE.store(mode as u8, Ordering::Relaxed);
 }
@@ -531,9 +540,7 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
 pub fn has_printable_range(start_pos: &Position, end_pos: &Position) -> bool {
     // Rust's `Location::none()` (line 0) stands for OCaml's `Location.none`,
     // whose `pos_cnum = -1` makes the range unprintable (location.ml).
-    start_pos.line != 0
-        && start_pos.cnum - start_pos.bol != -1
-        && end_pos.cnum - end_pos.bol != -1
+    start_pos.line != 0 && start_pos.cnum - start_pos.bol != -1 && end_pos.cnum - end_pos.bol != -1
 }
 
 pub fn format_location(filename: &str, start_pos: &Position, end_pos: &Position) -> String {
@@ -573,7 +580,9 @@ pub fn format_error(
 
     // Location
     result.push_str("  ");
-    result.push_str(&colorize_location(&format_location(filename, start_pos, end_pos)));
+    result.push_str(&colorize_location(&format_location(
+        filename, start_pos, end_pos,
+    )));
     result.push_str("\n\n");
 
     // Code frame, printed only for a normalized range (location.ml:95-120).

@@ -55,9 +55,7 @@ impl<'a> LoweringContext<'a> {
             ),
             RawLambda::Llet(kind, id, value, body) => self.lower_let(kind, id, *value, *body),
             RawLambda::Lletrec(bindings, body) => self.lower_letrec(bindings, *body),
-            RawLambda::Lprim(info) => {
-                self.lower_primitive(info.primitive, info.args, info.loc)
-            }
+            RawLambda::Lprim(info) => self.lower_primitive(info.primitive, info.args, info.loc),
             RawLambda::Lswitch(scrutinee, switch) => self.lower_switch(*scrutinee, *switch),
             RawLambda::LstringSwitch(scrutinee, cases, default) => {
                 // `Lam.stringswitch (convert_aux e) ... (convert_aux default)` depends on
@@ -256,9 +254,8 @@ impl<'a> LoweringContext<'a> {
         // scrutinee to `Lam.switch`, so OCaml's right-to-left evaluation keeps
         // case/failaction exit-alias updates visible to the scrutinee, not the
         // other way around.
-        let const_only_switch = switch.sw_failaction.is_none()
-            && switch.sw_blocks.is_empty()
-            && switch.sw_blocks_full;
+        let const_only_switch =
+            switch.sw_failaction.is_none() && switch.sw_blocks.is_empty() && switch.sw_blocks_full;
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -644,13 +641,16 @@ fn eta_reduce_function_apply(
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
             let wrap = function_primitive(function.body.as_ref())?;
-            let inner =
-                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
+            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
             Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()))
+            Some(Lambda::prim(
+                inner_call.primitive.clone(),
+                eta_args,
+                ap_info.loc.clone(),
+            ))
         }
         Lambda::Lsequence(first, second) => {
             let Lambda::Lprim(inner_call) = first.as_ref() else {
@@ -771,7 +771,8 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
                 if let Some(value) = string_constant_value(constant) {
                     return Lambda::const_(Constant::Int {
                         i: crate::string_literal::utf16_length(value)
-                            .expect("String_literal.utf16_length: Invalid_utf8") as i32,
+                            .expect("String_literal.utf16_length: Invalid_utf8")
+                            as i32,
                         comment: None,
                     });
                 }
@@ -867,7 +868,8 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
             (Primitive::Pstringrefs | Primitive::Pstringrefu, lhs, Constant::Int { i, .. }) => {
                 // lambda.ml `Lambda.prim`: `String_literal.code_point_at_utf16_index`.
                 if let Some(value) = string_constant_value(lhs)
-                    && let Ok(Some(codepoint)) = crate::string_literal::code_point_at_utf16_index(value, *i as i64)
+                    && let Ok(Some(codepoint)) =
+                        crate::string_literal::code_point_at_utf16_index(value, *i as i64)
                 {
                     return Lambda::const_(Constant::Char(codepoint as i32));
                 }
@@ -974,9 +976,7 @@ fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
 fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
     match (lhs, rhs) {
         (Lambda::Lvar(lhs), Lambda::Lvar(rhs)) => lhs.same(rhs),
-        (Lambda::LglobalModule(lhs), Lambda::LglobalModule(rhs)) => {
-            lhs.same(rhs)
-        }
+        (Lambda::LglobalModule(lhs), Lambda::LglobalModule(rhs)) => lhs.same(rhs),
         _ => false,
     }
 }
@@ -1406,8 +1406,9 @@ mod tests {
 
     #[test]
     fn lowers_predef_exception_global_module_to_string_constant() {
-        let lowered =
-            lower_to_lambda(RawLambda::global_module(crate::types::predef::ident_assert_failure()));
+        let lowered = lower_to_lambda(RawLambda::global_module(
+            crate::types::predef::ident_assert_failure(),
+        ));
 
         assert!(matches!(
             lowered,

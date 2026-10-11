@@ -375,7 +375,9 @@ fn bridge_expr_args(
         Some(arg) => {
             let loc = arg.pexp_loc;
             match &*arg.pexp_desc {
-                ExpressionDesc::Pexp_tuple(items) if split_tuple && arg.pexp_attributes.is_empty() => {
+                ExpressionDesc::Pexp_tuple(items)
+                    if split_tuple && arg.pexp_attributes.is_empty() =>
+                {
                     Located::new(items.to_vec(), loc)
                 }
                 _ => Located::new(vec![arena.push_expr(arg)], loc),
@@ -641,7 +643,10 @@ fn pat_construct_with_loc(
     let split_tuple = arena.is_lident(lid_idx, "::");
     let args = bridge_pat_args(split_tuple, arg, pat_loc, arena);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_construct(Located::new(lid_idx, loc), Box::new(args))),
+        ppat_desc: Box::new(PatternDesc::Ppat_construct(
+            Located::new(lid_idx, loc),
+            Box::new(args),
+        )),
         ppat_loc: pat_loc,
         ppat_attributes: Attributes::new(),
     }
@@ -894,10 +899,7 @@ fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, Stri
 
 fn index_const(i: usize, arena: &mut ParseArena) -> Expression {
     let value = format!("[{}]", i);
-    expr_constant(
-        Constant::string(&value),
-        arena,
-    )
+    expr_constant(Constant::string(&value), arena)
 }
 
 fn check_option_type(typ_idx: &CoreTypeIdx, arena: &ParseArena) -> bool {
@@ -2083,8 +2085,7 @@ fn records_generate_flat_decoder_expr(
                         arena,
                     )
                 } else {
-                    let missing =
-                        expr_constant(Constant::string(" missing"), arena);
+                    let missing = expr_constant(Constant::string(" missing"), arena);
                     let key = clone_record_key(field, arena);
                     let msg = expr_concat(arena, key, missing);
                     let v_loc = arena.dummy_loc();
@@ -2105,8 +2106,7 @@ fn records_generate_flat_decoder_expr(
                 default_expr
             }
             None => {
-                let missing =
-                    expr_constant(Constant::string(" missing"), arena);
+                let missing = expr_constant(Constant::string(" missing"), arena);
                 let key = clone_record_key(field, arena);
                 let msg = expr_concat(arena, key, missing);
                 let v_loc = arena.dummy_loc();
@@ -2460,10 +2460,7 @@ fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseAr
         arena,
     );
     arena.register_shareable_literal("[1]");
-    let index = expr_constant(
-        Constant::string("[1]"),
-        arena,
-    );
+    let index = expr_constant(Constant::string("[1]"), arena);
     let path = expr_concat(arena, index, previous_path);
     let path_lid = {
         let name = arena.intern_string("path");
@@ -2510,10 +2507,7 @@ fn variants_parse_decl(
         Ok(None) => {
             let name_str = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal)));
             arena.register_constant_string_identity(name_str.as_ref(), name_literal);
-            (
-                expr_constant(Constant::string(&name_str), arena),
-                false,
-            )
+            (expr_constant(Constant::string(&name_str), arena), false)
         }
         Err(e) => return Err(e),
     };
@@ -2800,7 +2794,9 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(&name_const)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(
+                        &name_const,
+                    )))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -2880,7 +2876,9 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(&name_const)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(
+                        &name_const,
+                    )))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -3221,7 +3219,10 @@ fn variants_generate_codecs(
 
 /// A tag's payload groups as the v0 PPX bridge (`Ast_mapper_to0`) hands
 /// them to this PPX: a single type stays itself, several become a tuple.
-fn bridge_rtag_types(groups: &[crate::parser::ast::VariantTypeArgs], arena: &ParseArena) -> Vec<CoreType> {
+fn bridge_rtag_types(
+    groups: &[crate::parser::ast::VariantTypeArgs],
+    arena: &ParseArena,
+) -> Vec<CoreType> {
     groups
         .iter()
         .map(|group| match group.txt.as_slice() {
@@ -3271,13 +3272,7 @@ fn polyvars_parse_decl(
     let (alias, has_attr_as) = match row_field {
         RowField::Rtag(_, attrs, _, _) => match get_attribute_by_name(attrs, "spice.as", arena) {
             Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, true),
-            Ok(None) => (
-                expr_constant(
-                    Constant::string(&name),
-                    arena,
-                ),
-                false,
-            ),
+            Ok(None) => (expr_constant(Constant::string(&name), arena), false),
             Err(e) => return Err(e),
         },
         RowField::Rinherit(_) => {
@@ -3512,7 +3507,9 @@ fn polyvars_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(&tag_name)))),
+                    ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(
+                        &tag_name,
+                    )))),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),

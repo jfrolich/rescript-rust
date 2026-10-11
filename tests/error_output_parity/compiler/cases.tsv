@@ -1,0 +1,41 @@
+# source_file<TAB>compiler flags
+# The harness also auto-discovers tests/error_output_parity/compiler/fixtures/*.{res,resi}
+# with default flags: -w +A -bs-jsx 4 -color never.
+#
+# Add explicit cases here when a fixture needs different flags.
+tests/error_output_parity/compiler/cases/jsx_not_enabled.res	-w +A -color never
+tests/error_output_parity/compiler/cases/interface_not_compiled.res	-w +A -bs-jsx 4 -color never -bs-read-cmi
+tests/error_output_parity/compiler/cases/illegal_renaming.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases
+tests/error_output_parity/compiler/cases/inconsistent_import.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/inconsistent_import_cmis
+tests/error_output_parity/compiler/cases/missing_module.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
+tests/error_output_parity/compiler/cases/illegal_value_name.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/illegal_value_name_cmis
+tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
+tests/error_output_parity/compiler/cases/include_unbound_module_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
+tests/error_output_parity/compiler/cases/cannot_scrape_alias_type_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
+tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
+tests/error_output_parity/compiler/cases/cmi_not_an_interface.cmi	-color never
+tests/error_output_parity/compiler/cases/cmi_wrong_version.cmi	-color never
+tests/error_output_parity/compiler/cases/cmi_corrupted.cmi	-color never
+tests/error_output_parity/compiler/cases/bs_ast_parse_error.res	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/no_builtin_raw_extension.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
+tests/error_output_parity/compiler/cases/no_builtin_normal_external.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
+tests/error_output_parity/compiler/cases/no_builtin_let_unwrap.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
+tests/error_output_parity/compiler/cases/no_builtin_js_delimiter_success.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
+tests/error_output_parity/compiler/cases/external_ppx_wrong_magic.res	-w +A -bs-jsx 4 -color never -ppx tests/error_output_parity/compiler/cases/ppx_wrong_magic.sh
+tests/error_output_parity/compiler/cases/warn_error_unused_variable.res	-w +A -warn-error +A -bs-jsx 4 -color never
+tests/error_output_parity/compiler/cases/parmatch_all_guarded.res	-w +A -warn-error +8 -bs-jsx 4 -color never
+tests/error_output_parity/compiler/cases/gentype_stale_cmti.res	-w +A -bs-jsx 4 -color never -bs-gentype -o .parity-cache/error-output/compiler/gentype_stale_cmti.js
+.parity-cache/error-output/compiler/gentype_bad_magic.res	-w +A -bs-jsx 4 -color never -bs-gentype
+.parity-cache/error-output/compiler/compunit_deprecated_inclusion.res	-w +A -bs-jsx 4 -color never -bs-read-cmi -I .parity-cache/error-output/compiler
+tests/error_output_parity/compiler/cases/compunit_value_mismatch.res	-w +A -bs-jsx 4 -color never -bs-read-cmi -I tests/error_output_parity/compiler/cases
+tests/error_output_parity/compiler/cases/no_cmi_file_warning.res	-w +A -bs-jsx 4 -color never -no-alias-deps
+tests/error_output_parity/compiler/cases/module_alias_current_unit_no_alias_deps.res	-w +A -bs-jsx 4 -color never -no-alias-deps
+tests/error_output_parity/compiler/cases/cmj_not_found.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases
+tests/error_output_parity/compiler/cases/js_not_found.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases
+tests/error_output_parity/compiler/cases/package_script_dependency.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases -bs-project-root . -bs-package-name pkg -bs-package-output esmodule:src:.mjs
+tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res	-w -A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases -bs-project-root . -bs-package-name pkg -bs-package-output esmodule:src:.mjs
+tests/error_output_parity/compiler/cases/bs_ast_error_extension.res	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/bs_ast_error_extension_empty.res	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/bs_ast_error_extension.resi	-w +A -bs-jsx 4 -color never -bs-ast
+tests/error_output_parity/compiler/cases/deprecated_module_persistent_submodule.res	-w +A -bs-jsx 4 -color never -I packages/@rescript/belt/lib/ocaml

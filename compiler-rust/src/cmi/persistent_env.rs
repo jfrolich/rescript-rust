@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name, jsx_version_for_structure,
-    load_pervasives, normalize_signature,
+    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name,
+    jsx_version_for_structure, load_pervasives, normalize_signature,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
@@ -444,7 +444,8 @@ pub struct ModuleRegistry {
     /// Keyed by unit, signature identity and fingerprint, and the identity
     /// of the JS metadata whose inlinable bodies the references follow
     /// (`usize::MAX` for references without them).
-    item_refs_cache: Arc<Mutex<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
+    item_refs_cache:
+        Arc<Mutex<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -491,7 +492,10 @@ impl ModuleRegistry {
         Some(self.item_digests(name)?[super::item_deps::WHOLE])
     }
 
-    fn registered(&self, name: &str) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
+    fn registered(
+        &self,
+        name: &str,
+    ) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
         let pers = self
             .local_cached_modules
             .get(name)
@@ -513,7 +517,10 @@ impl ModuleRegistry {
         if pers.is_none() && info.is_none() {
             return None;
         }
-        Some(super::item_deps::item_digests(pers.as_deref(), info.as_ref()))
+        Some(super::item_deps::item_digests(
+            pers.as_deref(),
+            info.as_ref(),
+        ))
     }
 
     /// Resolve the reads of a compile against the registered modules' signatures
@@ -526,7 +533,13 @@ impl ModuleRegistry {
         &self,
         reads: Vec<super::item_deps::UnitRead>,
     ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
-        super::item_deps::resolve_reads(reads, &RegistryUnitSource { registry: self, lambdas: false })
+        super::item_deps::resolve_reads(
+            reads,
+            &RegistryUnitSource {
+                registry: self,
+                lambdas: false,
+            },
+        )
     }
 
     /// What the inlinable bodies of the values and modules in `resolved`
@@ -537,7 +550,10 @@ impl ModuleRegistry {
         resolved: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
         use super::item_deps::{Kind, UnitRead, item_key};
-        let source = RegistryUnitSource { registry: self, lambdas: true };
+        let source = RegistryUnitSource {
+            registry: self,
+            lambdas: true,
+        };
         let value_prefix = item_key(Kind::Value, "");
         let module_prefix = item_key(Kind::Module, "");
         let mut seeds = Vec::new();
@@ -553,8 +569,9 @@ impl ModuleRegistry {
                 names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
             } else {
                 for key in keys {
-                    if let Some(name) =
-                        key.strip_prefix(&value_prefix).or_else(|| key.strip_prefix(&module_prefix))
+                    if let Some(name) = key
+                        .strip_prefix(&value_prefix)
+                        .or_else(|| key.strip_prefix(&module_prefix))
                     {
                         names.push(name);
                     }
@@ -578,24 +595,36 @@ impl ModuleRegistry {
 
     /// The module's published interface encoded for storage (see
     /// [`super::stored_module`]), `None` when it is not registered.
-    pub fn encode_stored_module(&self, name: &str, alias_rewrites: &[(String, Path)]) -> Option<Vec<u8>> {
+    pub fn encode_stored_module(
+        &self,
+        name: &str,
+        alias_rewrites: &[(String, Path)],
+    ) -> Option<Vec<u8>> {
         let (pers, info) = self.registered(name);
         let info = info?;
         let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
-        Some(super::stored_module::encode(&super::stored_module::StoredModuleRef {
-            pers_struct: pers.as_deref(),
-            info: &info,
-            alias_rewrites,
-            gentype_declarations: &gentype_declarations,
-        }))
+        Some(super::stored_module::encode(
+            &super::stored_module::StoredModuleRef {
+                pers_struct: pers.as_deref(),
+                info: &info,
+                alias_rewrites,
+                gentype_declarations: &gentype_declarations,
+            },
+        ))
     }
 
     /// Register a stored module's interface, as compiling it would.
-    pub fn register_stored_module(&mut self, name: &str, module: super::stored_module::StoredModule) {
+    pub fn register_stored_module(
+        &mut self,
+        name: &str,
+        module: super::stored_module::StoredModule,
+    ) {
         let alias_rewrites = module.alias_rewrite_map();
         crate::gentype::main::restore_type_declarations(name, module.gentype_declarations);
         match module.pers_struct {
-            Some(pers) => self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites),
+            Some(pers) => {
+                self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites)
+            }
             None => {
                 self.insert_module_info(name.to_string(), module.info);
                 self.extend_alias_rewrites(alias_rewrites);
@@ -609,7 +638,9 @@ impl ModuleRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0 && self.disk_modules.len() == 0
+        self.local_cached_modules.is_empty()
+            && self.cached_modules.len() == 0
+            && self.disk_modules.len() == 0
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
@@ -644,7 +675,8 @@ impl ModuleRegistry {
         ps_crcs: Vec<(String, Option<[u8; 16]>)>,
     ) {
         if let Some(root) = package_root {
-            self.module_package_roots.insert(namespace_name.to_string(), root);
+            self.module_package_roots
+                .insert(namespace_name.to_string(), root);
         }
         let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
         for (short_name, internal_name) in module_aliases {
@@ -1113,7 +1145,8 @@ impl PersistentEnv {
         if self.outside_load_path(name) {
             return None;
         }
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
+        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name)
+        {
             if self.view.hidden_modules.contains(key) {
                 return None;
             }
@@ -1235,7 +1268,11 @@ impl PersistentEnv {
     }
 
     /// Set the load path from lists shared with other compilations.
-    pub fn set_load_path_shared(&mut self, paths: Arc<Vec<PathBuf>>, display_paths: Arc<Vec<PathBuf>>) {
+    pub fn set_load_path_shared(
+        &mut self,
+        paths: Arc<Vec<PathBuf>>,
+        display_paths: Arc<Vec<PathBuf>>,
+    ) {
         debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = paths;
         self.load_path_display = display_paths;
@@ -1398,7 +1435,14 @@ impl PersistentEnv {
 
     /// The units whose interface this compilation read, sorted.
     pub fn loaded_units(&self) -> Vec<String> {
-        let mut units: Vec<String> = self.imported_units.lock().unwrap().recorded.iter().cloned().collect();
+        let mut units: Vec<String> = self
+            .imported_units
+            .lock()
+            .unwrap()
+            .recorded
+            .iter()
+            .cloned()
+            .collect();
         units.sort();
         units
     }
@@ -1869,7 +1913,8 @@ impl PersistentEnv {
     /// `js_cmj_format.ml:112-121`, where non-constant
     /// `persistent_closed_lambda` values are preserved for backend inlining.
     pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<Arc<HashMap<String, Lambda>>> {
-        if let Some(lambdas) = self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
+        if let Some(lambdas) =
+            self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
         {
             return Some(lambdas);
         }
@@ -1994,7 +2039,9 @@ impl PersistentEnv {
             );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
-                mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(decl_signature)),
+                mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(
+                    decl_signature,
+                )),
                 mty_env: crate::types::typedtree::EnvRef(0),
                 mty_loc: crate::parse_arena::LocIdx(0),
                 mty_attributes: crate::parser::ast::Attributes::new(),
@@ -2084,8 +2131,7 @@ impl PersistentEnv {
         };
         let preferred_path = interface_path.as_deref().unwrap_or(source_path.as_path());
 
-        let debug_source_fallback =
-            crate::debug_flags::debug_persistent_source_fallback();
+        let debug_source_fallback = crate::debug_flags::debug_persistent_source_fallback();
         if debug_source_fallback {
             eprintln!(
                 "[persistent-source] module={} ast={} source={}",
@@ -2095,8 +2141,10 @@ impl PersistentEnv {
             );
         }
 
-        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(preferred_path, ctx)?;
-        self.view_mut().alias_prefix_rewrites
+        let (signature, fallback_pers, deprecated) =
+            self.typecheck_source_signature(preferred_path, ctx)?;
+        self.view_mut()
+            .alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
@@ -2114,8 +2162,9 @@ impl PersistentEnv {
 
         // OCaml reads this unit's `.cmi`; report the CRCs saved beside the
         // source it was typed from.
-        let crcs = cmi_format::read_cmi_crcs(&preferred_path.with_extension("cmi").to_string_lossy())
-            .unwrap_or_default();
+        let crcs =
+            cmi_format::read_cmi_crcs(&preferred_path.with_extension("cmi").to_string_lossy())
+                .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
             name.to_string(),
@@ -2179,7 +2228,8 @@ impl PersistentEnv {
                 .map(|(unit, crc)| {
                     (
                         unit.clone(),
-                        crc.as_deref().and_then(|crc| <[u8; 16]>::try_from(crc).ok()),
+                        crc.as_deref()
+                            .and_then(|crc| <[u8; 16]>::try_from(crc).ok()),
                     )
                 })
                 .collect();
@@ -2211,7 +2261,8 @@ impl PersistentEnv {
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
         // registering the paths.
-        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(&source_path, ctx)?;
+        let (signature, fallback_pers, deprecated) =
+            self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
         self.view_mut()
@@ -3039,9 +3090,9 @@ fn decode_cmj_lambda(value: &OcamlValue) -> Option<Lambda> {
             let apply = decode_cmj_apply(&fields[0])?;
             Some(Lambda::Lapply(Box::new(apply)))
         }
-        OcamlValue::Block(4, fields) if fields.len() == 1 => {
-            Some(Lambda::Lfunction(Box::new(decode_cmj_lfunction(&fields[0])?)))
-        }
+        OcamlValue::Block(4, fields) if fields.len() == 1 => Some(Lambda::Lfunction(Box::new(
+            decode_cmj_lfunction(&fields[0])?,
+        ))),
         OcamlValue::Block(7, fields) if fields.len() == 1 => {
             let prim = decode_cmj_prim_info(&fields[0])?;
             Some(Lambda::Lprim(Box::new(prim)))
@@ -3251,9 +3302,7 @@ fn decode_cmj_variant_literal_tag(value: &OcamlValue) -> Option<crate::types::Va
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             Some(T::String(fields[0].as_string().to_string()))
         }
-        OcamlValue::Block(1, fields) if fields.len() == 1 => {
-            Some(T::Int(fields[0].as_int()))
-        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => Some(T::Int(fields[0].as_int())),
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(T::Float(fields[0].as_string().to_string()))
         }
@@ -3290,7 +3339,9 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
     /// record `Untagged of {tag; block_type}`.
     fn block(value: &OcamlValue) -> Option<crate::types::VariantBlock> {
         match value.as_block_opt()? {
-            (0, fields) => Some(crate::types::VariantBlock::Tagged(tagged_block(fields.first()?)?)),
+            (0, fields) => Some(crate::types::VariantBlock::Tagged(tagged_block(
+                fields.first()?,
+            )?)),
             (1, fields) => Some(crate::types::VariantBlock::Untagged {
                 tag: decode_cmj_variant_tag(fields.first()?)?,
                 block_type: crate::cmi::sig_reader::decode_variant_block_type(fields.get(1)?),
@@ -3508,13 +3559,12 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Block(13, fields) if fields.len() == 1 => {
             Some(Primitive::Pstringcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(18, fields) if fields.len() == 1 => {
-            Some(Primitive::PtaggedTemplate(decode_cmj_string_list(&fields[0])?))
-        }
-        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(decode_cmj_list(
-            &fields[0],
-            decode_cmj_template_segment,
-        )?)),
+        OcamlValue::Block(18, fields) if fields.len() == 1 => Some(Primitive::PtaggedTemplate(
+            decode_cmj_string_list(&fields[0])?,
+        )),
+        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(
+            decode_cmj_list(&fields[0], decode_cmj_template_segment)?,
+        )),
         OcamlValue::Block(16, fields) if fields.len() == 1 => {
             Some(Primitive::Pjscomp(decode_cmj_comparison(&fields[0])?))
         }
@@ -3550,16 +3600,22 @@ fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
 }
 
 /// `String_literal.payload`: `Valid {source; semantic}` or `Invalid_source`.
-fn decode_cmj_template_segment(value: &OcamlValue) -> Option<crate::string_literal::TemplateSegment> {
+fn decode_cmj_template_segment(
+    value: &OcamlValue,
+) -> Option<crate::string_literal::TemplateSegment> {
     use std::borrow::Cow;
     match value {
-        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(crate::string_literal::StringLiteral::Valid {
-            source: Cow::Owned(fields[0].as_string().to_string()),
-            semantic: Cow::Owned(fields[1].as_string().to_string()),
-        }),
-        OcamlValue::Block(1, fields) if fields.len() == 1 => Some(
-            crate::string_literal::StringLiteral::InvalidSource(Cow::Owned(fields[0].as_string().to_string())),
-        ),
+        OcamlValue::Block(0, fields) if fields.len() == 2 => {
+            Some(crate::string_literal::StringLiteral::Valid {
+                source: Cow::Owned(fields[0].as_string().to_string()),
+                semantic: Cow::Owned(fields[1].as_string().to_string()),
+            })
+        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(crate::string_literal::StringLiteral::InvalidSource(
+                Cow::Owned(fields[0].as_string().to_string()),
+            ))
+        }
         _ => None,
     }
 }
@@ -3846,7 +3902,12 @@ fn freshen_module_type_bound_idents_rec(
             }
         }
         ModuleType::MtySignature(sig) => {
-            freshen_signature_bound_idents_rec(crate::types::decl::signature_mut(sig), maps, ctx, visited);
+            freshen_signature_bound_idents_rec(
+                crate::types::decl::signature_mut(sig),
+                maps,
+                ctx,
+                visited,
+            );
         }
         ModuleType::MtyFunctor {
             param,
@@ -3988,14 +4049,18 @@ pub(crate) fn signature_freshen_stamp_count(sig_items: &[SignatureItem]) -> i32 
                 param_type, result, ..
             } => {
                 1 + module_type_count(result)
-                    + param_type.as_ref().map_or(0, |param| module_type_count(param))
+                    + param_type
+                        .as_ref()
+                        .map_or(0, |param| module_type_count(param))
             }
         }
     }
     sig_items
         .iter()
         .map(|item| match item {
-            SignatureItem::SigValue(..) | SignatureItem::SigTypext(..) | SignatureItem::SigType(..) => 1,
+            SignatureItem::SigValue(..)
+            | SignatureItem::SigTypext(..)
+            | SignatureItem::SigType(..) => 1,
             SignatureItem::SigModtype(_, mtd) => {
                 1 + mtd.mtd_type.as_ref().map_or(0, module_type_count)
             }
@@ -4224,7 +4289,10 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
             );
         }
         ModuleType::MtySignature(sig) => {
-            substitute_sig_decl_paths_in_place_with_maps(crate::types::decl::signature_mut(sig), maps);
+            substitute_sig_decl_paths_in_place_with_maps(
+                crate::types::decl::signature_mut(sig),
+                maps,
+            );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -5137,8 +5205,12 @@ pub fn reroot_value_description(
     }
     let mut cache = crate::types::type_expr::TypeExprRefMap::new();
     let map_path = |p: &Path| reroot_path(p, prefixes);
-    desc.val_type =
-        crate::types::typecore::copy_type_expr_mapping_paths(ctx, desc.val_type, &mut cache, &map_path);
+    desc.val_type = crate::types::typecore::copy_type_expr_mapping_paths(
+        ctx,
+        desc.val_type,
+        &mut cache,
+        &map_path,
+    );
 }
 
 /// Alias sources of a component path, including those inherited from its
@@ -5160,7 +5232,8 @@ fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
 
 /// Rewrite `path` through the first matching `(old, new)` prefix pair.
 pub fn reroot_path(path: &Path, prefixes: &[(Path, Path)]) -> Path {
-    rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes)).unwrap_or_else(|| path.clone())
+    rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes))
+        .unwrap_or_else(|| path.clone())
 }
 
 /// Whether any type constructor or package path reachable from `ty` starts
@@ -5607,7 +5680,11 @@ fn rewrite_module_type_prefix_paths(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_module_prefix_paths_in_sig(crate::types::decl::signature_mut(sig), old_name, new_prefix);
+            rewrite_module_prefix_paths_in_sig(
+                crate::types::decl::signature_mut(sig),
+                old_name,
+                new_prefix,
+            );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -6059,7 +6136,11 @@ fn rewrite_module_type_by_path_prefix(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_sig_paths_by_path_prefix(crate::types::decl::signature_mut(sig), old_prefix, new_prefix);
+            rewrite_sig_paths_by_path_prefix(
+                crate::types::decl::signature_mut(sig),
+                old_prefix,
+                new_prefix,
+            );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -6506,7 +6587,6 @@ fn rewrite_sig_by_path_prefix_index(
     prefixes: &PathPrefixes<'_>,
     ctx: &TypeContext,
 ) {
-
     let mut visited = HashSet::new();
 
     for item in sig_items {
@@ -7680,12 +7760,21 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
         } else {
             usize::MAX
         };
-        let key = (unit.to_string(), Arc::as_ptr(&ps) as usize, ps.fingerprint, lambdas);
+        let key = (
+            unit.to_string(),
+            Arc::as_ptr(&ps) as usize,
+            ps.fingerprint,
+            lambdas,
+        );
         if let Some(refs) = registry.item_refs_cache.lock().unwrap().get(&key) {
             return Some(refs.clone());
         }
         let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
-        registry.item_refs_cache.lock().unwrap().insert(key, refs.clone());
+        registry
+            .item_refs_cache
+            .lock()
+            .unwrap()
+            .insert(key, refs.clone());
         Some(refs)
     }
 }

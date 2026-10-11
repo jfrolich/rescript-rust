@@ -227,7 +227,13 @@ impl<'a> Checker<'a> {
                 for (index, tdcl) in tdcls.iter().enumerate() {
                     self.type_declaration(tdcl, index == last)?;
                 }
-                run_derivers(tdcls, self.arena, in_structure, &payload, &mut self.warnings)
+                run_derivers(
+                    tdcls,
+                    self.arena,
+                    in_structure,
+                    &payload,
+                    &mut self.warnings,
+                )
             }
             None => {
                 for tdcl in tdcls {
@@ -496,7 +502,8 @@ impl<'a> Checker<'a> {
                         | WithConstraint::Pwith_typesubst(_, tdcl) => {
                             self.type_declaration(tdcl, false)?;
                         }
-                        WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
+                        WithConstraint::Pwith_module(_, _)
+                        | WithConstraint::Pwith_modsubst(_, _) => {}
                     }
                 }
                 self.module_type(*mod_type)
@@ -624,8 +631,9 @@ impl<'a> Checker<'a> {
             | PatternDesc::Ppat_interval(_)
             | PatternDesc::Ppat_type(_)
             | PatternDesc::Ppat_unpack(_) => Ok(()),
-            PatternDesc::Ppat_alias(inner, _)
-            | PatternDesc::Ppat_exception(inner) => self.pat(*inner),
+            PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
+                self.pat(*inner)
+            }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
                 for item in items.iter() {
                     self.pat(*item)?;
@@ -688,7 +696,10 @@ impl<'a> Checker<'a> {
             _ => false,
         };
         if awaits && !self.async_context {
-            return Err(PpxError::at_loc(expr.pexp_loc, AWAIT_NOT_ASYNC_CONTEXT_ERROR));
+            return Err(PpxError::at_loc(
+                expr.pexp_loc,
+                AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+            ));
         }
         Ok(())
     }
@@ -870,8 +881,11 @@ impl<'a> Checker<'a> {
             && self.arena.value_constraint(vb.pvb_pat).is_none()
             && self.is_record_pattern(vb.pvb_pat)
             && !matches!(
-                &*crate::parser::parsetree_viewer::unwrap_braces(self.arena, self.arena.get_expr(vb.pvb_expr))
-                    .pexp_desc,
+                &*crate::parser::parsetree_viewer::unwrap_braces(
+                    self.arena,
+                    self.arena.get_expr(vb.pvb_expr)
+                )
+                .pexp_desc,
                 ExpressionDesc::Pexp_pack(_)
             )
         {
@@ -1004,7 +1018,8 @@ impl<'a> Checker<'a> {
             }
             ExpressionDesc::Pexp_braces(braces) => self.expr(braces.expr),
             ExpressionDesc::Pexp_regexp(_) => Ok(()),
-            ExpressionDesc::Pexp_sequence(first, second) | ExpressionDesc::Pexp_while(first, second) => {
+            ExpressionDesc::Pexp_sequence(first, second)
+            | ExpressionDesc::Pexp_while(first, second) => {
                 self.expr(*second)?;
                 self.expr(*first)
             }
@@ -1015,8 +1030,7 @@ impl<'a> Checker<'a> {
                 self.expr(*start)?;
                 self.pat(*pat)
             }
-            ExpressionDesc::Pexp_for_of(inner)
-            | ExpressionDesc::Pexp_for_await_of(inner) => {
+            ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (pat, collection, body) = &**inner;
                 self.expr(*body)?;
                 self.expr(*collection)?;
@@ -1058,8 +1072,9 @@ impl<'a> Checker<'a> {
                 self.expr(*body)?;
                 self.extension_constructor(constructor)
             }
-            ExpressionDesc::Pexp_assert(inner)
-            | ExpressionDesc::Pexp_await(inner) => self.expr(*inner),
+            ExpressionDesc::Pexp_assert(inner) | ExpressionDesc::Pexp_await(inner) => {
+                self.expr(*inner)
+            }
             ExpressionDesc::Pexp_newtype(inner) => self.expr(inner.1),
             ExpressionDesc::Pexp_pack(mod_expr) => self.module_expr(*mod_expr),
             ExpressionDesc::Pexp_open(inner) => self.expr(inner.2),

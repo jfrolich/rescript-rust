@@ -23,7 +23,11 @@ fn list<T>(w: &mut MarshalWriter<'_>, items: &[T], f: impl Fn(&mut MarshalWriter
     w.write_int(0);
 }
 
-fn option<T>(w: &mut MarshalWriter<'_>, value: &Option<T>, f: impl FnOnce(&mut MarshalWriter<'_>, &T)) {
+fn option<T>(
+    w: &mut MarshalWriter<'_>,
+    value: &Option<T>,
+    f: impl FnOnce(&mut MarshalWriter<'_>, &T),
+) {
     match value {
         None => w.write_int(0),
         Some(v) => {

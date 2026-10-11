@@ -29,8 +29,7 @@ use crate::lambda::{InlineAttribute, LFunction, Lambda, PrimInfo};
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` for
 /// `Lam_arity_analysis.get_arity` (compiler/core/lam_arity_analysis.ml:43-71).
-pub type ExternalArityResolver<'a> =
-    dyn FnMut(&Ident, &str) -> Option<ExternalArityInfo> + 'a;
+pub type ExternalArityResolver<'a> = dyn FnMut(&Ident, &str) -> Option<ExternalArityInfo> + 'a;
 
 /// Direct port of `Lam_util.element_of_lambda` (lam_util.ml:188-196).
 ///
@@ -109,8 +108,7 @@ fn lookup_cached_external_arity<'a>(
     module_id: &Ident,
     field_name: &str,
 ) -> Option<&'a ExternalArityInfo> {
-    lookup_external_arity_entry(external_arities, module_id, field_name)
-        .and_then(Option::as_ref)
+    lookup_external_arity_entry(external_arities, module_id, field_name).and_then(Option::as_ref)
 }
 
 fn resolve_external_arity(

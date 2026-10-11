@@ -2073,6 +2073,3 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
         other => panic!("expected the effect statement second, got {other:?}"),
     }
 }
-
-
-

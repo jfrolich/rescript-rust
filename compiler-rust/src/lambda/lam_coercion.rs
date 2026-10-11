@@ -162,10 +162,6 @@ pub(crate) fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident,
     }
 }
 
-
-
-
-
 pub(crate) fn max_ident_stamp_in_block(block: &Block) -> i32 {
     block.iter().fold(0, |max_stamp, stmt| {
         max_stamp.max(max_ident_stamp_in_statement(stmt))
@@ -276,9 +272,11 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
             }
             max_stamp
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values
-            .iter()
-            .fold(0, |max_stamp, value| max_stamp.max(max_ident_stamp_in_expression(value))),
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().fold(0, |max_stamp, value| {
+                max_stamp.max(max_ident_stamp_in_expression(value))
+            })
+        }
         ExpressionDesc::StaticIndex(target, _, _) => max_ident_stamp_in_expression(target),
         ExpressionDesc::New(target, args) => {
             let mut max_stamp = max_ident_stamp_in_expression(target);

@@ -870,15 +870,13 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 )
             })
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values.iter().all(|expr| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    expr,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(|expr| {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                expr,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }),
         ExpressionDesc::New(func, args) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 func,
@@ -1065,11 +1063,9 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
                     .iter()
                     .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values
-                    .iter()
-                    .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values
+            .iter()
+            .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target)),
         ExpressionDesc::New(func, Some(args)) => {
             expression_mentions_ident_outside_nested_functions(func, target)
                 || args
@@ -1436,11 +1432,9 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
                     .iter()
                     .any(|expr| expression_mentions_ident_anywhere(expr, target))
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values
-                    .iter()
-                    .any(|expr| expression_mentions_ident_anywhere(expr, target))
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values
+            .iter()
+            .any(|expr| expression_mentions_ident_anywhere(expr, target)),
         ExpressionDesc::New(func, Some(args)) => {
             expression_mentions_ident_anywhere(func, target)
                 || args

@@ -239,7 +239,10 @@ pub fn substitute_type_vars(
                                         .map(|substituted| arena.push_core_type(substituted))
                                 })
                                 .collect::<Result<_, _>>()?;
-                            new_groups.push(Located { txt, loc: group.loc });
+                            new_groups.push(Located {
+                                txt,
+                                loc: group.loc,
+                            });
                         }
                         Ok(RowField::Rtag(name, attrs, empty, new_groups))
                     }
@@ -338,7 +341,8 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    let return_type = without_inline_types_context(p, |p| parse_typ_expr_inner(p, true));
+                    let return_type =
+                        without_inline_types_context(p, |p| parse_typ_expr_inner(p, true));
                     let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
                     let end_pos_idx = p.prev_end_pos_idx();
                     let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
@@ -938,7 +942,6 @@ fn parse_type_constr_with_start(
     ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
 }
 
-
 /// OCaml `parse_type_constructor_args ~constr_name` (res_core.ml:5140-5180).
 pub(super) fn parse_type_constructor_args(
     p: &mut Parser<'_>,
@@ -1159,10 +1162,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // res_core.ml:4827-4831); `parse_comma_delimited_region` then stops at
         // `)`/EOF/abort or reports the token and skips it
         // (res_core.ml:1068-1105).
-        if !has_dot
-            && p.token != Token::Tilde
-            && !super::grammar::is_typ_expr_start(&p.token)
-        {
+        if !has_dot && p.token != Token::Tilde && !super::grammar::is_typ_expr_start(&p.token) {
             if p.token == Token::Eof
                 || p.token == Token::Rparen
                 || super::core::recover::should_abort_list_parse(p)
@@ -1796,9 +1796,6 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     }
 }
 
-
-
-
 /// OCaml `parse_string_field_declaration` (compiler/syntax/src/res_core.ml:5186-5222).
 pub(super) fn parse_string_field_declaration(p: &mut Parser<'_>) -> Option<ObjectField> {
     // OCaml res_core.ml:5186-5222 parses object field types with plain
@@ -1869,7 +1866,10 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> VariantTypeArgs {
         });
     p.expect(Token::Rparen);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let txt = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+    let txt = args
+        .into_iter()
+        .map(|a| p.arena_mut().push_core_type(a))
+        .collect();
     Located { txt, loc }
 }
 
@@ -2102,7 +2102,11 @@ fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
 /// Parse a package type without leading paren: S [with type constraints].
 /// Used for first-class module constraints: module(Expr: S)
 /// OCaml `parse_package_type ~start_pos ~attrs` (res_core.ml:4694-4704).
-pub fn parse_package_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> CoreType {
+pub fn parse_package_type(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> CoreType {
     let lid = super::module::parse_module_type_long_ident(p);
 
     // Parse optional constraints ("with" is not a keyword)

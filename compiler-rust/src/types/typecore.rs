@@ -27,6 +27,7 @@
 #![allow(dead_code)]
 
 use crate::diagnostics::{Warning, WarningConfig};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
@@ -37,16 +38,15 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
-    ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
-    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint, ModuleTypeDesc, PatExtra,
-    Pattern, PatternDesc, StructureItem, StructureItemDesc, TypedSignatureItem,
-    TypedSignatureItemDesc, ValueBinding,
+    ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam, ModuleExpr,
+    ModuleExprDesc, ModuleType, ModuleTypeConstraint, ModuleTypeDesc, PatExtra, Pattern,
+    PatternDesc, StructureItem, StructureItemDesc, TypedSignatureItem, TypedSignatureItemDesc,
+    ValueBinding,
 };
 use crate::types::{
     Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef, TypeExprRefMap,
     UnifyState, ValueDescription,
 };
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -1479,13 +1479,18 @@ impl<'a> TypeCheckContext<'a> {
             && !self.arena.to_location(loc).loc_ghost
             && (self.warning_config.is_active(&Warning::UnusedOpen {
                 name: String::new(),
-            }) || self.warning_config.is_active(&Warning::OpenShadowIdentifier {
-                kind: String::new(),
-                name: String::new(),
-            }) || self.warning_config.is_active(&Warning::OpenShadowLabelConstructor {
-                kind: String::new(),
-                name: String::new(),
-            }));
+            }) || self
+                .warning_config
+                .is_active(&Warning::OpenShadowIdentifier {
+                    kind: String::new(),
+                    name: String::new(),
+                })
+                || self
+                    .warning_config
+                    .is_active(&Warning::OpenShadowLabelConstructor {
+                        kind: String::new(),
+                        name: String::new(),
+                    }));
         if !tracked {
             return None;
         }
@@ -1507,7 +1512,12 @@ impl<'a> TypeCheckContext<'a> {
         let Some(slot) = slot else {
             return;
         };
-        if let Some(check) = self.delayed_open_checks.iter_mut().rev().find(|c| c.slot == slot) {
+        if let Some(check) = self
+            .delayed_open_checks
+            .iter_mut()
+            .rev()
+            .find(|c| c.slot == slot)
+        {
             check.root = root.name();
         }
     }
@@ -1669,10 +1679,11 @@ impl<'a> TypeCheckContext<'a> {
             return;
         };
         if crate::types::usage::warns_for_name(name) {
-            self.push_env_usage_check(warning_loc, &warning.clone(), EnvUsageCheckKind::Declaration {
-                cell,
-                warning,
-            });
+            self.push_env_usage_check(
+                warning_loc,
+                &warning.clone(),
+                EnvUsageCheckKind::Declaration { cell, warning },
+            );
         }
     }
 
@@ -1689,10 +1700,11 @@ impl<'a> TypeCheckContext<'a> {
             return;
         };
         if crate::types::usage::warns_for_name(name) {
-            self.push_env_usage_check(warning_loc, &warning.clone(), EnvUsageCheckKind::Declaration {
-                cell,
-                warning,
-            });
+            self.push_env_usage_check(
+                warning_loc,
+                &warning.clone(),
+                EnvUsageCheckKind::Declaration { cell, warning },
+            );
         }
     }
 
@@ -1715,15 +1727,23 @@ impl<'a> TypeCheckContext<'a> {
             return;
         }
         for name in constructors {
-            let Some(cell) = self.type_ctx.usage().check_constructor_usage(ty_name, loc, name) else {
+            let Some(cell) = self
+                .type_ctx
+                .usage()
+                .check_constructor_usage(ty_name, loc, name)
+            else {
                 continue;
             };
             if !(ty_name.is_empty() || ty_name.starts_with('_')) {
-                self.push_env_usage_check(warning_loc, &probe, EnvUsageCheckKind::Constructor {
-                    cell,
-                    name: name.clone(),
-                    in_signature,
-                });
+                self.push_env_usage_check(
+                    warning_loc,
+                    &probe,
+                    EnvUsageCheckKind::Constructor {
+                        cell,
+                        name: name.clone(),
+                        in_signature,
+                    },
+                );
             }
         }
     }
@@ -1747,15 +1767,23 @@ impl<'a> TypeCheckContext<'a> {
         if loc.loc_ghost || !self.warning_config.is_active(&probe) {
             return;
         }
-        let Some(cell) = self.type_ctx.usage().check_constructor_usage(ty_name, loc, name) else {
+        let Some(cell) = self
+            .type_ctx
+            .usage()
+            .check_constructor_usage(ty_name, loc, name)
+        else {
             return;
         };
-        self.push_env_usage_check(warning_loc, &probe, EnvUsageCheckKind::Extension {
-            cell,
-            name: name.to_string(),
-            is_exception,
-            in_signature,
-        });
+        self.push_env_usage_check(
+            warning_loc,
+            &probe,
+            EnvUsageCheckKind::Extension {
+                cell,
+                name: name.to_string(),
+                is_exception,
+                in_signature,
+            },
+        );
     }
 
     fn push_env_usage_check(&mut self, loc: LocIdx, warning: &Warning, kind: EnvUsageCheckKind) {
@@ -1922,7 +1950,13 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Queue the warning of a delayed check registered at `seq`; `sub` orders
     /// the checks registered together.
-    pub(crate) fn add_delayed_warning(&mut self, seq: u64, sub: u32, loc: LocIdx, warning: Warning) {
+    pub(crate) fn add_delayed_warning(
+        &mut self,
+        seq: u64,
+        sub: u32,
+        loc: LocIdx,
+        warning: Warning,
+    ) {
         if !self.warning_config.is_active(&warning) {
             return;
         }
@@ -1961,7 +1995,9 @@ impl<'a> TypeCheckContext<'a> {
                 ));
             }
         }
-        let mut usage = std::mem::take(&mut self.value_usage_checks).into_iter().peekable();
+        let mut usage = std::mem::take(&mut self.value_usage_checks)
+            .into_iter()
+            .peekable();
         let mut unused = std::mem::take(&mut self.delayed_unused_checks)
             .into_iter()
             .peekable();
@@ -1972,7 +2008,10 @@ impl<'a> TypeCheckContext<'a> {
             let usage_key = usage.peek().map(|u| (u.seq, 0));
             let unused_key = unused.peek().map(|c| (c.seq, 0));
             let resolved_key = resolved.peek().map(|(key, _)| *key);
-            let Some(min_key) = [usage_key, unused_key, resolved_key].into_iter().flatten().min()
+            let Some(min_key) = [usage_key, unused_key, resolved_key]
+                .into_iter()
+                .flatten()
+                .min()
             else {
                 break;
             };
@@ -2252,7 +2291,6 @@ pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
     };
     value <= max
 }
-
 
 /// Convert a parsed constant to a typed constant.
 pub fn convert_constant(
@@ -2690,7 +2728,14 @@ pub(crate) fn resolve_type_constructor_path(
     loc: Option<LocIdx>,
 ) -> (Path, Option<crate::types::decl::TypeDeclaration>) {
     // `Env.lookup_type` (env.ml:1062-1073) marks the source name.
-    mark_open_lid_use(tctx.type_ctx, env, tctx.arena, lid, crate::types::env::OpenLookupKind::Type, loc);
+    mark_open_lid_use(
+        tctx.type_ctx,
+        env,
+        tctx.arena,
+        lid,
+        crate::types::env::OpenLookupKind::Type,
+        loc,
+    );
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
@@ -2737,7 +2782,10 @@ pub(crate) fn resolve_type_constructor_path(
                     // translation window, read the already-computed module
                     // signature without forcing env.ml:781-813's component
                     // table; the queued pattern force runs that lookup later.
-                    return (Path::pdot(module_path, type_name.to_string()), Some((*decl).clone()));
+                    return (
+                        Path::pdot(module_path, type_name.to_string()),
+                        Some((*decl).clone()),
+                    );
                 }
             }
             if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
@@ -2748,10 +2796,11 @@ pub(crate) fn resolve_type_constructor_path(
                 tctx.type_ctx,
                 |components| {
                     let module_path = components.access_path().clone();
-                    if let Some((cached_path, _, decl)) =
-                        tctx.type_ctx
-                            .find_resolved_module_type(env.scope_id(), &module_path, type_name)
-                    {
+                    if let Some((cached_path, _, decl)) = tctx.type_ctx.find_resolved_module_type(
+                        env.scope_id(),
+                        &module_path,
+                        type_name,
+                    ) {
                         return Some((cached_path, (*decl).clone()));
                     }
                     components.lookup_type(type_name).map(|(id, decl)| {
@@ -3096,7 +3145,9 @@ fn transl_type_inner(
 
             let constr_ty = ctx.new_constr(path.clone(), arg_refs);
             // typetexp.ml:369-371: `Ctype.enforce_constraints env constr`.
-            if let Err(err) = crate::types::ctype::try_enforce_constraints(ctx, env, constr_ty, &decl) {
+            if let Err(err) =
+                crate::types::ctype::try_enforce_constraints(ctx, env, constr_ty, &decl)
+            {
                 return Err(TypeCoreError::TypeMismatch {
                     loc,
                     trace: match err {
@@ -3167,7 +3218,10 @@ fn transl_type_inner(
                         .map_err(|_| TypeCoreError::PatternTypeClash {
                             loc: Some(loc),
                             trace: vec![(fallback_alias_ty, inner_ty)],
-                            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+                            env: tctx
+                                .unify_state
+                                .env()
+                                .map(|env| tctx.type_ctx.store_typed_env(env)),
                         })?;
                     (inner_ctyp, inner_ty)
                 } else {
@@ -3289,7 +3343,10 @@ fn transl_type_inner(
                 .map_err(|_| TypeCoreError::PatternTypeClash {
                     loc: Some(loc),
                     trace: vec![(scope_var, poly_ty)],
-                    env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+                    env: tctx
+                        .unify_state
+                        .env()
+                        .map(|env| tctx.type_ctx.store_typed_env(env)),
                 })?;
 
             let ctyp = TypedCoreType {
@@ -3309,8 +3366,10 @@ fn transl_type_inner(
             let mut typed_fields = Vec::new();
             // Match OCaml Typetexp.transl_fields: collect unique fields in a
             // hashtable, then iterate in Hashtbl.fold order.
-            let mut field_entries: HashMap<String, (TypeExprRef, crate::types::asttypes::MutableFlag)> =
-                HashMap::new();
+            let mut field_entries: HashMap<
+                String,
+                (TypeExprRef, crate::types::asttypes::MutableFlag),
+            > = HashMap::new();
             let mut field_insertions: Vec<String> = Vec::new();
 
             // `add_typed_field` (typetexp.ml:571-579): skip equal types,
@@ -3319,7 +3378,10 @@ fn transl_type_inner(
                 tctx: &mut TypeCheckContext<'_>,
                 env: &Env,
                 loc: LocIdx,
-                field_entries: &mut HashMap<String, (TypeExprRef, crate::types::asttypes::MutableFlag)>,
+                field_entries: &mut HashMap<
+                    String,
+                    (TypeExprRef, crate::types::asttypes::MutableFlag),
+                >,
                 field_insertions: &mut Vec<String>,
                 field_name: String,
                 field_type: TypeExprRef,
@@ -3336,18 +3398,20 @@ fn transl_type_inner(
                         );
                     }
                     let ctx = tctx.type_ctx;
-                    if crate::types::ctype::equal(ctx, env, false, &[field_type], &[existing_type]) {
+                    if crate::types::ctype::equal(ctx, env, false, &[field_type], &[existing_type])
+                    {
                         return Ok(());
                     }
                     let mut unify_state = UnifyState::new();
                     unify_state.set_env(env);
-                    crate::types::unify(ctx, &mut unify_state, field_type, existing_type)
-                        .map_err(|_| TypeCoreError::MethodMismatch {
+                    crate::types::unify(ctx, &mut unify_state, field_type, existing_type).map_err(
+                        |_| TypeCoreError::MethodMismatch {
                             loc,
                             label: field_name,
                             actual: field_type,
                             expected: existing_type,
-                        })?;
+                        },
+                    )?;
                 } else {
                     field_insertions.push(field_name.clone());
                     field_entries.insert(field_name, (field_type, mutability));
@@ -3482,8 +3546,10 @@ fn transl_type_inner(
                             }
                         } else {
                             if let Some(path) = inherit_name
-                                && (matches!(&*ctx.borrow_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
-                                    || is_incomplete_type_constructor_path(ctx, env, &path))
+                                && (matches!(
+                                    &*ctx.borrow_desc(ctx.repr(expanded)),
+                                    TypeDesc::Tvar(_)
+                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -3523,17 +3589,19 @@ fn transl_type_inner(
                 .filter_map(|name| field_entries.remove(&name).map(|ty| (name, ty)))
                 .collect::<Vec<_>>();
             // Fold fields into Tfield chain
-            let fields_ty = field_entries
-                .iter()
-                .fold(ty_init, |rest, (name, (field_ty, mutability))| {
-                    ctx.new_type(TypeDesc::Tfield {
-                        name: name.clone(),
-                        mutability: ctx
-                            .alloc_mutability(crate::types::type_expr::FieldMutability::Value(*mutability)),
-                        typ: *field_ty,
-                        rest,
-                    })
-                });
+            let fields_ty =
+                field_entries
+                    .iter()
+                    .fold(ty_init, |rest, (name, (field_ty, mutability))| {
+                        ctx.new_type(TypeDesc::Tfield {
+                            name: name.clone(),
+                            mutability: ctx.alloc_mutability(
+                                crate::types::type_expr::FieldMutability::Value(*mutability),
+                            ),
+                            typ: *field_ty,
+                            rest,
+                        })
+                    });
             // Wrap in Tobject
             let obj_ty = ctx.new_type(TypeDesc::Tobject { fields: fields_ty });
 
@@ -3609,13 +3677,18 @@ fn transl_type_inner(
                             .iter()
                             .map(|group| match group.txt.as_slice() {
                                 [arg] => *arg,
-                                types => tctx.arena.push_shared_core_type(crate::parser::ast::CoreType {
-                                    ptyp_desc: Box::new(crate::parser::ast::CoreTypeDesc::Ptyp_tuple(
-                                        Box::new(types.to_vec()),
-                                    )),
-                                    ptyp_loc: group.loc,
-                                    ptyp_attributes: Attributes::new(),
-                                }),
+                                types => {
+                                    tctx.arena
+                                        .push_shared_core_type(crate::parser::ast::CoreType {
+                                            ptyp_desc: Box::new(
+                                                crate::parser::ast::CoreTypeDesc::Ptyp_tuple(
+                                                    Box::new(types.to_vec()),
+                                                ),
+                                            ),
+                                            ptyp_loc: group.loc,
+                                            ptyp_attributes: Attributes::new(),
+                                        })
+                                }
                             })
                             .collect();
                         let mut typed_args = Vec::new();
@@ -3708,8 +3781,10 @@ fn transl_type_inner(
                         };
                         let Some(fields) = inherited_fields else {
                             if let Some((path, _)) = inherit_name
-                                && (matches!(&*ctx.borrow_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
-                                    || is_incomplete_type_constructor_path(ctx, env, &path))
+                                && (matches!(
+                                    &*ctx.borrow_desc(ctx.repr(expanded)),
+                                    TypeDesc::Tvar(_)
+                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -3848,7 +3923,14 @@ fn transl_type_inner(
             }
 
             let longident = tctx.resolve_lid(mod_lid.txt).clone();
-            crate::types::typecore::mark_open_lid_use(tctx.type_ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Modtype, Some(loc));
+            crate::types::typecore::mark_open_lid_use(
+                tctx.type_ctx,
+                env,
+                tctx.arena,
+                &longident,
+                crate::types::env::OpenLookupKind::Modtype,
+                Some(loc),
+            );
             let pack_path = match crate::types::typemod::lookup_modtype_path_by_lid(
                 &longident,
                 tctx.arena,
@@ -4051,7 +4133,12 @@ fn build_or_pat(
         TypeDesc::Tvariant(row) if crate::types::btype::static_row(ctx, row) => {
             crate::types::btype::row_repr(ctx, row)
         }
-        _ => return Err(TypeCoreError::NotAVariantType { loc: lid.loc, lid: lid_txt }),
+        _ => {
+            return Err(TypeCoreError::NotAVariantType {
+                loc: lid.loc,
+                lid: lid_txt,
+            });
+        }
     };
     drop(expanded_desc);
 
@@ -4184,8 +4271,9 @@ fn extract_type_from_pat_variant_spread(
     };
     let spread_ty = ctx.new_generic_constr(spread_path.clone(), vec![]);
 
-    crate::types::ctype::subtype_now(ctx, env, spread_ty, expected_ty)
-        .map_err(|err| not_subtype_error(tctx.type_ctx, env, lid.loc, err, spread_ty, expected_ty))?;
+    crate::types::ctype::subtype_now(ctx, env, spread_ty, expected_ty).map_err(|err| {
+        not_subtype_error(tctx.type_ctx, env, lid.loc, err, spread_ty, expected_ty)
+    })?;
 
     Ok((spread_path, constructors.into_vec(), spread_ty))
 }
@@ -4223,7 +4311,9 @@ fn build_ppat_or_for_variant_spread(
             loc: lident.loc,
         };
         let cstr_args = match cstr.cd_args {
-            crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty() => Vec::new(),
+            crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty() => {
+                Vec::new()
+            }
             _ => vec![push_synthetic_pat(
                 tctx.arena,
                 ParsedPattern {
@@ -4997,7 +5087,10 @@ fn unify_pattern_types(
             } else {
                 trace
             },
-            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+            env: tctx
+                .unify_state
+                .env()
+                .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
         Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
             loc: _loc,
@@ -5006,7 +5099,10 @@ fn unify_pattern_types(
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
             trace: vec![(ty1, ty2)],
-            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+            env: tctx
+                .unify_state
+                .env()
+                .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
     }
 }
@@ -5051,7 +5147,10 @@ fn unify_pattern_types_gadt(
             } else {
                 trace
             },
-            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+            env: tctx
+                .unify_state
+                .env()
+                .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
         Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
             loc: _loc,
@@ -5060,7 +5159,10 @@ fn unify_pattern_types_gadt(
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
             trace: vec![(ty1, ty2)],
-            env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+            env: tctx
+                .unify_state
+                .env()
+                .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
     }
 }
@@ -5318,7 +5420,8 @@ fn build_as_type(
                 row_fields: vec![(
                     label.clone().into(),
                     crate::types::type_expr::RowField::Rpresent(opt_ty),
-                )].into(),
+                )]
+                .into(),
                 row_more: ctx.new_var(None),
                 row_name: None,
                 row_fixed: false,
@@ -5387,7 +5490,10 @@ fn merge_or_pattern_variables(
                                 } else {
                                     trace
                                 },
-                                env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+                                env: tctx
+                                    .unify_state
+                                    .env()
+                                    .map(|env| tctx.type_ctx.store_typed_env(env)),
                             });
                         }
                         Err(_) => {
@@ -5395,7 +5501,10 @@ fn merge_or_pattern_variables(
                                 loc,
                                 id: v1.id.clone(),
                                 trace: vec![(v1.ty, v2.ty)],
-                                env: tctx.unify_state.env().map(|env| tctx.type_ctx.store_typed_env(env)),
+                                env: tctx
+                                    .unify_state
+                                    .env()
+                                    .map(|env| tctx.type_ctx.store_typed_env(env)),
                             });
                         }
                     }
@@ -5577,7 +5686,14 @@ fn type_pattern_construct(
     if is_qualified {
         // `Typetexp.find_all_constructors` marks the qualifying module
         // through `lookup_module_descr` (env.ml:1076-1089).
-        mark_open_lid_use(ctx, env, tctx.arena, lid_txt, crate::types::env::OpenLookupKind::Component, Some(lid.loc));
+        mark_open_lid_use(
+            ctx,
+            env,
+            tctx.arena,
+            lid_txt,
+            crate::types::env::OpenLookupKind::Component,
+            Some(lid.loc),
+        );
     }
     let qualified_opath = if is_qualified {
         // OCaml compiler/ml/typecore.ml:1456-1478 computes `opath`, gets
@@ -5637,39 +5753,41 @@ fn type_pattern_construct(
                 Some(expected_ty),
             ) {
                 Some((path, desc, ambiguous_types)) => {
-                // `NameChoice.disambiguate` (typecore.ml:913-918).
-                if !ambiguous_types.is_empty() {
-                    tctx.report_warning(
-                        lid.loc,
-                        Warning::AmbiguousName {
-                            names: vec![desc.cstr_name.clone()],
-                            types: ambiguous_types,
-                            is_label: false,
-                        },
-                    );
-                }
-                if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
-                    qualified_opath.as_ref(),
-                    &desc,
-                    expected_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
-                    return Err(TypeCoreError::NameTypeMismatch {
-                        loc: lid.loc,
-                        kind: "variant".to_string(),
-                        lid: lid_txt.clone(),
-                        expected,
-                        alternatives,
-                    });
-                }
+                    // `NameChoice.disambiguate` (typecore.ml:913-918).
+                    if !ambiguous_types.is_empty() {
+                        tctx.report_warning(
+                            lid.loc,
+                            Warning::AmbiguousName {
+                                names: vec![desc.cstr_name.clone()],
+                                types: ambiguous_types,
+                                is_label: false,
+                            },
+                        );
+                    }
+                    if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
+                        qualified_opath.as_ref(),
+                        &desc,
+                        expected_ty,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    ) {
+                        return Err(TypeCoreError::NameTypeMismatch {
+                            loc: lid.loc,
+                            kind: "variant".to_string(),
+                            lid: lid_txt.clone(),
+                            expected,
+                            alternatives,
+                        });
+                    }
                     (desc, path)
                 }
                 // OCaml `Typetexp.find_all_constructors` only reads the
                 // qualifying module; a miss is a (narrowed) unbound error.
                 None => {
-                    return Err(unbound_constructor_lookup_error(tctx, env, lid.loc, lid_txt));
+                    return Err(unbound_constructor_lookup_error(
+                        tctx, env, lid.loc, lid_txt,
+                    ));
                 }
             }
         }
@@ -5787,8 +5905,10 @@ fn type_pattern_construct(
     };
     if let [sp] = sargs.as_slice() {
         let sp = tctx.arena.get_pat(*sp);
-        if matches!(&*sp.ppat_desc, crate::parser::ast::PatternDesc::Ppat_constant(_))
-            && has_warn_on_literal_pattern_attribute(&cstr_desc.cstr_attributes)
+        if matches!(
+            &*sp.ppat_desc,
+            crate::parser::ast::PatternDesc::Ppat_constant(_)
+        ) && has_warn_on_literal_pattern_attribute(&cstr_desc.cstr_attributes)
         {
             tctx.report_warning(sp.ppat_loc, Warning::FragileLiteralPattern);
         }
@@ -5948,7 +6068,8 @@ fn type_pattern_variant(
                 matched: true,
                 link: ctx.alloc_row_field(None),
             },
-        )].into(),
+        )]
+        .into(),
         row_more: ctx.new_var(None),
         row_closed: false,
         row_fixed: false,
@@ -6039,19 +6160,21 @@ fn record_pattern_unresolved_label_error(
         )
     {
         let decl = lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx);
-        let (alternatives, jsx_component_info) =
-            match decl.as_ref().map(|decl| (&decl.type_kind, &decl.type_attributes)) {
-                Some((crate::types::TypeKind::TypeRecord(labels, _), attrs)) => (
-                    labels
-                        .iter()
-                        .map(|label| label.ld_id.name().to_string())
-                        .collect::<Vec<_>>(),
-                    // `Typecore.report_error`'s `Wrong_name` asks
-                    // `get_jsx_component_props` (typecore.ml:4950-4954).
-                    jsx_prop_error_info_from_record_parts(&path, labels, attrs),
-                ),
-                _ => (Vec::new(), None),
-            };
+        let (alternatives, jsx_component_info) = match decl
+            .as_ref()
+            .map(|decl| (&decl.type_kind, &decl.type_attributes))
+        {
+            Some((crate::types::TypeKind::TypeRecord(labels, _), attrs)) => (
+                labels
+                    .iter()
+                    .map(|label| label.ld_id.name().to_string())
+                    .collect::<Vec<_>>(),
+                // `Typecore.report_error`'s `Wrong_name` asks
+                // `get_jsx_component_props` (typecore.ml:4950-4954).
+                jsx_prop_error_info_from_record_parts(&path, labels, attrs),
+            ),
+            _ => (Vec::new(), None),
+        };
         return TypeCoreError::WrongName {
             loc: lid.loc,
             kind: "record".to_string(),
@@ -6212,9 +6335,16 @@ fn type_pattern_record(
                 Longident::Ldot(..) => module_labels.iter().collect(),
                 _ => env.find_all_labels(&field_name),
             };
-            disambiguate_label_by_ids(scope, &field_names, false, env, &mut tctx.persistent_env, ctx)
-                .first()
-                .map(|label| (*label).clone())
+            disambiguate_label_by_ids(
+                scope,
+                &field_names,
+                false,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
+            .first()
+            .map(|label| (*label).clone())
         } else {
             None
         };
@@ -6367,69 +6497,68 @@ fn type_pattern_record(
     let mut typed_fields = Vec::new();
     for field in pending_fields {
         let field_lid_for_error = tctx.arena.get_longident(field.lid.txt).clone();
-        let (label_desc, field_ty, poly_vars, force_label_arg_paths) = if let Some(env_label) =
-            field.label
-        {
-            if field.opt && !env_label.lbl_optional {
-                return Err(TypeCoreError::FieldNotOptional {
-                    loc: tctx.arena.get_pat(field.pat).ppat_loc,
-                    name: env_label.lbl_name.clone(),
-                    typ: env_label.lbl_res,
-                });
-            }
-            // OCaml compiler/ml/typecore.ml:1623-1632 `type_label_pat`
-            // creates `(vars, ty_arg, ty_res) = instance_label false label`,
-            // unifies `ty_res` with the record type, then types the field
-            // pattern directly against `ty_arg`. Do not insert an extra fresh
-            // field variable here; that changes both sharing and lazy forcing.
-            // The label already carries its `lbl_all` array there; Rust
-            // populates the exact-path raw-lambda cache after all field
-            // binders are allocated below, preserving OCaml's binder-before-
-            // bookkeeping order from typecore.ml:1623-1644.
-            ctx.begin_def();
-            let (vars, ty_arg, ty_res) =
-                crate::types::ctype::instance_label(ctx, false, &env_label);
-            if vars.is_empty() {
-                ctx.end_def();
-            }
-            // OCaml typecore.ml:1538 `unify_pat_types loc !env ty_res
-            // record_ty` raises `Pattern_type_clash` at the record pattern.
-            if let Err(err) = unify_pattern_types(tctx, loc, ty_res, record_ty) {
-                if !vars.is_empty() {
+        let (label_desc, field_ty, poly_vars, force_label_arg_paths) =
+            if let Some(env_label) = field.label {
+                if field.opt && !env_label.lbl_optional {
+                    return Err(TypeCoreError::FieldNotOptional {
+                        loc: tctx.arena.get_pat(field.pat).ppat_loc,
+                        name: env_label.lbl_name.clone(),
+                        typ: env_label.lbl_res,
+                    });
+                }
+                // OCaml compiler/ml/typecore.ml:1623-1632 `type_label_pat`
+                // creates `(vars, ty_arg, ty_res) = instance_label false label`,
+                // unifies `ty_res` with the record type, then types the field
+                // pattern directly against `ty_arg`. Do not insert an extra fresh
+                // field variable here; that changes both sharing and lazy forcing.
+                // The label already carries its `lbl_all` array there; Rust
+                // populates the exact-path raw-lambda cache after all field
+                // binders are allocated below, preserving OCaml's binder-before-
+                // bookkeeping order from typecore.ml:1623-1644.
+                ctx.begin_def();
+                let (vars, ty_arg, ty_res) =
+                    crate::types::ctype::instance_label(ctx, false, &env_label);
+                if vars.is_empty() {
                     ctx.end_def();
                 }
-                return Err(err);
-            }
-            (env_label, ty_arg, vars, true)
-        } else {
-            if !has_dict_pattern_attr {
-                return Err(record_pattern_unresolved_label_error(
-                    tctx,
-                    env,
-                    record_ty,
-                    expected_ty,
-                    &field.lid,
-                    field.field_name,
-                ));
-            }
-            let field_ty = ctx.new_var(None);
-            let label_desc = crate::types::LabelDescription {
-                lbl_name: field.field_name.clone(),
-                // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                lbl_runtime_name: field.field_name,
-                lbl_res: record_ty,
-                lbl_arg: field_ty,
-                lbl_mut: crate::types::MutableFlag::Immutable,
-                lbl_optional: field.opt,
-                lbl_pos: field.source_pos,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                lbl_private: crate::types::PrivateFlag::Public,
-                lbl_loc: tctx.arena.to_location(field.lid.loc),
-                lbl_attributes: vec![],
+                // OCaml typecore.ml:1538 `unify_pat_types loc !env ty_res
+                // record_ty` raises `Pattern_type_clash` at the record pattern.
+                if let Err(err) = unify_pattern_types(tctx, loc, ty_res, record_ty) {
+                    if !vars.is_empty() {
+                        ctx.end_def();
+                    }
+                    return Err(err);
+                }
+                (env_label, ty_arg, vars, true)
+            } else {
+                if !has_dict_pattern_attr {
+                    return Err(record_pattern_unresolved_label_error(
+                        tctx,
+                        env,
+                        record_ty,
+                        expected_ty,
+                        &field.lid,
+                        field.field_name,
+                    ));
+                }
+                let field_ty = ctx.new_var(None);
+                let label_desc = crate::types::LabelDescription {
+                    lbl_name: field.field_name.clone(),
+                    // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
+                    lbl_runtime_name: field.field_name,
+                    lbl_res: record_ty,
+                    lbl_arg: field_ty,
+                    lbl_mut: crate::types::MutableFlag::Immutable,
+                    lbl_optional: field.opt,
+                    lbl_pos: field.source_pos,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                    lbl_private: crate::types::PrivateFlag::Public,
+                    lbl_loc: tctx.arena.to_location(field.lid.loc),
+                    lbl_attributes: vec![],
+                };
+                (label_desc, field_ty, Vec::new(), false)
             };
-            (label_desc, field_ty, Vec::new(), false)
-        };
 
         // process_optional_label: if the label is optional and the user did NOT write '?',
         // wrap the pattern in Some(...) before type checking.
@@ -7473,7 +7602,13 @@ fn type_statement<'a>(
 
     let expected_ty = env.type_unit(ctx);
     let context = type_clash_context_in_statement(expr);
-    unify_expression_types(tctx, proper_exp_loc(&typed), typed.exp_type, expected_ty, context)?;
+    unify_expression_types(
+        tctx,
+        proper_exp_loc(&typed),
+        typed.exp_type,
+        expected_ty,
+        context,
+    )?;
     Ok(typed)
 }
 
@@ -7520,9 +7655,12 @@ fn deprecated_warning_from_attrs(
 
 /// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:76-80).
 fn deprecated_of_decl_attrs(attrs: &[crate::types::decl::Attribute]) -> Option<String> {
-    let attr = attrs
-        .iter()
-        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated" | "ocaml.deprecated"))?;
+    let attr = attrs.iter().find(|attr| {
+        matches!(
+            attr.attr_name.txt.as_str(),
+            "deprecated" | "ocaml.deprecated"
+        )
+    })?;
     Some(match &attr.attr_payload {
         // `string_of_opt_payload` (builtin_attributes.ml:28-31): the record
         // form has no string payload.
@@ -7622,10 +7760,12 @@ fn record_deprecated_used(
     context: Option<crate::types::context::DeprecatedContext>,
 ) {
     use crate::types::decl::AttributePayload;
-    let Some(attr) = attrs
-        .iter()
-        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated" | "ocaml.deprecated"))
-    else {
+    let Some(attr) = attrs.iter().find(|attr| {
+        matches!(
+            attr.attr_name.txt.as_str(),
+            "deprecated" | "ocaml.deprecated"
+        )
+    }) else {
         return;
     };
     let (text, migrate, migrate_in_pipe_chain) = match &attr.attr_payload {
@@ -7634,17 +7774,22 @@ fn record_deprecated_used(
             migrate,
             migrate_in_pipe_chain,
             ..
-        } => (reason.clone(), migrate.clone(), migrate_in_pipe_chain.clone()),
+        } => (
+            reason.clone(),
+            migrate.clone(),
+            migrate_in_pipe_chain.clone(),
+        ),
         AttributePayload::Str(reason) => (reason.clone(), None, None),
         _ => (String::new(), None, None),
     };
-    tctx.type_ctx.record_deprecated_used(crate::types::context::DeprecatedUse {
-        source_loc: tctx.arena.to_location(loc),
-        text,
-        migrate,
-        migrate_in_pipe_chain,
-        context,
-    });
+    tctx.type_ctx
+        .record_deprecated_used(crate::types::context::DeprecatedUse {
+            source_loc: tctx.arena.to_location(loc),
+            text,
+            migrate,
+            migrate_in_pipe_chain,
+            context,
+        });
 }
 
 fn deprecated_warning(name: &str, reason: &str, can_be_automigrated: bool) -> Warning {
@@ -7736,10 +7881,13 @@ fn type_expect_with_recarg<'a>(
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
     let arena = tctx.arena;
-    let mut typed =
-        crate::types::typemod::with_warning_scope(tctx, arena, &expr.pexp_attributes, true, |tctx| {
-            type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg)
-        })?;
+    let mut typed = crate::types::typemod::with_warning_scope(
+        tctx,
+        arena,
+        &expr.pexp_attributes,
+        true,
+        |tctx| type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg),
+    )?;
     // OCaml records `exp_env = env` on every typed expression
     // (typecore.ml type_expect_); later phases such as
     // Typeopt.type_cannot_contain_undefined (translcore.ml:822) expand the
@@ -7767,7 +7915,10 @@ fn type_expect_with_recarg_unscoped<'a>(
     let context = match &*expr.pexp_desc {
         // Special errors for braced identifiers passed to records.
         ED::Pexp_braces(braces)
-            if matches!(&*tctx.arena.get_expr(braces.expr).pexp_desc, ED::Pexp_ident(_)) =>
+            if matches!(
+                &*tctx.arena.get_expr(braces.expr).pexp_desc,
+                ED::Pexp_ident(_)
+            ) =>
         {
             Some(TypeClashContext::BracedIdent)
         }
@@ -7797,14 +7948,23 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `Env.check_value_name (Longident.last lid) loc` before lookup.
             {
                 let last = tctx.arena.get_string(longident.last_idx());
-                if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc)).is_err() {
+                if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
+                    .is_err()
+                {
                     return Err(TypeCoreError::IllegalValueName {
                         loc: lid.loc,
                         name: last.to_string(),
                     });
                 }
             }
-            mark_open_lid_use(ctx, env, tctx.arena, longident, crate::types::env::OpenLookupKind::Value, Some(lid.loc));
+            mark_open_lid_use(
+                ctx,
+                env,
+                tctx.arena,
+                longident,
+                crate::types::env::OpenLookupKind::Value,
+                Some(lid.loc),
+            );
             let (path, desc) = match env.lookup_value_by_lid(
                 longident,
                 tctx.arena,
@@ -7829,7 +7989,12 @@ fn type_expect_with_recarg_unscoped<'a>(
             } else {
                 crate::types::context::DeprecatedContext::Reference
             };
-            record_deprecated_used(tctx, lid.loc, &desc.val_attributes, Some(deprecated_context));
+            record_deprecated_used(
+                tctx,
+                lid.loc,
+                &desc.val_attributes,
+                Some(deprecated_context),
+            );
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -7992,9 +8157,12 @@ fn type_expect_with_recarg_unscoped<'a>(
                 ED::Pexp_ifthenelse(inner) => {
                     (inner.0, inner.1, inner.2, Some(TypeClashContext::IfReturn))
                 }
-                ED::Pexp_ternary(inner) => {
-                    (inner.0, inner.1, Some(inner.2), Some(TypeClashContext::TernaryReturn))
-                }
+                ED::Pexp_ternary(inner) => (
+                    inner.0,
+                    inner.1,
+                    Some(inner.2),
+                    Some(TypeClashContext::TernaryReturn),
+                ),
                 _ => unreachable!(),
             };
             let (cond_idx, then_idx, else_idx) = (&cond_idx, &then_idx, &else_idx);
@@ -8174,7 +8342,8 @@ fn type_expect_with_recarg_unscoped<'a>(
             ctx.begin_def();
             let mut segments = Vec::with_capacity(template.source_segments.len());
             for source in &template.source_segments {
-                match crate::string_literal::template_from_source(tctx.arena.get_string(source.txt)) {
+                match crate::string_literal::template_from_source(tctx.arena.get_string(source.txt))
+                {
                     Some(segment) => segments.push(segment),
                     None => {
                         return Err(TypeCoreError::InvalidStringEscapeSequence { loc: source.loc });
@@ -8216,7 +8385,10 @@ fn type_expect_with_recarg_unscoped<'a>(
             let tag = tag?;
             let param_ty = ctx.new_var(None);
             let output_ty = ctx.new_var(None);
-            let tag_ty = ctx.new_constr(crate::types::predef::path_tagged_template(), vec![param_ty, output_ty]);
+            let tag_ty = ctx.new_constr(
+                crate::types::predef::path_tagged_template(),
+                vec![param_ty, output_ty],
+            );
             tctx.set_unify_env(env);
             if crate::types::ctype::unify(
                 ctx,
@@ -8244,8 +8416,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             unify_expression_types(tctx, loc, ctx.new_var(None), tag.exp_type, None)?;
             ctx.end_def();
             rue_unify(tctx, loc, output_ty, expected_ty, context)?;
-            let raw_sources =
-                template.raw_sources.iter().map(|source| tctx.arena.get_string(source.txt).to_string()).collect();
+            let raw_sources = template
+                .raw_sources
+                .iter()
+                .map(|source| tctx.arena.get_string(source.txt).to_string())
+                .collect();
             Ok(Expression::new(
                 ExpressionDesc::Texp_tagged_template {
                     tag: Box::new(tag),
@@ -8705,7 +8880,6 @@ fn type_expect_with_recarg_unscoped<'a>(
                 &expr.pexp_attributes,
             )
         }
-
     }
 }
 
@@ -9182,8 +9356,7 @@ fn translate_unified_ops(
     // Check if the function is a unified op (`Pervasives.<op>`).
     let path_name = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => match path {
-            Path::Pdot(parent, op, _)
-                if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") =>
+            Path::Pdot(parent, op, _) if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") =>
             {
                 if get_unified_op_entry_for_op(op).is_none() {
                     return None;
@@ -9498,7 +9671,10 @@ fn lookup_qualified_value_for_arity_suggestion(
                     &mod_path,
                     ctx,
                 );
-                let result = (Path::pdot_pos(mod_path.clone(), value_name, 0), Arc::new(vd));
+                let result = (
+                    Path::pdot_pos(mod_path.clone(), value_name, 0),
+                    Arc::new(vd),
+                );
                 ctx.register_resolved_module_value(
                     &module_path,
                     value_name,
@@ -9906,8 +10082,10 @@ fn type_application(
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
-    tctx.deprecated_function_call =
-        matches!(&*funct.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_ident(_));
+    tctx.deprecated_function_call = matches!(
+        &*funct.pexp_desc,
+        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+    );
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None);
     tctx.deprecated_function_call = false;
     let typed_funct = typed_funct?;
@@ -10121,7 +10299,9 @@ fn type_application(
                 enforce_optional: param.label().is_optional() && !call_is_optional,
                 skip_post_unify: is_ignore_fn,
             });
-        } else if param.label().is_optional() && (total_app || has_nolabel_arg(args, &remaining_args)) {
+        } else if param.label().is_optional()
+            && (total_app || has_nolabel_arg(args, &remaining_args))
+        {
             ignored.push(OmittedArrow {
                 label: param.label().clone(),
                 arg_ty: param.typ,
@@ -10176,7 +10356,10 @@ fn type_application(
                     function_level,
                 )
             };
-            if matches!(&*ctx.borrow_desc(ctx.repr(result_ty)), TypeDesc::Tarrow { .. }) {
+            if matches!(
+                &*ctx.borrow_desc(ctx.repr(result_ty)),
+                TypeDesc::Tarrow { .. }
+            ) {
                 return Err(TypeCoreError::ApplyWrongLabel {
                     loc: arg_expr.pexp_loc,
                     label: *label,
@@ -10484,7 +10667,6 @@ fn materialize_pattern_of_type(
     Some(conv_counter_example(tctx, &typed, None))
 }
 
-
 fn report_unused_match_cases(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -10515,7 +10697,15 @@ fn report_unused_match_cases(
             }),
         })
         .collect();
-    register_unused_match_check(tctx, env, parmatch_cases, delayed, level, ty_arg_check, check_ambiguous);
+    register_unused_match_check(
+        tctx,
+        env,
+        parmatch_cases,
+        delayed,
+        level,
+        ty_arg_check,
+        check_ambiguous,
+    );
 }
 
 /// [`report_unused_match_cases`] for a single unguarded pattern, such as a
@@ -10569,7 +10759,8 @@ fn register_unused_match_check(
     };
     if delayed {
         let seq = tctx.next_delayed_check_seq();
-        tctx.delayed_unused_checks.push(DelayedUnusedCheck { seq, ..check });
+        tctx.delayed_unused_checks
+            .push(DelayedUnusedCheck { seq, ..check });
     } else {
         run_delayed_unused_check(tctx, check);
     }
@@ -10973,7 +11164,10 @@ fn pressure_variants_on_match_cases(
     env: &Env,
     pending_cases: &[PendingMatchCase<'_>],
 ) {
-    let patl: Vec<&Pattern> = pending_cases.iter().map(|pending| &pending.typed_pat).collect();
+    let patl: Vec<&Pattern> = pending_cases
+        .iter()
+        .map(|pending| &pending.typed_pat)
+        .collect();
     parmatch_pressure_variants(tctx, env, &patl);
 }
 
@@ -11442,7 +11636,6 @@ fn type_match(
         }
     };
 
-
     // Match OCaml type_cases:
     //   if has_gadts then
     //     let ty_res' = instance env ty_res in
@@ -11902,10 +12095,7 @@ fn collect_lident_idents_in_expression(
                 out.push(arena.get_string(*id).to_string());
             }
         }
-        ED::Pexp_constant(_)
-        | ED::Pexp_extension(_)
-        | ED::Pexp_break
-        | ED::Pexp_continue => {}
+        ED::Pexp_constant(_) | ED::Pexp_extension(_) | ED::Pexp_break | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
             for binding in inner.1.iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);
@@ -12167,9 +12357,11 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p1))
                 || parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p2))
         }
-        crate::parser::ast::PatternDesc::Ppat_construct(_, args) => args.txt.iter().any(|pat_idx| {
-            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
-        }),
+        crate::parser::ast::PatternDesc::Ppat_construct(_, args) => {
+            args.txt.iter().any(|pat_idx| {
+                parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
         }),
@@ -13480,7 +13672,14 @@ fn type_construct(
     if is_qualified {
         // `Typetexp.find_all_constructors` marks the qualifying module
         // through `lookup_module_descr` (env.ml:1076-1089).
-        mark_open_lid_use(ctx, env, tctx.arena, &longident, crate::types::env::OpenLookupKind::Component, Some(lid.loc));
+        mark_open_lid_use(
+            ctx,
+            env,
+            tctx.arena,
+            &longident,
+            crate::types::env::OpenLookupKind::Component,
+            Some(lid.loc),
+        );
     }
     let qualified_opath = if is_qualified {
         // OCaml compiler/ml/typecore.ml:4244-4253 computes `opath`, gathers
@@ -13530,40 +13729,42 @@ fn type_construct(
                 Some(expected_ty),
             ) {
                 Some((path, desc, ambiguous_types)) => {
-                // `NameChoice.disambiguate` (typecore.ml:913-918) warns
-                // before the constructor is typed.
-                if !ambiguous_types.is_empty() {
-                    tctx.report_warning(
-                        lid.loc,
-                        Warning::AmbiguousName {
-                            names: vec![lid_name.clone()],
-                            types: ambiguous_types,
-                            is_label: false,
-                        },
-                    );
-                }
-                if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
-                    qualified_opath.as_ref(),
-                    &desc,
-                    expected_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
-                    return Err(TypeCoreError::NameTypeMismatch {
-                        loc: lid.loc,
-                        kind: "variant".to_string(),
-                        lid: longident.clone(),
-                        expected,
-                        alternatives,
-                    });
-                }
+                    // `NameChoice.disambiguate` (typecore.ml:913-918) warns
+                    // before the constructor is typed.
+                    if !ambiguous_types.is_empty() {
+                        tctx.report_warning(
+                            lid.loc,
+                            Warning::AmbiguousName {
+                                names: vec![lid_name.clone()],
+                                types: ambiguous_types,
+                                is_label: false,
+                            },
+                        );
+                    }
+                    if let Some((expected, alternatives)) = qualified_constructor_type_mismatch(
+                        qualified_opath.as_ref(),
+                        &desc,
+                        expected_ty,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    ) {
+                        return Err(TypeCoreError::NameTypeMismatch {
+                            loc: lid.loc,
+                            kind: "variant".to_string(),
+                            lid: longident.clone(),
+                            expected,
+                            alternatives,
+                        });
+                    }
                     (path, desc)
                 }
                 // OCaml `Typetexp.find_all_constructors` only reads the
                 // qualifying module; a miss is a (narrowed) unbound error.
                 None => {
-                    return Err(unbound_constructor_lookup_error(tctx, env, lid.loc, &longident));
+                    return Err(unbound_constructor_lookup_error(
+                        tctx, env, lid.loc, &longident,
+                    ));
                 }
             }
         }
@@ -13722,8 +13923,10 @@ fn type_construct(
     // `List.map2 (fun e (t, t0) -> type_argument ~context ~recarg env e t t0)
     // sargs (List.combine ty_args ty_args0)`.
     let mut typed_args = Vec::with_capacity(sargs.len());
-    for ((arg_idx, arg_ty), arg_ty0) in
-        sargs.iter().zip(arg_types_for_expect.iter()).zip(arg_types_for_unify.iter())
+    for ((arg_idx, arg_ty), arg_ty0) in sargs
+        .iter()
+        .zip(arg_types_for_expect.iter())
+        .zip(arg_types_for_unify.iter())
     {
         let arg_expr = tctx.arena.get_expr(*arg_idx);
         let typed_arg = type_expect_with_recarg(tctx, env, arg_expr, *arg_ty, None, recarg)?;
@@ -13842,7 +14045,8 @@ fn type_variant(
             row_fields: vec![(
                 label.to_string().into(),
                 crate::types::type_expr::RowField::Rpresent(Some(typed_arg.exp_type)),
-            )].into(),
+            )]
+            .into(),
             row_more: ctx.new_var(None),
             row_closed: false,
             row_fixed: false,
@@ -13864,7 +14068,8 @@ fn type_variant(
         row_fields: vec![(
             label.to_string().into(),
             crate::types::type_expr::RowField::Rpresent(None),
-        )].into(),
+        )]
+        .into(),
         row_more: ctx.new_var(None),
         row_closed: false,
         row_fixed: false,
@@ -14147,7 +14352,10 @@ fn ambiguous_record_label_warning_info<'a>(
 
     // `List.map Printtyp.string_of_path tpaths` (typecore.ml:888-891).
     let printer = crate::types::printtyp::Printtyp::new(ctx);
-    let types = paths.iter().map(|path| printer.string_of_path(path)).collect();
+    let types = paths
+        .iter()
+        .map(|path| printer.string_of_path(path))
+        .collect();
     Some((types, Some(selected_path)))
 }
 
@@ -15091,7 +15299,11 @@ fn type_record(
             let wrapped_loc = tctx.arena.get_expr(field.expr).pexp_loc;
             let wrapped_env = typed_expr.exp_env;
             Expression::new(
-                ExpressionDesc::Texp_construct(some_lid.clone(), std::sync::Arc::new(some_cstr), vec![typed_expr]),
+                ExpressionDesc::Texp_construct(
+                    some_lid.clone(),
+                    std::sync::Arc::new(some_cstr),
+                    vec![typed_expr],
+                ),
                 wrapped_loc,
                 label_desc.lbl_arg,
                 wrapped_env,
@@ -15746,7 +15958,11 @@ fn type_record(
                 TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
             )
         });
-        let dict_labels = if first_is_dict_label { ctx.get_dict_pattern_labels() } else { Vec::new() };
+        let dict_labels = if first_is_dict_label {
+            ctx.get_dict_pattern_labels()
+        } else {
+            Vec::new()
+        };
         let num_fields = (!dict_labels.is_empty())
             .then_some(dict_labels.len())
             .or_else(|| all_label_descriptions.as_ref().map(|labels| labels.len()))
@@ -16118,7 +16334,10 @@ fn inline_record_decl_from_variant_type<'a>(
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
-                type_kind: crate::types::TypeKind::TypeRecord(crate::types::decl::SharedVec::from(labels.clone()), inline_repr),
+                type_kind: crate::types::TypeKind::TypeRecord(
+                    crate::types::decl::SharedVec::from(labels.clone()),
+                    inline_repr,
+                ),
                 type_private: type_decl.type_private,
                 type_manifest: None,
                 type_variance: inline_params
@@ -16358,7 +16577,11 @@ fn type_field(
     // `ty_arg` without recursively forcing paths inside the field argument type.
     unify_expression_types(tctx, proper_exp_loc(&typed_record), ty_exp, ty_res, None)?;
     Ok(Expression::new(
-        ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), std::sync::Arc::new(label_desc)),
+        ExpressionDesc::Texp_field(
+            Box::new(typed_record),
+            field_lid.clone(),
+            std::sync::Arc::new(label_desc),
+        ),
         loc,
         field_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -16461,12 +16684,13 @@ fn type_setfield(
     // OCaml typecore.ml:2948: `let ty_record = if opath = None then newvar ()
     // else record.exp_type`, where `opath` is the receiver's concrete record
     // path (`type_label_access`).
-    let ty_record =
-        if extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx).is_some() {
-            ty_exp
-        } else {
-            ctx.new_var(None)
-        };
+    let ty_record = if extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx)
+        .is_some()
+    {
+        ty_exp
+    } else {
+        ctx.new_var(None)
+    };
     // OCaml compiler/ml/typecore.ml:3703-3743 (`type_label_exp`) opens a
     // definition scope before `instance_label` and keeps it open through
     // `type_argument`; setfield values must see the same raised level as record
@@ -16567,9 +16791,8 @@ fn type_setfield(
                 // OCaml `type_label_access` (compiler/ml/typecore.ml:3848):
                 // `Typetexp.find_all_labels` raises `Unbound_label`.
                 let ty_exp_repr = ctx.repr(ty_exp);
-                let from_type =
-                    matches!(&*ctx.borrow_desc(ty_exp_repr), TypeDesc::Tconstr { .. })
-                        .then_some(ty_exp_repr);
+                let from_type = matches!(&*ctx.borrow_desc(ty_exp_repr), TypeDesc::Tconstr { .. })
+                    .then_some(ty_exp_repr);
                 return Err(TypeCoreError::UnboundRecordField {
                     loc: field_lid.loc,
                     field_name: tctx.longident_to_string(&resolved_lid),
@@ -16605,7 +16828,13 @@ fn type_setfield(
     // instance env arg.exp_type}` from `type_label_exp`.
     typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
     // OCaml typecore.ml:2953: `unify_exp env record ty_record`.
-    unify_expression_types(tctx, proper_exp_loc(&typed_record), typed_record.exp_type, ty_record, None)?;
+    unify_expression_types(
+        tctx,
+        proper_exp_loc(&typed_record),
+        typed_record.exp_type,
+        ty_record,
+        None,
+    )?;
 
     if label_desc.lbl_mut == crate::types::MutableFlag::Immutable {
         return Err(TypeCoreError::LabelNotMutable {
@@ -17173,7 +17402,9 @@ fn object_field_use_type(
     let typ = ctx.repr(typ);
     let desc = (*ctx.get_desc(typ)).clone();
     match desc {
-        TypeDesc::Tpoly { body, vars } if vars.is_empty() => Ok(crate::types::ctype::instance(ctx, body)),
+        TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
+            Ok(crate::types::ctype::instance(ctx, body))
+        }
         TypeDesc::Tpoly { body, vars } => {
             Ok(crate::types::ctype::instance_poly(ctx, false, false, &vars, body).1)
         }
@@ -17270,9 +17501,15 @@ fn type_object_set(
     // Assignment can add or promote a field only while its object row is
     // open. The result distinguishes a missing field from a closed immutable
     // field so the two cases retain their respective diagnostics.
-    let field_typ =
-        crate::types::ctype::filter_object_field_for_write(ctx, env, &field.txt, typed_obj.exp_type)
-            .unwrap_or(Err(crate::types::ctype::ObjectFieldWriteError::OwriteMissing));
+    let field_typ = crate::types::ctype::filter_object_field_for_write(
+        ctx,
+        env,
+        &field.txt,
+        typed_obj.exp_type,
+    )
+    .unwrap_or(Err(
+        crate::types::ctype::ObjectFieldWriteError::OwriteMissing,
+    ));
     let typ = match field_typ {
         Err(crate::types::ctype::ObjectFieldWriteError::OwriteMissing) => {
             return Err(TypeCoreError::UndefinedMethod {
@@ -17337,15 +17574,16 @@ fn type_object_field_value(
             Ok(value)
         }
         None => {
-            let typ = object_field_use_type(tctx, typ).map_err(|err| TypeCoreError::ExprTypeClash {
-                loc: svalue.pexp_loc,
-                trace: match err {
-                    TypeError::Unify(trace) => trace,
-                    _ => vec![],
-                },
-                context: None,
-                env: Some(tctx.type_ctx.store_typed_env(env)),
-            })?;
+            let typ =
+                object_field_use_type(tctx, typ).map_err(|err| TypeCoreError::ExprTypeClash {
+                    loc: svalue.pexp_loc,
+                    trace: match err {
+                        TypeError::Unify(trace) => trace,
+                        _ => vec![],
+                    },
+                    context: None,
+                    env: Some(tctx.type_ctx.store_typed_env(env)),
+                })?;
             type_expect(tctx, env, svalue, typ, None)
         }
     }
@@ -17358,7 +17596,10 @@ fn type_object_literal(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    sfields: &[(Located<std::borrow::Cow<'static, str>>, crate::parse_arena::ExprIdx)],
+    sfields: &[(
+        Located<std::borrow::Cow<'static, str>>,
+        crate::parse_arena::ExprIdx,
+    )],
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
@@ -17430,129 +17671,131 @@ fn type_letexception(
     // Match OCaml's transl_exception: begin_def before creating arg types,
     // end_def + generalize after, so instance_constructor creates fresh copies.
     ctx.begin_def();
-    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) = match &ext_constr
-        .pext_kind
-    {
-        crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
-            let mut arg_ty_refs = Vec::new();
-            let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
-                crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
-                    let mut typed = Vec::new();
-                    for ty in types {
-                        let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ty))?;
-                        arg_ty_refs.push(ty_ref);
-                        typed.push(typed_ct);
+    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
+        match &ext_constr.pext_kind {
+            crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+                let mut arg_ty_refs = Vec::new();
+                let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
+                    crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
+                        let mut typed = Vec::new();
+                        for ty in types {
+                            let (typed_ct, ty_ref) =
+                                transl_type(tctx, env, arena.get_core_type(*ty))?;
+                            arg_ty_refs.push(ty_ref);
+                            typed.push(typed_ct);
+                        }
+                        (
+                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
+                            crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
+                            arg_ty_refs.clone(),
+                            None,
+                        )
                     }
-                    (
-                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
-                        crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
-                        arg_ty_refs.clone(),
-                        None,
-                    )
-                }
-                crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
-                    let mut typed_labels = Vec::new();
-                    let mut decl_labels = Vec::new();
-                    for label in labels {
-                        let label_name = arena.get_string(label.pld_name.txt).to_string();
-                        let (typed_ct, ty_ref) =
-                            transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
-                        let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
-                        let poly_typed_ct = crate::types::typedtree::TypedCoreType {
-                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
-                                vec![],
-                                Box::new(typed_ct.clone()),
+                    crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                        let mut typed_labels = Vec::new();
+                        let mut decl_labels = Vec::new();
+                        for label in labels {
+                            let label_name = arena.get_string(label.pld_name.txt).to_string();
+                            let (typed_ct, ty_ref) =
+                                transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
+                            let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
+                            let poly_typed_ct = crate::types::typedtree::TypedCoreType {
+                                ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
+                                    vec![],
+                                    Box::new(typed_ct.clone()),
+                                ),
+                                ctyp_type: poly_ty_ref,
+                                ctyp_env: typed_ct.ctyp_env,
+                                ctyp_loc: typed_ct.ctyp_loc,
+                                ctyp_attributes: Attributes::new(),
+                            };
+                            let label_id = ctx.create_ident(&label_name);
+                            typed_labels.push(crate::types::typedtree::LabelDeclaration {
+                                ld_id: label_id.clone(),
+                                ld_name: crate::parse_arena::Located {
+                                    txt: label_name.clone(),
+                                    loc: label.pld_name.loc,
+                                },
+                                ld_runtime_name:
+                                    crate::types::record_runtime::parsetree_runtime_name(label),
+                                ld_mutable: label.pld_mutable,
+                                ld_optional: label.pld_optional,
+                                ld_type: poly_typed_ct,
+                                ld_loc: label.pld_loc,
+                                ld_attributes: label.pld_attributes.clone(),
+                            });
+                            decl_labels.push(crate::types::decl::LabelDeclaration {
+                                ld_id: label_id,
+                                ld_runtime_name:
+                                    crate::types::record_runtime::parsetree_runtime_name(label),
+                                ld_mutable: match label.pld_mutable {
+                                    crate::parser::ast::MutableFlag::Immutable => {
+                                        crate::types::MutableFlag::Immutable
+                                    }
+                                    crate::parser::ast::MutableFlag::Mutable => {
+                                        crate::types::MutableFlag::Mutable
+                                    }
+                                },
+                                ld_optional: label.pld_optional,
+                                ld_type: poly_ty_ref,
+                                ld_loc: arena.to_location(label.pld_loc),
+                                ld_attributes: vec![],
+                            });
+                        }
+                        let inline_path = Path::pident(id.clone());
+                        // Match OCaml's newgenconstr: create at generic_level
+                        let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
+                        let inline_decl = crate::types::TypeDeclaration {
+                            type_params: vec![],
+                            type_arity: 0,
+                            type_kind: crate::types::TypeKind::TypeRecord(
+                                crate::types::decl::SharedVec::from(decl_labels.clone()),
+                                crate::types::RecordRepresentation::RecordExtension,
                             ),
-                            ctyp_type: poly_ty_ref,
-                            ctyp_env: typed_ct.ctyp_env,
-                            ctyp_loc: typed_ct.ctyp_loc,
-                            ctyp_attributes: Attributes::new(),
+                            type_private: crate::types::PrivateFlag::Public,
+                            type_manifest: None,
+                            type_variance: vec![],
+                            type_newtype_level: None,
+                            type_loc: crate::location::Location::none(),
+                            type_attributes: vec![],
+                            type_immediate: false,
+                            type_representation: crate::types::TypeRepresentation::Boxed,
+                            type_inlined_types: vec![],
+                            type_path: None,
                         };
-                        let label_id = ctx.create_ident(&label_name);
-                        typed_labels.push(crate::types::typedtree::LabelDeclaration {
-                            ld_id: label_id.clone(),
-                            ld_name: crate::parse_arena::Located {
-                                txt: label_name.clone(),
-                                loc: label.pld_name.loc,
-                            },
-                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
-                            ld_mutable: label.pld_mutable,
-                            ld_optional: label.pld_optional,
-                            ld_type: poly_typed_ct,
-                            ld_loc: label.pld_loc,
-                            ld_attributes: label.pld_attributes.clone(),
-                        });
-                        decl_labels.push(crate::types::decl::LabelDeclaration {
-                            ld_id: label_id,
-                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
-                            ld_mutable: match label.pld_mutable {
-                                crate::parser::ast::MutableFlag::Immutable => {
-                                    crate::types::MutableFlag::Immutable
-                                }
-                                crate::parser::ast::MutableFlag::Mutable => {
-                                    crate::types::MutableFlag::Mutable
-                                }
-                            },
-                            ld_optional: label.pld_optional,
-                            ld_type: poly_ty_ref,
-                            ld_loc: arena.to_location(label.pld_loc),
-                            ld_attributes: vec![],
-                        });
+                        (
+                            crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
+                            crate::types::ConstructorArguments::CstrRecord(decl_labels),
+                            vec![inline_ty],
+                            Some(Box::new(inline_decl)),
+                        )
                     }
-                    let inline_path = Path::pident(id.clone());
-                    // Match OCaml's newgenconstr: create at generic_level
-                    let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
-                    let inline_decl = crate::types::TypeDeclaration {
-                        type_params: vec![],
-                        type_arity: 0,
-                        type_kind: crate::types::TypeKind::TypeRecord(
-                            crate::types::decl::SharedVec::from(decl_labels.clone()),
-                            crate::types::RecordRepresentation::RecordExtension,
-                        ),
-                        type_private: crate::types::PrivateFlag::Public,
-                        type_manifest: None,
-                        type_variance: vec![],
-                        type_newtype_level: None,
-                        type_loc: crate::location::Location::none(),
-                        type_attributes: vec![],
-                        type_immediate: false,
-                        type_representation: crate::types::TypeRepresentation::Boxed,
-                        type_inlined_types: vec![],
-                        type_path: None,
-                    };
-                    (
-                        crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
-                        crate::types::ConstructorArguments::CstrRecord(decl_labels),
-                        vec![inline_ty],
-                        Some(Box::new(inline_decl)),
-                    )
-                }
-            };
-            let (typed_ret, ext_ret_ty) = match ret {
-                Some(ct) => {
-                    let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                    (Some(typed_ct), Some(ty_ref))
-                }
-                None => (None, None),
-            };
-            (
-                typed_args,
-                typed_ret,
-                ext_args,
-                cstr_args,
-                cstr_inlined,
-                ext_ret_ty,
-            )
-        }
-        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-            None,
-            crate::types::ConstructorArguments::CstrTuple(vec![]),
-            vec![],
-            None,
-            None,
-        ),
-    };
+                };
+                let (typed_ret, ext_ret_ty) = match ret {
+                    Some(ct) => {
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
+                        (Some(typed_ct), Some(ty_ref))
+                    }
+                    None => (None, None),
+                };
+                (
+                    typed_args,
+                    typed_ret,
+                    ext_args,
+                    cstr_args,
+                    cstr_inlined,
+                    ext_ret_ty,
+                )
+            }
+            crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
+                crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
+                None,
+                crate::types::ConstructorArguments::CstrTuple(vec![]),
+                vec![],
+                None,
+                None,
+            ),
+        };
     ctx.end_def();
 
     // Generalize constructor arg types (matching OCaml's iter_type_expr_cstr_args generalize)
@@ -17936,7 +18179,10 @@ fn unbound_value_module_suggestion(
     if let Ok((path, _)) = env.find_module_with_path(&candidate) {
         // `Env.lookup_module` marks the module (and an open providing it)
         // used, which can report an open-shadowing warning right away.
-        let lid = tctx.arena.get_longident(tctx.arena.push_typecheck_lident(&candidate)).clone();
+        let lid = tctx
+            .arena
+            .get_longident(tctx.arena.push_typecheck_lident(&candidate))
+            .clone();
         mark_open_lid_use(
             tctx.type_ctx,
             env,
@@ -17966,7 +18212,12 @@ pub(crate) fn find_type_for_lid(
     let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident, Some(loc));
     // `Env.lookup_type` marks the declaration used (env.ml:1174-1177).
     if let Some(decl) = type_decl.as_ref() {
-        mark_type_used(tctx.type_ctx, env, tctx.longident_last_name_str(longident), decl.type_loc);
+        mark_type_used(
+            tctx.type_ctx,
+            env,
+            tctx.longident_last_name_str(longident),
+            decl.type_loc,
+        );
     }
     let Some(decl) = type_decl else {
         if let Some(error) = unbound_module_prefix_error(tctx, env, loc, longident) {
@@ -18997,7 +19248,9 @@ fn type_pack(
                 ctx,
             )
         })
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(
+            std::sync::Arc::new(vec![]),
+        ));
     // OCaml compiler/ml/typemod.ml:1710-1719 calls `wrap_constraint` for
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
@@ -19245,7 +19498,11 @@ fn type_expect_with_module_unpacks(
     // which calls instance() on the looked-up type. Match that by instancing here.
     let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
     let unpack_expr = Expression::new(
-        ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, Arc::new(value_desc)),
+        ExpressionDesc::Texp_ident(
+            Path::pident(unpack.id.clone()),
+            located_lid,
+            Arc::new(value_desc),
+        ),
         unpack.loc_idx,
         unpack_inst_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -19670,7 +19927,9 @@ fn type_approx_for_rec_let(
     let loc = sexp.pexp_loc;
 
     match &*sexp.pexp_desc {
-        ED::Pexp_braces(braces) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr)),
+        ED::Pexp_braces(braces) => {
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr))
+        }
         ED::Pexp_let(inner) => {
             let (_, _, body) = &**inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*body))
@@ -19852,11 +20111,13 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
         }
         ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
             typed_expression_uses_ident(tag, target)
-                || values.iter().any(|value| typed_expression_uses_ident(value, target))
+                || values
+                    .iter()
+                    .any(|value| typed_expression_uses_ident(value, target))
         }
-        ExpressionDesc::Texp_template { values, .. } => {
-            values.iter().any(|value| typed_expression_uses_ident(value, target))
-        }
+        ExpressionDesc::Texp_template { values, .. } => values
+            .iter()
+            .any(|value| typed_expression_uses_ident(value, target)),
         ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
             typed_expression_uses_ident(scrutinee, target)
                 || value_cases
@@ -19921,9 +20182,12 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                 || typed_expression_uses_ident(stop, target)
                 || typed_expression_uses_ident(body, target)
         }
-        ExpressionDesc::Texp_object_get(receiver, _) => typed_expression_uses_ident(receiver, target),
+        ExpressionDesc::Texp_object_get(receiver, _) => {
+            typed_expression_uses_ident(receiver, target)
+        }
         ExpressionDesc::Texp_object_set(receiver, _, value) => {
-            typed_expression_uses_ident(receiver, target) || typed_expression_uses_ident(value, target)
+            typed_expression_uses_ident(receiver, target)
+                || typed_expression_uses_ident(value, target)
         }
         ExpressionDesc::Texp_object_literal(fields) => fields
             .iter()
@@ -20766,10 +21030,11 @@ fn type_let_bindings(
     // OCaml typecore.ml:4503-4514 maps `Ast_helper.Typ.varify_constructors`
     // over the bindings before `begin_def`; a type variable that names one of
     // the locally abstract types escapes as an uncaught `Syntaxerr.Error`.
-    if bindings
-        .iter()
-        .any(|binding| tctx.arena.value_constraint_varify_error(binding.pvb_pat).is_some())
-    {
+    if bindings.iter().any(|binding| {
+        tctx.arena
+            .value_constraint_varify_error(binding.pvb_pat)
+            .is_some()
+    }) {
         crate::misc::raise_uncaught("Syntaxerr.Error(_)");
     }
     let result = (|| -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
@@ -20969,8 +21234,10 @@ fn type_let_bindings(
             }
         }
         let mut let_slots: Vec<Option<crate::types::usage::LetSlot>> = Vec::new();
-        for ((binding, typed_pat), pvars) in
-            bindings.iter().zip(typed_patterns.iter()).zip(all_pattern_vars.iter())
+        for ((binding, typed_pat), pvars) in bindings
+            .iter()
+            .zip(typed_patterns.iter())
+            .zip(all_pattern_vars.iter())
         {
             let slot = crate::types::typemod::with_warning_scope(
                 tctx,
@@ -21480,7 +21747,13 @@ where
                 }
             }
             CopyTypeExprPlan::Tobject { fields } => TypeDesc::Tobject {
-                fields: copy_lookup_type_expr_with_paths(ctx, fields, cache, type_path, module_path),
+                fields: copy_lookup_type_expr_with_paths(
+                    ctx,
+                    fields,
+                    cache,
+                    type_path,
+                    module_path,
+                ),
             },
             CopyTypeExprPlan::Tfield {
                 name,
@@ -22042,13 +22315,9 @@ where
             )),
         },
         crate::types::decl::ModuleType::MtySignature(sig_items) => {
-            crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(copy_lookup_signature_with_paths(
-                sig_items,
-                ctx,
-                cache,
-                type_path,
-                module_path,
-            )))
+            crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(
+                copy_lookup_signature_with_paths(sig_items, ctx, cache, type_path, module_path),
+            ))
         }
     }
 }
@@ -22124,7 +22393,13 @@ where
                 crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
                     crate::types::decl::SignatureItem::SigType(
                         new_id.unwrap_or_else(|| id.clone()),
-                        std::sync::Arc::new(copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path)),
+                        std::sync::Arc::new(copy_lookup_type_decl_with_paths(
+                            decl,
+                            ctx,
+                            cache,
+                            type_path,
+                            module_path,
+                        )),
                         *rec_status,
                     )
                 }
@@ -23610,7 +23885,11 @@ pub(crate) fn lookup_constructor_in_module_with_ambiguity<'b>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext,
     expected_ty: Option<TypeExprRef>,
-) -> Option<(Path, crate::types::decl::ConstructorDescription, Vec<String>)> {
+) -> Option<(
+    Path,
+    crate::types::decl::ConstructorDescription,
+    Vec<String>,
+)> {
     use crate::parser::longident::Longident;
     match lid {
         Longident::Ldot(module_lid, cstr_idx) => {
@@ -24786,11 +25065,13 @@ pub(crate) fn mark_constructor(
     let loc = match &desc.cstr_kind {
         crate::types::decl::ConstructorKind::Extension(_) => Some(desc.cstr_loc),
         crate::types::decl::ConstructorKind::Ordinary(_) => {
-            crate::types::ctype::lookup_type_decl_for_path(ctx, env, &path).map(|decl| decl.type_loc)
+            crate::types::ctype::lookup_type_decl_for_path(ctx, env, &path)
+                .map(|decl| decl.type_loc)
         }
     };
     if let Some(loc) = loc {
-        ctx.usage().mark_constructor_used(usage, path.last(), loc, name);
+        ctx.usage()
+            .mark_constructor_used(usage, path.last(), loc, name);
     }
 }
 
@@ -24850,9 +25131,13 @@ fn use_in_scope_label_of_type(
     let Some(selected_path) = label_result_path(ctx, selected) else {
         return;
     };
-    if let Some((desc, mark)) = env.find_all_labels_marking(name).into_iter().find(|(desc, _)| {
-        label_result_path(ctx, desc).is_some_and(|path| path.same(&selected_path))
-    }) {
+    if let Some((desc, mark)) = env
+        .find_all_labels_marking(name)
+        .into_iter()
+        .find(|(desc, _)| {
+            label_result_path(ctx, desc).is_some_and(|path| path.same(&selected_path))
+        })
+    {
         use_label_candidate(ctx, env, name, desc, mark);
     }
 }
@@ -25060,7 +25345,13 @@ fn qualified_constructor_type_mismatch<'a>(
 ) -> Option<((Path, Path), Vec<(Path, Path)>)> {
     let target_path = opath?;
     let cstr_path = constructor_result_path(ctx, cstr)?;
-    if compare_type_paths_for_constructor_disambiguation(target_path, &cstr_path, env, pers_env, ctx) {
+    if compare_type_paths_for_constructor_disambiguation(
+        target_path,
+        &cstr_path,
+        env,
+        pers_env,
+        ctx,
+    ) {
         return None;
     }
     let mut expand = |path: &Path| {
@@ -25140,7 +25431,10 @@ where
     } else {
         // `List.map Printtyp.string_of_path tpaths` (typecore.ml:888-891).
         let printer = crate::types::printtyp::Printtyp::new(ctx);
-        paths.iter().map(|path| printer.string_of_path(path)).collect()
+        paths
+            .iter()
+            .map(|path| printer.string_of_path(path))
+            .collect()
     }
 }
 
@@ -25164,7 +25458,14 @@ fn lookup_label_by_lid<'a>(
     };
     // `Typetexp.find_all_labels` marks the qualifying module through
     // `lookup_module_descr` (env.ml:1076-1089).
-    mark_open_lid_use(ctx, env, arena, lid, crate::types::env::OpenLookupKind::Component, loc);
+    mark_open_lid_use(
+        ctx,
+        env,
+        arena,
+        lid,
+        crate::types::env::OpenLookupKind::Component,
+        loc,
+    );
 
     let label_name = arena.get_string(*label_idx);
     // OCaml compiler/ml/typecore.ml:1107-1126 calls
@@ -25389,7 +25690,9 @@ fn extract_concrete_record_type_info<'a>(
                     }
                 };
                 match decl.type_kind {
-                    crate::types::TypeKind::TypeRecord(_, _) => return Some((path, args.to_vec(), decl)),
+                    crate::types::TypeKind::TypeRecord(_, _) => {
+                        return Some((path, args.to_vec(), decl));
+                    }
                     crate::types::TypeKind::TypeAbstract => {
                         // `try_expand_once` uses `Env.find_type_expansion`
                         // (env.ml:944-956): a private abstract type expands
@@ -25471,8 +25774,8 @@ fn build_record_label_descriptions_info<'a>(
     // Large regular records of dependency types (JSX DOM props and the like)
     // are reconstructed identically by every module, and their labels are
     // not qualified here (see below), so build them once per worker store.
-    let large_regular = labels.len() >= 20
-        && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
+    let large_regular =
+        labels.len() >= 20 && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
     if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
         let store = ctx.thread_store();
         if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
@@ -25510,9 +25813,9 @@ fn build_record_label_descriptions_info<'a>(
                 .collect::<Vec<_>>()
         });
         let descriptions = Arc::new(descriptions);
-        let summary = Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(
-            &descriptions,
-        ));
+        let summary = Arc::new(
+            crate::types::context::RecordLabelDescriptionSummary::from_labels(&descriptions),
+        );
         if let Some(piece) = piece {
             store.publish_record_labels(
                 record_path.clone(),
@@ -25533,8 +25836,8 @@ fn build_record_label_descriptions_info<'a>(
     // Large regular records of dependency types (JSX DOM props and the like)
     // are reconstructed identically by every module, and their labels are
     // not qualified here (see below), so build them once per worker store.
-    let large_regular = labels.len() >= 20
-        && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
+    let large_regular =
+        labels.len() >= 20 && matches!(repr, crate::types::RecordRepresentation::RecordRegular);
     if large_regular && crate::types::ctype::path_root_is_persistent(&record_path) {
         let store = ctx.thread_store();
         if let Some((labels, summary, piece)) = store.cached_record_labels(&record_path) {
@@ -25572,9 +25875,9 @@ fn build_record_label_descriptions_info<'a>(
                 .collect::<Vec<_>>()
         });
         let descriptions = Arc::new(descriptions);
-        let summary = Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(
-            &descriptions,
-        ));
+        let summary = Arc::new(
+            crate::types::context::RecordLabelDescriptionSummary::from_labels(&descriptions),
+        );
         if let Some(piece) = piece {
             store.publish_record_labels(
                 record_path.clone(),
@@ -25732,7 +26035,8 @@ fn lookup_label_by_expected_type<'a>(
             mark_type_path(ctx, env, &label_path);
             let mut selected = (*env_label).clone();
             if !label_path.same(&visible_path) {
-                selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args.to_vec());
+                selected.lbl_res =
+                    ctx.new_generic_constr(visible_path.clone(), label_args.to_vec());
             }
             if qualify_field_paths {
                 qualify_label_description_paths(&mut selected, env, pers_env, ctx);
@@ -25956,8 +26260,8 @@ fn disambiguate_label<'a>(
         // `unsafe_do_not_use__add_with_name` (typecore.ml:960-975): the
         // renamed magic label is appended to the shared `lbl_all`.
         if let Some(override_name) = override_name {
-            selected = selected
-                .map(|label| materialize_dict_pattern_label(ctx, &label, &override_name));
+            selected =
+                selected.map(|label| materialize_dict_pattern_label(ctx, &label, &override_name));
         }
         return selected;
     }
@@ -26389,19 +26693,20 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     // component's own `Sig_type` binders (subst.ml:87-95
                     // matches by ident identity); a same-name type from
                     // outside the module, such as predef `array`, is kept.
-                    let is_component_binder = with_resolved_module_components_for_path_with_cache_mode(
-                        module_access_path,
-                        env,
-                        pers_env,
-                        ctx,
-                        ComponentLookupApi::ProbeModuleDescr,
-                        |components| {
-                            components
-                                .lookup_type(id.name())
-                                .is_some_and(|(binder, _)| binder.same(id))
-                        },
-                    )
-                    .unwrap_or(false);
+                    let is_component_binder =
+                        with_resolved_module_components_for_path_with_cache_mode(
+                            module_access_path,
+                            env,
+                            pers_env,
+                            ctx,
+                            ComponentLookupApi::ProbeModuleDescr,
+                            |components| {
+                                components
+                                    .lookup_type(id.name())
+                                    .is_some_and(|(binder, _)| binder.same(id))
+                            },
+                        )
+                        .unwrap_or(false);
                     let candidate = Path::pdot(module_access_path.clone(), id.name());
                     if is_component_binder
                         && lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
@@ -26991,7 +27296,12 @@ fn strengthen_sig_for_module_access_path<'a>(
                 // declarations by adding a self manifest at `Pdot(p, id)`.
                 strengthened.push(crate::types::decl::SignatureItem::SigType(
                     id.clone(),
-                    std::sync::Arc::new(strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl)),
+                    std::sync::Arc::new(strengthen_type_decl_for_module_access_path(
+                        ctx,
+                        module_access_path,
+                        id,
+                        decl,
+                    )),
                     *rec_status,
                 ));
             }
@@ -27325,7 +27635,11 @@ fn with_resolved_child_module_components<'a, R>(
 
     let components = match md.md_type {
         crate::types::decl::ModuleType::MtySignature(sig) => {
-            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), std::sync::Arc::unwrap_or_clone(sig), ctx)
+            crate::types::env_lazy::QualifiedModuleComponents::new(
+                access_path.clone(),
+                std::sync::Arc::unwrap_or_clone(sig),
+                ctx,
+            )
         }
         _ => {
             let sig = build_qualified_signature_for_access_path(
@@ -27421,8 +27735,10 @@ enum ModuleLidTarget {
     },
 }
 
-type ModuleDeprecationReport<'r> =
-    Option<(LocIdx, &'r mut Vec<crate::types::context::ModuleDeprecation>)>;
+type ModuleDeprecationReport<'r> = Option<(
+    LocIdx,
+    &'r mut Vec<crate::types::context::ModuleDeprecation>,
+)>;
 
 /// The `mark_module_used` and `report_deprecated` calls of
 /// `Env.lookup_module_descr` and `Env.lookup_module` (env.ml:989-1074) along
@@ -27904,9 +28220,13 @@ fn build_module_components_from_parent_path<'a>(
                 &md,
             );
             match md.md_type {
-                crate::types::decl::ModuleType::MtySignature(sig) => Some(
-                    crate::types::env_lazy::QualifiedModuleComponents::new(access_path, std::sync::Arc::unwrap_or_clone(sig), ctx),
-                ),
+                crate::types::decl::ModuleType::MtySignature(sig) => {
+                    Some(crate::types::env_lazy::QualifiedModuleComponents::new(
+                        access_path,
+                        std::sync::Arc::unwrap_or_clone(sig),
+                        ctx,
+                    ))
+                }
                 _ => None,
             }
         },
@@ -28144,7 +28464,9 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
         } else {
             ctx.with_qualified_module_components(module_key, |components| {
                 (f.take()
-                    .expect("qualified module components callback reused"))(components)
+                    .expect("qualified module components callback reused"))(
+                    components
+                )
             })
         };
         if let Some(result) = unit_hit {
@@ -28158,9 +28480,9 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
             eprintln!("[store-hit] {}", module_path.name());
         }
         ctx.touch_store_piece(&piece);
-        let result = (f
-            .take()
-            .expect("qualified module components callback reused"))(&components);
+        let result =
+            (f.take()
+                .expect("qualified module components callback reused"))(&components);
         ctx.register_qualified_module_components_arc(shared_key.clone(), components);
         return Some(result);
     }
@@ -28201,7 +28523,11 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
         && cache_mode.publishes()
     {
         if crate::types::context::store_debug_enabled() && shared_key.is_some() {
-            eprintln!("[store-build] {} published={}", module_path.name(), piece.is_some());
+            eprintln!(
+                "[store-build] {} published={}",
+                module_path.name(),
+                piece.is_some()
+            );
         }
         if let (Some(shared_key), Some(piece)) = (shared_key, piece) {
             ctx.thread_store()
@@ -28390,7 +28716,9 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
     ctx: &'a crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
 ) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    if let Some(cached) = ctx.find_resolved_module_type(env.scope_id(), parent_module_path, type_name) {
+    if let Some(cached) =
+        ctx.find_resolved_module_type(env.scope_id(), parent_module_path, type_name)
+    {
         return Some(cached);
     }
 
@@ -28402,11 +28730,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
                 crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
                     if sig_id.name() == type_name =>
                 {
-                    Some((
-                        parent_module_path.clone(),
-                        sig_id.clone(),
-                        sig_decl.clone(),
-                    ))
+                    Some((parent_module_path.clone(), sig_id.clone(), sig_decl.clone()))
                 }
                 _ => None,
             })
@@ -28469,11 +28793,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
         cache_mode,
         |components| {
             components.lookup_type(type_name).map(|(id, decl)| {
-                let result = (
-                    parent_module_path.clone(),
-                    id.clone(),
-                    decl.clone(),
-                );
+                let result = (parent_module_path.clone(), id.clone(), decl.clone());
                 // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
                 // component tables through env.ml:781-793 `find_module_descr`, while
                 // typedecl.ml:767-779 probe-style constraint checks can inspect the
@@ -29958,10 +30278,11 @@ mod tests {
 
         tctx.mark_value_used(&Env::empty(), "x", val_loc);
 
-        assert!(tctx
-            .value_usage_checks
-            .iter()
-            .all(|check| type_ctx.usage().is_used(check.cell)));
+        assert!(
+            tctx.value_usage_checks
+                .iter()
+                .all(|check| type_ctx.usage().is_used(check.cell))
+        );
     }
 
     #[test]
@@ -29976,14 +30297,22 @@ mod tests {
             "t",
         );
         let row_more = ctx.new_var(None);
-        let ty = ctx.new_type(TypeDesc::Tvariant(Box::new(crate::types::type_expr::RowDesc {
-            row_fields: Vec::new().into(),
-            row_more,
-            row_closed: false,
-            row_fixed: false,
-            row_name: Some((local.clone(), Vec::new())),
-        })));
-        let map = |p: &Path| if p.same(&local) { rerooted.clone() } else { p.clone() };
+        let ty = ctx.new_type(TypeDesc::Tvariant(Box::new(
+            crate::types::type_expr::RowDesc {
+                row_fields: Vec::new().into(),
+                row_more,
+                row_closed: false,
+                row_fixed: false,
+                row_name: Some((local.clone(), Vec::new())),
+            },
+        )));
+        let map = |p: &Path| {
+            if p.same(&local) {
+                rerooted.clone()
+            } else {
+                p.clone()
+            }
+        };
         let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut TypeExprRefMap::new(), &map);
         match &*ctx.get_desc(ctx.repr(copied)) {
             TypeDesc::Tvariant(row) => {
@@ -30358,11 +30687,13 @@ fn pm_type_shape(
         crate::types::TypeKind::TypeVariant(cl, _)
             if always || cl.len() == 1 || cl.iter().all(|cd| cd.cd_res.is_some()) =>
         {
-            TypeShape::Variant(crate::types::env_lazy::constructors_of_type_path(&path, &decl, ctx))
+            TypeShape::Variant(crate::types::env_lazy::constructors_of_type_path(
+                &path, &decl, ctx,
+            ))
         }
-        crate::types::TypeKind::TypeRecord(..) => {
-            TypeShape::Record(crate::types::env_lazy::labels_of_type_path(&path, &decl, ctx))
-        }
+        crate::types::TypeKind::TypeRecord(..) => TypeShape::Record(
+            crate::types::env_lazy::labels_of_type_path(&path, &decl, ctx),
+        ),
         _ => TypeShape::Other,
     }
 }
@@ -30444,7 +30775,12 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         _env: EnvRef,
         ty: TypeExprRef,
     ) -> Vec<crate::types::ConstructorDescription> {
-        pm_variant_constructors(self.tctx.type_ctx, self.env, &mut self.tctx.persistent_env, ty)
+        pm_variant_constructors(
+            self.tctx.type_ctx,
+            self.env,
+            &mut self.tctx.persistent_env,
+            ty,
+        )
     }
 
     fn record_labels(
@@ -30552,7 +30888,10 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         pm_is_predef_some_lid(self.tctx.arena, lid)
     }
 
-    fn is_block_that_cannot_be_undefined(&self, cstr: &crate::types::ConstructorDescription) -> bool {
+    fn is_block_that_cannot_be_undefined(
+        &self,
+        cstr: &crate::types::ConstructorDescription,
+    ) -> bool {
         pm_is_block_that_cannot_be_undefined(self.tctx.type_ctx, cstr)
     }
 
@@ -30586,7 +30925,8 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
     }
 
     fn expand_head(&mut self, _env: EnvRef, ty: TypeExprRef) -> TypeExprRef {
-        self.ctx.repr(crate::types::ctype::expand_head(self.ctx, self.env, ty))
+        self.ctx
+            .repr(crate::types::ctype::expand_head(self.ctx, self.env, ty))
     }
 
     fn variant_constructors(
@@ -30672,7 +31012,10 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
         pm_is_predef_some_lid(self.arena, lid)
     }
 
-    fn is_block_that_cannot_be_undefined(&self, cstr: &crate::types::ConstructorDescription) -> bool {
+    fn is_block_that_cannot_be_undefined(
+        &self,
+        cstr: &crate::types::ConstructorDescription,
+    ) -> bool {
         pm_is_block_that_cannot_be_undefined(self.ctx, cstr)
     }
 
@@ -30724,10 +31067,14 @@ fn pattern_contains_or(p: &Pattern) -> bool {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
         PatternDesc::Tpat_or(..) => true,
         PatternDesc::Tpat_alias(p, _, _) => pattern_contains_or(p),
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ps.iter().any(pattern_contains_or),
+        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
+            ps.iter().any(pattern_contains_or)
+        }
         PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(pattern_contains_or),
         PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(pattern_contains_or),
-        PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| pattern_contains_or(p)),
+        PatternDesc::Tpat_record(fields, _, _) => {
+            fields.iter().any(|(_, _, p, _)| pattern_contains_or(p))
+        }
     }
 }
 
@@ -30866,7 +31213,10 @@ fn conv_counter_example(
             ),
             PatternDesc::Tpat_alias(inner, _, _) => lp(tctx, inner, counter, loc),
             PatternDesc::Tpat_tuple(items) => {
-                let items = items.iter().map(|item| lp(tctx, item, counter, none)).collect();
+                let items = items
+                    .iter()
+                    .map(|item| lp(tctx, item, counter, none))
+                    .collect();
                 push_parsed_pattern(arena, loc, P::Ppat_tuple(Box::new(items)))
             }
             PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
@@ -30875,11 +31225,22 @@ fn conv_counter_example(
                     .push((id.clone(), cstr.clone()));
                 let lid = Located::new(arena.push_typecheck_lident(&id), cstr_lid.loc);
                 // parmatch.ml Conv: `Location.mknoloc (List.map loop lst)`.
-                let items: Vec<_> = args.iter().map(|arg| lp(tctx, arg, counter, none)).collect();
-                push_parsed_pattern(arena, loc, P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)))
+                let items: Vec<_> = args
+                    .iter()
+                    .map(|arg| lp(tctx, arg, counter, none))
+                    .collect();
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)),
+                )
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
-                let args: Vec<_> = arg.as_deref().map(|arg| lp(tctx, arg, counter, none)).into_iter().collect();
+                let args: Vec<_> = arg
+                    .as_deref()
+                    .map(|arg| lp(tctx, arg, counter, none))
+                    .into_iter()
+                    .collect();
                 push_parsed_pattern(
                     arena,
                     loc,
@@ -30891,7 +31252,8 @@ fn conv_counter_example(
                     .iter()
                     .map(|(_, lbl, p, optional)| {
                         let id = fresh(counter, &lbl.lbl_name);
-                        tctx.generated_pattern_labels.push((id.clone(), lbl.clone()));
+                        tctx.generated_pattern_labels
+                            .push((id.clone(), lbl.clone()));
                         PatternRecordField {
                             lid: Located::new(arena.push_typecheck_lident(&id), none),
                             pat: lp(tctx, p, counter, none),
@@ -30904,11 +31266,18 @@ fn conv_counter_example(
                 push_parsed_pattern(
                     arena,
                     loc,
-                    P::Ppat_record(Box::new((fields, crate::parser::ast::ClosedFlag::Open, None))),
+                    P::Ppat_record(Box::new((
+                        fields,
+                        crate::parser::ast::ClosedFlag::Open,
+                        None,
+                    ))),
                 )
             }
             PatternDesc::Tpat_array(items) => {
-                let items = items.iter().map(|item| lp(tctx, item, counter, none)).collect();
+                let items = items
+                    .iter()
+                    .map(|item| lp(tctx, item, counter, none))
+                    .collect();
                 push_parsed_pattern(arena, loc, P::Ppat_array(Box::new(items)))
             }
         }
@@ -31008,10 +31377,18 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 let lid = Located::new(arena.push_typecheck_lident(&cstr.cstr_name), cstr_lid.loc);
                 // pattern_printer.ml untype: `mknoloc (List.map loop lst)`.
                 let items: Vec<_> = args.iter().map(|arg| untype(arena, arg)).collect();
-                push_parsed_pattern(arena, none, P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)))
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)),
+                )
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
-                let args: Vec<_> = arg.as_deref().map(|arg| untype(arena, arg)).into_iter().collect();
+                let args: Vec<_> = arg
+                    .as_deref()
+                    .map(|arg| untype(arena, arg))
+                    .into_iter()
+                    .collect();
                 push_parsed_pattern(
                     arena,
                     none,
@@ -31033,7 +31410,17 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                                 saw_optional_rewrite = true;
                                 let none_lid =
                                     Located::new(arena.push_typecheck_lident("None"), none);
-                                (true, push_parsed_pattern(arena, none, P::Ppat_construct(none_lid, crate::parser::ast::ctor_args(Vec::new(), none))))
+                                (
+                                    true,
+                                    push_parsed_pattern(
+                                        arena,
+                                        none,
+                                        P::Ppat_construct(
+                                            none_lid,
+                                            crate::parser::ast::ctor_args(Vec::new(), none),
+                                        ),
+                                    ),
+                                )
                             }
                             FieldState::PresentNone => {
                                 saw_optional_rewrite = true;

@@ -162,13 +162,16 @@ fn register_in_process_type_declarations(
 ) {
     let key = normalize_cmt_cache_key(cmt_file);
     let type_declarations = std::sync::Arc::new(type_declarations);
-    let replaced = in_process_type_declarations_cache().lock().ok().and_then(|mut cache| {
-        let keys = cache.by_module.entry(module_name.to_string()).or_default();
-        if !keys.contains(&key) {
-            keys.push(key.clone());
-        }
-        cache.by_cmt.insert(key, type_declarations)
-    });
+    let replaced = in_process_type_declarations_cache()
+        .lock()
+        .ok()
+        .and_then(|mut cache| {
+            let keys = cache.by_module.entry(module_name.to_string()).or_default();
+            if !keys.contains(&key) {
+                keys.push(key.clone());
+            }
+            cache.by_cmt.insert(key, type_declarations)
+        });
     drop(replaced);
 }
 

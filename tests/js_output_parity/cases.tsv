@@ -1,0 +1,56 @@
+# source	extra compiler flags
+tests/js_output_parity/fixtures/core_patterns.res	
+tests/js_output_parity/fixtures/numeric_primitive_patterns.res
+tests/js_output_parity/fixtures/runtime_primitive_alias_patterns.res
+tests/js_output_parity/fixtures/ffi_patterns.res	
+tests/js_output_parity/fixtures/js_expression_patterns.res	
+tests/js_output_parity/fixtures/uncurried_external_edge_patterns.res
+tests/js_output_parity/fixtures/uncurried_optional_external_patterns.res
+tests/js_output_parity/fixtures/function_call_patterns.res	
+tests/js_output_parity/fixtures/higher_order_eta_patterns.res
+tests/js_output_parity/fixtures/async_this_callback_patterns.res
+tests/js_output_parity/fixtures/mutable_uncurry_patterns.res
+tests/js_output_parity/fixtures/match_lowering_patterns.res
+tests/js_output_parity/fixtures/local_exception_scope_patterns.res
+tests/js_output_parity/fixtures/js_exception_rethrow_patterns.res
+tests/js_output_parity/fixtures/advanced_output_patterns.res	
+tests/js_output_parity/fixtures/control_module_patterns.res	
+tests/js_output_parity/fixtures/module_pack_patterns.res
+tests/js_output_parity/fixtures/module_value_patterns.res
+tests/js_output_parity/fixtures/external_edge_patterns
+tests/js_output_parity/fixtures/import_binding_patterns.res
+tests/js_output_parity/fixtures/variant_representation_patterns.res	
+tests/js_output_parity/fixtures/unboxed_recursive_output_patterns.res
+tests/js_output_parity/fixtures/unboxed_false_payload_guard.res
+tests/js_output_parity/fixtures/tella_sparse_record.res	
+tests/js_output_parity/fixtures/tella_scoped_send_patterns.res
+tests/js_output_parity/fixtures/tella_aws_binding_patterns.res
+tests/js_output_parity/fixtures/tella_chrome_svix_binding_patterns.res
+tests/js_output_parity/fixtures/tella_json_decode_patterns.res
+tests/js_output_parity/fixtures/tella_json_encode_patterns.res
+tests/js_output_parity/fixtures/tella_dexie_binding_patterns.res
+tests/js_output_parity/fixtures/tella_directive_import_patterns.res
+tests/js_output_parity/fixtures/tella_raw_function_patterns.res
+tests/js_output_parity/fixtures/interface_patterns.res
+tests/js_output_parity/fixtures/module_boundary_patterns
+tests/js_output_parity/fixtures/namespace_project_patterns
+tests/js_output_parity/fixtures/config_output_patterns.res
+tests/js_output_parity/fixtures/deriving_output_patterns.res
+tests/js_output_parity/fixtures/uncurried_deriving_output_patterns.res
+tests/js_output_parity/fixtures/attribute_codegen_patterns.res
+tests/js_output_parity/fixtures/external_arity_patterns.res	-bs-jsx 4
+tests/js_output_parity/fixtures/jsx_transform_patterns.res	-bs-jsx 4
+tests/js_output_parity/fixtures/jsx_external_component_patterns.res	-bs-jsx 4
+tests/js_output_parity/fixtures/react_component_edge_patterns.res	-bs-jsx 4
+tests/js_output_parity/fixtures/jsx_preserve_minimal.res	-bs-jsx 4 -bs-jsx-preserve
+tests/js_output_parity/fixtures/constructor_tag_escapes.res
+tests/js_output_parity/fixtures/object_spread_literal.res
+tests/js_output_parity/fixtures/conditional_array_index.res
+tests/js_output_parity/fixtures/local_alias_option_representation.res
+tests/js_output_parity/fixtures/staticcatch_shared_exit.res
+tests/js_output_parity/fixtures/staticcatch_shared_handlers.res
+tests/js_output_parity/fixtures/exported_constant_alias.res
+tests/js_output_parity/fixtures/conditional_return_printing.res
+tests/js_output_parity/fixtures/short_circuit_assignment.res
+tests/js_output_parity/fixtures/callback_boolean_inline.res
+tests/js_output_parity/fixtures/tella_regression_patterns.res	

@@ -1,0 +1,11 @@
+type r = {a: int, b: option<int>}
+type one = One(int)
+let (x1, y1) = (1, 2)
+let {a} = {a: 1, b: None}
+let One(z) = One(3)
+let [w] = [1]
+let Some(v) = Some(1)
+let {b: Some(q)} = {a: 1, b: None}
+let #A(t) = #A(1)
+let () = ()
+let (p, _) as whole = (1, 2)

@@ -246,14 +246,22 @@ fn covers_range(cases: &[(crate::lambda::SwitchKey, RawLambda)], start: i32, fin
 /// `lo .. hi`. A two-value range reads better as a pair of equality tests
 /// than as a pair of comparisons.
 pub(crate) fn out_of_range(arg: &RawLambda, lo: i32, hi: i32) -> RawLambda {
-    let test = |cmp: Comparison, k: i32| make_prim(Primitive::Pintcomp(cmp), vec![arg.clone(), make_const(k)]);
+    let test = |cmp: Comparison, k: i32| {
+        make_prim(Primitive::Pintcomp(cmp), vec![arg.clone(), make_const(k)])
+    };
     if hi == lo + 1 {
         make_prim(
             Primitive::Pnot,
-            vec![make_prim(Primitive::Psequor, vec![test(Comparison::Eq, lo), test(Comparison::Eq, hi)])],
+            vec![make_prim(
+                Primitive::Psequor,
+                vec![test(Comparison::Eq, lo), test(Comparison::Eq, hi)],
+            )],
         )
     } else {
-        make_prim(Primitive::Psequor, vec![test(Comparison::Gt, hi), test(Comparison::Lt, lo)])
+        make_prim(
+            Primitive::Psequor,
+            vec![test(Comparison::Gt, hi), test(Comparison::Lt, lo)],
+        )
     }
 }
 
@@ -261,7 +269,13 @@ pub(crate) fn out_of_range(arg: &RawLambda, lo: i32, hi: i32) -> RawLambda {
 /// jump table with a range test; a JS `switch` has a native `default`, so
 /// when the table already covers the whole guarded range the guard is
 /// dropped and its action becomes the failaction.
-fn emit_if_out(offset: i32, range: i32, arg: &RawLambda, ifso: RawLambda, ifno: RawLambda) -> RawLambda {
+fn emit_if_out(
+    offset: i32,
+    range: i32,
+    arg: &RawLambda,
+    ifso: RawLambda,
+    ifno: RawLambda,
+) -> RawLambda {
     let lo = -offset;
     let hi = range - offset;
     if let (RawLambda::Lvar(x), RawLambda::Lswitch(sarg, sw)) = (arg, &ifno)
@@ -283,10 +297,20 @@ fn emit_if_out(offset: i32, range: i32, arg: &RawLambda, ifso: RawLambda, ifno: 
 }
 
 /// OCaml `Switch.emit_if_in` (switch.ml:140-142).
-fn emit_if_in(offset: i32, range: i32, arg: &RawLambda, ifso: RawLambda, ifno: RawLambda) -> RawLambda {
+fn emit_if_in(
+    offset: i32,
+    range: i32,
+    arg: &RawLambda,
+    ifso: RawLambda,
+    ifno: RawLambda,
+) -> RawLambda {
     let lo = -offset;
     let hi = range - offset;
-    make_if(make_prim(Primitive::Pnot, vec![out_of_range(arg, lo, hi)]), ifso, ifno)
+    make_if(
+        make_prim(Primitive::Pnot, vec![out_of_range(arg, lo, hi)]),
+        ifso,
+        ifno,
+    )
 }
 
 fn make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
@@ -1127,14 +1151,7 @@ pub fn zyva(
     assert!(!cases.is_empty());
 
     let shared_actions = store.act_get_shared();
-    zyva_with_shared_actions(
-        edges,
-        arg,
-        cases,
-        shared_actions,
-        sw_dispatch,
-        next_raise,
-    )
+    zyva_with_shared_actions(edges, arg, cases, shared_actions, sw_dispatch, next_raise)
 }
 
 /// Main entry point when the caller already owns the action array.
@@ -1157,7 +1174,7 @@ pub fn zyva_with_shared_actions(
     let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
     let mut compiler = SwitchCompiler::new(ok_inter);
 
-    let result = build_clustered_test(&mut compiler,cases, &actions, &arg, &sw_dispatch);
+    let result = build_clustered_test(&mut compiler, cases, &actions, &arg, &sw_dispatch);
     wrap_handlers(result, handlers)
 }
 

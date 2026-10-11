@@ -4,9 +4,9 @@
 //! incrementally ports expression lowering from `translcore.ml`.
 
 use crate::fast_hash::AHashSet;
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
 
@@ -20,9 +20,7 @@ use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo,
 };
-use crate::lambda::lam_primitive::{
-    ExternalModuleName, ImportSource, Mutable,
-};
+use crate::lambda::lam_primitive::{ExternalModuleName, ImportSource, Mutable};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
@@ -46,8 +44,8 @@ use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
-    ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
-    RecordField, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
+    ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
+    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
 // Keep these aligned with compiler/ml/predef.ml's allocation order. The
@@ -271,7 +269,9 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
     }
 
     match lam {
-        RawLambda::Lshared(inner) => raw_subst_idents_owned(subst, std::sync::Arc::unwrap_or_clone(inner)),
+        RawLambda::Lshared(inner) => {
+            raw_subst_idents_owned(subst, std::sync::Arc::unwrap_or_clone(inner))
+        }
         RawLambda::Lvar(id) => subst
             .get(&id)
             .cloned()
@@ -288,12 +288,14 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
             ap_info: apply.ap_info,
             ap_transformed_jsx: apply.ap_transformed_jsx,
         })),
-        RawLambda::Lfunction(func) => RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
-            arity: func.arity,
-            params: func.params,
-            body: Box::new(raw_subst_idents_owned(subst, *func.body)),
-            attr: func.attr,
-        })),
+        RawLambda::Lfunction(func) => {
+            RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
+                arity: func.arity,
+                params: func.params,
+                body: Box::new(raw_subst_idents_owned(subst, *func.body)),
+                attr: func.attr,
+            }))
+        }
         RawLambda::Llet(kind, id, arg, body) => RawLambda::Llet(
             kind,
             id,
@@ -469,7 +471,9 @@ fn constructor_runtime_tag(
     tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<ConstructorRuntimeTag> {
     tag.as_ref().and_then(|tag| match tag {
-        crate::types::VariantLiteralTag::Int(value) => Some(ConstructorRuntimeTag::Int(i64::from(*value as i32))),
+        crate::types::VariantLiteralTag::Int(value) => {
+            Some(ConstructorRuntimeTag::Int(i64::from(*value as i32)))
+        }
         crate::types::VariantLiteralTag::String(value) => {
             Some(ConstructorRuntimeTag::String(value.clone()))
         }
@@ -1738,7 +1742,10 @@ impl<'a> RawLambdaConverter<'a> {
                 if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
                     let (expr_idx, attrs) = &**eval_inner;
                     // translattribute.ml: `Ast_payload.unwrap_braces expression`.
-                    let expr = crate::ast_payload::unwrap_braces(self.arena, self.arena.get_expr(*expr_idx));
+                    let expr = crate::ast_payload::unwrap_braces(
+                        self.arena,
+                        self.arena.get_expr(*expr_idx),
+                    );
                     if attrs.is_empty()
                         && let ExpressionDesc::Pexp_ident(ident) = &*expr.pexp_desc
                     {
@@ -1863,7 +1870,10 @@ impl<'a> RawLambdaConverter<'a> {
             if arena.get_string(located_name.txt) != "directive" {
                 continue;
             }
-            if let Some(directive) = crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten() {
+            if let Some(directive) = crate::ast_payload::semantic_string_of_payload(arena, payload)
+                .ok()
+                .flatten()
+            {
                 return Some(directive);
             }
         }
@@ -3300,7 +3310,9 @@ impl<'a> RawLambdaConverter<'a> {
         use crate::types::external_ffi_types::ReturnWrapper;
         match result_type {
             ReturnWrapper::ReturnUnset if returns_unit => RawLambda::seq(result, RawLambda::unit()),
-            ReturnWrapper::ReturnNullToOpt => RawLambda::prim(Primitive::PnullToOpt, vec![result], loc),
+            ReturnWrapper::ReturnNullToOpt => {
+                RawLambda::prim(Primitive::PnullToOpt, vec![result], loc)
+            }
             ReturnWrapper::ReturnNullUndefinedToOpt => {
                 RawLambda::prim(Primitive::PnullUndefinedToOpt, vec![result], loc)
             }
@@ -3385,7 +3397,9 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 None => unsupported(self, arg.exp_loc),
             },
-            ExpressionDesc::Texp_ident(_, _, desc) if matches!(desc.val_kind, ValueKind::ValPrim(_)) => {
+            ExpressionDesc::Texp_ident(_, _, desc)
+                if matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
+            {
                 let ValueKind::ValPrim(p) = &desc.val_kind else {
                     unreachable!()
                 };
@@ -3700,11 +3714,13 @@ impl<'a> RawLambdaConverter<'a> {
                     [arg] => {
                         // translcore.ml:818-824: `type_cannot_contain_undefined
                         // arg.exp_type arg.exp_env`.
-                        let can_skip = self
-                            .type_ctx
-                            .get_typed_env(arg.exp_env)
-                            .is_some_and(|env| {
-                                type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
+                        let can_skip =
+                            self.type_ctx.get_typed_env(arg.exp_env).is_some_and(|env| {
+                                type_cannot_contain_undefined(
+                                    self.type_ctx,
+                                    env.as_ref(),
+                                    arg.exp_type,
+                                )
                             });
                         if can_skip {
                             TagInfo::SomeNotNested
@@ -3827,7 +3843,9 @@ impl<'a> RawLambdaConverter<'a> {
                 {
                     match args {
                         [arg] => self.convert_expr_raw(arg),
-                        _ => unreachable!("untagged constructor arity is checked by the type checker"),
+                        _ => unreachable!(
+                            "untagged constructor arity is checked by the type checker"
+                        ),
                     }
                 }
                 crate::types::VariantConstructorCase::Block(_) => {
@@ -4264,18 +4282,24 @@ impl<'a> RawLambdaConverter<'a> {
                     terminal_exports(body)
                 }
                 RawLambda::Lsequence(_, body) => terminal_exports(body),
-                RawLambda::Lprim(__prim1) if matches!(__prim1.as_ref(), RawPrimInfo {
-                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
-                    ..
-                }) => {
-            let RawPrimInfo {
-                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
-                    ..
-                } = __prim1.as_ref() else {
-                unreachable!()
-            };
-            ids.clone()
-        },
+                RawLambda::Lprim(__prim1)
+                    if matches!(
+                        __prim1.as_ref(),
+                        RawPrimInfo {
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
+                            ..
+                        }
+                    ) =>
+                {
+                    let RawPrimInfo {
+                        primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                        ..
+                    } = __prim1.as_ref()
+                    else {
+                        unreachable!()
+                    };
+                    ids.clone()
+                }
                 _ => Vec::new(),
             }
         }
@@ -4297,25 +4321,30 @@ impl<'a> RawLambdaConverter<'a> {
                         None => (lam.clone(), Some(id.clone())),
                     }
                 }
-                RawLambda::Lprim(__prim0) if matches!(__prim0.as_ref(), RawPrimInfo {
+                RawLambda::Lprim(__prim0)
+                    if matches!(__prim0.as_ref(), RawPrimInfo {
                     primitive: Primitive::Pfield(pos, _),
                     args,
                     ..
-                } if args.len() == 1) => {
-            let RawPrimInfo {
-                    primitive: Primitive::Pfield(pos, _),
-                    args,
-                    ..
-                } = __prim0.as_ref() else {
-                unreachable!()
-            };
-
-                    let (base, _) = resolve_binding(&args[0], groups, seen);
-                    if let RawLambda::Lprim(__prim201) = base && let RawPrimInfo {
-                        primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+                } if args.len() == 1) =>
+                {
+                    let RawPrimInfo {
+                        primitive: Primitive::Pfield(pos, _),
                         args,
                         ..
-                    } = __prim201.as_ref() {
+                    } = __prim0.as_ref()
+                    else {
+                        unreachable!()
+                    };
+
+                    let (base, _) = resolve_binding(&args[0], groups, seen);
+                    if let RawLambda::Lprim(__prim201) = base
+                        && let RawPrimInfo {
+                            primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+                            args,
+                            ..
+                        } = __prim201.as_ref()
+                    {
                         if let Some(field) =
                             usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
                         {
@@ -4346,15 +4375,15 @@ impl<'a> RawLambdaConverter<'a> {
                     other => break other,
                 }
             };
-            let RawLambda::Lprim(__prim200) = resolved
-            else {
+            let RawLambda::Lprim(__prim200) = resolved else {
                 return None;
             };
-        let RawPrimInfo {
+            let RawPrimInfo {
                 primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
                 args,
                 ..
-            } = __prim200.as_ref() else {
+            } = __prim200.as_ref()
+            else {
                 return None;
             };
             let pos = names.iter().position(|name| name == &fields[0])?;
@@ -4605,12 +4634,14 @@ impl<'a> RawLambdaConverter<'a> {
                     return None;
                 }
                 match mty {
-                    ModuleType::MtySignature(sig) => std::sync::Arc::unwrap_or_clone(sig).into_iter().find_map(|item| match item {
-                        SignatureItem::SigModule(id, md, _) if id.name() == name => {
-                            Some(md.md_type)
-                        }
-                        _ => None,
-                    }),
+                    ModuleType::MtySignature(sig) => std::sync::Arc::unwrap_or_clone(sig)
+                        .into_iter()
+                        .find_map(|item| match item {
+                            SignatureItem::SigModule(id, md, _) if id.name() == name => {
+                                Some(md.md_type)
+                            }
+                            _ => None,
+                        }),
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         if alias_path.same(module_path) {
                             return None;
@@ -5033,10 +5064,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.translate_value_path_raw(path, loc)
     }
 
-    fn note_possible_required_modules_from_module_expr(
-        &mut self,
-        module_expr: &ModuleExpr,
-    ) {
+    fn note_possible_required_modules_from_module_expr(&mut self, module_expr: &ModuleExpr) {
         fn note_from_path(
             this: &mut RawLambdaConverter<'_>,
             env: &crate::types::env::Env,
@@ -5892,10 +5920,7 @@ impl<'a> RawLambdaConverter<'a> {
                             // add_name: wrap with (shape, name) tuple
                             result.push(Constant::Block {
                                 tag_info: Box::new(TagInfo::Tuple),
-                                elements: vec![
-                                    init_v,
-                                    Constant::const_string(&id.name()),
-                                ],
+                                elements: vec![init_v, Constant::const_string(&id.name())],
                             });
                         }
                     }
@@ -5911,10 +5936,7 @@ impl<'a> RawLambdaConverter<'a> {
                     // add_name: wrap with (shape, name) tuple
                     result.push(Constant::Block {
                         tag_info: Box::new(TagInfo::Tuple),
-                        elements: vec![
-                            sub_shape,
-                            Constant::const_string(&id.name()),
-                        ],
+                        elements: vec![sub_shape, Constant::const_string(&id.name())],
                     });
                     env.add_module(id.clone(), md.clone());
                 }
@@ -6524,7 +6546,10 @@ impl<'a> RawLambdaConverter<'a> {
         // an unusable payload is reported, a usable one updates the state.
         for attr in attrs.iter().rev() {
             let name = self.arena.get_string(attr.0.txt);
-            if !matches!(name, "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror") {
+            if !matches!(
+                name,
+                "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror"
+            ) {
                 continue;
             }
             let Some((is_error, spec)) = self.warning_attribute_spec(attr) else {
@@ -6635,16 +6660,34 @@ impl<'a> RawLambdaConverter<'a> {
             }
             // translcore.ml `Texp_tagged_template`: `transl_exp tag ::
             // transl_list values`; OCaml evaluates the cons tail first.
-            ExpressionDesc::Texp_tagged_template { tag, raw_sources, values } => {
-                let values: Vec<RawLambda> = values.iter().map(|value| self.convert_expr_raw(value)).collect();
+            ExpressionDesc::Texp_tagged_template {
+                tag,
+                raw_sources,
+                values,
+            } => {
+                let values: Vec<RawLambda> = values
+                    .iter()
+                    .map(|value| self.convert_expr_raw(value))
+                    .collect();
                 let mut args = Vec::with_capacity(values.len() + 1);
                 args.push(self.convert_expr_raw(tag));
                 args.extend(values);
-                RawLambda::prim(Primitive::PtaggedTemplate(raw_sources.clone()), args, self.loc(expr.exp_loc))
+                RawLambda::prim(
+                    Primitive::PtaggedTemplate(raw_sources.clone()),
+                    args,
+                    self.loc(expr.exp_loc),
+                )
             }
             ExpressionDesc::Texp_template { segments, values } => {
-                let args = values.iter().map(|value| self.convert_expr_raw(value)).collect();
-                RawLambda::prim(Primitive::Ptemplate(segments.clone()), args, self.loc(expr.exp_loc))
+                let args = values
+                    .iter()
+                    .map(|value| self.convert_expr_raw(value))
+                    .collect();
+                RawLambda::prim(
+                    Primitive::Ptemplate(segments.clone()),
+                    args,
+                    self.loc(expr.exp_loc),
+                )
             }
             ExpressionDesc::Texp_apply {
                 funct,
@@ -6861,7 +6904,11 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|(_, field)| self.convert_expr_raw(field))
                     .collect();
-                RawLambda::prim(Primitive::PjsObjectCreate(labels), args, self.loc(expr.exp_loc))
+                RawLambda::prim(
+                    Primitive::PjsObjectCreate(labels),
+                    args,
+                    self.loc(expr.exp_loc),
+                )
             }
             ExpressionDesc::Texp_object_get(obj_expr, name) => RawLambda::prim(
                 Primitive::PjsObjectGet(name.txt.clone()),
@@ -6996,11 +7043,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.convert_construct(self.loc(expr.exp_loc), cstr, args)
                 }
                 _ => {
-                    let raw = self.convert_construct_raw(
-                        self.loc(expr.exp_loc),
-                        cstr,
-                        args,
-                    );
+                    let raw = self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args);
                     let start_stamp = self.current_stamp();
                     crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
                 }
@@ -11318,10 +11361,12 @@ impl<'a> RawLambdaConverter<'a> {
                                         _ => unreachable!("%raw takes a string constant"),
                                     };
                                     RawLambda::prim(
-                                        Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
-                                            code,
-                                            is_stmt: raw_name == "#raw_stmt",
-                                        }),
+                                        Primitive::PrawJsCode(
+                                            crate::lambda::lam_primitive::JsRawInfo {
+                                                code,
+                                                is_stmt: raw_name == "#raw_stmt",
+                                            },
+                                        ),
                                         vec![],
                                         loc.clone(),
                                     )
@@ -11628,12 +11673,14 @@ impl<'a> RawLambdaConverter<'a> {
                         loc.clone(),
                         transformed_jsx,
                     ) {
-                        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-                            arity: func.arity + 1,
-                            params: std::iter::once(id_arg).chain(func.params).collect(),
-                            body: func.body,
-                            attr: func.attr,
-                        })),
+                        Lambda::Lfunction(func) => {
+                            Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+                                arity: func.arity + 1,
+                                params: std::iter::once(id_arg).chain(func.params).collect(),
+                                body: func.body,
+                                attr: func.attr,
+                            }))
+                        }
                         lam => {
                             Lambda::function_(1, vec![id_arg], lam, FunctionAttribute::default())
                         }
@@ -11908,7 +11955,12 @@ impl<'a> RawLambdaConverter<'a> {
             };
             let args = params.iter().cloned().map(RawLambda::var).collect();
             let body = self.transl_external_application(loc, env, prim, val_type, args, false);
-            return RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default());
+            return RawLambda::function_(
+                prim.prim_arity,
+                params,
+                body,
+                FunctionAttribute::default(),
+            );
         };
         if let Some(warn_loc) = warn_loc {
             self.report_polymorphic_comparison_warning(warn_loc, &primitive, &[]);
@@ -11941,7 +11993,12 @@ impl<'a> RawLambdaConverter<'a> {
     /// are erased at translation. `%identity` is its argument and `%ignore`
     /// sequences its argument with unit; every other primitive is built
     /// through the folding `Lambda.prim`.
-    fn mk_builtin(&mut self, primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> RawLambda {
+    fn mk_builtin(
+        &mut self,
+        primitive: Primitive,
+        args: Vec<RawLambda>,
+        loc: Location,
+    ) -> RawLambda {
         match primitive {
             Primitive::Pidentity => {
                 let [arg] = <[RawLambda; 1]>::try_from(args).expect("%identity takes one argument");
@@ -12022,7 +12079,10 @@ impl<'a> RawLambdaConverter<'a> {
             PrimKind::KindIntrinsic | PrimKind::KindInlineConst(_) => {
                 self.report_diagnostic(
                     loc,
-                    format!("internal error, using unrecognized primitive {}", prim.prim_name),
+                    format!(
+                        "internal error, using unrecognized primitive {}",
+                        prim.prim_name
+                    ),
                 );
                 Primitive::Pidentity
             }
@@ -12798,21 +12858,19 @@ mod tests {
         env.add_module(
             original_module.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: test_signature_module_type(vec![
-                    crate::types::SignatureItem::SigModule(
-                        local_n.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: crate::types::decl::ModuleType::MtyAlias(
-                                crate::types::decl::AliasPresence::MtaPresent,
-                                crate::types::Path::Pident(local_n.clone()),
-                            ),
-                            md_attributes: Vec::new(),
-                            md_loc: Location::none(),
-                            md_path: None,
-                        },
-                        crate::types::decl::RecStatus::TrecNot,
-                    ),
-                ]),
+                md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
+                    local_n.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: crate::types::decl::ModuleType::MtyAlias(
+                            crate::types::decl::AliasPresence::MtaPresent,
+                            crate::types::Path::Pident(local_n.clone()),
+                        ),
+                        md_attributes: Vec::new(),
+                        md_loc: Location::none(),
+                        md_path: None,
+                    },
+                    crate::types::decl::RecStatus::TrecNot,
+                )]),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
                 md_path: None,
@@ -12900,20 +12958,18 @@ mod tests {
         env.add_module(
             pkg.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: test_signature_module_type(vec![
-                    crate::types::SignatureItem::SigModule(
-                        Ident::create_local("List"),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: crate::types::decl::ModuleType::MtyIdent(
-                                crate::types::Path::Pident(pkg_list.clone()),
-                            ),
-                            md_attributes: Vec::new(),
-                            md_loc: Location::none(),
-                            md_path: None,
-                        },
-                        crate::types::decl::RecStatus::TrecNot,
-                    ),
-                ]),
+                md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
+                    Ident::create_local("List"),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: crate::types::decl::ModuleType::MtyIdent(
+                            crate::types::Path::Pident(pkg_list.clone()),
+                        ),
+                        md_attributes: Vec::new(),
+                        md_loc: Location::none(),
+                        md_path: None,
+                    },
+                    crate::types::decl::RecStatus::TrecNot,
+                )]),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
                 md_path: None,
@@ -13078,20 +13134,18 @@ mod tests {
         env.add_module(
             pkg.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: test_signature_module_type(vec![
-                    crate::types::SignatureItem::SigModule(
-                        Ident::create_local("List"),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: crate::types::decl::ModuleType::MtyIdent(
-                                crate::types::Path::Pident(pkg_list.clone()),
-                            ),
-                            md_attributes: Vec::new(),
-                            md_loc: Location::none(),
-                            md_path: None,
-                        },
-                        crate::types::decl::RecStatus::TrecNot,
-                    ),
-                ]),
+                md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
+                    Ident::create_local("List"),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: crate::types::decl::ModuleType::MtyIdent(
+                            crate::types::Path::Pident(pkg_list.clone()),
+                        ),
+                        md_attributes: Vec::new(),
+                        md_loc: Location::none(),
+                        md_path: None,
+                    },
+                    crate::types::decl::RecStatus::TrecNot,
+                )]),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
                 md_path: None,
@@ -13100,18 +13154,16 @@ mod tests {
         env.add_module(
             pkg_list.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: test_signature_module_type(vec![
-                    crate::types::SignatureItem::SigValue(
-                        Ident::create_local("length"),
-                        crate::types::decl::ValueDescription {
-                            val_type: ctx.new_var(None),
-                            val_kind: crate::types::decl::ValueKind::ValReg,
-                            val_loc: Location::none(),
-                            val_attributes: Vec::new(),
-                            val_path: None,
-                        },
-                    ),
-                ]),
+                md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
+                    Ident::create_local("length"),
+                    crate::types::decl::ValueDescription {
+                        val_type: ctx.new_var(None),
+                        val_kind: crate::types::decl::ValueKind::ValReg,
+                        val_loc: Location::none(),
+                        val_attributes: Vec::new(),
+                        val_path: None,
+                    },
+                )]),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
                 md_path: None,
@@ -13164,18 +13216,16 @@ mod tests {
         let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
 
         let main_decl = crate::types::decl::ModuleDeclaration {
-            md_type: test_signature_module_type(vec![
-                crate::types::SignatureItem::SigValue(
-                    make.clone(),
-                    crate::types::decl::ValueDescription {
-                        val_type: ctx.new_var(None),
-                        val_kind: crate::types::decl::ValueKind::ValReg,
-                        val_loc: Location::none(),
-                        val_attributes: Vec::new(),
-                        val_path: None,
-                    },
-                ),
-            ]),
+            md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
+                make.clone(),
+                crate::types::decl::ValueDescription {
+                    val_type: ctx.new_var(None),
+                    val_kind: crate::types::decl::ValueKind::ValReg,
+                    val_loc: Location::none(),
+                    val_attributes: Vec::new(),
+                    val_path: None,
+                },
+            )]),
             md_attributes: Vec::new(),
             md_loc: Location::none(),
             md_path: None,
@@ -13184,51 +13234,46 @@ mod tests {
         env.add_module(
             icon.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: test_signature_module_type(vec![
-                    crate::types::SignatureItem::SigModule(
-                        export.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: test_signature_module_type(vec![
-                                crate::types::SignatureItem::SigModule(
-                                    subtitles.clone(),
-                                    crate::types::decl::ModuleDeclaration {
-                                        md_type: test_signature_module_type(
-                                            vec![
-                                                crate::types::SignatureItem::SigModule(
-                                                    main.clone(),
-                                                    main_decl,
-                                                    crate::types::decl::RecStatus::TrecNot,
-                                                ),
-                                                crate::types::SignatureItem::SigModule(
-                                                    separate.clone(),
-                                                    crate::types::decl::ModuleDeclaration {
-                                                        md_type:
-                                                            crate::types::decl::ModuleType::MtyAlias(
-                                                                crate::types::decl::AliasPresence::MtaPresent,
-                                                                main_path.clone(),
-                                                            ),
-                                                        md_attributes: Vec::new(),
-                                                        md_loc: Location::none(),
-                                                        md_path: None,
-                                                    },
-                                                    crate::types::decl::RecStatus::TrecNot,
-                                                ),
-                                            ],
+                md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
+                    export.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: test_signature_module_type(vec![
+                            crate::types::SignatureItem::SigModule(
+                                subtitles.clone(),
+                                crate::types::decl::ModuleDeclaration {
+                                    md_type: test_signature_module_type(vec![
+                                        crate::types::SignatureItem::SigModule(
+                                            main.clone(),
+                                            main_decl,
+                                            crate::types::decl::RecStatus::TrecNot,
                                         ),
-                                        md_attributes: Vec::new(),
-                                        md_loc: Location::none(),
-                                        md_path: None,
-                                    },
-                                    crate::types::decl::RecStatus::TrecNot,
-                                ),
-                            ]),
-                            md_attributes: Vec::new(),
-                            md_loc: Location::none(),
-                            md_path: None,
-                        },
-                        crate::types::decl::RecStatus::TrecNot,
-                    ),
-                ]),
+                                        crate::types::SignatureItem::SigModule(
+                                            separate.clone(),
+                                            crate::types::decl::ModuleDeclaration {
+                                                md_type: crate::types::decl::ModuleType::MtyAlias(
+                                                    crate::types::decl::AliasPresence::MtaPresent,
+                                                    main_path.clone(),
+                                                ),
+                                                md_attributes: Vec::new(),
+                                                md_loc: Location::none(),
+                                                md_path: None,
+                                            },
+                                            crate::types::decl::RecStatus::TrecNot,
+                                        ),
+                                    ]),
+                                    md_attributes: Vec::new(),
+                                    md_loc: Location::none(),
+                                    md_path: None,
+                                },
+                                crate::types::decl::RecStatus::TrecNot,
+                            ),
+                        ]),
+                        md_attributes: Vec::new(),
+                        md_loc: Location::none(),
+                        md_path: None,
+                    },
+                    crate::types::decl::RecStatus::TrecNot,
+                )]),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
                 md_path: None,

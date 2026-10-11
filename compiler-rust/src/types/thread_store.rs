@@ -19,15 +19,14 @@ use super::context::TypeArena;
 use super::decl::{Signature, TypeDeclaration};
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr,
-    TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -285,7 +284,9 @@ impl ThreadTypeStore {
             return found.clone();
         }
         let built = Arc::new(crate::types::env_lazy::SignatureIndex::build(sig));
-        self.signature_indexes.borrow_mut().insert(key, built.clone());
+        self.signature_indexes
+            .borrow_mut()
+            .insert(key, built.clone());
         built
     }
 
@@ -387,7 +388,11 @@ impl ThreadTypeStore {
     }
 
     /// Apply `f` to a store memo cell without copying it.
-    pub(crate) fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+    pub(crate) fn with_abbrev<R>(
+        &self,
+        memo: AbbrevMemoRef,
+        f: impl FnOnce(&AbbrevMemo) -> R,
+    ) -> R {
         match self.abbrevs.borrow().get(memo.store_index()) {
             Some(value) => f(value),
             None => f(&AbbrevMemo::Mnil),

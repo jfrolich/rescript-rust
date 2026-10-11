@@ -378,7 +378,8 @@ pub mod error_messages {
     pub const STRING_INTERPOLATION_IN_PATTERN: &str =
         "String interpolation is not supported in pattern matching.";
 
-    pub const TAGGED_TEMPLATE_IN_PATTERN: &str = "Tagged template literals are not supported in patterns";
+    pub const TAGGED_TEMPLATE_IN_PATTERN: &str =
+        "Tagged template literals are not supported in patterns";
 
     /// Error message for type definition in function.
     pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n  Move this `type` declaration to the top level or into a module.";
@@ -529,8 +530,7 @@ pub fn parse_lident(p: &mut Parser<'_>) -> (String, LocIdx) {
             ("_".to_string(), p.mk_loc_idx_to_prev_end(start_pos_idx))
         }
         _ => {
-            let same_line_keyword =
-                p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
+            let same_line_keyword = p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
             p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             p.next();
             if !same_line_keyword {
@@ -980,7 +980,10 @@ pub mod ast_helper {
                 // This matches OCaml's behavior: Location { loc_ghost: true, ..loc }
                 let nil_loc = p.arena_mut().mk_ghost_loc(loc);
                 let nil = with_loc(nil_idx, nil_loc);
-                make_pat(PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)), nil_loc)
+                make_pat(
+                    PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)),
+                    nil_loc,
+                )
             }
         };
 
@@ -1164,7 +1167,10 @@ pub fn make_infix_operator(
 pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
     // Every other token makes the lookahead below answer `false`, and the
     // lookahead restores all parser state, so skip it for them.
-    if !matches!(p.token, Token::Lident(_) | Token::Underscore | Token::Lparen) {
+    if !matches!(
+        p.token,
+        Token::Lident(_) | Token::Underscore | Token::Lparen
+    ) {
         return false;
     }
     p.lookahead(|state| {

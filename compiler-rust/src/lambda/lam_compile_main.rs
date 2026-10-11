@@ -450,9 +450,13 @@ pub fn duplicate_export_name(lam: &Lambda) -> Option<String> {
             Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => current = body,
             Lambda::Lsequence(_, right) => current = right,
             Lambda::Lprim(info)
-                if matches!(&info.primitive, Primitive::Pmakeblock(TagInfo::ModuleExport(_), _)) =>
+                if matches!(
+                    &info.primitive,
+                    Primitive::Pmakeblock(TagInfo::ModuleExport(_), _)
+                ) =>
             {
-                let Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), _) = &info.primitive else {
+                let Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), _) = &info.primitive
+                else {
                     unreachable!()
                 };
                 let mut seen = ahash::AHashSet::new();

@@ -184,7 +184,9 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 string_value(store, state, left),
                 string_value(store, state, right),
             ) {
-                (Some(left), Some(right)) => store.append(NodeSnapshot::Const(Constant::String(left + &right))),
+                (Some(left), Some(right)) => {
+                    store.append(NodeSnapshot::Const(Constant::String(left + &right)))
+                }
                 _ => append_rebuilt(
                     store,
                     NodeSnapshot::Prim(Primitive::Pstringadd, vec![left, right], loc),

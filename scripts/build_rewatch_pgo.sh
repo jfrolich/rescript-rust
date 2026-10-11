@@ -61,10 +61,16 @@ rsync -a --delete --exclude node_modules --exclude lib "$PROJECT_ROOT/tests/test
 
 export RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 INSTRUMENTED="$INSTRUMENTED_TARGET/release/rescript"
+# rewatch hashes the bsc binary for compiler-info even in in-process mode.
+if [[ -z "${RESCRIPT_BSC_EXE:-}" ]]; then
+    RESCRIPT_BSC_EXE="$PROJECT_ROOT/compiler-rust/target/release/bsc"
+    [[ -x "$RESCRIPT_BSC_EXE" ]] || RESCRIPT_BSC_EXE="$INSTRUMENTED"
+fi
+export RESCRIPT_BSC_EXE
 echo "==> Training ($RUNS clean in-process builds)"
 for _ in $(seq "$RUNS"); do
     "$INSTRUMENTED" clean "$TRAIN_DIR" > /dev/null
-    LLVM_PROFILE_FILE="$PROFILE_DIR/%p-%m.profraw" "$INSTRUMENTED" build "$TRAIN_DIR" > /dev/null
+    LLVM_PROFILE_FILE="$PROFILE_DIR/%p-%m.profraw" "$INSTRUMENTED" build --in-process "$TRAIN_DIR" > /dev/null
 done
 
 echo "==> Merging profiles"

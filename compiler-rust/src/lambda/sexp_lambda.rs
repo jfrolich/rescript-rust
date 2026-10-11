@@ -10,8 +10,8 @@ use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
-    ApInfo, Apply, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction,
-    Lambda, LambdaSwitch, PrimInfo,
+    ApInfo, Apply, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction, Lambda,
+    LambdaSwitch, PrimInfo,
 };
 use crate::parser::ast::MutableFlag;
 
@@ -424,8 +424,12 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PupdateMod => Sexp::atom("Pupdate_mod"),
         Primitive::PjsApply => Sexp::atom("Pjs_apply"),
         Primitive::PjsRuntimeApply => Sexp::atom("Pjs_runtime_apply"),
-        Primitive::PjsObjectGet(name) => Sexp::list(vec![Sexp::atom("Pjs_object_get"), string(name)]),
-        Primitive::PjsObjectSet(name) => Sexp::list(vec![Sexp::atom("Pjs_object_set"), string(name)]),
+        Primitive::PjsObjectGet(name) => {
+            Sexp::list(vec![Sexp::atom("Pjs_object_get"), string(name)])
+        }
+        Primitive::PjsObjectSet(name) => {
+            Sexp::list(vec![Sexp::atom("Pjs_object_set"), string(name)])
+        }
         Primitive::PfnArity => Sexp::atom("Pfn_arity"),
         Primitive::PjsFnMethod => Sexp::atom("Pjs_fn_method"),
         Primitive::Pdebugger => Sexp::atom("Pdebugger"),
@@ -569,11 +573,9 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         }
         Primitive::Ptemplate(segments) => {
             let mut items = vec![Sexp::atom("Ptemplate")];
-            items.extend(
-                segments
-                    .iter()
-                    .map(|segment| Sexp::list(vec![string(segment.source()), string(segment.semantic())])),
-            );
+            items.extend(segments.iter().map(|segment| {
+                Sexp::list(vec![string(segment.source()), string(segment.semantic())])
+            }));
             Sexp::list(items)
         }
         Primitive::Phash => Sexp::atom("Phash"),
@@ -606,10 +608,7 @@ fn function_attribute(attr: &FunctionAttribute) -> Sexp {
 fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
     match lam {
         Lambda::Lvar(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        Lambda::LglobalModule(id) => Sexp::list(vec![
-            Sexp::atom("Lglobal_module"),
-            ident(id),
-        ]),
+        Lambda::LglobalModule(id) => Sexp::list(vec![Sexp::atom("Lglobal_module"), ident(id)]),
         Lambda::Lconst(c) => Sexp::list(vec![Sexp::atom("Lconst"), constant(c)]),
         Lambda::Lapply(__apply2) => {
             let Apply {
@@ -630,10 +629,7 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             // compiler/core/sexp_lambda.ml prints no arity: Lambda functions
             // are n-ary by their parameter list.
             let LFunction {
-                params,
-                body,
-                attr,
-                ..
+                params, body, attr, ..
             } = __func1.as_ref();
             Sexp::list(vec![
                 Sexp::atom("Lfunction"),
@@ -827,17 +823,16 @@ mod tests {
                 literal: None,
             }),
         );
-        let block_key = crate::lambda::SwitchKey::Constructor(
-            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
-                crate::types::TaggedBlock {
+        let block_key =
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
                         name: "Boolean".to_string(),
                         literal: None,
                     },
                     tag_name: None,
-                },
-            )),
-        );
+                }),
+            ));
 
         let constant_printed = switch_key(&constant_key).to_string();
         let block_printed = switch_key(&block_key).to_string();
@@ -896,10 +891,7 @@ fn indexed_lambda(
     let child = |node| indexed_lambda(store, node, with_locs);
     match store.view(node) {
         NodeView::Var(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        NodeView::GlobalModule(id) => Sexp::list(vec![
-            Sexp::atom("Lglobal_module"),
-            ident(id),
-        ]),
+        NodeView::GlobalModule(id) => Sexp::list(vec![Sexp::atom("Lglobal_module"), ident(id)]),
         NodeView::Const(value) => Sexp::list(vec![Sexp::atom("Lconst"), constant(value)]),
         NodeView::Apply(function, args, info, jsx) => Sexp::list(vec![
             Sexp::atom("Lapply"),

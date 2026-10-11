@@ -669,8 +669,8 @@ fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() 
 
 #[test]
 fn indexed_output_keeps_native_finished_and_dummy_append_protocol() {
-    use super::output::{Finished, Output};
     use super::context::{Continuation, TailType};
+    use super::output::{Finished, Output};
     let first = Output {
         block: vec![Statement::break_()],
         value: Some(Expression::call(

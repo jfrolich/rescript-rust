@@ -40,6 +40,15 @@ particular, Flow parser `Parse_error.t` values cross into the ReScript compiler
 as warning 103 (`Bs_ffi_warning`), whose integration boundary is covered by
 [`warning_103_flow_parser.res`](build_tests/super_errors/fixtures/warning_103_flow_parser.res).
 
+## Forwarded extension errors
+
+Module-type extension errors are forwarded through `Builtin_attributes.error_of_extension`
+rather than a named `typemod` variant. The differential fixtures
+[`builtin_extension_modtype_uninterpreted.res`](error_output_parity/compiler/fixtures/builtin_extension_modtype_uninterpreted.res),
+[`builtin_extension_modtype_recursive.res`](error_output_parity/compiler/fixtures/builtin_extension_modtype_recursive.res), and
+[`builtin_extension_modtype_signature.resi`](error_output_parity/compiler/fixtures/builtin_extension_modtype_signature.resi)
+cover ordinary translation, recursive-module approximation, and signature declarations.
+
 ## Fixture paths
 
 - Single-file fixtures live in [`build_tests/super_errors/fixtures/`](build_tests/super_errors/fixtures/) with expected output in [`build_tests/super_errors/expected/`](build_tests/super_errors/expected/).
@@ -207,7 +216,7 @@ Source: `type error` in [typecore.ml](../compiler/ml/typecore.ml).
 | `Or_pattern_type_clash` | ✓ | `or_pattern_type_clash.res` | |
 | `Multiply_bound_variable` | ✓ | `multiply_bound_variable.res` | |
 | `Orpat_vars` | ✓ | `orpat_vars_unbalanced.res` | |
-| `Expr_type_clash` | ✓ | many `*.res` | Most-fired expression error. Trace-shape sub-cases covered: `if_return_type_mismatch.res` (IfReturn), `maybe_unwrap_option.res` (MaybeUnwrapOption), `string_concat_non_string.res` (StringConcat), `labeled_fn_argument_type_clash.res` (FunctionArgument with explicit label), `math_operator_*.res` (MathOperator family), `ternary_branch_mismatch.res`, `switch_different_types.res`, `try_catch_same_type.res`, `comparison_operator.res`, `array_item_type_mismatch.res`, `array_literal_passed_to_tuple.res`, `if_condition_mismatch.res`, `while_condition.res`, `for_loop_condition.res`, `assert_condition.res`, `function_call_mismatch.res`, `awaiting_non_promise.res`, multiple `jsx_*` fixtures (including `jsx_preserve_external_function.res` for a plain-function external in a JSX component position); `object_literal_for_poly_field.res` (object literal against a polymorphic field annotation). |
+| `Expr_type_clash` | ✓ | many `*.res` | Most-fired expression error. Trace-shape sub-cases covered: `if_return_type_mismatch.res` (IfReturn), `maybe_unwrap_option.res` (MaybeUnwrapOption), `string_concat_non_string.res` (StringConcat), `labeled_fn_argument_type_clash.res` (FunctionArgument with explicit label), `math_operator_*.res` (MathOperator family), `ternary_branch_mismatch.res`, `switch_different_types.res`, `try_catch_same_type.res`, `comparison_operator.res`, `array_item_type_mismatch.res`, `array_literal_passed_to_tuple.res`, `if_condition_mismatch.res`, `while_condition.res`, `for_loop_condition.res`, `assert_condition.res`, `function_call_mismatch.res`, `awaiting_non_promise.res`, multiple `jsx_*` fixtures (including `jsx_preserve_external_function.res` for a plain-function external in a JSX component position), `tests/error_output_parity/compiler/fixtures/record_spread_wrong_type.res` (spread source mismatch) and `long_type_clash.res` (long type/alias diagnostic wrapping); `object_literal_for_poly_field.res` (object literal against a polymorphic field annotation). |
 | `Apply_non_function` | ✓ | `apply_non_function.res` | |
 | `Apply_wrong_label` | ✓ | `apply_wrong_label.res` | |
 | `Label_multiply_defined` | ✓ | `label_multiply_defined_literal.res` | |

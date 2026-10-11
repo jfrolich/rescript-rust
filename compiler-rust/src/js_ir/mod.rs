@@ -122,7 +122,11 @@ impl ModulePathResolver {
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             output_dir: output_path
                 .or(source_filename.map(FsPath::new))
-                .and_then(|path| normalize_absolute_path(path).parent().map(FsPath::to_path_buf)),
+                .and_then(|path| {
+                    normalize_absolute_path(path)
+                        .parent()
+                        .map(FsPath::to_path_buf)
+                }),
             current_package_name: package_name.map(ToOwned::to_owned),
             current_package_has_output: package_name.is_some() && output_module_format.is_some(),
             runtime_path: runtime_path.map(normalize_absolute_path),
@@ -428,7 +432,9 @@ impl ModulePathResolver {
     /// dependency of a script unit is imported from the `.js` file found on
     /// the load path, relative to the output directory.
     fn script_module_path(&self, module_name: &str) -> Option<String> {
-        if self.is_in_process_mode() || !matches!(self.current_package_query(), PackageInfoQuery::Script) {
+        if self.is_in_process_mode()
+            || !matches!(self.current_package_query(), PackageInfoQuery::Script)
+        {
             return None;
         }
         let env = self.persistent_env.as_ref()?;
@@ -447,7 +453,10 @@ impl ModulePathResolver {
                 .iter()
                 .find(|info| module_system_compatible(info.module_system, self.format))?;
             let js_file = js_name_of_module_name(module_name, import_info.file_case, &info.suffix);
-            return Some(filename_concat(&filename_concat(package_name, &info.path), &js_file));
+            return Some(filename_concat(
+                &filename_concat(package_name, &info.path),
+                &js_file,
+            ));
         }
         let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
         let found = normalize_absolute_path(FsPath::new(&env.find_in_load_path_uncap(&js_file)?));
@@ -992,7 +1001,10 @@ impl Expression {
 
     /// Create a qualified variable expression
     pub fn qualified(module: impl Into<Box<ModuleId>>, member: Option<String>) -> Self {
-        Self::new(ExpressionDesc::Var(VIdent::Qualified(module.into(), member)))
+        Self::new(ExpressionDesc::Var(VIdent::Qualified(
+            module.into(),
+            member,
+        )))
     }
 
     /// Create a string expression (`Js_exp_make.str`).
@@ -1026,7 +1038,10 @@ impl Expression {
             }
         }
 
-        match (left.string_literal_semantic(), right.string_literal_semantic()) {
+        match (
+            left.string_literal_semantic(),
+            right.string_literal_semantic(),
+        ) {
             (Some(""), _) => return right,
             (_, Some("")) => return left,
             (Some(a), Some(b)) => {
@@ -1039,7 +1054,10 @@ impl Expression {
         }
         match (&left.desc, &right.desc) {
             (ExpressionDesc::StringAppend(a, b_expr), ExpressionDesc::StringAppend(c_expr, d)) => {
-                match (b_expr.string_literal_semantic(), c_expr.string_literal_semantic()) {
+                match (
+                    b_expr.string_literal_semantic(),
+                    c_expr.string_literal_semantic(),
+                ) {
                     (Some(b), Some(c)) => Self::string_append(
                         Self::string_append(a.as_ref().clone(), concat(b_expr, b, c)),
                         d.as_ref().clone(),
@@ -1049,13 +1067,20 @@ impl Expression {
             }
             (_, ExpressionDesc::StringAppend(b, c)) => {
                 match (left.string_literal_semantic(), b.string_literal_semantic()) {
-                    (Some(a), Some(b)) => Self::string_append(concat(&left, a, b), c.as_ref().clone()),
+                    (Some(a), Some(b)) => {
+                        Self::string_append(concat(&left, a, b), c.as_ref().clone())
+                    }
                     _ => append(left, right),
                 }
             }
             (ExpressionDesc::StringAppend(c, b_expr), _) => {
-                match (b_expr.string_literal_semantic(), right.string_literal_semantic()) {
-                    (Some(b), Some(a)) => Self::string_append(c.as_ref().clone(), concat(b_expr, b, a)),
+                match (
+                    b_expr.string_literal_semantic(),
+                    right.string_literal_semantic(),
+                ) {
+                    (Some(b), Some(a)) => {
+                        Self::string_append(c.as_ref().clone(), concat(b_expr, b, a))
+                    }
                     _ => append(left, right),
                 }
             }
@@ -1097,7 +1122,8 @@ impl Expression {
             (ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_), LengthObject::String) => {
                 let semantic = target.string_literal_semantic().expect("a string literal");
                 Expression::number(Number::int(
-                    crate::string_literal::utf16_length(semantic).expect("String_literal.utf16_length: Invalid_utf8")
+                    crate::string_literal::utf16_length(semantic)
+                        .expect("String_literal.utf16_length: Invalid_utf8")
                         as i32,
                 ))
             }
@@ -1421,7 +1447,10 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
     }
 
     // js_exp_make.ml `string_comp`: literal strings compare by semantic value.
-    if let (Some(left), Some(right)) = (left.string_literal_semantic(), right.string_literal_semantic()) {
+    if let (Some(left), Some(right)) = (
+        left.string_literal_semantic(),
+        right.string_literal_semantic(),
+    ) {
         return Some(left == right);
     }
 
@@ -1504,7 +1533,9 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Str(_)
         | ExpressionDesc::TemplateLiteral(_) => true,
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(expression_has_no_side_effects),
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(expression_has_no_side_effects)
+        }
         ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
         ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
@@ -1839,7 +1870,12 @@ impl Statement {
         iterable: Expression,
         body: Block,
     ) -> Self {
-        Self::new(StatementDesc::ForAwaitOf(label, ident, Box::new(iterable), body))
+        Self::new(StatementDesc::ForAwaitOf(
+            label,
+            ident,
+            Box::new(iterable),
+            body,
+        ))
     }
 
     /// Create a return statement
@@ -2023,9 +2059,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if !nested_then.is_empty()
-            && ocaml_eq_block(nested_then, &else_)
-        {
+        if !nested_then.is_empty() && ocaml_eq_block(nested_then, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, Expression::not(nested_cond.clone())),
                 nested_else.clone(),
@@ -2315,8 +2349,10 @@ fn simplify_and_expression_with_depth(
                 let simplified_left_b =
                     simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
-                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
-                        .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
+                    (None, None) => {
+                        simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
+                            .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
+                    }
                     (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
                     (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
                     (Some(left_a), Some(left_b)) => simplify_and_force(&left_a, &left_b, depth + 1),
@@ -2742,7 +2778,9 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
                 && ocaml_eq_expression(left_rhs, right_rhs)
         }
         (ExpressionDesc::Str(left_txt), ExpressionDesc::Str(right_txt)) => left_txt == right_txt,
-        (ExpressionDesc::TemplateLiteral(left), ExpressionDesc::TemplateLiteral(right)) => left == right,
+        (ExpressionDesc::TemplateLiteral(left), ExpressionDesc::TemplateLiteral(right)) => {
+            left == right
+        }
         (
             ExpressionDesc::StaticIndex(left_obj, left_field, left_pos),
             ExpressionDesc::StaticIndex(right_obj, right_field, right_pos),
@@ -3904,7 +3942,9 @@ mod tests {
         let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
         // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
         let mut expected = vec![Statement::new(StatementDesc::If(
-            Expression::not(cond), else_block, vec![],
+            Expression::not(cond),
+            else_block,
+            vec![],
         ))];
         expected.extend(then_block);
         assert_eq!(
@@ -4003,7 +4043,9 @@ mod tests {
         let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
         // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
         let mut expected = vec![Statement::new(StatementDesc::If(
-            Expression::not(dispatch), else_block, vec![],
+            Expression::not(dispatch),
+            else_block,
+            vec![],
         ))];
         expected.extend(then_block);
         assert_eq!(
@@ -4060,7 +4102,9 @@ mod tests {
         let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
         // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
         let mut expected = vec![Statement::new(StatementDesc::If(
-            Expression::not(dispatch), else_block, vec![],
+            Expression::not(dispatch),
+            else_block,
+            vec![],
         ))];
         expected.extend(then_block);
         assert_eq!(

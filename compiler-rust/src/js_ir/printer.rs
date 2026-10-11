@@ -5,8 +5,8 @@
 
 use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
-    Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc,
-    ForDirection, JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
+    Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc, ForDirection,
+    JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
     VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
 };
 use crate::binary_ast::ppx::{
@@ -15,8 +15,8 @@ use crate::binary_ast::ppx::{
 use crate::ident::Ident;
 use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
-use std::borrow::Cow;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use std::borrow::Cow;
 use std::fmt::Write;
 
 #[derive(Clone, Default)]
@@ -1291,14 +1291,18 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::Call(func, _, _) => matches!(func.desc, ExpressionDesc::RawJsCode(_)),
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) | ExpressionDesc::JsonLiteral(_) => true,
+            ExpressionDesc::Fun { .. }
+            | ExpressionDesc::Object(_, _)
+            | ExpressionDesc::JsonLiteral(_) => true,
             _ => false,
         }
     }
 
     fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
         match &expr.desc {
-            ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) | ExpressionDesc::JsonLiteral(_) => true,
+            ExpressionDesc::Fun { .. }
+            | ExpressionDesc::Object(_, _)
+            | ExpressionDesc::JsonLiteral(_) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
                 &**tag_info,
@@ -2661,7 +2665,9 @@ impl JsPrinter {
                 128..=255 => {
                     let (valid, _, length) = crate::string_literal::get_utf_8_uchar(&bytes, i);
                     if valid {
-                        out.push_str(std::str::from_utf8(&bytes[i..i + length]).expect("valid UTF-8"));
+                        out.push_str(
+                            std::str::from_utf8(&bytes[i..i + length]).expect("valid UTF-8"),
+                        );
                         i += length;
                         continue;
                     }
@@ -2746,7 +2752,6 @@ impl JsPrinter {
             _ => self.print_statement(stmt, false),
         }
     }
-
 }
 
 /// Direct port of the eta-reduction check in OCaml's `pp_function`
@@ -2915,10 +2920,16 @@ fn call_argument_needs_extra_group_indent(
 
 fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag> {
     match tag.literal.as_ref()? {
-        crate::types::VariantLiteralTag::String(value) => Some(SwitchCaseTag::String(value.clone())),
-        crate::types::VariantLiteralTag::Int(value) => Some(SwitchCaseTag::Int(i64::from(*value as i32))),
+        crate::types::VariantLiteralTag::String(value) => {
+            Some(SwitchCaseTag::String(value.clone()))
+        }
+        crate::types::VariantLiteralTag::Int(value) => {
+            Some(SwitchCaseTag::Int(i64::from(*value as i32)))
+        }
         crate::types::VariantLiteralTag::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
-        crate::types::VariantLiteralTag::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
+        crate::types::VariantLiteralTag::BigInt(value) => {
+            Some(SwitchCaseTag::BigInt(value.clone()))
+        }
         crate::types::VariantLiteralTag::Bool(value) => Some(SwitchCaseTag::Bool(*value)),
         crate::types::VariantLiteralTag::Null => Some(SwitchCaseTag::Null),
         crate::types::VariantLiteralTag::Undefined => Some(SwitchCaseTag::Undefined),
@@ -3751,7 +3762,10 @@ mod tests {
         ))];
         let mut printer = JsPrinter::new();
         printer.print_function_body(&body, true);
-        assert_eq!(printer.into_output(), "if (outer) {\n  if (inner) {\n    act();\n  } else {\n    return;\n  }\n}");
+        assert_eq!(
+            printer.into_output(),
+            "if (outer) {\n  if (inner) {\n    act();\n  } else {\n    return;\n  }\n}"
+        );
     }
 
     #[test]
@@ -3768,7 +3782,10 @@ mod tests {
         ];
         let mut printer = JsPrinter::new();
         printer.print_function_body(&body, true);
-        assert_eq!(printer.into_output(), "if (cond) {\n  return 1;\n} else {\n  return;\n}");
+        assert_eq!(
+            printer.into_output(),
+            "if (cond) {\n  return 1;\n} else {\n  return;\n}"
+        );
     }
 
     fn jsx_runtime_module() -> ModuleId {
@@ -3910,7 +3927,9 @@ mod tests {
     fn test_print_tagged_template_decodes_internal_utf8_bytes() {
         let expr = Expression::new(ExpressionDesc::TaggedTemplate(
             Box::new(Expression::var(Ident::create_local("tag"))),
-            vec![latin1_encoded_utf8("\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}")],
+            vec![latin1_encoded_utf8(
+                "\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}",
+            )],
             vec![],
         ));
 
@@ -4379,7 +4398,10 @@ mod tests {
                 Expression::new(ExpressionDesc::CamlBlock(
                     vec![],
                     MutableFlag::Immutable,
-                    Box::new(TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable)),
+                    Box::new(TagInfo::record(
+                        vec![],
+                        crate::parser::ast::MutableFlag::Immutable,
+                    )),
                 )),
             ],
             CallInfo {
@@ -4752,14 +4774,7 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::for_range(
-            None,
-            None,
-            finish,
-            i,
-            ForDirection::Upto,
-            vec![],
-        );
+        let stmt = Statement::for_range(None, None, finish, i, ForDirection::Upto, vec![]);
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -4784,14 +4799,7 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::for_range(
-            None,
-            Some(init),
-            finish,
-            i,
-            ForDirection::Upto,
-            vec![],
-        );
+        let stmt = Statement::for_range(None, Some(init), finish, i, ForDirection::Upto, vec![]);
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -6004,10 +6012,15 @@ mod tests {
             Box::new(TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
-                        name: "One".to_string(),
-                        literal: None,
-                    }, tag_name: None })),
+                runtime: Box::new(crate::types::VariantBlock::Tagged(
+                    crate::types::TaggedBlock {
+                        tag: crate::types::VariantTag {
+                            name: "One".to_string(),
+                            literal: None,
+                        },
+                        tag_name: None,
+                    },
+                )),
                 fields: vec![("name".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,

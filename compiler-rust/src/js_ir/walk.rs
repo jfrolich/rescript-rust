@@ -56,7 +56,8 @@ fn walk_statement<'a>(visitor: &mut impl Visitor<'a>, statement: &'a Statement) 
             walk_expression(visitor, end);
             walk_block(visitor, body);
         }
-        StatementDesc::ForOf(_, _, iterable, body) | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
             walk_expression(visitor, iterable);
             walk_block(visitor, body);
         }

@@ -281,9 +281,19 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForRange(
                 label,
                 start.map(|expr| {
-                    Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution, jsx_preserve))
+                    Box::new(flatten_and_mark_dead_expression(
+                        *expr,
+                        id_gen,
+                        substitution,
+                        jsx_preserve,
+                    ))
                 }),
-                Box::new(flatten_and_mark_dead_expression(*finish, id_gen, substitution, jsx_preserve)),
+                Box::new(flatten_and_mark_dead_expression(
+                    *finish,
+                    id_gen,
+                    substitution,
+                    jsx_preserve,
+                )),
                 ident,
                 direction,
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
@@ -295,7 +305,12 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
+                Box::new(flatten_and_mark_dead_expression(
+                    *iterable,
+                    id_gen,
+                    substitution,
+                    jsx_preserve,
+                )),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -305,7 +320,12 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
+                Box::new(flatten_and_mark_dead_expression(
+                    *iterable,
+                    id_gen,
+                    substitution,
+                    jsx_preserve,
+                )),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -416,7 +436,8 @@ fn flatten_and_mark_dead_expression(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Expression {
-    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve) {
+    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve)
+    {
         return rewritten;
     }
 
@@ -547,7 +568,9 @@ fn flatten_and_mark_dead_expression(
                 jsx_preserve,
             )),
             args.into_iter()
-                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve))
+                .map(|arg| {
+                    flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve)
+                })
                 .collect(),
             info,
         ),
@@ -591,15 +614,17 @@ fn flatten_and_mark_dead_expression(
                 })
                 .collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values
-                .into_iter()
-                .map(|value| {
-                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
-                })
-                .collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values
+                    .into_iter()
+                    .map(|value| {
+                        flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                    })
+                    .collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(target, field, pos) => {
             let target =
                 flatten_and_mark_dead_expression(*target, id_gen, substitution, jsx_preserve);
@@ -1676,10 +1701,12 @@ fn flatten_expression(expr: Expression) -> Expression {
             strings,
             values.into_iter().map(flatten_expression).collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values.into_iter().map(flatten_expression).collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values.into_iter().map(flatten_expression).collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(target, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(flatten_expression(*target)), field, pos)
         }

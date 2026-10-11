@@ -355,10 +355,13 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: Box::new(crate::types::TaggedBlock { tag: crate::types::VariantTag {
+                runtime: Box::new(crate::types::TaggedBlock {
+                    tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         literal: None,
-                    }, tag_name: None }),
+                    },
+                    tag_name: None,
+                }),
             },
             Mutable::Immutable,
         ),
@@ -1103,10 +1106,13 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
-                                                name: "Int1".to_string(),
-                                                literal: None,
-                                            }, tag_name: None }),
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                                        tag: crate::types::VariantTag {
+                                            name: "Int1".to_string(),
+                                            literal: None,
+                                        },
+                                        tag_name: None,
+                                    }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1114,10 +1120,13 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
-                                                name: "Int2".to_string(),
-                                                literal: None,
-                                            }, tag_name: None }),
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                                        tag: crate::types::VariantTag {
+                                            name: "Int2".to_string(),
+                                            literal: None,
+                                        },
+                                        tag_name: None,
+                                    }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1217,10 +1226,13 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
-                                                name: "Int1".to_string(),
-                                                literal: None,
-                                            }, tag_name: None }),
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                                        tag: crate::types::VariantTag {
+                                            name: "Int1".to_string(),
+                                            literal: None,
+                                        },
+                                        tag_name: None,
+                                    }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1228,10 +1240,13 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                         (
                             crate::lambda::SwitchKey::Constructor(
                                 crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock { tag: crate::types::VariantTag {
-                                                name: "Int2".to_string(),
-                                                literal: None,
-                                            }, tag_name: None }),
+                                    crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                                        tag: crate::types::VariantTag {
+                                            name: "Int2".to_string(),
+                                            literal: None,
+                                        },
+                                        tag_name: None,
+                                    }),
                                 ),
                             ),
                             Lambda::static_raise(2, Vec::new()),
@@ -1801,10 +1816,13 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
                     sw_blocks: vec![(
                         crate::lambda::SwitchKey::Constructor(
                             crate::types::VariantConstructorCase::Block(
-                                crate::types::VariantBlock::Untagged { tag: crate::types::VariantTag {
-                                            name: "Object".to_string(),
-                                            literal: None,
-                                        }, block_type: crate::types::VariantBlockType::Object },
+                                crate::types::VariantBlock::Untagged {
+                                    tag: crate::types::VariantTag {
+                                        name: "Object".to_string(),
+                                        literal: None,
+                                    },
+                                    block_type: crate::types::VariantBlockType::Object,
+                                },
                             ),
                         ),
                         Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
@@ -2057,9 +2075,15 @@ fn multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_
                                 tag_name: None,
                                 block_types: vec![],
                                 literal_tags: vec![
-                                    crate::types::VariantLiteralTag::String("C".to_string().clone()),
-                                    crate::types::VariantLiteralTag::String("B".to_string().clone()),
-                                    crate::types::VariantLiteralTag::String("A".to_string().clone()),
+                                    crate::types::VariantLiteralTag::String(
+                                        "C".to_string().clone(),
+                                    ),
+                                    crate::types::VariantLiteralTag::String(
+                                        "B".to_string().clone(),
+                                    ),
+                                    crate::types::VariantLiteralTag::String(
+                                        "A".to_string().clone(),
+                                    ),
                                 ],
                                 has_null: false,
                                 has_undefined: false,
@@ -2181,7 +2205,9 @@ fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arm
                                     crate::types::VariantLiteralTag::String(
                                         "Seven".to_string().clone(),
                                     ),
-                                    crate::types::VariantLiteralTag::String("Six".to_string().clone()),
+                                    crate::types::VariantLiteralTag::String(
+                                        "Six".to_string().clone(),
+                                    ),
                                     crate::types::VariantLiteralTag::String(
                                         "Five".to_string().clone(),
                                     ),
