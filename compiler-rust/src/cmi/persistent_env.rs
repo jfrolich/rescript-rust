@@ -481,44 +481,11 @@ impl ModuleRegistry {
     /// constants, arities, inlinable lambdas, hoisted exports, package).
     /// Equal digests mean a dependent compiles to the same output. `None`
     /// when the module is not registered.
+    /// The digest of the module's whole interface: of all its item digests
+    /// (see [`super::item_deps::item_digests`]), so it changes exactly when
+    /// what dependents compile against changes.
     pub fn interface_digest(&self, name: &str) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        fn sorted_debug<K: Ord + std::fmt::Debug, V: std::fmt::Debug>(map: &HashMap<K, V>) -> String {
-            let mut entries: Vec<(&K, &V)> = map.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            format!("{entries:?}")
-        }
-        let pers = self
-            .local_cached_modules
-            .get(name)
-            .cloned()
-            .or_else(|| self.cached_modules.get_cloned(name));
-        let info = self
-            .local_module_info
-            .get(name)
-            .cloned()
-            .or_else(|| self.module_info.get_cloned(name));
-        if pers.is_none() && info.is_none() {
-            return None;
-        }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        if let Some(pers) = pers.as_ref() {
-            pers.fingerprint.hash(&mut hasher);
-            pers.ps_deprecated.hash(&mut hasher);
-            pers.ps_filename.hash(&mut hasher);
-        }
-        if let Some(info) = info {
-            info.source_path.hash(&mut hasher);
-            info.is_pure.hash(&mut hasher);
-            sorted_debug(&info.cmj_export_constants).hash(&mut hasher);
-            sorted_debug(&info.cmj_export_arities).hash(&mut hasher);
-            sorted_debug(&info.cmj_export_lambdas).hash(&mut hasher);
-            format!("{:?}", info.cmj_hoisted_exports).hash(&mut hasher);
-            info.package_name.hash(&mut hasher);
-            info.js_output_suffix.hash(&mut hasher);
-            info.is_runtime.hash(&mut hasher);
-        }
-        Some(hasher.finish())
+        Some(self.item_digests(name)?[super::item_deps::WHOLE])
     }
 
     fn registered(&self, name: &str) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
@@ -689,6 +656,7 @@ impl ModuleRegistry {
             &portable_types::HashGraph {
                 entries: &[],
                 layouts: &[],
+                mutabilities: &[],
             },
             &sig_items,
         );

@@ -173,11 +173,14 @@ pub struct PortablePersStruct {
 /// Public API for computing a fingerprint outside of `serialize_pers_struct`
 /// (e.g., for namespace signatures synthesized directly).
 /// What hashing a signature reads of its portable type graph: the type
-/// entries, and the variant layouts declarations refer to by index.
+/// entries, and the variant layouts and object-field mutabilities that
+/// entries and declarations refer to by index (indices follow allocation
+/// order, so they are hashed by what they point to).
 #[derive(Clone, Copy)]
 pub struct HashGraph<'a> {
     pub entries: &'a [PortableTypeEntry],
     pub layouts: &'a [crate::types::VariantLayout],
+    pub mutabilities: &'a [crate::types::asttypes::MutableFlag],
 }
 
 impl<'a> HashGraph<'a> {
@@ -185,6 +188,7 @@ impl<'a> HashGraph<'a> {
         HashGraph {
             entries: &graph.entries,
             layouts: &graph.variant_layouts,
+            mutabilities: &graph.mutabilities,
         }
     }
 }
@@ -288,7 +292,13 @@ fn hash_portable_desc(
         PortableTypeDesc::Tarrow { args, ret } => {
             args.len().hash(hasher);
             for (label, arg) in args {
-                label.hash(hasher);
+                // The label's kind and name; not where it was written.
+                std::mem::discriminant(label).hash(hasher);
+                match label {
+                    crate::types::asttypes::ArgLabel::Nolabel => {}
+                    crate::types::asttypes::ArgLabel::Labelled(name)
+                    | crate::types::asttypes::ArgLabel::Optional(name) => name.txt.hash(hasher),
+                }
                 hash_type_ref(hasher, *arg, entries, visiting);
             }
             hash_type_ref(hasher, *ret, entries, visiting);
@@ -308,7 +318,7 @@ fn hash_portable_desc(
             rest,
         } => {
             name.hash(hasher);
-            mutability.hash(hasher);
+            entries.mutabilities.get(*mutability).hash(hasher);
             hash_type_ref(hasher, *typ, entries, visiting);
             hash_type_ref(hasher, *rest, entries, visiting);
         }

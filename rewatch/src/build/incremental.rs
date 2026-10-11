@@ -102,6 +102,12 @@ pub struct IncrementalPlan {
     pub cutoff: bool,
 }
 
+/// A unit's interface digest (its whole-unit item digest) with its item
+/// digests.
+fn whole_and_items(items: ItemDigests) -> (u64, ItemDigests) {
+    (items[item_deps::WHOLE], items)
+}
+
 /// The build record to save for `package` after this build.
 /// The interface and item digests of registered modules, computed once for
 /// a set of lookups.
@@ -129,9 +135,7 @@ impl UnitDigests {
             .modules
             .par_iter()
             .filter_map(|(module_name, _)| {
-                let digests = registry
-                    .interface_digest(module_name)
-                    .zip(registry.item_digests(module_name))?;
+                let digests = whole_and_items(registry.item_digests(module_name)?);
                 Some((module_name.clone(), std::sync::Arc::new(digests)))
             })
             .collect::<Vec<_>>()
@@ -164,9 +168,8 @@ impl UnitDigests {
         }
         let computed = self
             .registry
-            .interface_digest(module_name)
-            .zip(self.registry.item_digests(module_name))
-            .map(std::sync::Arc::new);
+            .item_digests(module_name)
+            .map(|items| std::sync::Arc::new(whole_and_items(items)));
         self.cache
             .lock()
             .unwrap()

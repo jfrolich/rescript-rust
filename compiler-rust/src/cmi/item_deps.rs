@@ -137,15 +137,18 @@ pub fn item_digests(
                 previous.hash(&mut hasher);
             }
             super::portable_types::hash_sig_item_pub(&mut hasher, item, &graph);
+            // The JS metadata dependents' code generation reads for the item,
+            // without locations and identifier stamps (see `digest_ser`).
             if let (Some(info), Some(name)) =
                 (info, key.strip_prefix("v:").or(key.strip_prefix("m:")))
             {
-                format!("{:?}", info.cmj_export_constants.get(name)).hash(&mut hasher);
-                format!("{:?}", info.cmj_export_arities.get(name)).hash(&mut hasher);
-                format!("{:?}", info.cmj_export_lambdas.get(name)).hash(&mut hasher);
+                let mut canonical = super::digest_ser::Canonical::new(&mut hasher);
+                canonical.hash(&info.cmj_export_constants.get(name));
+                canonical.hash(&info.cmj_export_arities.get(name));
+                canonical.hash(&info.cmj_export_lambdas.get(name));
                 for hoisted in info.cmj_hoisted_exports.iter() {
                     if hoisted.path.first().map(String::as_str) == Some(name) {
-                        format!("{hoisted:?}").hash(&mut hasher);
+                        canonical.hash(hoisted);
                     }
                 }
             }

@@ -13,6 +13,7 @@
 
 pub mod cmi_format;
 pub mod ffi_decode;
+pub mod digest_ser;
 pub mod item_deps;
 pub mod stored_module;
 pub mod marshal_reader;
