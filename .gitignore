@@ -100,8 +100,6 @@ package.tgz
 # AI Agents
 .claude/settings.local.json
 
-# Parser parity test baselines (machine-generated, local tracking)
-tests/parity_baselines/*.txt
 scripts/failure_categories.json
 projects/**/.tmp/
 
@@ -114,13 +112,7 @@ tests/tests/src/**/*.ocaml.mjs
 tests/tests/src/**/*.js
 !tests/tests/src/tagged_template_lib.js
 
-# Parity test cache (generated diffs/summaries, inspected by LLM agents)
-.parity-cache/
 .claude
-.fuzz/
-
-# JS written by scripts/test_error_output_parity.sh compiler cases
-/src/
 
 # rewatch build lock guards
 .build.lock.guard

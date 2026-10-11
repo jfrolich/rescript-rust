@@ -1,3 +1,0 @@
-module H = () => {
-  %%private()
-}

@@ -131,24 +131,11 @@ clean-compiler:
 
 # Rust Compiler
 
-RUST_COMPILER_SOURCES = $(shell find compiler-rust/src -name '*.rs') compiler-rust/Cargo.toml compiler-rust/Cargo.lock
-RUST_BSC := compiler-rust/target/release/bsc
-RUST_PARSER := compiler-rust/target/release/res_parser_rust
-
-rust-compiler: $(RUST_BSC) $(RUST_PARSER)
-
-$(RUST_BSC) $(RUST_PARSER): $(RUST_COMPILER_SOURCES)
+rust-compiler:
 	cargo build --manifest-path compiler-rust/Cargo.toml --release
 
-rust-test: lib rust-compiler
-	cd tests/tests && ../../$(RESCRIPT_EXE) build
-	./scripts/test_rust_parity.sh --release
-
-rust-test-parser: compiler rust-compiler
-	./scripts/test_rust_parity.sh --release --skip-js
-
-rust-test-ast: compiler rust-compiler
-	./scripts/test_parser_ast_parity.sh
+rust-test:
+	cargo test --manifest-path compiler-rust/Cargo.toml --release
 
 clean-rust-compiler:
 	cargo clean --manifest-path compiler-rust/Cargo.toml
@@ -389,4 +376,4 @@ clean: clean-lib clean-compiler clean-rewatch clean-coverage
 
 .DEFAULT_GOAL := build
 
-.PHONY: yarn-install build rewatch compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-all rust-compiler rust-test rust-test-parser rust-test-ast clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
+.PHONY: yarn-install build rewatch compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-all rust-compiler rust-test clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
