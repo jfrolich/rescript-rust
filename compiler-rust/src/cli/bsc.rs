@@ -512,7 +512,9 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
             .into());
         }
         let runtime_path = opts.runtime_path.clone().or_else(default_runtime_path);
-        return compile_in_process(&input, &opts, registry(runtime_path)?);
+        let registry = registry(runtime_path)?;
+        code_frame::reset_color_setup();
+        return compile_in_process(&input, &opts, registry);
     }
     if ext == "cmi" {
         return read_cmi_input(&input);
@@ -699,7 +701,7 @@ fn compile_in_process(
     // sibling `.resi` and publish its signature as the build does. Its
     // warnings belong to the interface compile, so they are not printed.
     let interface_path = source_path.with_extension("resi");
-    let has_interface = interface_path.is_file();
+    let has_interface = opts.read_cmi && interface_path.is_file();
     if has_interface {
         let bytes = fs::read(&interface_path)
             .with_context(|| format!("Failed to read {}", interface_path.display()))?;

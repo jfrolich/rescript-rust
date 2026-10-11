@@ -163,6 +163,12 @@ pub fn mark_color_setup() {
     COLOR_SETUP.store(true, Ordering::Relaxed);
 }
 
+/// Forget earlier reports, as at the start of a `bsc` process: building the
+/// runtime in process formats reports of its own.
+pub fn reset_color_setup() {
+    COLOR_SETUP.store(false, Ordering::Relaxed);
+}
+
 /// Whether styles embedded in a formatted message are emitted.
 pub fn message_styles_enabled() -> bool {
     !COLOR_SETUP.load(Ordering::Relaxed) || should_enable_color()
