@@ -153,7 +153,7 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 # Parser executables
 RUST_TARGET="${RUST_TARGET:-debug}"
 RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
-"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
+"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 
 # Colors for output

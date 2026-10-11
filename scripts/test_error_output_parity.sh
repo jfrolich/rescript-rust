@@ -88,7 +88,7 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 RUST_TARGET="${RUST_TARGET:-debug}"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
-"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
+"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
 RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust}"
 

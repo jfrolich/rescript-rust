@@ -16,7 +16,7 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 if [[ "$PARSER" == "rust" ]]; then
   RUST_TARGET="${RUST_TARGET:-debug}"
   RES_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
-  "$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
+  "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
   if [[ ! -x "$RES_PARSER" ]]; then
     echo "Error: Rust parser not found at $RES_PARSER"
     echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."

@@ -25,7 +25,7 @@ project_root=$(cd "$script_dir/.."; pwd -P)
 
 RUST_TARGET="${RUST_TARGET:-debug}"
 RUST_BSC="$project_root/rewatch/target/$RUST_TARGET/bsc"
-"$project_root/scripts/rust_compiler_links.sh" "$RUST_TARGET"
+"$project_root/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 RESCRIPT_CLI="$project_root/packages/@rescript/$($script_dir/platform.sh)/bin/rescript.exe"
 TESTS_DIR="$project_root/tests/tests"
 DIFF_DIR="$project_root/temp/rust-parity/diffs"

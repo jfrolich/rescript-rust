@@ -141,7 +141,7 @@ rust-compiler: $(RUST_BSC) $(RUST_PARSER)
 
 $(RUST_BSC) $(RUST_PARSER): $(RUST_COMPILER_SOURCES) $(REWATCH_SOURCES)
 	cargo build --manifest-path rewatch/Cargo.toml --release
-	./scripts/rust_compiler_links.sh release
+	./scripts/rust_compiler_shims.sh release
 
 rust-test: lib rust-compiler
 	cd tests/tests && ../../$(RESCRIPT_EXE) build

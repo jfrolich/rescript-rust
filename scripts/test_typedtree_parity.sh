@@ -134,12 +134,8 @@ fi
 
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
-DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
-"$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/rescript.exe}"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
@@ -194,24 +190,18 @@ if [[ ! -x "$OCAML_BSC" ]]; then
     exit 1
 fi
 
-if [[ ! -x "$RUST_BSC" ]]; then
-    echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
-    if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' to build the release Rust compiler."
-    else
-        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' to build the debug Rust compiler."
-    fi
-    echo "For now, testing OCaml compiler only."
-    RUST_AVAILABLE=false
-else
-    RUST_AVAILABLE=true
-fi
-
+# The Rust side is the compiler linked into rescript, run in process.
 if [[ ! -x "$RESCRIPT_CLI" ]]; then
-    echo -e "${RED}Error: rescript CLI not found at $RESCRIPT_CLI${RESET}"
-    echo "Run 'make' first to build the toolchain."
+    echo -e "${RED}Error: rescript not found at $RESCRIPT_CLI${RESET}"
+    if [[ "$RUST_TARGET" == "release" ]]; then
+        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first."
+    else
+        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
+    fi
     exit 1
 fi
+RUST_AVAILABLE=true
+
 
 if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
     echo -e "${RED}Error: ReScript runtime package not found at $RESCRIPT_RUNTIME${RESET}"
@@ -286,7 +276,7 @@ fi
 echo "============================================"
 echo "OCaml bsc: $OCAML_BSC"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
-    echo "Rust bsc:  $RUST_BSC"
+    echo "Rust:      $RESCRIPT_CLI (in-process build dumps)"
     echo "Rust target: $RUST_TARGET"
 else
     echo "Rust bsc:  (not available)"
@@ -310,32 +300,17 @@ echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
 
-# Step 1: Build with rewatch to ensure all dependencies are compiled
-echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
+RUST_DUMP_DIR="$CACHE_DIR/typedtree/rust-dumps"
+echo -e "${BOLD}Step 1: Building with the Rust compiler (in process, --dump typedtree)...${RESET}"
 acquire_build_lock
-cd "$BUILD_DIR"
-if [[ "$STDLIB_MODE" == "true" ]]; then
-    # Runtime package artifacts are ignored, while JS outputs are checked in.
-    # Build without cleaning so this diagnostic mode does not delete snapshots.
-    echo "Building stdlib/runtime with OCaml bsc to generate AST artifacts..."
-    if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
-        echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
-    fi
-elif [[ "$TELLA_MODE" == "true" ]]; then
-    # Build with OCaml bsc to ensure all .ast artifacts exist.
-    # Rust parity is measured per-file below with the same compiler args.
-    echo "Building with OCaml bsc to generate AST artifacts..."
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
-        echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
-    fi
-else
-    # Use the standard OCaml bsc for the initial build
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
-    if ! RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
-        echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
-    fi
+if ! parity_build_rust_dumps "$BUILD_DIR" "$RUST_DUMP_DIR" typedtree 2>&1 | tail -5; then
+    echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
 fi
+echo -e "${BOLD}Step 2: Building the OCaml reference...${RESET}"
+if ! parity_build_ocaml_reference "$BUILD_DIR" 2>&1 | tail -5; then
+    echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+fi
+TEST_PACKAGE_NAME=$(parity_package_name "$TEST_PROJECT")
 cd "$PROJECT_ROOT"
 release_build_lock
 echo ""
@@ -446,7 +421,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE STDLIB_MODE CACHE_DIR
+export OCAML_BSC RESCRIPT_CLI RUST_DUMP_DIR TEST_PACKAGE_NAME TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE STDLIB_MODE CACHE_DIR
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -479,16 +454,14 @@ test_single_file() {
     # Get relative path from test project
     local rel_path="${full_file_path#$TEST_PROJECT/}"
 
-    # Helper: run Rust bsc and classify exit code
+    # The Rust output is the dump of the in-process build (Step 1).
     run_rust_bsc() {
-        local rust_exit=0
-        RUST_TYPEDTREE_ONLY=1 timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "$@" || rust_exit=$?
-        if [[ "$rust_exit" -eq 0 ]]; then
+        local dump="$RUST_DUMP_DIR/$TEST_PACKAGE_NAME/$rel_path.typedtree"
+        if [[ -f "$dump" ]]; then
+            cat "$dump" >&2
             rust_pass=1
-        elif [[ "$rust_exit" -eq 124 ]]; then
-            rust_timeout=1
-            rust_fail=1
         else
+            echo "no typedtree dump: the in-process build did not compile $rel_path" >&2
             rust_crash=1
             rust_fail=1
         fi
@@ -623,7 +596,7 @@ print(' '.join(rewritten))" 2>/dev/null) || args=""
 export -f test_single_file
 
 # Run tests
-echo -e "${BOLD}Step 2: Running typed tree parity tests...${RESET}"
+echo -e "${BOLD}Step 3: Running typed tree parity tests...${RESET}"
 echo ""
 if [[ "$PARALLEL_JOBS" -eq 1 ]]; then
     while IFS= read -r file; do

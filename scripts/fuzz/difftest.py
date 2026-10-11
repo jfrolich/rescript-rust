@@ -31,7 +31,7 @@ RUST_BSC = Path(
 # `bsc` is a symlink to the rescript executable, which runs its linked compiler
 # when invoked under that name.
 subprocess.run(
-    [ROOT / "scripts/rust_compiler_links.sh", os.environ.get("RUST_TARGET", "release")],
+    [ROOT / "scripts/rust_compiler_shims.sh", os.environ.get("RUST_TARGET", "release")],
     check=False,
 )
 BELT_LIB = ROOT / "packages/@rescript/belt/lib/ocaml"

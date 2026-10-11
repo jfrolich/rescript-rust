@@ -125,7 +125,7 @@ check_prerequisites() {
         missing=true
     fi
 
-    "$PROJECT_ROOT/scripts/rust_compiler_links.sh" "$RUST_TARGET"
+    "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
     if [[ ! -x "$RUST_BSC" ]]; then
         echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
         if [[ "$RUST_TARGET" == "release" ]]; then

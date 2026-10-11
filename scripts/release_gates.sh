@@ -75,7 +75,7 @@ fi
 step rust-build bash -c '
     cargo build --release --locked --manifest-path compiler-rust/Cargo.toml &&
     cargo build --release --locked --manifest-path rewatch/Cargo.toml &&
-    ./scripts/rust_compiler_links.sh release' || { summary; exit 1; }
+    ./scripts/rust_compiler_shims.sh release' || { summary; exit 1; }
 
 step fixtures env \
     RESCRIPT_SUBPROCESS_BUILD=1 \
