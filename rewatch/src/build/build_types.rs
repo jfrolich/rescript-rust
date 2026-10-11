@@ -199,6 +199,10 @@ pub struct BuildState {
     pub packages: AHashMap<String, Package>,
     pub module_names: AHashSet<String>,
     pub deleted_modules: AHashSet<String>,
+    /// The output files each package's previous build recorded (see
+    /// `state_db::META_OUTPUTS`), read before a compiler or configuration
+    /// change cleans the package's build state.
+    pub recorded_outputs: AHashMap<String, AHashSet<String>>,
     pub compiler_info: CompilerInfo,
     pub deps_initialized: bool,
     pub source_map_command: SourceMapCommand,
@@ -357,6 +361,7 @@ impl BuildState {
             modules: AHashMap::new(),
             packages,
             deleted_modules: AHashSet::new(),
+            recorded_outputs: AHashMap::new(),
             compiler_info: compiler,
             deps_initialized: false,
             source_map_command,

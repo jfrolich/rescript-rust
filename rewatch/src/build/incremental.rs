@@ -187,12 +187,57 @@ impl UnitDigests {
     }
 }
 
+/// The files the sources of `package_name` compile to under the current
+/// configuration, relative to the package: the JavaScript of every package
+/// spec and, with genType on, the generated TypeScript. Kept in the record so
+/// a later build can remove what a configuration change made obsolete (see
+/// `clean::remove_obsolete_outputs`).
+pub fn expected_outputs(build_state: &BuildCommandState, package_name: &str) -> Vec<String> {
+    let Some(package) = build_state.get_package(package_name) else {
+        return Vec::new();
+    };
+    let root_config = build_state.get_root_config();
+    let gentype_extension = package.config.gentype_config.as_ref().map(|gentype| {
+        gentype
+            .generated_file_extension
+            .as_deref()
+            .unwrap_or(".gen.tsx")
+            .to_string()
+    });
+    let mut outputs = Vec::new();
+    for module in build_state.modules.values() {
+        if module.package_name != package_name {
+            continue;
+        }
+        let SourceType::SourceFile(source_file) = &module.source_type else {
+            continue;
+        };
+        let source = &source_file.implementation.path;
+        for target in super::compile::js_output_targets_for_source(package, source, root_config) {
+            if let Ok(relative) = target.path.strip_prefix(&package.path) {
+                outputs.push(relative.to_string_lossy().into_owned());
+            }
+        }
+        if let (Some(extension), Some(stem)) = (&gentype_extension, source.file_stem()) {
+            let file = source.with_file_name(format!("{}{extension}", stem.to_string_lossy()));
+            outputs.push(file.to_string_lossy().into_owned());
+        }
+    }
+    outputs.sort();
+    outputs.dedup();
+    outputs
+}
+
 pub fn current_record(
     build_state: &BuildCommandState,
     package_name: &str,
     digests: &UnitDigests,
 ) -> PackageState {
     let mut record = PackageState::default();
+    record.meta.insert(
+        state_db::META_OUTPUTS.to_string(),
+        expected_outputs(build_state, package_name).join("\n"),
+    );
     if let Some(started) = build_state.build_started_at {
         record.meta.insert(
             state_db::META_BUILD_STARTED_AT.to_string(),

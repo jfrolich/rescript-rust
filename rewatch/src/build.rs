@@ -251,6 +251,8 @@ pub fn initialize_build(
     let source_map_args = project_context
         .get_root_config()
         .get_source_map_args(source_map_command);
+    // Read before `verify_compiler_info` may clean a package's build state.
+    let recorded_outputs = clean::recorded_outputs(&packages);
     let compiler_check = verify_compiler_info(&packages, &compiler, &source_map_args);
 
     if !packages::validate_packages_dependencies(&packages) {
@@ -269,6 +271,7 @@ pub fn initialize_build(
         source_map_command,
     );
     phase_mark("init:validate");
+    build_state.recorded_outputs = recorded_outputs;
     packages::parse_packages(&mut build_state)?;
     phase_mark("init:parse-packages");
 
