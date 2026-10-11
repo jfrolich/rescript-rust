@@ -593,6 +593,10 @@ pub fn emit_translation(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(source_file);
+    // Source-derived text (names, string literals, doc comments) holds one
+    // `char` per source byte; OCaml writes those bytes unchanged, so turn
+    // them back into the UTF-8 they spell.
+    let code_text = crate::source_text::decode_internal_utf8_runs(&code_text);
     let file_contents = format!(
         "{}\n{}\n",
         crate::gentype::emit_type::file_header(source_file),

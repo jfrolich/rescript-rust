@@ -97,9 +97,77 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
                 .as_ref()
                 .and_then(|previous| previous.packages.get(package_name))
                 .map(|record| &record.state);
+            let current: AHashSet<&str> = record
+                .meta
+                .get(build::state_db::META_OUTPUTS)
+                .map(|outputs| outputs.lines().collect())
+                .unwrap_or_default();
+            remove_obsolete_outputs(package, build_state.recorded_outputs.get(package_name), &current);
             build::state_db::write_record(package, previous, &record);
             build::state_db::remove_legacy_files(package);
         });
+}
+
+/// The output files each package's last recorded build listed.
+/// Remove the outputs the recorded build had that this one no longer
+/// produces (see [`remove_obsolete_outputs`]) now, rather than when the build
+/// is recorded: a watcher records its builds only before it reinitializes and
+/// when it exits.
+pub fn remove_obsolete_outputs_of_build(build_state: &BuildCommandState) {
+    build_state
+        .packages
+        .par_iter()
+        .for_each(|(package_name, package)| {
+            let Some(previous) = build_state.recorded_outputs.get(package_name) else {
+                return;
+            };
+            let expected = build::incremental::expected_outputs(build_state, package_name);
+            let current: AHashSet<&str> = expected.iter().map(String::as_str).collect();
+            remove_obsolete_outputs(package, Some(previous), &current);
+        });
+}
+
+pub fn recorded_outputs(packages: &AHashMap<String, Package>) -> AHashMap<String, AHashSet<String>> {
+    packages
+        .par_iter()
+        .filter_map(|(name, package)| {
+            let meta = build::state_db::read_meta(package)?;
+            let outputs = meta.get(build::state_db::META_OUTPUTS)?;
+            Some((
+                name.clone(),
+                outputs.lines().map(str::to_string).collect::<AHashSet<_>>(),
+            ))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Remove the files the previous build's sources compiled to that the
+/// current configuration no longer produces (another suffix or package spec,
+/// genType turned off, or a removed source). GenType files are removed only
+/// when genType wrote them.
+fn remove_obsolete_outputs(package: &Package, previous: Option<&AHashSet<String>>, current: &AHashSet<&str>) {
+    let Some(previous) = previous else {
+        return;
+    };
+    for output in previous {
+        if current.contains(output.as_str()) {
+            continue;
+        }
+        let file = package.path.join(&output);
+        if output.contains(".gen.") {
+            let generated = std::fs::read_to_string(&file)
+                .is_ok_and(|content| content.starts_with("/* TypeScript file generated from"));
+            if !generated {
+                continue;
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+        let mut map_file = file.into_os_string();
+        map_file.push(".map");
+        let _ = std::fs::remove_file(PathBuf::from(map_file));
+    }
 }
 
 /// Read the previous in-process build's records and remove the outputs of

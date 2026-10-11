@@ -63,6 +63,11 @@ pub struct InMemoryModuleState {
     /// Whether this module's source is pure (no side effects), used for
     /// JS import resolution.
     pub is_pure: bool,
+    /// Digest of everything dependents compile against: the signature plus
+    /// the JS metadata their code generation inlines (constants, arities,
+    /// inlinable bodies). The signature fingerprint alone misses a change
+    /// such as `let flag = true` becoming `false`.
+    pub published_digest: Option<u64>,
 }
 
 impl std::fmt::Debug for InMemoryModuleState {
@@ -204,6 +209,10 @@ pub struct BuildState {
     pub packages: AHashMap<String, Package>,
     pub module_names: AHashSet<String>,
     pub deleted_modules: AHashSet<String>,
+    /// The output files each package's previous build recorded (see
+    /// `state_db::META_OUTPUTS`), read before a compiler or configuration
+    /// change cleans the package's build state.
+    pub recorded_outputs: AHashMap<String, AHashSet<String>>,
     pub compiler_info: CompilerInfo,
     pub deps_initialized: bool,
     pub source_map_command: SourceMapCommand,
@@ -358,6 +367,7 @@ impl BuildState {
             modules: AHashMap::new(),
             packages,
             deleted_modules: AHashSet::new(),
+            recorded_outputs: AHashMap::new(),
             compiler_info: compiler,
             deps_initialized: false,
             source_map_command,
@@ -491,6 +501,7 @@ impl BuildCommandState {
             generation,
             fingerprint,
             is_pure,
+            published_digest: None,
         };
         interfaces.insert(module_name, state);
         generation
@@ -504,6 +515,25 @@ impl BuildCommandState {
             .unwrap()
             .get(module_name)
             .map(|s| s.generation)
+    }
+
+    /// Record the digest of what dependents compile against of a module whose
+    /// JS metadata is final (see [`InMemoryModuleState::published_digest`]).
+    /// Returns whether it equals the digest recorded when the module was last
+    /// compiled with the same signature.
+    pub fn record_published_digest(&self, module_name: &str) -> bool {
+        let digest = self
+            .module_registry
+            .lock()
+            .unwrap()
+            .item_digests(module_name)
+            .and_then(|digests| digests.get(rescript_compiler::cmi::item_deps::WHOLE).copied());
+        let mut interfaces = self.in_memory_interfaces.lock().unwrap();
+        let Some(state) = interfaces.get_mut(module_name) else {
+            return false;
+        };
+        let previous = std::mem::replace(&mut state.published_digest, digest);
+        previous.is_some() && previous == digest
     }
 
     /// Purge deleted/renamed modules from the in-memory registries.

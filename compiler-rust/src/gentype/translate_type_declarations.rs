@@ -99,7 +99,7 @@ pub fn create_case(
             LabelJs::IntLabel(i)
         }
         Some((_, crate::gentype::annotation::AttributePayload::StringPayload(as_label))) => {
-            LabelJs::StringLabel(as_label)
+            LabelJs::StringLabel(crate::gentype::emit_text::escape_string_contents(&as_label))
         }
         _ if poly && crate::gentype::gen_type_common::is_number(label) => {
             LabelJs::IntLabel(label.to_string())
@@ -111,7 +111,9 @@ pub fn create_case(
 
 fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag>) -> VariantCase {
     let label_js = match tag {
-        Some(crate::types::VariantLiteralTag::String(value)) => LabelJs::StringLabel(value.clone()),
+        Some(crate::types::VariantLiteralTag::String(value)) => {
+            LabelJs::StringLabel(crate::gentype::emit_text::escape_string_contents(value))
+        }
         Some(crate::types::VariantLiteralTag::Int(value)) => LabelJs::IntLabel(value.to_string()),
         Some(crate::types::VariantLiteralTag::Float(value)) => LabelJs::FloatLabel(value.clone()),
         Some(crate::types::VariantLiteralTag::BigInt(value)) => LabelJs::IntLabel(value.clone()),

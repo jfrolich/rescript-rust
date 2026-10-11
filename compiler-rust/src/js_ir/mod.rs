@@ -62,11 +62,26 @@ pub enum ModuleFormat {
     CommonJs,
 }
 
+/// One `-bs-package-output` of the package being compiled
+/// (compiler/core/js_packages_info.ml:133-159): where its JavaScript for a
+/// module system goes and with which suffix. Every package of a build gets the
+/// root configuration's specs, so a dependency's are the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsPackageSpec {
+    pub module_format: ModuleFormat,
+    /// Next to the source, or under `lib/<out_of_source_dir>/`.
+    pub in_source: bool,
+    pub out_of_source_dir: String,
+    pub suffix: String,
+}
+
 /// Resolves lowered module identifiers to emitted JavaScript import paths.
 #[derive(Clone)]
 pub struct ModulePathResolver {
     format: ModuleFormat,
     output_suffix: String,
+    /// The package's specs in configuration order (see [`JsPackageSpec`]).
+    package_specs: Vec<JsPackageSpec>,
     current_source_path: Option<PathBuf>,
     /// `Filename.dirname` of the output prefix, which script-mode imports are
     /// relative to (js_name_of_module_id.ml `~output_dir`).
@@ -117,7 +132,8 @@ impl ModulePathResolver {
         Self {
             format: output_module_format
                 .unwrap_or_else(|| module_format_from_output_path(output_path)),
-            output_suffix: output_suffix_from_path(output_path),
+            output_suffix: output_suffix_from_paths(source_filename.map(FsPath::new), output_path),
+            package_specs: Vec::new(),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             output_dir: output_path
@@ -141,6 +157,24 @@ impl ModulePathResolver {
             cmj_export_lambdas_cache: RefCell::new(AHashMap::new()),
             cmj_hoisted_exports_cache: RefCell::new(AHashMap::new()),
         }
+    }
+
+    /// The package specs imports are resolved with (see [`JsPackageSpec`]).
+    pub fn set_package_specs(&mut self, specs: &[JsPackageSpec]) {
+        self.package_specs = specs.to_vec();
+        self.module_path_cache.borrow_mut().clear();
+    }
+
+    /// The spec a module's import path follows for the current module system:
+    /// OCaml's `query_package_infos` (js_packages_info.ml:110-121) takes the
+    /// first compatible entry of `module_systems`, which `add_npm_package_path`
+    /// builds by prepending each `-bs-package-output`, so the last one in
+    /// configuration order wins.
+    fn found_package_spec(&self) -> Option<&JsPackageSpec> {
+        self.package_specs
+            .iter()
+            .rev()
+            .find(|spec| spec.module_format == self.format)
     }
 
     /// Override a module's emitted JS import path.
@@ -473,7 +507,14 @@ impl ModulePathResolver {
         let from_dir = current_source.parent()?;
         let target_dir = target_source.parent()?;
         let target_stem = target_source.file_stem()?.to_str()?;
-        let target_output = target_dir.join(format!("{target_stem}{}", self.output_suffix));
+        // Within a package, `node_rebase_file` between the two modules'
+        // directories of the found spec (js_name_of_module_id.ml:115-127) is
+        // the relative path between their source directories either way; the
+        // spec decides the suffix.
+        let suffix = self
+            .found_package_spec()
+            .map_or(self.output_suffix.as_str(), |spec| spec.suffix.as_str());
+        let target_output = target_dir.join(format!("{target_stem}{suffix}"));
         let relative = relative_path_between(from_dir, &target_output)?;
         let mut rendered = relative.to_string_lossy().replace('\\', "/");
         if !rendered.starts_with("./") && !rendered.starts_with("../") {
@@ -497,8 +538,22 @@ impl ModulePathResolver {
         // same_package_by_name; see compiler/core/js_name_of_module_id.ml:115-146.
         let target_package_root = normalize_absolute_path(target_package_root.as_ref());
         let relative_source = target_source.strip_prefix(&target_package_root).ok()?;
-        let suffix = target_suffix.as_deref().unwrap_or(&self.output_suffix);
-        let relative_output = source_path_with_js_suffix(relative_source, suffix)?;
+        // `dep_pkg.pkg_rel_path // js_file` (js_name_of_module_id.ml:132):
+        // the found spec's directory, out of source under `lib/`.
+        let relative_output = match self.found_package_spec() {
+            Some(spec) => {
+                let output = source_path_with_js_suffix(relative_source, &spec.suffix)?;
+                if spec.in_source {
+                    output
+                } else {
+                    PathBuf::from("lib").join(&spec.out_of_source_dir).join(output)
+                }
+            }
+            None => {
+                let suffix = target_suffix.as_deref().unwrap_or(&self.output_suffix);
+                source_path_with_js_suffix(relative_source, suffix)?
+            }
+        };
         Some(format!(
             "{}/{}",
             target_package_name.as_ref(),
@@ -619,6 +674,20 @@ fn uncapitalize_ascii(name: &str) -> String {
         return String::new();
     };
     format!("{}{}", first.to_ascii_lowercase(), chars.as_str())
+}
+
+/// The suffix of the output file: what follows the source file's stem in its
+/// name (`Foo.res` -> `Foo.res.js` is `.res.js`), else guessed from the name.
+fn output_suffix_from_paths(source_path: Option<&FsPath>, output_path: Option<&FsPath>) -> String {
+    let stem = source_path.and_then(|path| path.file_stem()).and_then(|stem| stem.to_str());
+    let name = output_path.and_then(|path| path.file_name()).and_then(|name| name.to_str());
+    if let (Some(stem), Some(name)) = (stem, name)
+        && let Some(suffix) = name.strip_prefix(stem)
+        && suffix.starts_with('.')
+    {
+        return suffix.to_string();
+    }
+    output_suffix_from_path(output_path)
 }
 
 fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {
@@ -3649,6 +3718,53 @@ mod tests {
                 .resolve_local_module_fallback_path(module.id.name())
                 .as_deref(),
             Some("./side_effect.mjs")
+        );
+    }
+
+    fn sibling_resolver(output_name: &str, specs: &[JsPackageSpec]) -> (tempfile::TempDir, ModulePathResolver) {
+        let project = tempdir().expect("failed to create tempdir");
+        let source_dir = project.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("failed to create source dir");
+        let current_source = source_dir.join("Current.res");
+        std::fs::write(&current_source, "").expect("failed to write current source");
+        std::fs::write(source_dir.join("Sibling.res"), "").expect("failed to write target source");
+        let mut resolver = ModulePathResolver::from_compile_options(
+            Some(current_source.to_str().expect("utf8 current source")),
+            Some(source_dir.join(output_name).as_path()),
+            Some(ModuleFormat::EsModule),
+            None,
+            None,
+            None,
+            false,
+        );
+        resolver.set_package_specs(specs);
+        (project, resolver)
+    }
+
+    #[test]
+    fn sibling_import_keeps_a_multi_part_suffix() {
+        let (_project, resolver) = sibling_resolver("Current.res.js", &[]);
+        assert_eq!(
+            resolver.resolve_local_module_fallback_path("Sibling").as_deref(),
+            Some("./Sibling.res.js")
+        );
+    }
+
+    #[test]
+    fn sibling_import_follows_the_last_matching_package_spec() {
+        // js_packages_info.ml:159 prepends each -bs-package-output, and
+        // query_package_infos takes the first compatible one.
+        let spec = |in_source, suffix: &str| JsPackageSpec {
+            module_format: ModuleFormat::EsModule,
+            in_source,
+            out_of_source_dir: "es6".to_string(),
+            suffix: suffix.to_string(),
+        };
+        let (_project, resolver) =
+            sibling_resolver("Current.mjs", &[spec(true, ".mjs"), spec(false, ".res.js")]);
+        assert_eq!(
+            resolver.resolve_local_module_fallback_path("Sibling").as_deref(),
+            Some("./Sibling.res.js")
         );
     }
 
