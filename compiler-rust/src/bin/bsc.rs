@@ -564,6 +564,7 @@ fn run() -> Result<()> {
         }),
         gentype_resolver: None,
         gentype_declarations_only: false,
+        js_package_specs: Vec::new(),
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,
