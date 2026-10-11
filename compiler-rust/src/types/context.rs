@@ -1850,6 +1850,7 @@ impl TypeContext {
     }
 
     pub(crate) fn component_paths_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
+        self.poison_store_build_for("read:component_paths_for_alias_source");
         self.component_paths_by_alias_source
             .borrow()
             .get(&SamePathKey(alias_source.clone()))
@@ -1863,6 +1864,9 @@ impl TypeContext {
     /// through `scrape_alias`, while env.ml:1573-1578 stores child
     /// declaration/component thunks under the selected access path.
     pub(crate) fn alias_sources_for_component_path(&self, component_path: &Path) -> Vec<Path> {
+        // Registered as this compilation builds component tables: a store
+        // build that reads it depends on this compilation.
+        self.poison_store_build_for("read:alias_sources_for_component_path");
         self.component_alias_sources
             .borrow()
             .get(&SamePathKey(component_path.clone()))
@@ -2112,6 +2116,9 @@ impl TypeContext {
         if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
             return None;
         }
+        // Filled by this compilation's forces (and replayed store pieces):
+        // what a store build finds here, including nothing, is local state.
+        self.poison_store_build_for("read:find_qualified_module_decl");
         self.qualified_module_decl_cache
             .borrow()
             .get(parent_path)

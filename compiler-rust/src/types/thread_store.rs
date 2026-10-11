@@ -486,11 +486,20 @@ impl Drop for StoreLease {
     }
 }
 
+/// `RESCRIPT_FRESH_STORE=1` gives every compilation an empty store, so the
+/// store caches nothing across compilations: a build's output must not change
+/// with it (checks that store builds are independent of compilation state).
+fn fresh_store_per_compilation() -> bool {
+    static FRESH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FRESH.get_or_init(|| std::env::var_os("RESCRIPT_FRESH_STORE").is_some())
+}
+
 pub(crate) fn current() -> StoreLease {
     let generation = BUILD_GENERATION.load(Ordering::SeqCst);
+    let fresh = fresh_store_per_compilation();
     StoreLease(Some(THREAD_TYPE_STORE.with(
         |slot| match slot.borrow_mut().take() {
-            Some(store) if store.generation == generation => store,
+            Some(store) if store.generation == generation && !fresh => store,
             _ => Box::new(ThreadTypeStore::new()),
         },
     )))
