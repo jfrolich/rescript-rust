@@ -7,7 +7,6 @@
     "LICENSE",
     "LICENSE.MIT",
     "README.md",
-    "cli/bsc.js",
     "cli/common/bins.js",
     "cli/common/runtime.js",
     "cli/rescript-tools.js",

@@ -363,30 +363,6 @@ fn collect_list_elements<'a>(
 // Public API
 // ============================================================================
 
-/// Print structure in ML format (like Pprintast in OCaml)
-pub fn print_structure_ml(structure: &Structure, arena: &ParseArena, out: &mut impl Write) {
-    let mut f = Formatter::new(out);
-    for (i, item) in structure.iter().enumerate() {
-        if i > 0 {
-            f.newline();
-        }
-        print_structure_item(&mut f, arena, item);
-    }
-    f.flush();
-}
-
-/// Print signature in ML format
-pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: &mut impl Write) {
-    let mut f = Formatter::new(out);
-    for (i, item) in signature.iter().enumerate() {
-        if i > 0 {
-            f.newline(); // Top-level items on separate lines
-        }
-        print_signature_item(&mut f, arena, item);
-    }
-    f.flush();
-}
-
 // ============================================================================
 // Structure items
 // ============================================================================

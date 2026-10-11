@@ -11,15 +11,6 @@ repository = "https://github.com/rescript-lang/rescript"
 name = "rescript_compiler"
 path = "src/lib.rs"
 
-# Parser CLI for testing (matches OCaml res_parser interface)
-[[bin]]
-name = "res_parser_rust"
-path = "src/bin/res_parser.rs"
-
-[[bin]]
-name = "bsc"
-path = "src/bin/bsc.rs"
-
 [dependencies]
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }

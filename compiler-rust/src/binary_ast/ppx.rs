@@ -12140,16 +12140,6 @@ fn with_deferred_ppx_error<T>(result: PpxResult<T>, arena: &mut ParseArena) -> P
     }
 }
 
-/// Apply the built-in mapper for parser-debug output. OCaml's `res_parser`
-/// exposes the mapped tree without running the compiler-only invariant pass.
-pub fn rewrite_structure_for_parser_debug(
-    structure: &[StructureItem],
-    arena: &mut ParseArena,
-) -> PpxResult<Vec<StructureItem>> {
-    let result = rewrite_structure_impl(structure, arena, true, false, None);
-    with_deferred_ppx_error(result, arena)
-}
-
 /// The order in which OCaml `Bs_builtin_ppx.structure_mapper`
 /// (bs_builtin_ppx.ml:676-802) maps the items of `structure`: it recurses as
 /// `head :: structure_mapper rest`, evaluated right to left, so most items

@@ -191,15 +191,6 @@ pub fn apply_message_styles(message: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
-    match value {
-        "auto" => Some(ColorMode::Auto),
-        "always" => Some(ColorMode::Always),
-        "never" => Some(ColorMode::Never),
-        _ => None,
-    }
-}
-
 pub fn set_color_mode(mode: ColorMode) {
     COLOR_MODE.store(mode as u8, Ordering::Relaxed);
 }

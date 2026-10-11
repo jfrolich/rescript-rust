@@ -57,7 +57,6 @@ const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabl
 const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
 const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
     "`let?` is only supported in let bindings targeting the `result` or `option` type.";
-static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
 const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
@@ -93,10 +92,6 @@ impl fmt::Display for UserDiagnostic {
 }
 
 impl std::error::Error for UserDiagnostic {}
-
-pub fn enable_cli_cleanup_skip() {
-    SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
-}
 
 pub fn module_name_from_source_filename(path: &str) -> String {
     let basename = std::path::Path::new(path)
@@ -5172,25 +5167,6 @@ fn format_compiler_error_report(
     }
     output.push('\n');
     output
-}
-
-/// The error OCaml raises when writing a binary AST reaches an `[%error]`
-/// extension: `Location.Error (Builtin_attributes.error_of_extension ext)`
-/// from `Depend.handle_extension` (depend.ml:92-96).
-pub fn error_extension_to_anyhow(
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    extension: &crate::parser::ast::Extension,
-) -> anyhow::Error {
-    match crate::types::typecore::builtin_extension_error(arena, extension) {
-        TypeCoreError::ExtensionError(error) => UserDiagnostic::new(
-            format_builtin_extension_error_report(arena, source, filename, &error),
-            2,
-        )
-        .into(),
-        _ => UserDiagnostic::new(String::new(), 2).into(),
-    }
 }
 
 fn format_builtin_extension_error_report(
@@ -12267,24 +12243,6 @@ fn compile_source_to_js_with_options_inner(
         }
     }
 
-    // The CLI compiler is a short-lived process. Skipping teardown for the
-    // large typechecking arenas keeps snapshot runs inside the harness timeout
-    // once output has already been produced.
-    if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
-        std::mem::forget(compiler);
-        std::mem::forget(program);
-        std::mem::forget(lowered_lambda);
-        std::mem::forget(raw_converter);
-        std::mem::forget(implementation_coercion);
-        std::mem::forget(typed_structure);
-        std::mem::forget(final_env);
-        std::mem::forget(env);
-        std::mem::forget(tctx);
-        std::mem::forget(type_ctx);
-        std::mem::forget(structure);
-        std::mem::forget(parser);
-    }
-
     Ok(js)
 }
 
@@ -12855,161 +12813,6 @@ pub fn run_interface_frontend(
         file_config,
         experimental_let_unwrap,
     })
-}
-
-pub fn typecheck_interface_source(
-    source: &str,
-    filename: &str,
-    options: &CompilerOptions,
-) -> Result<()> {
-    // Parse as signature
-    let mut parser = Parser::new(filename, source);
-    let signature = module::parse_signature(&mut parser);
-    let mut frontend_output = String::new();
-    let frontend = run_interface_frontend(
-        &mut parser,
-        signature,
-        source,
-        filename,
-        options,
-        &mut frontend_output,
-    );
-    if !options.frontend_already_reported {
-        write_stderr(&frontend_output);
-    }
-    let InterfaceFrontend {
-        signature,
-        warnings_fatal: ppx_warnings_have_errors,
-        frontend_warning_specs,
-        file_config,
-        experimental_let_unwrap,
-    } = frontend?;
-    let ppx_warnings_have_errors = if options.frontend_already_reported {
-        report_stored_ast_config_warnings(
-            first_config_attribute_of_signature(&signature, parser.arena()),
-            false,
-            parser.arena(),
-            source,
-            filename,
-            options,
-        )
-    } else {
-        ppx_warnings_have_errors
-    };
-    parser.arena_mut().reserve_typecheck_synthetic_capacity();
-
-    // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    // Load Pervasives and extend the initial environment
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        current_unit_name.as_deref(),
-    );
-
-    tctx.set_persistent_env(pers_env);
-
-    let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
-        Ok(typed_signature) => typed_signature,
-        Err(e) => {
-            // See the implementation path above (compiler/ext/misc.ml:337-392).
-            tctx.drain_open_slot_uses();
-            let suppress_info_style =
-                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-            if let Some(error) = tctx
-                .persistent_env
-                .as_ref()
-                .and_then(|persistent_env| persistent_env.last_error())
-            {
-                return Err(persistent_env_error_to_anyhow(error, filename));
-            }
-            return Err(type_mod_error_to_anyhow(
-                e,
-                &type_ctx,
-                parser.arena(),
-                source,
-                filename,
-                suppress_info_style,
-            ));
-        }
-    };
-    if let Some(error) = tctx
-        .persistent_env
-        .as_ref()
-        .and_then(|persistent_env| persistent_env.last_error())
-    {
-        return Err(persistent_env_error_to_anyhow(error, filename));
-    }
-    // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
-    // sg)`, which marks the declarations of the interface used.
-    let sig_type =
-        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, parser.arena());
-    let _ = crate::types::includemod::compunit(
-        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
-    );
-    // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
-    tctx.flush_value_usage_checks();
-    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-    if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
-        return Err(UserDiagnostic::new(String::new(), 2).into());
-    }
-
-    // Print typed tree if requested
-    if options.dump_typed_sexp {
-        let mut stderr = std::io::stderr();
-        let _ = print_typed_signature(parser.arena(), &type_ctx, &typed_signature, &mut stderr);
-    }
-    if options.dump_typed_sexp_locs {
-        let mut stderr = std::io::stderr();
-        let _ = print_typed_signature_with_locs(
-            parser.arena(),
-            &type_ctx,
-            &typed_signature,
-            &mut stderr,
-        );
-    }
-
-    Ok(())
-}
-
-/// Type-check an interface file and dump typed sexp if requested.
-pub fn typecheck_interface_file(path: &std::path::Path, options: &CompilerOptions) -> Result<()> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let source = crate::source_text::latin1_bytes_to_string(bytes);
-    let filename = path.to_string_lossy();
-    typecheck_interface_source(&source, &filename, options)
 }
 
 /// Compile a file to JavaScript.

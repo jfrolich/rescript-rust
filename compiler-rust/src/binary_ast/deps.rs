@@ -33,21 +33,6 @@ pub fn extract_structure_deps(arena: &ParseArena, structure: &[StructureItem]) -
     collector.finish()
 }
 
-/// The `[%error]` extension OCaml `Depend` raises on while extracting the
-/// dependencies of a structure (depend.ml:92-96), if any.
-pub fn structure_error_extension(arena: &ParseArena, structure: &[StructureItem]) -> Option<Extension> {
-    let mut collector = DependencyCollector::new(arena);
-    collector.add_structure(structure);
-    collector.error_extension
-}
-
-/// The `[%error]` extension OCaml `Depend` raises on for a signature.
-pub fn signature_error_extension(arena: &ParseArena, signature: &[SignatureItem]) -> Option<Extension> {
-    let mut collector = DependencyCollector::new(arena);
-    collector.add_signature(signature);
-    collector.error_extension
-}
-
 /// Extract module dependencies from a signature (interface).
 pub fn extract_signature_deps(arena: &ParseArena, signature: &[SignatureItem]) -> Dependencies {
     let mut collector = DependencyCollector::new(arena);
