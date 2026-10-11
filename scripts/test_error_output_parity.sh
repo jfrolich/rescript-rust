@@ -95,6 +95,7 @@ RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser
 PARSER_MATRIX="$PROJECT_ROOT/tests/syntax_tests/data/parsing/diagnostics_numbers.csv"
 COMPILER_CASES_FILE="$PROJECT_ROOT/tests/error_output_parity/compiler/cases.tsv"
 COMPILER_FIXTURE_DIR="$PROJECT_ROOT/tests/error_output_parity/compiler/fixtures"
+FILE_COMPILE_ONLY_FILE="$PROJECT_ROOT/tests/error_output_parity/compiler/file_compile_only.tsv"
 SUPER_ERRORS_DIR="$PROJECT_ROOT/tests/build_tests/super_errors/fixtures"
 
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/error-output"
@@ -178,7 +179,13 @@ run_capture_stderr() {
 total=0
 pass=0
 fail=0
+skipped=0
 failed_files=""
+
+# Whether case $1 needs the file-based compile (see file_compile_only.tsv).
+is_file_compile_only() {
+    [[ -f "$FILE_COMPILE_ONLY_FILE" ]] && cut -f1 "$FILE_COMPILE_ONLY_FILE" | grep -qxF -- "$1"
+}
 
 record_failure() {
     local file="$1"
@@ -271,6 +278,10 @@ run_parser_cases() {
 run_compiler_case() {
     local source_file="$1"
     shift
+    if is_file_compile_only "$source_file"; then
+        skipped=$((skipped + 1))
+        return 0
+    fi
     local flags=("$@")
     local safe ocaml_out rust_out diff_out
     safe=$(safe_name "compiler_${source_file}")
@@ -399,6 +410,7 @@ echo -e "${BOLD}Error output parity summary${RESET}"
 echo "  total:  $total"
 echo -e "  pass:   ${GREEN}$pass${RESET}"
 echo -e "  fail:   ${RED}$fail${RESET}"
+echo "  skipped (file-based compile only, see $(basename "$FILE_COMPILE_ONLY_FILE")): $skipped"
 echo "  cache:  $CACHE_DIR"
 
 if [[ "$fail" -gt 0 ]]; then
