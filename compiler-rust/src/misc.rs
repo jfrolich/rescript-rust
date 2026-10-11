@@ -2,14 +2,16 @@
 
 /// Unwind payload standing in for OCaml's `Misc.Fatal_error` exception.
 #[derive(Debug)]
-pub struct FatalError;
+pub struct FatalError(pub String);
 
 /// OCaml `Misc.fatal_error` (compiler/ext/misc.ml): report the message, then
 /// raise `Fatal_error`, which the driver reports as an uncaught exception.
 /// `resume_unwind` skips the panic hook, so only OCaml's lines are printed.
 pub fn fatal_error(msg: &str) -> ! {
-    eprintln!(">> Fatal error: {msg}");
-    std::panic::resume_unwind(Box::new(FatalError))
+    // OCaml prints the `>> Fatal error:` line before raising; nothing prints
+    // in between, so the report prints it with the exception's line. That
+    // keeps it after warnings an in-process compile has not printed yet.
+    std::panic::resume_unwind(Box::new(FatalError(msg.to_string())))
 }
 
 /// Unwind payload for an OCaml exception that escapes to the toplevel
@@ -25,8 +27,10 @@ pub fn raise_uncaught(exception: &'static str) -> ! {
 
 /// The OCaml runtime's report for an uncaught-exception unwind payload.
 pub fn uncaught_exception_report(payload: &(dyn std::any::Any + Send)) -> Option<String> {
-    if payload.is::<FatalError>() {
-        return Some("Fatal error: exception Misc.Fatal_error".to_string());
+    if let Some(FatalError(msg)) = payload.downcast_ref::<FatalError>() {
+        return Some(format!(
+            ">> Fatal error: {msg}\nFatal error: exception Misc.Fatal_error"
+        ));
     }
     payload
         .downcast_ref::<UncaughtException>()

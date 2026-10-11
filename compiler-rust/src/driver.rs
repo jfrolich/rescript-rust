@@ -15560,13 +15560,13 @@ fn compile_js_program_for_output(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
+) -> Result<(
     DepsProgram,
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
     ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
+)> {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -15607,6 +15607,21 @@ fn compile_js_program_for_output(
         lowered_lambda,
         possible_required_modules,
     );
+    // lam_compile_main.ml reports a primitive's Location error before the
+    // fatal-warnings check, as the file compile does.
+    if let Some(diagnostic) = compiler.take_diagnostic() {
+        let filename = options.source_filename.as_deref().unwrap_or("_none_");
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                &read_in_process_source(filename),
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
     let module_path_resolver = compiler
         .take_module_path_resolver()
         .expect("lambda compiler retained module path resolver");
@@ -15614,13 +15629,13 @@ fn compile_js_program_for_output(
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
 
-    (
+    Ok((
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
-    )
+    ))
 }
 
 fn compile_js_program_for_output_owned(
@@ -15632,13 +15647,13 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
+) -> Result<(
     DepsProgram,
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
     ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
+)> {
     // The pre-JS result already collected the modules of this lowered lambda
     // into `possible_required_modules` (see
     // `compile_preprocessed_structure_in_process_until_js`).
@@ -15664,13 +15679,13 @@ fn compile_js_program_for_output_owned_with_collected_modules(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
+) -> Result<(
     DepsProgram,
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
     ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
+)> {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -15712,6 +15727,21 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         lowered_lambda,
         possible_required_modules,
     );
+    // lam_compile_main.ml reports a primitive's Location error before the
+    // fatal-warnings check, as the file compile does.
+    if let Some(diagnostic) = compiler.take_diagnostic() {
+        let filename = options.source_filename.as_deref().unwrap_or("_none_");
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                &read_in_process_source(filename),
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
     let module_path_resolver = compiler
         .take_module_path_resolver()
         .expect("lambda compiler retained module path resolver");
@@ -15719,13 +15749,13 @@ fn compile_js_program_for_output_owned_with_collected_modules(
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
 
-    (
+    Ok((
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
-    )
+    ))
 }
 pub fn compile_preprocessed_structure_in_process(
     arena: &crate::parse_arena::ParseArena,
@@ -16328,7 +16358,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_lambda_current_stamp,
         hoisted_functions,
         hoisted_exports,
-    ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
+    ) = match crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
         // The interface check above already computed the coercion; report
         // its inclusion warnings where the coercion is used, as before.
@@ -16365,15 +16395,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         if let Some(persistent_env) = tctx.persistent_env.clone() {
             raw_converter.set_persistent_env(persistent_env);
         }
-        let raw_lambda = raw_converter
-            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        // An uncaught exception in Translmod (`Misc.fatal_error`) ends the
+        // file compile after the warnings it already printed; report it with
+        // the warnings this compile buffered.
+        let raw_lambda = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion)
+        })) {
+            Ok(raw_lambda) => raw_lambda,
+            Err(payload) => return Err(payload),
+        };
         let raw_warnings = raw_converter.take_warnings();
         let raw_diagnostic = raw_converter.take_diagnostic();
         let possible_required_modules = raw_converter.take_possible_required_modules();
         let raw_lambda_current_stamp = raw_converter.current_stamp();
         let hoisted_functions = raw_converter.take_hoisted_functions();
         let hoisted_exports = raw_converter.take_hoisted_exports();
-        (
+        Ok((
             raw_lambda,
             raw_warnings,
             raw_diagnostic,
@@ -16381,8 +16418,23 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
             hoisted_functions,
             hoisted_exports,
-        )
-    });
+        ))
+    }) {
+        Ok(converted) => converted,
+        Err(payload) => {
+            let Some(report) = crate::misc::uncaught_exception_report(&*payload) else {
+                std::panic::resume_unwind(payload);
+            };
+            return Err(UserDiagnostic::new(
+                format!(
+                    "{}{report}\n",
+                    format_type_warnings_lazy(arena, &source, filename, &tctx.warnings)
+                ),
+                2,
+            )
+            .into());
+        }
+    };
     // The file compile reports the typing warnings, then Translmod's
     // (js_implementation.ml:161-167); a Translmod error escapes before
     // `Warnings.check_fatal`.
@@ -16585,7 +16637,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
-            )
+            )?
         } else {
             compile_js_program_for_output_owned(
                 lowered_lambda
@@ -16598,7 +16650,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
-            )
+            )?
         }
     };
     if !options.skip_js_render {
@@ -16641,7 +16693,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 Some(target.module_format),
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
-            );
+            )?;
             check_module_path_resolution_errors(
                 &program,
                 &module_path_resolver,
