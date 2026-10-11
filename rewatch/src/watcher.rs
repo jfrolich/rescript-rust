@@ -522,6 +522,12 @@ async fn async_watch(
                 // the same build lock boundary as regular `rescript build`.
                 let rebuild =
                     build::with_build_lock(path, || -> anyhow::Result<build::CompilationOutcome> {
+                        // Reinitialization compares the sources and outputs on disk with the
+                        // recorded build to remove what deleted sources and configuration
+                        // changes left behind: record the builds this watcher made first.
+                        if build_state.build_mode().is_in_process() {
+                            clean::write_in_process_record(&build_state);
+                        }
                         let mut next_build_state = match build::initialize_build(
                             None,
                             filter,
@@ -562,6 +568,9 @@ async fn async_watch(
                             false,
                             plain_output,
                         );
+                        if build_state.build_mode().is_in_process() {
+                            clean::remove_obsolete_outputs_of_build(&build_state);
+                        }
                         result.map_err(|e| anyhow::anyhow!("{e}"))
                     });
                 match rebuild {
