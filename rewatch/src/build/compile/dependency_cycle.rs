@@ -7,35 +7,42 @@ use std::{
 };
 
 pub fn find(modules: &Vec<(&String, &Module)>) -> Vec<String> {
-    find_shortest_cycle(modules)
+    let graph: Vec<(&String, &AHashSet<String>)> = modules
+        .iter()
+        .map(|(name, module)| (*name, &module.deps))
+        .collect();
+    find_shortest_cycle(&graph)
 }
 
-fn find_shortest_cycle(modules: &Vec<(&String, &Module)>) -> Vec<String> {
+/// The reported cycle must not depend on hash-map iteration order: start
+/// nodes and neighbors are visited in name order, so the same project always
+/// reports the same cycle.
+fn find_shortest_cycle(modules: &[(&String, &AHashSet<String>)]) -> Vec<String> {
     let mut shortest_cycle: Vec<String> = Vec::new();
 
-    // Build a graph representation for easier traversal
-
-    let mut graph: HashMap<&String, &AHashSet<String>> = HashMap::new();
+    // Build a graph representation for easier traversal, neighbors sorted.
+    let mut graph: HashMap<&String, Vec<&String>> = HashMap::new();
     let mut in_degrees: HashMap<&String, usize> = HashMap::new();
 
-    let empty = AHashSet::new();
     // First pass: collect all nodes and initialize in-degrees
     for (name, _) in modules {
-        graph.insert(name, &empty);
+        graph.insert(name, Vec::new());
         in_degrees.insert(name, 0);
     }
 
     // Second pass: build the graph and count in-degrees
-    for (name, module) in modules {
+    for (name, deps) in modules {
         // Update in-degrees
-        for dep in module.deps.iter() {
+        for dep in deps.iter() {
             if let Some(count) = in_degrees.get_mut(dep) {
                 *count += 1;
             }
         }
 
         // Update the graph
-        *graph.get_mut(*name).unwrap() = &module.deps;
+        let mut neighbors: Vec<&String> = deps.iter().collect();
+        neighbors.sort();
+        *graph.get_mut(*name).unwrap() = neighbors;
     }
     // Remove all nodes in the graph that have no incoming edges
     graph.retain(|_, deps| !deps.is_empty());
@@ -46,7 +53,8 @@ fn find_shortest_cycle(modules: &Vec<(&String, &Module)>) -> Vec<String> {
     start_nodes.sort_by(|a, b| {
         let a_connectivity = in_degrees.get(a).unwrap_or(&0) + graph.get(a).map_or(0, |v| v.len());
         let b_connectivity = in_degrees.get(b).unwrap_or(&0) + graph.get(b).map_or(0, |v| v.len());
-        b_connectivity.cmp(&a_connectivity) // Sort in descending order
+        // Descending connectivity, then by name.
+        b_connectivity.cmp(&a_connectivity).then_with(|| a.cmp(b))
     });
 
     // OPTIMIZATION 2: Keep track of the current shortest cycle length for early termination
@@ -90,7 +98,7 @@ fn find_shortest_cycle(modules: &Vec<(&String, &Module)>) -> Vec<String> {
 
 fn find_cycle_bfs(
     start: &String,
-    graph: &HashMap<&String, &AHashSet<String>>,
+    graph: &HashMap<&String, Vec<&String>>,
     max_length: usize,
 ) -> Option<Vec<String>> {
     // Use a BFS to find the shortest cycle
@@ -115,6 +123,7 @@ fn find_cycle_bfs(
         if let Some(neighbors) = graph.get(&current) {
             for neighbor in neighbors.iter() {
                 // If we found the start node again, we have a cycle
+                let neighbor: &String = neighbor;
                 if neighbor == start {
                     // Reconstruct the cycle
                     let mut path = Vec::new();
@@ -181,4 +190,30 @@ pub fn format(cycle: &[String], build_state: &BuildCommandState) -> String {
         })
         .collect::<Vec<String>>()
         .join("\n → ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_the_same_cycle_every_time() {
+        let names: Vec<String> = ["Cy1", "Cy2", "A"].iter().map(|s| s.to_string()).collect();
+        let deps: Vec<AHashSet<String>> = vec![
+            AHashSet::from(["Cy2".to_string()]),
+            AHashSet::from(["Cy1".to_string()]),
+            AHashSet::from(["Cy1".to_string()]),
+        ];
+        let graph: Vec<(&String, &AHashSet<String>)> = names.iter().zip(deps.iter()).collect();
+        let expected = find_shortest_cycle(&graph);
+        assert_eq!(expected, vec!["Cy1".to_string(), "Cy2".to_string()]);
+        // Hash maps seed their order per instance: rebuilding them must not
+        // change the answer, whatever the input order.
+        for _ in 0..50 {
+            let mut reversed = graph.clone();
+            reversed.reverse();
+            assert_eq!(find_shortest_cycle(&graph), expected);
+            assert_eq!(find_shortest_cycle(&reversed), expected);
+        }
+    }
 }
