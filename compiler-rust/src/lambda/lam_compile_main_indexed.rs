@@ -250,7 +250,7 @@ impl IndexedPreJsBackend {
                         | crate::lambda::Constant::JsTrue
                         | crate::lambda::Constant::JsFalse,
                     ) => Persistent::Root(root),
-                    NodeView::Function(_, _, _, attr)
+                    NodeView::Function(_, _, _, attr, _)
                         if cross_module_inline
                             && (matches!(attr.inline, crate::lambda::InlineAttribute::Always)
                                 || attr.is_a_functor)
@@ -423,7 +423,7 @@ fn flatten(
             let (left, mut groups) = flatten(store, left, acc);
             if !matches!(
                 store.view(left),
-                NodeView::Var(_) | NodeView::Const(_) | NodeView::Function(_, _, _, _)
+                NodeView::Var(_) | NodeView::Const(_) | NodeView::Function(_, _, _, _, _)
             ) {
                 groups.insert(0, (None, IndexedGroup::Nop(left)));
             }
@@ -473,7 +473,7 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
                     visit(store, *child, free);
                 }
             }
-            NodeView::Function(_, params, body, _) => {
+            NodeView::Function(_, params, body, _, _) => {
                 visit(store, body, free);
                 for id in params {
                     set_remove(free, id);
@@ -591,7 +591,7 @@ fn remove_dead_groups(
             IndexedGroup::Recursive(bindings) => {
                 for (id, value) in bindings {
                     free_by_ident.push((id.clone(), pass_free_variables(store, *value)));
-                    if !matches!(store.view(*value), NodeView::Function(_, _, _, _)) {
+                    if !matches!(store.view(*value), NodeView::Function(_, _, _, _, _)) {
                         initial.insert(0, id.clone());
                     }
                 }
@@ -712,7 +712,7 @@ fn coerce_and_group(
                 };
                 if !arity.first_arity_na() {
                     let lambda =
-                        matches!(context.store().view(value), NodeView::Function(_, _, _, _))
+                        matches!(context.store().view(value), NodeView::Function(_, _, _, _, _))
                             .then_some((value, RecFlag::NonRec));
                     context
                         .metadata_mut_for_backend()
@@ -939,7 +939,7 @@ fn add_hoisted_aliases(
             .join("$");
         let js_name = crate::js_ir::printer::convert_ident_name(&name);
         if !occupied.insert(js_name) {
-            let loc = if matches!(context.store().view(target), NodeView::Function(_, _, _, _)) {
+            let loc = if matches!(context.store().view(target), NodeView::Function(_, _, _, _, _)) {
                 item.target_loc
             } else {
                 item.loc
@@ -1006,7 +1006,7 @@ fn collect_required_modules(
                     visit(store, *n, modules);
                 }
             }
-            NodeView::Function(_, _, body, _) => visit(store, body, modules),
+            NodeView::Function(_, _, body, _, _) => visit(store, body, modules),
             NodeView::Let(_, _, value, body) => {
                 visit(store, value, modules);
                 visit(store, body, modules);
@@ -1626,7 +1626,7 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             binding.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
             Lambda::let_(
                 LetKind::Strict,
                 module.clone(),
@@ -1759,9 +1759,9 @@ mod tests {
                     crate::lambda::FunctionAttribute {
                         inline: crate::lambda::InlineAttribute::Always,
                         ..Default::default()
-                    },
+                    }, crate::location::Location::none(),
                 ),
-                Lambda::function_(1, vec![id("y", 5)], Lambda::unit(), Default::default()),
+                Lambda::function_(1, vec![id("y", 5)], Lambda::unit(), Default::default(), crate::location::Location::none()),
             ],
         );
         let mut result = run(input, &[], Arc::new(IdGenerator::with_start_stamp(20))).unwrap();
@@ -1927,7 +1927,7 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             binding.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
             Lambda::let_(
                 LetKind::Strict,
                 module.clone(),
@@ -2061,11 +2061,11 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             occupied.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
             Lambda::let_(
                 LetKind::Strict,
                 binding.clone(),
-                Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+                Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
                 Lambda::let_(
                     LetKind::Strict,
                     module.clone(),
@@ -2228,11 +2228,11 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             first.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
             Lambda::let_(
                 LetKind::Strict,
                 second.clone(),
-                Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+                Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
                 Lambda::let_(
                     LetKind::Strict,
                     module.clone(),
@@ -2341,7 +2341,7 @@ mod tests {
             0,
             vec![],
             Lambda::unit(),
-            Default::default(),
+            Default::default(), crate::location::Location::none(),
         ));
         let nop = context.store_mut().append_compat_lambda(Lambda::Lbreak);
         let groups = vec![

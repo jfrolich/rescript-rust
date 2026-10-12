@@ -93,7 +93,7 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
                 1,
                 vec![param.clone()],
                 Lambda::var(param),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )]))),
     );
@@ -153,7 +153,7 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
                     exception.clone(),
                     Box::new(Lambda::unit()),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )]))),
     );
@@ -208,7 +208,7 @@ fn rejected_cmj_does_not_import_and_lowers_arguments_after_arity_query_rtl() {
                 2,
                 vec![Ident::create_persistent("a"), Ident::create_persistent("b")],
                 Lambda::unit(),
-                attr,
+                attr, crate::location::Location::none(),
             ),
         )]))),
     );
@@ -491,7 +491,7 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
                 directive: Some("use server".into()),
                 return_unit: true,
                 ..FunctionAttribute::default()
-            },
+            }, crate::location::Location::none(),
         ),
         [],
     );

@@ -213,7 +213,7 @@ fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
                 ap_info: test_apply_info(),
                 ap_transformed_jsx: false,
             })),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         ),
     )
 }
@@ -235,7 +235,7 @@ fn test_function_calling_two(ident: Ident, first: &Ident, second: &Ident) -> (Id
             1,
             vec![param],
             Lambda::seq(test_apply(first), test_apply(second)),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         ),
     )
 }
@@ -248,7 +248,7 @@ fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
             1,
             vec![param],
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         ),
     )
 }
@@ -1325,7 +1325,7 @@ fn compile_eta_wrapped_object_compare_function_aliases_runtime_member() {
             vec![Lambda::var(left), Lambda::var(right)],
             Location::none(),
         ),
-        Default::default(),
+        Default::default(), crate::location::Location::none(),
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1374,7 +1374,7 @@ fn compile_eta_wrapped_float_compare_function_aliases_runtime_member() {
             vec![Lambda::var(left), Lambda::var(right)],
             Location::none(),
         ),
-        Default::default(),
+        Default::default(), crate::location::Location::none(),
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1410,7 +1410,7 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
             },
             ap_transformed_jsx: false,
         })),
-        Default::default(),
+        Default::default(), crate::location::Location::none(),
     ));
 
     let rendered = print_expression(&compiled.expr);
@@ -1466,9 +1466,9 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                 },
                 ap_transformed_jsx: false,
             })),
-            Default::default(),
+            Default::default(), crate::location::Location::none(),
         ),
-        Default::default(),
+        Default::default(), crate::location::Location::none(),
     ));
 
     let rendered = print_expression(&compiled.expr);
@@ -1513,16 +1513,16 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
                     1,
                     vec![inner_true_param],
                     Lambda::true_(),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
                 Lambda::function_(
                     1,
                     vec![inner_zero_param],
                     Lambda::const_(Constant::int(0)),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         ),
     );
     let nested_call = Lambda::Lapply(Box::new(Apply {
@@ -1640,7 +1640,7 @@ fn compile_eta_wrapped_hash_function_aliases_runtime_member() {
             ],
             Location::none(),
         ),
-        Default::default(),
+        Default::default(), crate::location::Location::none(),
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1733,7 +1733,7 @@ fn compile_eta_wrapped_float_equality_stays_as_function() {
             vec![Lambda::var(left), Lambda::var(right)],
             Location::none(),
         ),
-        Default::default(),
+        Default::default(), crate::location::Location::none(),
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -1863,7 +1863,7 @@ fn compile_deps_program_reuses_same_name_export_targets() {
             1,
             vec![param.clone()],
             Lambda::var(param),
-            crate::lambda::FunctionAttribute::default(),
+            crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
         ),
         Lambda::let_(
             LetKind::Alias,
@@ -2073,7 +2073,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                 vec![Lambda::var(param)],
                 Location::none(),
             ),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -2210,7 +2210,7 @@ fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bind
                     1,
                     vec![param.clone()],
                     Lambda::var(param),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
                 export_block,
             ),
@@ -2291,7 +2291,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
             1,
             vec![foo_param.clone()],
             Lambda::var(foo_param),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -2304,7 +2304,7 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
                     1,
                     vec![bar_param.clone()],
                     Lambda::var(bar_param),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
                 export_block,
             ),
@@ -2809,7 +2809,7 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                     exn,
                     Box::new(Lambda::const_(Constant::int(0))),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -2871,7 +2871,7 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                     exn,
                     Box::new(tailcall),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -3602,7 +3602,7 @@ pub(super) fn gpr_1438_fallthrough_handler() -> Lambda {
         FunctionAttribute {
             return_unit: true,
             ..FunctionAttribute::default()
-        },
+        }, crate::location::Location::none(),
     )
 }
 
@@ -3645,7 +3645,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
             (1, vec![]),
             Box::new(Lambda::var(a.clone())),
         ),
-        FunctionAttribute::default(),
+        FunctionAttribute::default(), crate::location::Location::none(),
     );
     let lam = Lambda::let_(
         LetKind::Strict,
@@ -3804,7 +3804,7 @@ fn nested_let_values_preserve_declaration_context_for_wrapped_string_switches() 
 fn function_return_blocks_lower_switches_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![scrutinee.clone()],
         body: Box::new(Lambda::Lswitch(
@@ -3865,7 +3865,7 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![cond.clone()],
         body: Box::new(Lambda::LifThenElse(
@@ -4070,7 +4070,7 @@ fn unit_return_function_body_keeps_positive_effect_guard_before_js_passes() {
         )),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 2,
         params: vec![cond.clone(), seen.clone()],
         body: Box::new(body),
@@ -4134,7 +4134,7 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![effect.clone()],
         body: Box::new(body),
@@ -4197,7 +4197,7 @@ fn unit_return_function_flips_effect_guard_into_early_return() {
             crate::lambda::FunctionAttribute {
                 return_unit: true,
                 ..Default::default()
-            },
+            }, crate::location::Location::none(),
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
@@ -4245,7 +4245,7 @@ fn unit_return_function_with_for_loop_tail_keeps_negative_guard() {
             crate::lambda::FunctionAttribute {
                 return_unit: true,
                 ..Default::default()
-            },
+            }, crate::location::Location::none(),
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
@@ -4293,7 +4293,7 @@ fn unit_return_function_with_else_for_loop_tail_keeps_negative_guard() {
             crate::lambda::FunctionAttribute {
                 return_unit: true,
                 ..Default::default()
-            },
+            }, crate::location::Location::none(),
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
@@ -4348,7 +4348,7 @@ fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
             crate::lambda::FunctionAttribute {
                 return_unit: true,
                 ..Default::default()
-            },
+            }, crate::location::Location::none(),
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
@@ -4375,7 +4375,7 @@ fn function_return_blocks_lower_effectful_sequands_without_a_result_temp() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![cond.clone()],
         body: Box::new(Lambda::prim(
@@ -5976,10 +5976,10 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                         vec![Lambda::var(u.clone()), Lambda::var(z)],
                         loc.clone(),
                     ),
-                    crate::lambda::FunctionAttribute::default(),
+                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
-            crate::lambda::FunctionAttribute::default(),
+            crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -6070,10 +6070,10 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                         ],
                         loc.clone(),
                     ),
-                    crate::lambda::FunctionAttribute::default(),
+                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
-            crate::lambda::FunctionAttribute::default(),
+            crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
         ),
         Lambda::let_(
             LetKind::Strict,
@@ -6103,7 +6103,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                     },
                     ap_transformed_jsx: false,
                 })),
-                crate::lambda::FunctionAttribute::default(),
+                crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
             ),
             Lambda::var(result),
         ),
@@ -6340,7 +6340,7 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
             Box::new(Lambda::var(value.clone())),
         )),
     );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![value.clone()],
         body: Box::new(body),
@@ -6964,7 +6964,7 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
     let field_alias = Ident::create_local("x");
     let loc = crate::location::Location::none();
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![module_param.clone()],
         body: Box::new(Lambda::let_(
@@ -7015,7 +7015,7 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
     let module_param = Ident::create_local("U");
     let loc = crate::location::Location::none();
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![module_param.clone()],
         body: Box::new(Lambda::prim(
@@ -7064,7 +7064,7 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
     let right_alias = Ident::create_local("y");
     let loc = crate::location::Location::none();
 
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
         arity: 2,
         params: vec![left.clone(), right.clone()],
         body: Box::new(Lambda::let_(
@@ -9537,7 +9537,7 @@ fn one_unit_arg_functions_lower_to_zero_arg_js_functions() {
         FunctionAttribute {
             one_unit_arg: true,
             ..FunctionAttribute::default()
-        },
+        }, crate::location::Location::none(),
     ));
 
     assert!(compiled.prelude.is_empty());
@@ -9559,7 +9559,7 @@ fn recursive_function_bindings_lower_directly_without_placeholder_assignments() 
                 1,
                 vec![param],
                 Lambda::var(func.clone()),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -9596,7 +9596,7 @@ fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() 
                     1,
                     vec![n.clone()],
                     Lambda::var(odd.clone()),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
             (
@@ -9605,7 +9605,7 @@ fn mutually_recursive_function_bindings_lower_without_placeholder_assignments() 
                     1,
                     vec![n],
                     Lambda::var(even.clone()),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
         ],
@@ -9648,7 +9648,7 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                     1,
                     vec![param],
                     Lambda::var(make.clone()),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
                 Lambda::let_(
                     LetKind::Strict,
@@ -9669,7 +9669,7 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                                 },
                                 false,
                             ),
-                            FunctionAttribute::default(),
+                            FunctionAttribute::default(), crate::location::Location::none(),
                         ),
                         Lambda::var(component),
                     ),
@@ -9927,7 +9927,7 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
                 3,
                 vec![flag.clone(), acc.clone(), next],
                 Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -9993,7 +9993,7 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
-            Lambda::function_(2, vec![tag, next], body, FunctionAttribute::default()),
+            Lambda::function_(2, vec![tag, next], body, FunctionAttribute::default(), crate::location::Location::none()),
         )],
         Lambda::unit(),
     );
@@ -10037,7 +10037,7 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
     let lam = Lambda::letrec(
         vec![(
             strip.clone(),
-            Lambda::function_(2, vec![ch, next], body, FunctionAttribute::default()),
+            Lambda::function_(2, vec![ch, next], body, FunctionAttribute::default(), crate::location::Location::none()),
         )],
         Lambda::unit(),
     );
@@ -10076,7 +10076,7 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
                     vec![Lambda::var(flag), tailcall],
                     Location::none(),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -10125,7 +10125,7 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
                     vec![Lambda::var(flag), tailcall],
                     Location::none(),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -10178,7 +10178,7 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
                 3,
                 vec![a.clone(), b.clone(), flag.clone()],
                 Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(a)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -10225,7 +10225,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                     1,
                     vec![compiler.id_gen.create("param")],
                     Lambda::var(acc.clone()),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ],
             ap_info: ApInfo {
@@ -10244,7 +10244,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                 2,
                 vec![n.clone(), acc.clone()],
                 body,
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -10310,7 +10310,7 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
                 3,
                 vec![flag.clone(), acc.clone(), next],
                 Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::var(loop_.clone()),
@@ -10394,7 +10394,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
-            Lambda::function_(1, vec![value], body, FunctionAttribute::default()),
+            Lambda::function_(1, vec![value], body, FunctionAttribute::default(), crate::location::Location::none()),
         )],
         Lambda::unit(),
     );
@@ -10441,7 +10441,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                         },
                         ap_transformed_jsx: false,
                     })),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
             (
@@ -10459,7 +10459,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                         },
                         ap_transformed_jsx: false,
                     })),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
         ],

@@ -51,7 +51,7 @@ fn indexed_cmj_beta_imports_into_owner_store_and_reuses_argument_ids() {
 
     let parameter = Ident::new("cmjArg", 40, crate::ident::IdentFlags::NONE);
     let exception = Ident::new("cmjExn", 41, crate::ident::IdentFlags::JS_OBJECT);
-    let function = LFunction {
+    let function = LFunction { loc: crate::location::Location::none(),
         arity: 1,
         params: vec![parameter.clone()],
         body: Box::new(Lambda::LtryWith(
@@ -133,7 +133,7 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
         1,
         vec![parameter.clone()],
         Lambda::var(parameter),
-        FunctionAttribute::default(),
+        FunctionAttribute::default(), crate::location::Location::none(),
     );
     compiler.cmj_lambda_cache.insert(
         module.name().to_string(),
@@ -190,7 +190,7 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
         module.name().to_string(),
         Some(Arc::new(AHashMap::from_iter([(
             "run".to_string(),
-            Lambda::function_(1, vec![parameter.clone()], Lambda::var(parameter), attr),
+            Lambda::function_(1, vec![parameter.clone()], Lambda::var(parameter), attr, crate::location::Location::none()),
         )]))),
     );
 

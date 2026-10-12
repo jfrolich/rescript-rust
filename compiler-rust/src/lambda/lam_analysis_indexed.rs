@@ -23,7 +23,7 @@ pub(crate) fn hit_variables(store: &IndexedLambda, targets: &[Ident], node: Node
             NodeView::Apply(function, args, _, _) => {
                 hit(store, targets, function) || args.iter().any(|node| hit(store, targets, *node))
             }
-            NodeView::Function(_, _, body, _) => hit(store, targets, body),
+            NodeView::Function(_, _, body, _, _) => hit(store, targets, body),
             NodeView::Let(_, _, value, body) => {
                 hit(store, targets, value) || hit(store, targets, body)
             }
@@ -74,7 +74,7 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
     match store.view(node) {
         NodeView::Var(_)
         | NodeView::Const(_)
-        | NodeView::Function(_, _, _, _)
+        | NodeView::Function(_, _, _, _, _)
         | NodeView::GlobalModule(_) => true,
         NodeView::Prim(primitive, args, _) => {
             args.iter().all(|node| no_side_effects(store, *node))
@@ -181,7 +181,7 @@ pub(crate) fn is_closed_with_map(
                     iter(store, *node, position, stats, local);
                 }
             }
-            NodeView::Function(_, params, body, _) => {
+            NodeView::Function(_, params, body, _, _) => {
                 local.extend(params.iter().cloned());
                 iter(store, body, Position::Sink, stats, local);
             }

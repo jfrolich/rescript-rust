@@ -245,6 +245,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 f.params.clone(),
                 self.simpl(&f.body),
                 f.attr.clone(),
+                f.loc,
             ),
 
             // lam_pass_alpha_conversion.ml:91-109

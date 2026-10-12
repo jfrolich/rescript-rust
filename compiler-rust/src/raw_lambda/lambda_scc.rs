@@ -246,7 +246,7 @@ mod tests {
     use crate::lambda::FunctionAttribute;
 
     fn function(param: &str, body: RawLambda) -> RawLambda {
-        RawLambda::function_(1, vec![Ident::create_local(param)], body, FunctionAttribute::default())
+        RawLambda::function_(1, vec![Ident::create_local(param)], body, FunctionAttribute::default(), crate::location::Location::none())
     }
 
     #[test]

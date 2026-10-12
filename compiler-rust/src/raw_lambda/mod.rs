@@ -48,6 +48,8 @@ pub struct RawLFunction {
     pub body: Box<RawLambda>,
     /// Function attributes.
     pub attr: FunctionAttribute,
+    /// Source location (`lfunction.loc`, compiler/ml/lambda.mli:374-379).
+    pub loc: Location,
 }
 
 /// Raw-lambda primitive operation payload.
@@ -251,12 +253,14 @@ impl RawLambda {
         params: Vec<Ident>,
         body: RawLambda,
         attr: FunctionAttribute,
+        loc: Location,
     ) -> Self {
         RawLambda::Lfunction(Box::new(RawLFunction {
             arity,
             params,
             body: Box::new(body),
             attr,
+            loc,
         }))
     }
 
@@ -384,6 +388,7 @@ impl RawLambda {
                 params: func.params,
                 body: Box::new(RawLambda::from_lowered(*func.body)),
                 attr: func.attr,
+                loc: func.loc,
             })),
             Lambda::Llet(kind, id, value, body) => RawLambda::Llet(
                 kind,
@@ -507,6 +512,7 @@ impl RawLambda {
                 params: func.params,
                 body: Box::new(func.body.into_lowered()),
                 attr: func.attr,
+                loc: func.loc,
             })),
             RawLambda::Llet(kind, id, value, body) => Lambda::Llet(
                 kind,

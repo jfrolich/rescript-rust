@@ -52,6 +52,7 @@ impl<'a> LoweringContext<'a> {
                 func.params,
                 self.lower_lambda(*func.body),
                 func.attr,
+                func.loc,
             ),
             RawLambda::Llet(kind, id, value, body) => self.lower_let(kind, id, *value, *body),
             RawLambda::Lletrec(bindings, body) => self.lower_letrec(bindings, *body),
@@ -1295,7 +1296,7 @@ mod tests {
                     vec![RawLambda::var(prim0.clone()), RawLambda::var(prim1.clone())],
                     Location::none(),
                 ),
-                crate::lambda::FunctionAttribute::default(),
+                crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
             )),
             ap_args: vec![RawLambda::var(lhs.clone()), RawLambda::var(rhs.clone())],
             ap_info: ApInfo {

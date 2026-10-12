@@ -1220,7 +1220,7 @@ impl LambdaCompiler {
         );
 
         let imported = context.import_cmj_function(function);
-        let NodeSnapshot::Function(_, params, body, attr) = context.store().snapshot(imported)
+        let NodeSnapshot::Function(_, params, body, attr, _) = context.store().snapshot(imported)
         else {
             unreachable!("CMJ function import did not produce an indexed function")
         };

@@ -3108,6 +3108,9 @@ fn decode_cmj_lfunction(value: &OcamlValue) -> Option<LFunction> {
         params,
         body: Box::new(decode_cmj_lambda(&fields[1])?),
         attr: decode_cmj_function_attribute(&fields[2])?,
+        // Locations of decoded `.cmj` lambdas are not kept (as for
+        // applications and primitives above).
+        loc: Location::none(),
     })
 }
 
