@@ -74,8 +74,10 @@ step rust-build bash -c '
     ./scripts/rust_compiler_shims.sh release' || { summary; exit 1; }
 
 
-step fixtures env RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime" \
-    ./rewatch/target/release/rescript build tests/tests
+# The compiler unit fixtures compile tests/tests sources file by file against
+# .cmi files, which only the OCaml reference build writes.
+step fixtures env PROJECT_ROOT="$ROOT" RUST_TARGET=release bash -c \
+    'source scripts/parity_lib.sh && parity_build_ocaml_reference "$PROJECT_ROOT/tests/tests"'
 
 if [[ $RUN_TESTS -eq 1 ]]; then
     step cargo-test-compiler cargo test --release --locked --manifest-path compiler-rust/Cargo.toml

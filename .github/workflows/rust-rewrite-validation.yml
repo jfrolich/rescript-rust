@@ -69,9 +69,11 @@ jobs:
 
       - name: Build native test corpus for compiler unit fixtures
         id: fixtures
+        # The fixtures compile tests/tests sources file by file against .cmi
+        # files, which only the OCaml reference build writes.
         run: |
-          RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
-            ./rewatch/target/release/rescript build tests/tests
+          PROJECT_ROOT="$PWD" RUST_TARGET=release bash -c \
+            'source scripts/parity_lib.sh && parity_build_ocaml_reference "$PROJECT_ROOT/tests/tests"'
 
       # The suite includes subprocess timing assertions. Run tests serially so
       # those benchmarks do not compete with one another for CPU time.
