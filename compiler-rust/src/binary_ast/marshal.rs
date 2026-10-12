@@ -140,7 +140,6 @@ pub struct MarshalFragment {
 pub struct MarshalWriter<'a> {
     /// Debug tracing is configured once per serialization, not per AST node.
     debug_marshal: bool,
-    pub(super) debug_const_share: bool,
 
     /// The output buffer containing encoded data
     buffer: Vec<u8>,
@@ -328,7 +327,6 @@ impl<'a> MarshalWriter<'a> {
     pub fn new() -> Self {
         Self {
             debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
-            debug_const_share: std::env::var("DEBUG_CONST_SHARE").is_ok(),
             buffer: Vec::with_capacity(4096),
             obj_table: HashMap::new(),
             str_idx_table: HashMap::new(),
@@ -381,7 +379,6 @@ impl<'a> MarshalWriter<'a> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
-            debug_const_share: std::env::var("DEBUG_CONST_SHARE").is_ok(),
             buffer: Vec::with_capacity(capacity),
             obj_table: HashMap::new(),
             str_idx_table: HashMap::new(),
