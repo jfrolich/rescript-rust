@@ -11974,6 +11974,7 @@ fn compile_source_to_js_with_options_inner(
         filename,
         has_resi,
         None,
+        current_unit_name.as_deref(),
     )?;
 
     // OCaml compiler/ml/typemod.ml:1755-1758 reads the compiled interface
@@ -12649,12 +12650,15 @@ fn check_compunit_inclusion_for_errors(
     filename: &str,
     has_resi: bool,
     interface_file: Option<&str>,
+    unit_name: Option<&str>,
 ) -> Result<Option<CompunitInclusion>> {
     if !has_resi || !source_file.ends_with(".res") {
         return Ok(None);
     }
 
-    let module_name = module_name_from_source_filename(source_file);
+    // The interface is the unit being compiled: `A-Ns` in a namespaced
+    // package, as OCaml's `modulename` (typemod.ml:1742-1753).
+    let module_name = interface_unit_name(unit_name, source_file);
     if module_name.is_empty() {
         return Ok(None);
     }
@@ -12677,9 +12681,18 @@ fn check_compunit_inclusion_for_errors(
     } else {
         None
     };
+    let in_process = pers.is_in_process_mode();
     let Some(target_sig) =
         raw_in_process_sig.or_else(|| pers.read_raw_sig_shared(&module_name, type_ctx))
     else {
+        // typemod.ml:1744-1751 raises `Interface_not_compiled` here. An
+        // in-process build registers every compiled interface, so a missing
+        // one must not silently skip the implementation-interface check.
+        if in_process {
+            return Err(anyhow!(
+                "Could not find the compiled interface of {module_name} for {source_file}"
+            ));
+        }
         return Ok(None);
     };
     // Env.read_signature forces ps_sig, whose Subst.signature identity copy
@@ -12720,6 +12733,15 @@ fn check_compunit_inclusion_for_errors(
     }
 }
 
+/// The unit name an implementation's interface is registered under: the
+/// compile's unit name when known (namespaced, `A-Ns`), else the file's.
+fn interface_unit_name(unit_name: Option<&str>, source_file: &str) -> String {
+    unit_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| module_name_from_source_filename(source_file))
+}
+
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -12744,7 +12766,7 @@ fn compute_raw_implementation_coercion(
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
 
-    let module_name = module_name_from_source_filename(source_file);
+    let module_name = interface_unit_name(options.current_unit_name().as_deref(), source_file);
     if module_name.is_empty() {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
@@ -13649,8 +13671,7 @@ fn apply_moregen_constraints(
         return;
     }
 
-    // Extract module name from source filename
-    let module_name = module_name_from_source_filename(source_file);
+    let module_name = interface_unit_name(options.current_unit_name().as_deref(), source_file);
     if module_name.is_empty() {
         return;
     }
@@ -15854,6 +15875,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             filename,
             true,
             interface_file.as_deref(),
+            options.current_unit_name().as_deref(),
         ) {
             Ok(inclusion) => interface_inclusion = inclusion,
             Err(error) => {
