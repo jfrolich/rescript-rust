@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Iface_field_names_mismatch/Foo.res
-  does not match the interface /.../fixtures/Iface_field_names_mismatch/foo.cmi:
+  does not match the interface /.../fixtures/Iface_field_names_mismatch/Foo.resi:
   Type declarations do not match:
     type t = {a: int, b: int}
   is not included in

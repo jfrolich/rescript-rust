@@ -3,12 +3,11 @@
 cd "$(dirname "$0")"
 source "../utils.sh"
 
-bold "Test: An interface mismatch names the interface the file build reports"
+bold "Test: An interface mismatch names the interface source file"
 
-# On a clean in-process build the interface's .cmi is not written yet when the
-# implementation is checked, and the error named `<project>/src/R.cmi`. The
-# file build reports the `lib/ocaml` copy relative to `lib/bs`:
-# `../ocaml/r.cmi` (uncapitalised where the filesystem ignores case).
+# The .cmi an interface is read from is a build artifact; errors name the
+# .resi. A clean in-process build used to name `<project>/src/R.cmi`, and the
+# file build `../ocaml/r.cmi`.
 
 project=$(mktemp -d)
 trap 'rm -r "$project"' EXIT
@@ -30,9 +29,14 @@ if [ $? -eq 0 ]; then
   printf "%s\n" "$output" >&2
   exit 1
 fi
-if ! echo "$output" | grep -Eq "does not match the interface \.\./ocaml/[rR]\.cmi:"; then
-  error "The mismatch did not name ../ocaml/r.cmi"
+if ! echo "$output" | grep -Eq "does not match the interface .*/src/R\.resi:"; then
+  error "The mismatch did not name src/R.resi"
   printf "%s\n" "$output" >&2
   exit 1
 fi
-success "Interface mismatch names ../ocaml/r.cmi"
+if echo "$output" | grep -q "\.cmi"; then
+  error "The error mentions a .cmi file"
+  printf "%s\n" "$output" >&2
+  exit 1
+fi
+success "Interface mismatch names src/R.resi"

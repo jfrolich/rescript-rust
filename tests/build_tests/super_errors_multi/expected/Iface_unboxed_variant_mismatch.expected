@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Iface_unboxed_variant_mismatch/Foo.res
-  does not match the interface /.../fixtures/Iface_unboxed_variant_mismatch/foo.cmi:
+  does not match the interface /.../fixtures/Iface_unboxed_variant_mismatch/Foo.resi:
   Type declarations do not match:
     type t = Wrap(int)
   is not included in

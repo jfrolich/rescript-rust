@@ -4,7 +4,7 @@
   [36m/.../fixtures/Iface_extension_constructors/Foo.res[0m
 
   The implementation /.../fixtures/Iface_extension_constructors/Foo.res
-  does not match the interface /.../fixtures/Iface_extension_constructors/foo.cmi:
+  does not match the interface /.../fixtures/Iface_extension_constructors/Foo.resi:
   Extension declarations do not match:
     type t +=  Boom(string)
   is not included in

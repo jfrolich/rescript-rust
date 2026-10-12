@@ -1738,12 +1738,12 @@ let type_implementation_more ?check_exists sourcefile outputprefix modulename
     let simple_sg = simplify_signature sg in
     let mli_status = !Clflags.assume_no_mli in
     if mli_status = Clflags.Mli_exists then (
+      let sourceintf =
+        Filename.remove_extension sourcefile ^ Literals.suffix_resi
+      in
       let intf_file =
         try find_in_path_uncap !Config.load_path (modulename ^ ".cmi")
         with Not_found ->
-          let sourceintf =
-            Filename.remove_extension sourcefile ^ Literals.suffix_resi
-          in
           raise
             (Error
                ( Location.in_file sourcefile,
@@ -1752,7 +1752,9 @@ let type_implementation_more ?check_exists sourcefile outputprefix modulename
       in
       let dclsig = Env.read_signature modulename intf_file in
       let coercion =
-        Includemod.compunit initial_env sourcefile sg intf_file dclsig
+        (* Errors name the interface by its source file; the .cmi it was
+           read from is a build artifact. *)
+        Includemod.compunit initial_env sourcefile sg sourceintf dclsig
       in
       Delayed_checks.force_delayed_checks ();
       (* It is important to run these checks after the inclusion test above,
@@ -1874,7 +1876,7 @@ let report_error ppf = function
           modtype mty);
     fprintf ppf "@]"
   | Interface_not_compiled intf_name ->
-    fprintf ppf "@[Could not find the .cmi file for interface@ %a.@]"
+    fprintf ppf "@[Could not compile the interface@ %a.@]"
       Location.print_filename intf_name
   | Not_allowed_in_functor_body ->
     fprintf ppf "@[This expression creates fresh types.@ %s@]"

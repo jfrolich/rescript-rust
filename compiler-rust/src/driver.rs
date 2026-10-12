@@ -5026,7 +5026,7 @@ fn format_interface_not_compiled_report(
     interface_name: &str,
 ) -> String {
     let loc = Location::in_file(file_name_idx);
-    let message = format!("Could not find the .cmi file for interface\n{interface_name}.");
+    let message = format!("Could not compile the interface\n{interface_name}.");
     format_compiler_error_report_from_location(source, filename, &loc, &message)
 }
 
@@ -5089,11 +5089,6 @@ fn compiled_interface_file_exists(options: &CompilerOptions, source_file: &str) 
         .any(|dir| dir.join(&uncapitalized).exists() || dir.join(&filename).exists())
 }
 
-fn interface_cmi_name(source_file: &str) -> String {
-    let mut intf = std::path::PathBuf::from(source_file);
-    intf.set_extension("cmi");
-    intf.to_string_lossy().into_owned()
-}
 
 fn push_compiler_error_report_header_from_location(
     output: &mut String,
@@ -11973,7 +11968,6 @@ fn compile_source_to_js_with_options_inner(
         &|| source.to_string(),
         filename,
         has_resi,
-        None,
         current_unit_name.as_deref(),
     )?;
 
@@ -12604,58 +12598,6 @@ fn format_compunit_mismatch_report(
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
 }
 
-/// The `.cmi` name `Typemod.type_implementation` reports for an interface:
-/// `find_in_path_uncap !Config.load_path (modulename ^ ".cmi")`
-/// (typemod.ml:1742-1749, misc.ml `find_in_path_uncap`) spelled with the
-/// `-I` entry the file build passes. In-process builds put the package's own
-/// `lib/ocaml` first, which the file build passes as `-I ../ocaml` from
-/// `lib/bs`.
-///
-/// A clean in-process build has not written the interface's `.cmi` yet when
-/// the implementation is checked, while the file build has already put it in
-/// `lib/ocaml`. The name then is the one that build reports: the first `-I`
-/// entry, with the uncapitalised spelling when the filesystem ignores case
-/// (probed with the implementation's own source file).
-fn in_process_interface_display_name(
-    options: &CompilerOptions,
-    module_name: &str,
-    source_filename: &str,
-) -> Option<String> {
-    let filename = format!("{module_name}.cmi");
-    let mut uncap = filename.clone();
-    if let Some(first) = uncap.get_mut(0..1) {
-        first.make_ascii_lowercase();
-    }
-    for (index, dir) in options.include_paths.iter().enumerate() {
-        let display_dir = if index == 0 {
-            std::path::PathBuf::from("../ocaml")
-        } else {
-            dir.clone()
-        };
-        for name in [&uncap, &filename] {
-            if dir.join(name).exists() {
-                return Some(display_dir.join(name).to_string_lossy().into_owned());
-            }
-        }
-    }
-    options.include_paths.first()?;
-    let source = std::path::Path::new(source_filename);
-    let case_insensitive = source.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-        let flipped: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_uppercase() {
-                    c.to_ascii_lowercase()
-                } else {
-                    c.to_ascii_uppercase()
-                }
-            })
-            .collect();
-        flipped != name && source.with_file_name(flipped).exists()
-    });
-    let name = if case_insensitive { uncap } else { filename };
-    Some(std::path::Path::new("../ocaml").join(name).to_string_lossy().into_owned())
-}
 
 #[allow(clippy::too_many_arguments)]
 /// The result of checking an implementation against its interface: OCaml's
@@ -12675,7 +12617,6 @@ fn check_compunit_inclusion_for_errors(
     source: &dyn Fn() -> String,
     filename: &str,
     has_resi: bool,
-    interface_file: Option<&str>,
     unit_name: Option<&str>,
 ) -> Result<Option<CompunitInclusion>> {
     if !has_resi || !source_file.ends_with(".res") {
@@ -12732,9 +12673,8 @@ fn check_compunit_inclusion_for_errors(
         env,
         source_file,
         &typed_structure.str_type,
-        &interface_file
-            .map(str::to_string)
-            .unwrap_or_else(|| interface_cmi_name(source_file)),
+        // typemod.ml: the interface is named by its source file.
+        &interface_source_name(source_file),
         target_sig.as_ref(),
         &mut inclusion_warnings,
     ) {
@@ -12748,9 +12688,7 @@ fn check_compunit_inclusion_for_errors(
                 &source(),
                 filename,
                 source_file,
-                &interface_file
-            .map(str::to_string)
-            .unwrap_or_else(|| interface_cmi_name(source_file)),
+                &interface_source_name(source_file),
                 &error,
             ),
             2,
@@ -15890,7 +15828,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // checks, as the file compile does.
     let mut interface_inclusion = None;
     if has_interface {
-        let interface_file = in_process_interface_display_name(options, module_name, filename);
         match check_compunit_inclusion_for_errors(
             &mut tctx,
             &type_ctx,
@@ -15900,7 +15837,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             &|| source().to_string(),
             filename,
             true,
-            interface_file.as_deref(),
             options.current_unit_name().as_deref(),
         ) {
             Ok(inclusion) => interface_inclusion = inclusion,
