@@ -67,7 +67,6 @@ pub struct JsPrinter {
     source_map: Option<SourceMapBuilder>,
     generated_line: usize,
     generated_column: usize,
-    fallback_expression_source_loc: Option<crate::location::Location>,
 }
 
 impl Default for JsPrinter {
@@ -92,7 +91,6 @@ impl JsPrinter {
             source_map: None,
             generated_line: 0,
             generated_column: 0,
-            fallback_expression_source_loc: None,
         }
     }
 
@@ -199,7 +197,6 @@ impl JsPrinter {
             source_map: None,
             generated_line: 0,
             generated_column: 0,
-            fallback_expression_source_loc: None,
         };
         printer.print_expression(expr, level);
         printer.output
@@ -437,10 +434,9 @@ impl JsPrinter {
             self.newline();
         }
 
+        // js_dump.ml:1321-1324.
         self.mark_source_loc(stmt.source_loc.as_ref().map(|v| &**v));
-        self.fallback_expression_source_loc = stmt.source_loc.as_deref().copied();
         self.print_statement_desc(&stmt.desc, top_level);
-        self.fallback_expression_source_loc = None;
     }
 
     fn statement_prints_anything(&self, stmt: &Statement, top_level: bool) -> bool {
@@ -499,9 +495,13 @@ impl JsPrinter {
                                 directive,
                                 ..
                             },
+                        source_loc,
                         ..
                     }) = &decl.value
                     {
+                        // js_dump.ml:1278-1280: `mark_source_loc f e.source_loc`
+                        // before `pp_function`.
+                        self.mark_source_loc(source_loc.as_deref());
                         self.print_function_declaration(
                             &decl.ident,
                             *is_method,
@@ -697,11 +697,10 @@ impl JsPrinter {
                 }
 
                 self.write("return ");
-                if expr.source_loc.is_none() {
-                    let fallback = self.fallback_expression_source_loc;
-                    self.mark_source_loc(fallback.as_ref());
-                }
-                self.print_expression(expr, 0);
+                // js_dump.ml:1576-1584: a returned function goes straight to
+                // `pp_function`, without `expression`'s source-location mark.
+                let mark = !matches!(expr.desc, ExpressionDesc::Fun { .. });
+                self.print_expression_with_mark(expr, 0, mark);
                 self.semi();
             }
 
@@ -1661,6 +1660,10 @@ impl JsPrinter {
 
     /// Print an expression
     pub fn print_expression(&mut self, expr: &Expression, level: u8) {
+        self.print_expression_with_mark(expr, level, true);
+    }
+
+    fn print_expression_with_mark(&mut self, expr: &Expression, level: u8, mark: bool) {
         // Print comment if present
         if let Some(ref comment) = expr.comment {
             self.write("/* ");
@@ -1668,7 +1671,9 @@ impl JsPrinter {
             self.write(" */");
         }
 
-        self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
+        if mark {
+            self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
+        }
         self.print_expression_desc(&expr.desc, level);
     }
 
@@ -1907,11 +1912,20 @@ impl JsPrinter {
                     ] => &[][..],
                     _ => args.as_slice(),
                 };
+                // js_dump.ml:653-671: a lone function argument goes straight
+                // to `pp_function`, without `expression`'s source-location mark.
+                let mark_args = !matches!(
+                    printed_args,
+                    [Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }]
+                );
                 for (i, arg) in printed_args.iter().enumerate() {
                     if i > 0 {
                         self.write(", ");
                     }
-                    self.print_call_argument(arg, level);
+                    self.print_call_argument_with_mark(arg, level, mark_args);
                 }
                 self.write_char(')');
 
@@ -2374,6 +2388,9 @@ impl JsPrinter {
                     crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
                 ) =>
             {
+                // js_dump.ml:470-472: `expression` marks the block's location
+                // before printing it.
+                self.mark_source_loc(expr.source_loc.as_deref());
                 self.print_exception_block_literal(level, elements, tag_info, include_stack);
                 true
             }
@@ -2532,6 +2549,10 @@ impl JsPrinter {
     }
 
     fn print_call_argument(&mut self, expr: &Expression, call_level: u8) {
+        self.print_call_argument_with_mark(expr, call_level, true);
+    }
+
+    fn print_call_argument_with_mark(&mut self, expr: &Expression, call_level: u8, mark: bool) {
         let extra_group_indent =
             call_argument_needs_extra_group_indent(expr, call_level, self.indent)
                 && self.suppress_member_target_call_arg_group_indent == 0
@@ -2540,7 +2561,7 @@ impl JsPrinter {
         if extra_group_indent {
             self.indent();
         }
-        self.print_expression(expr, 1);
+        self.print_expression_with_mark(expr, 1, mark);
         if extra_group_indent {
             self.dedent();
         }
