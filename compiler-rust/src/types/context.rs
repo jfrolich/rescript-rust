@@ -788,9 +788,8 @@ pub struct TypeContext {
     /// Raw signatures loaded only for persistent component lookup.
     ///
     /// OCaml keeps `ps_comps` separate from `ps_sig`; this cache gives Rust the
-    /// same one-shot component backing store without making
-    /// `trigger_all_module_sig_renames` see modules that were only touched by
-    /// descriptor lookup.
+    /// same one-shot component backing store without making the `ps_sig`
+    /// rename see modules that were only touched by descriptor lookup.
     raw_component_module_sigs:
         RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
@@ -4255,9 +4254,8 @@ impl TypeContext {
         // the CMI signature separately from `ps_sig`, and env.ml:781-788 returns
         // those components for exact persistent `Pident` descriptor lookup.
         // Keep this fallback separate from `raw_module_sigs`: that map drives
-        // ps_sig lazy renaming, and caching component-only loads there makes a
-        // later `trigger_all_module_sig_renames` freshen modules OCaml has only
-        // looked up through ps_comps.
+        // ps_sig lazy renaming, and component-only loads must not be freshened:
+        // OCaml has only looked them up through ps_comps.
         let sig = self.load_lazy_raw_module_sig_for_rename(module_name)?;
         self.raw_component_module_sigs
             .borrow_mut()
@@ -4278,24 +4276,6 @@ impl TypeContext {
             return; // Already renamed
         }
         self.rename_one_module_sig(module_name);
-    }
-
-    /// Trigger renaming for ALL registered module signatures.
-    /// In OCaml, accessing one module (e.g. Console) via components_of_module_maker
-    /// cascades into scrape_alias → find_module for dependent modules (e.g. Pervasives),
-    /// forcing ALL their ps_sig lazies. We match this by renaming all registered
-    /// modules when any one is first accessed.
-    pub fn trigger_all_module_sig_renames(&self) {
-        let names: Vec<String> = self.raw_module_sigs.borrow().keys().cloned().collect();
-        for name in &names {
-            if !self
-                .renamed_module_sigs
-                .borrow()
-                .contains_key(name.as_str())
-            {
-                self.rename_one_module_sig(name);
-            }
-        }
     }
 
     fn rename_one_module_sig(&self, module_name: &str) {

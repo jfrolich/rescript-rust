@@ -27227,7 +27227,7 @@ fn lookup_constructor_by_expected_type<'b>(
     None
 }
 
-fn strengthen_type_decl_for_module_access_path<'a>(
+pub(crate) fn strengthen_type_decl_for_module_access_path<'a>(
     ctx: &'a crate::types::context::TypeContext,
     module_access_path: &Path,
     id: &Ident,

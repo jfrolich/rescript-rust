@@ -3821,8 +3821,7 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized =
-        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false, None);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
@@ -3906,8 +3905,7 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     if let Some(cached) = ctx.find_forced_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized =
-        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true, None);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true);
     ctx.register_forced_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
@@ -3921,7 +3919,7 @@ fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path)
         return cached;
     }
     let normalized =
-        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false, None);
+        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false);
     ctx.register_normalized_path_forward(env_id, path, normalized.clone());
     normalized
 }
@@ -3934,7 +3932,6 @@ fn normalize_path_full_inner<'a>(
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
     force_module_lookup_side_effects: bool,
-    root_child: Option<&str>,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -3967,7 +3964,6 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
-                None,
             );
         }
     }
@@ -3990,7 +3986,6 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
-                Some(s.as_str()),
             );
             if p_norm == **p {
                 path.clone()
@@ -4007,7 +4002,6 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
-                None,
             );
             let p2_norm = normalize_path_full_inner(
                 ctx,
@@ -4017,7 +4011,6 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
-                None,
             );
             if p1_norm == **p1 && p2_norm == **p2 {
                 path.clone()
@@ -4038,16 +4031,7 @@ fn normalize_path_full_inner<'a>(
     // `Stdlib` roots naturally take the persistent force path here.
     if let Path::Pident(id) = &path {
         let has_local_module = env.find_module_same(id).is_ok();
-        // OCaml compiler/ml/env.ml:1000-1007 can reach selected implicit
-        // `Stdlib` children through persistent `ps_comps`. That descriptor
-        // path does not force env.ml:719-721 `ps_sig`; Rust recursively
-        // normalizes synthetic `Stdlib.<child>.*` paths, so keep the same
-        // component-only root lookup here.
-        let stdlib_component_lookup =
-            id.name() == "Stdlib" && matches!(root_child, Some("ArrayBuffer" | "JSON"));
-        let should_force_persistent_sig =
-            id.is_persistent() && !stdlib_component_lookup && !has_local_module;
-        if should_force_persistent_sig {
+        if id.is_persistent() && !has_local_module {
             ctx.trigger_module_sig_rename(id.name());
         }
     }
@@ -4071,7 +4055,6 @@ fn normalize_path_full_inner<'a>(
             visiting,
             allow_reverse_local_aliases,
             force_module_lookup_side_effects,
-            None,
         );
     }
 
@@ -4098,7 +4081,6 @@ fn normalize_path_full_inner<'a>(
                     visiting,
                     allow_reverse_local_aliases,
                     force_module_lookup_side_effects,
-                    None,
                 );
             }
         }
@@ -4123,7 +4105,6 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
-                None,
             );
         }
     }
