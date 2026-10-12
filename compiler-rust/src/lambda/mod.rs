@@ -72,6 +72,8 @@ pub(crate) mod lam_pass_remove_alias_indexed;
 pub mod lam_pass_sroa;
 pub mod lam_primitive;
 pub mod lam_print;
+pub mod printlambda;
+pub mod lam_pass_collapse_var_aliases;
 pub mod lam_subst;
 pub mod lam_tag_info;
 pub mod lam_util;

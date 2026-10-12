@@ -12288,29 +12288,6 @@ fn compile_source_to_js_with_options_inner(
         || type_warnings_have_errors(&raw_warnings);
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
-    if options.dump_lambda {
-        if raw_trace {
-            eprintln!("[drawlambda-stage] after-convert");
-            eprintln!("[drawlambda-stage] before-print");
-        }
-        use std::io::Write;
-        let mut stderr = std::io::stderr();
-        let mut raw_buf = Vec::new();
-        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
-        raw_buf.push(b'\n');
-        let _ = stderr.write_all(&raw_buf);
-        if raw_trace {
-            eprintln!("[drawlambda-stage] after-print");
-        }
-        let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
-        if !raw_only {
-            let _ = stderr.flush();
-        }
-        if raw_only {
-            std::process::exit(0);
-        }
-    }
-
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.type_context_stamp = type_ctx.current_stamp();
@@ -12319,10 +12296,27 @@ fn compile_source_to_js_with_options_inner(
         trace.raw_lambda = format!("{raw_lambda:#?}");
     }
 
-    let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-        raw_lambda,
-        raw_lambda_current_stamp,
-    );
+    let (lowered_lambda, export_idents) =
+        crate::raw_lambda::lower::lower_to_translmod_lambda_with_start_stamp(
+            raw_lambda,
+            raw_lambda_current_stamp,
+        );
+    // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
+    if options.dump_lambda {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        crate::lambda::printlambda::print_lambda(&lowered_lambda, &mut buf);
+        buf.push(b'\n');
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(&buf);
+        let _ = stderr.flush();
+        if std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some() {
+            std::process::exit(0);
+        }
+    }
+    // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
+    let lowered_lambda =
+        crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents);
     if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
         return Err(duplicate_export_error(filename, &name));
     }
@@ -16483,12 +16477,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if type_warnings_have_errors(&tctx.warnings) || type_warnings_have_errors(&raw_warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
     }
-    if options.dumps.contains(&DumpKind::RawLambda) {
-        let mut buf = Vec::new();
-        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut buf);
-        buf.push(b'\n');
-        dumps.push((DumpKind::RawLambda, latin1_dump(buf)));
-    }
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -16500,10 +16488,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.lower_lambda").entered();
-        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
+        crate::raw_lambda::lower::lower_to_translmod_lambda_with_start_stamp(
             raw_lambda,
             raw_lambda_current_stamp,
         )
+    });
+    let (lowered_lambda, export_idents) = lowered_lambda;
+    // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
+    if options.dumps.contains(&DumpKind::RawLambda) {
+        let mut buf = Vec::new();
+        crate::lambda::printlambda::print_lambda(&lowered_lambda, &mut buf);
+        buf.push(b'\n');
+        dumps.push((DumpKind::RawLambda, latin1_dump(buf)));
+    }
+    // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
+    let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
+        crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents)
     });
     if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
         return Err(duplicate_export_error(filename, &name));

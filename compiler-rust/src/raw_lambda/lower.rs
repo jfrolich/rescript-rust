@@ -4,7 +4,7 @@
 //! by optimized-lambda parity dumps and now also feeds the JS backend entry
 //! point in `driver.rs`.
 
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::AHashSet as HashSet;
 use std::sync::Arc;
 
 use crate::context::IdGenerator;
@@ -20,24 +20,18 @@ use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
 struct LoweringContext<'a> {
-    alias_tbl: HashMap<Ident, Ident>,
-    exported_idents: HashSet<Ident>,
     id_gen: &'a IdGenerator,
 }
 
 impl<'a> LoweringContext<'a> {
-    fn with_id_gen(exported_idents: HashSet<Ident>, id_gen: &'a IdGenerator) -> Self {
-        Self {
-            alias_tbl: HashMap::new(),
-            exported_idents,
-            id_gen,
-        }
+    fn with_id_gen(id_gen: &'a IdGenerator) -> Self {
+        Self { id_gen }
     }
 
     fn lower_lambda(&mut self, raw: RawLambda) -> Lambda {
         match raw {
             RawLambda::Lshared(inner) => self.lower_lambda(std::sync::Arc::unwrap_or_clone(inner)),
-            RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
+            RawLambda::Lvar(id) => Lambda::var(id),
             RawLambda::LglobalModule(id) => {
                 if id.is_predef_exn() {
                     Lambda::const_(Constant::String(id.name().to_string()))
@@ -117,10 +111,6 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
-    fn alias_target(&self, id: Ident) -> Ident {
-        self.alias_tbl.get(&id).cloned().unwrap_or(id)
-    }
-
     fn lower_apply(&mut self, apply: RawApply) -> Lambda {
         let RawApply {
             ap_func,
@@ -148,18 +138,6 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_let(&mut self, kind: LetKind, id: Ident, value: RawLambda, body: RawLambda) -> Lambda {
-        if kind == LetKind::Alias {
-            if let RawLambda::Lvar(target) = value {
-                let target = self.alias_target(target);
-                self.alias_tbl.insert(id.clone(), target.clone());
-                let lowered_body = self.lower_lambda(body);
-                if self.exported_idents.contains(&id) {
-                    return Lambda::let_(kind, id, Lambda::var(target), lowered_body);
-                }
-                return lowered_body;
-            }
-        }
-
         let lowered_value = self.lower_lambda(value);
         let lowered_body = self.lower_lambda(body);
 
@@ -1187,11 +1165,24 @@ pub(crate) fn max_ident_stamp_for_test(raw: &RawLambda) -> i32 {
     max_ident_stamp(raw)
 }
 
-pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lambda {
+/// The Lambda `Translmod.transl_implementation` returns, as `-drawlambda`
+/// prints it, and the module's exported identifiers.
+pub fn lower_to_translmod_lambda_with_start_stamp(
+    raw: RawLambda,
+    start_stamp: i32,
+) -> (Lambda, HashSet<Ident>) {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
     let id_gen = IdGenerator::with_start_stamp(start_stamp);
-    LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
+    let lambda = LoweringContext::with_id_gen(&id_gen).lower_lambda(raw);
+    (lambda, exported_idents)
+}
+
+/// The lowered Lambda after `Lam_pass_collapse_var_aliases`, the first pass
+/// of `Lam_compile_main.compile` (lam_compile_main.ml:288-290).
+pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lambda {
+    let (lambda, exports) = lower_to_translmod_lambda_with_start_stamp(raw, start_stamp);
+    crate::lambda::lam_pass_collapse_var_aliases::collapse(lambda, &exports)
 }
 
 /// Additive M5 entrypoint for the inactive indexed pipeline. The caller keeps
@@ -1199,7 +1190,8 @@ pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lam
 pub(crate) fn lower_to_lambda_with_id_gen(raw: RawLambda, id_gen: Arc<IdGenerator>) -> Lambda {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
+    let lambda = LoweringContext::with_id_gen(&id_gen).lower_lambda(raw);
+    crate::lambda::lam_pass_collapse_var_aliases::collapse(lambda, &exported_idents)
 }
 
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
