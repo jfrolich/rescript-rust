@@ -28,8 +28,8 @@ RUST_BSC = Path(
         ROOT / "rewatch/target" / os.environ.get("RUST_TARGET", "release") / "bsc",
     )
 )
-# `bsc` is a symlink to the rescript executable, which runs its linked compiler
-# when invoked under that name.
+# `bsc` is a wrapper script (scripts/rust_compiler_shims.sh) that runs the
+# rescript executable's hidden `rescript bsc` command.
 subprocess.run(
     [ROOT / "scripts/rust_compiler_shims.sh", os.environ.get("RUST_TARGET", "release")],
     check=False,

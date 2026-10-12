@@ -10,11 +10,19 @@ set -e
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 dir="$root/rewatch/target/${1:-release}"
 [[ -x "$dir/rescript" ]] || exit 0
+# Concurrent callers (e.g. the fuzz workers, which each import difftest.py)
+# may run a wrapper while another rewrites it, so an unchanged wrapper is left
+# alone and a new one replaces the old by rename.
 write_shim() {
-    local name=$1 command=$2
-    rm -f "$dir/$name"
-    printf '#!/bin/sh\nexec "%s/rescript" %s "$@"\n' "$dir" "$command" > "$dir/$name"
-    chmod +x "$dir/$name"
+    local name=$1 command=$2 content tmp
+    content=$(printf '#!/bin/sh\nexec "%s/rescript" %s "$@"' "$dir" "$command")
+    if [[ -x "$dir/$name" && ! -L "$dir/$name" && "$(cat "$dir/$name")" == "$content" ]]; then
+        return
+    fi
+    tmp=$(mktemp "$dir/.$name.XXXXXX")
+    printf '%s\n' "$content" > "$tmp"
+    chmod +x "$tmp"
+    mv -f "$tmp" "$dir/$name"
 }
 write_shim bsc bsc
 write_shim res_parser_rust res-parser
