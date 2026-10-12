@@ -143,6 +143,10 @@ impl Doc {
                         col += 1;
                     }
                     Mode::Break => {
+                        // res_minibuffer.ml `flush_newline`: drop the spaces
+                        // before the newline (an atom such as `" ~ "` can end
+                        // in one).
+                        out.truncate(out.trim_end_matches(' ').len());
                         out.push('\n');
                         for _ in 0..indent {
                             out.push(' ');
