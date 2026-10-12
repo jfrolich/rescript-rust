@@ -54,3 +54,4 @@ tests/js_output_parity/fixtures/conditional_return_printing.res
 tests/js_output_parity/fixtures/short_circuit_assignment.res
 tests/js_output_parity/fixtures/callback_boolean_inline.res
 tests/js_output_parity/fixtures/tella_regression_patterns.res	
+tests/js_output_parity/fixtures/match_failure_location.res	

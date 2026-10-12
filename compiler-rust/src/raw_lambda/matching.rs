@@ -3913,6 +3913,7 @@ fn cons_next_or<'p>(
 /// Ultra-naive splitting, close to semantics, used for extension constructors.
 /// Equivalent to OCaml's `split_naive`.
 fn split_naive<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     cls: &[Clause<'p>],
     args: &MatchArgs,
@@ -3924,6 +3925,7 @@ fn split_naive<'p>(
         None => panic!("split_naive: empty cases"),
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if group_constructor(p) => split_exc(
+                ctx_ref,
                 pa,
                 pat_as_constr(p),
                 vec![cl.clone()],
@@ -3933,7 +3935,7 @@ fn split_naive<'p>(
                 k,
                 next_raise,
             ),
-            Some(_) => split_noexc(pa, vec![cl.clone()], rem, args, def, k, next_raise),
+            Some(_) => split_noexc(ctx_ref, pa, vec![cl.clone()], rem, args, def, k, next_raise),
             None => panic!("split_naive: empty pattern row"),
         },
     }
@@ -3941,6 +3943,7 @@ fn split_naive<'p>(
 
 /// Split on extension constructors (naive).
 fn split_exc<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     cstr0: &crate::types::ConstructorDescription,
     yes: Vec<Clause<'p>>,
@@ -3972,10 +3975,11 @@ fn split_exc<'p>(
                 if same_constructor(cstr, cstr0) {
                     let mut new_yes = yes;
                     new_yes.insert(0, cl.clone());
-                    split_exc(pa, cstr0, new_yes, rem, args, def, k, next_raise)
+                    split_exc(ctx_ref, pa, cstr0, new_yes, rem, args, def, k, next_raise)
                 } else {
                     let yes = rev_vec(yes);
                     let (info, nexts) = split_exc(
+                        ctx_ref,
                         pa,
                         cstr,
                         vec![cl.clone()],
@@ -4010,8 +4014,16 @@ fn split_exc<'p>(
             }
             Some(_) => {
                 let yes = rev_vec(yes);
-                let (info, nexts) =
-                    split_noexc(pa, vec![cl.clone()], rem, args, def.clone(), k, next_raise);
+                let (info, nexts) = split_noexc(
+                    ctx_ref,
+                    pa,
+                    vec![cl.clone()],
+                    rem,
+                    args,
+                    def.clone(),
+                    k,
+                    next_raise,
+                );
                 let idef = bump_raise_count(next_raise, "matching::split_exc:nonconstructor");
                 let PmHalfCompiledInfo {
                     me: next,
@@ -4041,6 +4053,7 @@ fn split_exc<'p>(
 
 /// Split on non-extension constructors (naive).
 fn split_noexc<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     yes: Vec<Clause<'p>>,
     rest: &[Clause<'p>],
@@ -4052,12 +4065,13 @@ fn split_noexc<'p>(
     match rest.split_first() {
         None => {
             let yes = rev_vec(yes);
-            precompile_var(pa, args, yes, def, k, next_raise)
+            precompile_var(ctx_ref, pa, args, yes, def, k, next_raise)
         }
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if group_constructor(p) => {
                 let yes = rev_vec(yes);
                 let (info, nexts) = split_exc(
+                    ctx_ref,
                     pa,
                     pat_as_constr(p),
                     vec![cl.clone()],
@@ -4074,6 +4088,7 @@ fn split_noexc<'p>(
                     top_default,
                 } = info;
                 precompile_var(
+                    ctx_ref,
                     pa,
                     args,
                     yes,
@@ -4089,7 +4104,7 @@ fn split_noexc<'p>(
             Some(_) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
-                split_noexc(pa, new_yes, rem, args, def, k, next_raise)
+                split_noexc(ctx_ref, pa, new_yes, rem, args, def, k, next_raise)
             }
             None => panic!("split_noexc: empty pattern row"),
         },
@@ -4109,11 +4124,13 @@ fn split_constr<'p>(
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
     let ex_pat = what_is_cases(cls);
     match &ex_pat.pat_desc {
-        PatternDesc::Tpat_any => precompile_var(pa, args, cls.to_vec(), def, k, next_raise),
+        PatternDesc::Tpat_any => {
+            precompile_var(ctx_ref, pa, args, cls.to_vec(), def, k, next_raise)
+        }
         PatternDesc::Tpat_construct(_, cstr, _)
             if matches!(&cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) =>
         {
-            split_naive(pa, cls, args, def, k, next_raise)
+            split_naive(ctx_ref, pa, cls, args, def, k, next_raise)
         }
         _ => {
             let group = get_group(&ex_pat);
@@ -4270,7 +4287,7 @@ fn split_noex<'p>(
             let yes = rev_vec(yes);
             let no = rev_vec(no);
             match no.split_first() {
-                None => precompile_var(pa, args, yes, def, k, next_raise),
+                None => precompile_var(ctx_ref, pa, args, yes, def, k, next_raise),
                 Some((no_cl, no_rem)) => {
                     let (info, nexts) = split_ex(
                         ctx_ref,
@@ -4291,6 +4308,7 @@ fn split_noex<'p>(
                         top_default,
                     } = info;
                     precompile_var(
+                        ctx_ref,
                         pa,
                         args,
                         yes,
@@ -4387,6 +4405,7 @@ fn split_noex<'p>(
 /// split further on the second column.
 /// Equivalent to OCaml's `precompile_var`.
 fn precompile_var<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
@@ -4419,8 +4438,8 @@ fn precompile_var<'p>(
                         let av = arg_rest[0].0.clone();
                         let arg_tail = args.tail(1);
                         let (first_info, nexts) = split_or(
-                            None,
-                            pa, // TypeContext not available in do_split_or
+                            ctx_ref,
+                            pa,
                             &Some(v.clone()),
                             var_cls,
                             &arg_tail,
@@ -9465,13 +9484,20 @@ fn compile_matching_unresolved<'p>(
 
 /// Build a match failure exception raise.
 /// Equivalent to OCaml's `partial_function`.
-pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
+pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
     let line = loc.loc_start.line;
     let char_pos = loc.loc_start.column();
-    // File name is stored as StrIdx; we use "" as placeholder since we can't
-    // resolve it without the parse arena. The actual file name will be resolved
-    // when this is called from convert.rs which has arena access.
-    let fname = String::new();
+    // `Filename.basename fname` (matching.ml:2690-2691).
+    let fname = if loc.file_name_idx().0 == 0 {
+        String::new()
+    } else {
+        let file = arena.get_string(loc.file_name_idx());
+        std::path::Path::new(file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file)
+            .to_string()
+    };
 
     let match_failure_ident = crate::types::predef::ident_match_failure();
     let exn = RawLambda::global_module(match_failure_ident);
@@ -9510,7 +9536,7 @@ pub fn for_function<'p>(
     compile_matching(
         ctx_ref,
         arena,
-        || partial_function(ctx_ref, loc_clone),
+        || partial_function(arena, loc_clone),
         param,
         pat_act_list,
         partial,
@@ -9560,7 +9586,7 @@ pub fn simple_for_let(
     compile_matching(
         ctx_ref,
         arena,
-        || partial_function(ctx_ref, loc_clone),
+        || partial_function(arena, loc_clone),
         param,
         vec![(pat, CaseAction::unguarded(body))],
         Partial::Partial,
@@ -9658,10 +9684,10 @@ fn for_tupled_function_unresolved<'p>(
         Ok((lambda, total)) => {
             let loc_clone = loc.clone();
             check_total(&total, lambda, raise_num, || {
-                partial_function(ctx_ref, loc_clone)
+                partial_function(arena, loc_clone)
             })
         }
-        Err(Unused) => partial_function(ctx_ref, loc),
+        Err(Unused) => partial_function(arena, loc),
     }
 }
 
@@ -9930,7 +9956,7 @@ pub fn do_for_multiple_match<'p>(
                 Partial::Partial => {
                     let loc_clone = loc.clone();
                     check_total(&total, lam, raise_num, || {
-                        partial_function(ctx_ref, loc_clone)
+                        partial_function(arena, loc_clone)
                     })
                 }
                 Partial::Total => {
@@ -9961,7 +9987,7 @@ pub fn do_for_multiple_match<'p>(
                     Partial::Partial => {
                         let loc_clone = loc.clone();
                         check_total(&total, lambda, raise_num, || {
-                            partial_function(ctx_ref, loc_clone)
+                            partial_function(arena, loc_clone)
                         })
                     }
                     Partial::Total => {
