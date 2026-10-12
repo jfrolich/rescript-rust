@@ -2784,7 +2784,14 @@ pub fn same_actions<'p>(cases: &[Clause<'p>]) -> Option<RawLambda> {
 /// Returns true if both can be normalized and their normalized forms are equal.
 ///
 /// Equivalent to OCaml's `up_ok_action`.
-fn up_ok_action(act1: &MatchAction, act2: &MatchAction) -> bool {
+fn up_ok_action(ctx_ref: Option<&TypeContext>, act1: &MatchAction, act2: &MatchAction) -> bool {
+    // `let fail = Lambda.var (Ident.create "fallthrough")`
+    // (compiler/ml/matching.ml:522-525): every comparison takes a fresh
+    // identifier, shared by both keys. The cached keys use a stand-in that is
+    // never allocated, equally shared; take the stamp OCaml takes here.
+    if let Some(ctx) = ctx_ref {
+        let _fail = ctx.create_ident("fallthrough");
+    }
     match (act1.normalized_key(), act2.normalized_key()) {
         (Some(raw1), Some(raw2)) => raw1 == raw2,
         _ => false,
@@ -2800,16 +2807,22 @@ fn up_ok_action(act1: &MatchAction, act2: &MatchAction) -> bool {
 /// are incompatible.
 ///
 /// Equivalent to OCaml's `up_ok`.
-fn up_ok(ps: &[&Pattern], act_p: &MatchAction, l: &[Clause<'_>]) -> bool {
-    up_ok_iter(ps, act_p, l.iter())
+fn up_ok(
+    ctx_ref: Option<&TypeContext>,
+    ps: &[&Pattern],
+    act_p: &MatchAction,
+    l: &[Clause<'_>],
+) -> bool {
+    up_ok_iter(ctx_ref, ps, act_p, l.iter())
 }
 
 fn up_ok_iter<'p: 'a, 'a>(
+    ctx_ref: Option<&TypeContext>,
     ps: &[&'p Pattern],
     act_p: &MatchAction,
     mut clauses: impl Iterator<Item = &'a Clause<'p>>,
 ) -> bool {
-    clauses.all(|(qs, act_q)| up_ok_action(act_p, act_q) || !may_compats(ps, qs))
+    clauses.all(|(qs, act_q)| up_ok_action(ctx_ref, act_p, act_q) || !may_compats(ps, qs))
 }
 
 // ============================================================================
@@ -3817,13 +3830,13 @@ fn do_split_or<'p>(
         let push_to_before_or_ors = {
             let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
             let act = &cl.1;
-            if up_ok_iter(cl.0.as_slice(), act, no.iter()) {
+            if up_ok_iter(ctx_ref, cl.0.as_slice(), act, no.iter()) {
                 if is_or(p) {
                     let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
                     ors = new_ors;
                     no = new_no;
                     continue;
-                } else if up_ok_iter(cl.0.as_slice(), act, ors.iter()) {
+                } else if up_ok_iter(ctx_ref, cl.0.as_slice(), act, ors.iter()) {
                     // OCaml `do_split` moves the current row into `before` with
                     // `(cl :: before)` (compiler/ml/matching.ml:820-826).
                     Some(true)
@@ -4086,6 +4099,7 @@ fn split_noexc<'p>(
 /// Split on constructors using group predicates.
 /// Equivalent to OCaml's `split_constr`.
 fn split_constr<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     cls: &[Clause<'p>],
     args: &MatchArgs,
@@ -4106,6 +4120,7 @@ fn split_constr<'p>(
             match cls.split_first() {
                 Some((cl, rem)) => match cl.0.first() {
                     Some(p) if group(p) => split_ex(
+                        ctx_ref,
                         pa,
                         group,
                         vec![cl.clone()],
@@ -4117,6 +4132,7 @@ fn split_constr<'p>(
                         next_raise,
                     ),
                     _ => split_noex(
+                        ctx_ref,
                         pa,
                         group,
                         vec![cl.clone()],
@@ -4136,6 +4152,7 @@ fn split_constr<'p>(
 
 /// split_ex: raise constructor rows up.
 fn split_ex<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     group: fn(&'p Pattern) -> bool,
     yes: Vec<Clause<'p>>,
@@ -4167,6 +4184,7 @@ fn split_ex<'p>(
                     if yes.is_empty() {
                         // Could not succeed in raising up a constr matching up
                         split_noex(
+                            ctx_ref,
                             pa,
                             group,
                             vec![no_cl.clone()],
@@ -4179,6 +4197,7 @@ fn split_ex<'p>(
                         )
                     } else {
                         let (info, nexts) = split_noex(
+                            ctx_ref,
                             pa,
                             group,
                             vec![no_cl.clone()],
@@ -4215,15 +4234,19 @@ fn split_ex<'p>(
             }
         }
         Some((cl, rem)) => match cl.0.first() {
-            Some(p) if group(p) && up_ok(&cl.0, &cl.1, &no) => {
+            Some(p) if group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
-                split_ex(pa, group, new_yes, no, rem, args, def, k, next_raise)
+                split_ex(
+                    ctx_ref, pa, group, new_yes, no, rem, args, def, k, next_raise,
+                )
             }
             _ => {
                 let mut new_no = no;
                 new_no.insert(0, cl.clone());
-                split_ex(pa, group, yes, new_no, rem, args, def, k, next_raise)
+                split_ex(
+                    ctx_ref, pa, group, yes, new_no, rem, args, def, k, next_raise,
+                )
             }
         },
     }
@@ -4231,6 +4254,7 @@ fn split_ex<'p>(
 
 /// split_noex: raise non-constructor rows up.
 fn split_noex<'p>(
+    ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
     group: fn(&'p Pattern) -> bool,
     yes: Vec<Clause<'p>>,
@@ -4249,6 +4273,7 @@ fn split_noex<'p>(
                 None => precompile_var(pa, args, yes, def, k, next_raise),
                 Some((no_cl, no_rem)) => {
                     let (info, nexts) = split_ex(
+                        ctx_ref,
                         pa,
                         group,
                         vec![no_cl.clone()],
@@ -4288,34 +4313,71 @@ fn split_noex<'p>(
                 // last row is made of variables only
                 let mut new_no = no;
                 new_no.insert(0, cl.clone());
-                split_noex(pa, group, yes, new_no, &[], args, def, k, next_raise)
+                split_noex(
+                    ctx_ref,
+                    pa,
+                    group,
+                    yes,
+                    new_no,
+                    &[],
+                    args,
+                    def,
+                    k,
+                    next_raise,
+                )
             } else {
                 // Fall through to normal case
                 let cl = &rest[0];
                 match cl.0.first() {
-                    Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                    Some(p) if !group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
                         let mut new_yes = yes;
                         new_yes.insert(0, cl.clone());
-                        split_noex(pa, group, new_yes, no, &[], args, def, k, next_raise)
+                        split_noex(
+                            ctx_ref,
+                            pa,
+                            group,
+                            new_yes,
+                            no,
+                            &[],
+                            args,
+                            def,
+                            k,
+                            next_raise,
+                        )
                     }
                     _ => {
                         let mut new_no = no;
                         new_no.insert(0, cl.clone());
-                        split_noex(pa, group, yes, new_no, &[], args, def, k, next_raise)
+                        split_noex(
+                            ctx_ref,
+                            pa,
+                            group,
+                            yes,
+                            new_no,
+                            &[],
+                            args,
+                            def,
+                            k,
+                            next_raise,
+                        )
                     }
                 }
             }
         }
         Some((cl, rem)) => match cl.0.first() {
-            Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+            Some(p) if !group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
                 new_yes.insert(0, cl.clone());
-                split_noex(pa, group, new_yes, no, rem, args, def, k, next_raise)
+                split_noex(
+                    ctx_ref, pa, group, new_yes, no, rem, args, def, k, next_raise,
+                )
             }
             _ => {
                 let mut new_no = no;
                 new_no.insert(0, cl.clone());
-                split_noex(pa, group, yes, new_no, rem, args, def, k, next_raise)
+                split_noex(
+                    ctx_ref, pa, group, yes, new_no, rem, args, def, k, next_raise,
+                )
             }
         },
     }
@@ -4427,7 +4489,7 @@ fn precompile_or<'p>(
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
     if ors.is_empty() {
-        return split_constr(pa, &cls, args, def, k, next_raise);
+        return split_constr(ctx_ref, pa, &cls, args, def, k, next_raise);
     }
 
     // do_cases processes the or-pattern list

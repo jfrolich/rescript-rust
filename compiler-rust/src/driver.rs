@@ -16254,6 +16254,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let current_raw_sig = std::sync::Arc::new(
             crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx),
         );
+        // `save_signature` saves a copy (`Subst.signature (Subst.for_saving
+        // Subst.identity) sg`, env.ml:1949-1952): finalizing the saved paths
+        // (`t` -> `Current.t`) must not reach the typed tree's type nodes,
+        // which Lambda translation reads next (Typeopt expansions).
+        let signature_for_save =
+            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx);
         // typemod.ml:1778: `Builtin_attributes.deprecated_of_str ast`.
         internal_env.register_in_memory_signature(
             module_name,
