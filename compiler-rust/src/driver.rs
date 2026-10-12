@@ -12610,7 +12610,17 @@ fn format_compunit_mismatch_report(
 /// `-I` entry the file build passes. In-process builds put the package's own
 /// `lib/ocaml` first, which the file build passes as `-I ../ocaml` from
 /// `lib/bs`.
-fn in_process_interface_display_name(options: &CompilerOptions, module_name: &str) -> Option<String> {
+///
+/// A clean in-process build has not written the interface's `.cmi` yet when
+/// the implementation is checked, while the file build has already put it in
+/// `lib/ocaml`. The name then is the one that build reports: the first `-I`
+/// entry, with the uncapitalised spelling when the filesystem ignores case
+/// (probed with the implementation's own source file).
+fn in_process_interface_display_name(
+    options: &CompilerOptions,
+    module_name: &str,
+    source_filename: &str,
+) -> Option<String> {
     let filename = format!("{module_name}.cmi");
     let mut uncap = filename.clone();
     if let Some(first) = uncap.get_mut(0..1) {
@@ -12628,7 +12638,23 @@ fn in_process_interface_display_name(options: &CompilerOptions, module_name: &st
             }
         }
     }
-    None
+    options.include_paths.first()?;
+    let source = std::path::Path::new(source_filename);
+    let case_insensitive = source.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        let flipped: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        flipped != name && source.with_file_name(flipped).exists()
+    });
+    let name = if case_insensitive { uncap } else { filename };
+    Some(std::path::Path::new("../ocaml").join(name).to_string_lossy().into_owned())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -15864,7 +15890,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // checks, as the file compile does.
     let mut interface_inclusion = None;
     if has_interface {
-        let interface_file = in_process_interface_display_name(options, module_name);
+        let interface_file = in_process_interface_display_name(options, module_name, filename);
         match check_compunit_inclusion_for_errors(
             &mut tctx,
             &type_ctx,
