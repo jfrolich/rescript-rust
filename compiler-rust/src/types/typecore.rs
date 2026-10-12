@@ -29131,6 +29131,12 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
                 && ctx.persistent_env_is_in_process()
                 && key.is_worker_shareable()
                 && shared_components_enabled()
+                // The worker's shared view was built by a compilation that
+                // could see the root unit; one that cannot (a package that
+                // does not depend on it) must not reach it through the view.
+                && pers_env
+                    .as_ref()
+                    .is_none_or(|pers| pers.unit_visible(module_path.head().name()))
         })
         .cloned();
     if let Some(module_key) = module_key.as_ref() {
