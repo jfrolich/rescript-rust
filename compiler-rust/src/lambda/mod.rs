@@ -397,6 +397,9 @@ pub struct LFunction {
     pub body: Box<Lambda>,
     /// Function attributes
     pub attr: FunctionAttribute,
+    /// Source location (`lfunction.loc`, compiler/ml/lambda.mli:374-379),
+    /// read by source maps (compiler/core/lam_compile.ml:436, 1829).
+    pub loc: Location,
 }
 
 /// Primitive operation info
@@ -555,12 +558,14 @@ impl Lambda {
         params: Vec<Ident>,
         body: Lambda,
         attr: FunctionAttribute,
+        loc: Location,
     ) -> Self {
         Lambda::Lfunction(Box::new(LFunction {
             arity,
             params,
             body: Box::new(body),
             attr,
+            loc,
         }))
     }
 
@@ -1644,7 +1649,7 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(x.clone()),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
 
         match func {

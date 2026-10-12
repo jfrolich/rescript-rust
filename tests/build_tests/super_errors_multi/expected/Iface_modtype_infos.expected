@@ -4,7 +4,7 @@
   [36m/.../fixtures/Iface_modtype_infos/Foo.res[0m
 
   The implementation /.../fixtures/Iface_modtype_infos/Foo.res
-  does not match the interface /.../fixtures/Iface_modtype_infos/foo.cmi:
+  does not match the interface /.../fixtures/Iface_modtype_infos/Foo.resi:
   Module type declarations do not match:
     module type T = {
   let v: string

@@ -96,7 +96,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
                     count(store, *arg, counts);
                 }
             }
-            NodeView::Function(_, _, body, _) => count(store, body, counts),
+            NodeView::Function(_, _, body, _, _) => count(store, body, counts),
             NodeView::Let(_, _, value, body) => {
                 // OCaml deliberately visits the body before the value.
                 count(store, body, counts);
@@ -212,7 +212,7 @@ pub(crate) fn no_bounded_variables(store: &IndexedLambda, node: NodeId) -> bool 
                 && no_bounded_variables(store, body)
                 && no_bounded_variables(store, handler)
         }
-        NodeView::Function(_, params, body, _) => {
+        NodeView::Function(_, params, body, _, _) => {
             params.is_empty() && no_bounded_variables(store, body)
         }
         NodeView::LetRec(bindings, body) => {
@@ -622,7 +622,7 @@ mod tests {
                         args: vec![Lambda::Lvar(eta_param)],
                         loc: loc.clone(),
                     })),
-                    crate::lambda::FunctionAttribute::default(),
+                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
             caught(
@@ -648,7 +648,7 @@ mod tests {
                         }))],
                         loc: loc.clone(),
                     })),
-                    crate::lambda::FunctionAttribute::default(),
+                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
             caught(
@@ -776,7 +776,7 @@ mod tests {
                         args: body_args,
                         loc: body_loc,
                     })),
-                    crate::lambda::FunctionAttribute::default(),
+                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
                 );
                 let apply = Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(Lambda::LstaticRaise(91, vec![])),
@@ -832,7 +832,7 @@ mod tests {
                 args: vec![Lambda::Lconst(Constant::int(0))],
                 loc: Location::none(),
             })),
-            attr,
+            attr, crate::location::Location::none(),
         );
         let result = simplify_indexed(
             Lambda::LstaticCatch(
@@ -1178,7 +1178,7 @@ mod tests {
                 crate::lambda::FunctionAttribute {
                     inline: crate::lambda::InlineAttribute::Always,
                     ..crate::lambda::FunctionAttribute::default()
-                },
+                }, crate::location::Location::none(),
             )),
             Box::new(Lambda::Lvar(f.clone())),
         );

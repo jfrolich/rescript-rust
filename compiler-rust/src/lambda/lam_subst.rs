@@ -74,6 +74,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             params: func.params.clone(),
             body: Box::new(subst_aux(s, &func.body)),
             attr: func.attr.clone(),
+            loc: func.loc,
         })),
 
         Lambda::Llet(kind, id, arg, body) => Lambda::Llet(
@@ -283,7 +284,7 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
 
         let s = singleton(y, Lambda::const_(Constant::int(42)));
@@ -410,7 +411,7 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let letrec = Lambda::letrec(vec![(f.clone(), func)], Lambda::var(f.clone()));
 

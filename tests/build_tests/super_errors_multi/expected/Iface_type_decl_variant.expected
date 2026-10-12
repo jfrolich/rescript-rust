@@ -9,7 +9,7 @@
   4 [2m│[0m 
 
   The implementation /.../fixtures/Iface_type_decl_variant/Foo.res
-  does not match the interface /.../fixtures/Iface_type_decl_variant/foo.cmi:
+  does not match the interface /.../fixtures/Iface_type_decl_variant/Foo.resi:
   Type declarations do not match:
     type t = A | B(string)
   is not included in

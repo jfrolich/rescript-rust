@@ -268,13 +268,13 @@ fn rewrite_bounded(
             let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
             append_rebuilt(store, NodeSnapshot::LetRec(bindings, body))
         }
-        NodeSnapshot::Function(arity, params, body, attr) => {
+        NodeSnapshot::Function(arity, params, body, attr, loc) => {
             let params = params
                 .iter()
                 .map(|id| rebind(store, map, diagnostics, id_gen, id))
                 .collect();
             let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
-            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr))
+            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr, loc))
         }
         NodeSnapshot::StaticCatch(body, exit, params, handler) => {
             let body = rewrite_bounded(store, map, diagnostics, body, id_gen);

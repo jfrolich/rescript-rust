@@ -299,7 +299,7 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                         ap_transformed_jsx: false,
                     }))),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         )],
         Lambda::unit(),
@@ -465,7 +465,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                             ap_transformed_jsx: false,
                                         }))),
                                     ),
-                                    FunctionAttribute::default(),
+                                    FunctionAttribute::default(), crate::location::Location::none(),
                                 ),
                         )],
                         Lambda::Lapply(Box::new(Apply {
@@ -479,7 +479,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                             ap_transformed_jsx: false,
                         })),
                     ),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
         )],
         Lambda::prim(
@@ -1171,7 +1171,7 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                     vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
                     Location::none(),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             Lambda::apply(
                 Lambda::var(int_func),
@@ -1291,7 +1291,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                     vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
                     Location::none(),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             Lambda::apply(
                 Lambda::var(int_func),
@@ -1766,7 +1766,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
             crate::lambda::FunctionAttribute {
                 return_unit: true,
                 ..Default::default()
-            },
+            }, crate::location::Location::none(),
         ),
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),

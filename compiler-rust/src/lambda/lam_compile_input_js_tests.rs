@@ -92,7 +92,7 @@ fn indexed_eta_emits_runtime_js_and_honors_function_guards() {
                 2,
                 vec![left.clone(), right.clone()],
                 Lambda::prim(Primitive::Pobjorder, args, Location::none()),
-                attr,
+                attr, crate::location::Location::none(),
             ),
             [],
         );

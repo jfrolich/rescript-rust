@@ -161,7 +161,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             append_rebuilt(store, NodeSnapshot::Sequence(first, second))
         }
         NodeSnapshot::Apply(function, args, info, jsx) => {
-            if let NodeSnapshot::Function(_, params, body, attr) = store.snapshot(function)
+            if let NodeSnapshot::Function(_, params, body, attr, _) = store.snapshot(function)
                 && params.len() == args.len()
                 && !attr.async_
                 && attr.directive.is_none()
@@ -197,9 +197,9 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
         | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
-        NodeSnapshot::Function(arity, params, body, attr) => {
+        NodeSnapshot::Function(arity, params, body, attr, loc) => {
             let body = simplify(store, state, body);
-            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr))
+            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr, loc))
         }
         NodeSnapshot::LetRec(bindings, body) => {
             let body = simplify(store, state, body);
@@ -488,7 +488,7 @@ mod tests {
                         vec![Lambda::var(parameter.clone()), int(1)],
                         Location::none(),
                     ),
-                    attr,
+                    attr, crate::location::Location::none(),
                 ),
                 vec![int(2)],
                 crate::lambda::ApInfo {
@@ -528,7 +528,7 @@ mod tests {
                     ],
                     Location::none(),
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             (0..65).map(int).collect(),
             crate::lambda::ApInfo {
@@ -592,7 +592,7 @@ mod tests {
                             Lambda::var(value.clone()),
                             Lambda::var(recursive),
                         ),
-                        FunctionAttribute::default(),
+                        FunctionAttribute::default(), crate::location::Location::none(),
                     ),
                 )],
                 Lambda::var(value.clone()),
@@ -655,7 +655,7 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             function.clone(),
-            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr.clone()),
+            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr.clone(), crate::location::Location::none()),
             Lambda::apply(
                 Lambda::var(function.clone()),
                 vec![int(1)],
@@ -684,7 +684,7 @@ mod tests {
         let expected = Lambda::let_(
             LetKind::StrictOpt,
             function.clone(),
-            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr),
+            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr, crate::location::Location::none()),
             Lambda::function_(
                 1,
                 vec![expected_param.clone()],
@@ -698,7 +698,7 @@ mod tests {
                     },
                     false,
                 ),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         );
         assert_exact(&context.materialize(), &expected);
@@ -732,13 +732,13 @@ mod tests {
                 superseded_nodes: 12,
                 hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1140,
-                side_payload_shallow_capacity_bytes: 1600,
+                side_payload_shallow_occupied_bytes: 1420,
+                side_payload_shallow_capacity_bytes: 1920,
                 nested_heap_bytes_included: false,
-                current_live_side_payload_shallow_bytes: 384,
+                current_live_side_payload_shallow_bytes: 464,
                 backend_retained_only_side_payload_shallow_bytes: 0,
-                metadata_retained_only_side_payload_shallow_bytes: 80,
-                superseded_unreachable_side_payload_shallow_bytes: 676,
+                metadata_retained_only_side_payload_shallow_bytes: 120,
+                superseded_unreachable_side_payload_shallow_bytes: 836,
             }
         );
     }
@@ -821,7 +821,7 @@ mod tests {
                 vec![Lambda::var(reference.clone())],
                 Location::none(),
             ),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,

@@ -283,7 +283,7 @@ where
                 }
             }
         }
-        NodeView::Function(arity, _, body, _) => {
+        NodeView::Function(arity, _, body, _, _) => {
             get_arity_impl(arena, table, body, lookup).merge(arity)
         }
         NodeView::Switch {
@@ -421,7 +421,7 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
             NodeView::Apply(function, args, _, _) => {
                 nodes_size(arena, inner(arena, function)?, args)
             }
-            NodeView::Function(_, _, body, _) => inner(arena, body),
+            NodeView::Function(_, _, body, _, _) => inner(arena, body),
             NodeView::StaticRaise(_, args) => nodes_size(arena, 1, args),
             NodeView::IfThenElse(a, b, c) => {
                 Some(1 + inner(arena, a)? + inner(arena, b)? + inner(arena, c)?)
@@ -507,7 +507,7 @@ fn collect_bind(
             );
         }
         NodeView::Var(source) => alias_ident_or_global(meta, id.clone(), source, IndexedIdKind::Na),
-        NodeView::Function(_, params, body, _) => {
+        NodeView::Function(_, params, body, _, _) => {
             let params = params.to_vec();
             for param in &params {
                 meta.ident_tbl
@@ -555,7 +555,7 @@ fn collect(
                 collect(arena, meta, *arg, resolver);
             }
         }
-        NodeView::Function(_, params, body, _) => {
+        NodeView::Function(_, params, body, _, _) => {
             let params = params.to_vec();
             for param in params {
                 meta.ident_tbl.insert(param, IndexedIdKind::Parameter);
@@ -876,7 +876,7 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::Lvar(x),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let makeblock = Lambda::prim(
             Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable),
@@ -953,7 +953,7 @@ mod tests {
                 arity,
                 (0..arity).map(|n| id("p", 100 + n)).collect(),
                 Lambda::Lconst(Constant::int(0)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             )
         }
         fn assert_same(lambda: Lambda) {
@@ -1030,7 +1030,7 @@ mod tests {
                 FunctionAttribute {
                     inline,
                     ..FunctionAttribute::default()
-                },
+                }, crate::location::Location::none(),
             )
         }
         let always = id("always", 20);
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn bound_functions_always_retain_node_ids_like_ocaml_collect() {
         fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
-            Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+            Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
                 arity: params.len() as i32,
                 params,
                 body: Box::new(body),

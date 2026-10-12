@@ -2004,7 +2004,19 @@ fn build_package_compiler_options(
     // In the subprocess path, these are passed as raw CLI args to bsc.
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let warning_args = package.config.get_warning_args(package.is_local_dep, None);
-    let parsed_flags = parse_in_process_compiler_flags(&[bsc_flags, warning_args].concat());
+    // The root configuration's JSX flags apply to every package, as in the
+    // subprocess `bsc` arguments (`compiler_args`) and the in-process parse.
+    let parsed_flags = parse_in_process_compiler_flags(
+        &[
+            root_config.get_jsx_args(),
+            root_config.get_jsx_module_args(),
+            root_config.get_jsx_mode_args(),
+            root_config.get_jsx_preserve_args(),
+            bsc_flags,
+            warning_args,
+        ]
+        .concat(),
+    );
 
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();

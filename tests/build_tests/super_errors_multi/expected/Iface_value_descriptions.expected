@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Iface_value_descriptions/Foo.res
-  does not match the interface /.../fixtures/Iface_value_descriptions/foo.cmi:
+  does not match the interface /.../fixtures/Iface_value_descriptions/Foo.resi:
   Values do not match:
     let compute: string => int
   is not included in

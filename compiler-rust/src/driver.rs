@@ -5103,7 +5103,7 @@ fn format_interface_not_compiled_report(
     interface_name: &str,
 ) -> String {
     let loc = Location::in_file(file_name_idx);
-    let message = format!("Could not find the .cmi file for interface\n{interface_name}.");
+    let message = format!("Could not compile the interface\n{interface_name}.");
     format_compiler_error_report_from_location(source, filename, &loc, &message)
 }
 
@@ -5166,11 +5166,6 @@ fn compiled_interface_file_exists(options: &CompilerOptions, source_file: &str) 
         .any(|dir| dir.join(&uncapitalized).exists() || dir.join(&filename).exists())
 }
 
-fn interface_cmi_name(source_file: &str) -> String {
-    let mut intf = std::path::PathBuf::from(source_file);
-    intf.set_extension("cmi");
-    intf.to_string_lossy().into_owned()
-}
 
 fn push_compiler_error_report_header_from_location(
     output: &mut String,
@@ -12096,7 +12091,7 @@ fn compile_source_to_js_with_options_inner(
         &|| source.to_string(),
         filename,
         has_resi,
-        None,
+        current_unit_name.as_deref(),
     )?;
 
     // OCaml compiler/ml/typemod.ml:1755-1758 reads the compiled interface
@@ -12717,24 +12712,6 @@ fn format_compunit_mismatch_report(
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
 }
 
-/// The `.cmi` name `Typemod.type_implementation` reports for an interface:
-/// `find_in_path_uncap !Config.load_path (modulename ^ ".cmi")`
-/// (typemod.ml:1742-1749), the file the interface compile wrote, in
-/// `interface_cmi_dir` (or next to the source).
-fn in_process_interface_display_name(options: &CompilerOptions, source_file: &str) -> String {
-    match &options.interface_cmi_dir {
-        Some(dir) => {
-            let stem = std::path::Path::new(source_file)
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            dir.join(format!("{stem}.cmi"))
-                .to_string_lossy()
-                .into_owned()
-        }
-        None => interface_cmi_name(source_file),
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 /// The result of checking an implementation against its interface: OCaml's
@@ -12754,13 +12731,15 @@ fn check_compunit_inclusion_for_errors(
     source: &dyn Fn() -> String,
     filename: &str,
     has_resi: bool,
-    interface_file: Option<&str>,
+    unit_name: Option<&str>,
 ) -> Result<Option<CompunitInclusion>> {
     if !has_resi || !source_file.ends_with(".res") {
         return Ok(None);
     }
 
-    let module_name = module_name_from_source_filename(source_file);
+    // The interface is the unit being compiled: `A-Ns` in a namespaced
+    // package, as OCaml's `modulename` (typemod.ml:1742-1753).
+    let module_name = interface_unit_name(unit_name, source_file);
     if module_name.is_empty() {
         return Ok(None);
     }
@@ -12783,9 +12762,18 @@ fn check_compunit_inclusion_for_errors(
     } else {
         None
     };
+    let in_process = pers.is_in_process_mode();
     let Some(target_sig) =
         raw_in_process_sig.or_else(|| pers.read_raw_sig_shared(&module_name, type_ctx))
     else {
+        // typemod.ml:1744-1751 raises `Interface_not_compiled` here. An
+        // in-process build registers every compiled interface, so a missing
+        // one must not silently skip the implementation-interface check.
+        if in_process {
+            return Err(anyhow!(
+                "Could not find the compiled interface of {module_name} for {source_file}"
+            ));
+        }
         return Ok(None);
     };
     // Env.read_signature forces ps_sig, whose Subst.signature identity copy
@@ -12799,9 +12787,8 @@ fn check_compunit_inclusion_for_errors(
         env,
         source_file,
         &typed_structure.str_type,
-        &interface_file
-            .map(str::to_string)
-            .unwrap_or_else(|| interface_cmi_name(source_file)),
+        // typemod.ml: the interface is named by its source file.
+        &interface_source_name(source_file),
         target_sig.as_ref(),
         &mut inclusion_warnings,
     ) {
@@ -12815,15 +12802,22 @@ fn check_compunit_inclusion_for_errors(
                 &source(),
                 filename,
                 source_file,
-                &interface_file
-                    .map(str::to_string)
-                    .unwrap_or_else(|| interface_cmi_name(source_file)),
+                &interface_source_name(source_file),
                 &error,
             ),
             2,
         )
         .into()),
     }
+}
+
+/// The unit name an implementation's interface is registered under: the
+/// compile's unit name when known (namespaced, `A-Ns`), else the file's.
+fn interface_unit_name(unit_name: Option<&str>, source_file: &str) -> String {
+    unit_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| module_name_from_source_filename(source_file))
 }
 
 fn compute_raw_implementation_coercion(
@@ -12850,7 +12844,7 @@ fn compute_raw_implementation_coercion(
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
 
-    let module_name = module_name_from_source_filename(source_file);
+    let module_name = interface_unit_name(options.current_unit_name().as_deref(), source_file);
     if module_name.is_empty() {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
@@ -13778,8 +13772,7 @@ fn apply_moregen_constraints(
         return;
     }
 
-    // Extract module name from source filename
-    let module_name = module_name_from_source_filename(source_file);
+    let module_name = interface_unit_name(options.current_unit_name().as_deref(), source_file);
     if module_name.is_empty() {
         return;
     }
@@ -16148,7 +16141,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // checks, as the file compile does.
     let mut interface_inclusion = None;
     if has_interface {
-        let interface_file = in_process_interface_display_name(options, filename);
         match check_compunit_inclusion_for_errors(
             &mut tctx,
             &type_ctx,
@@ -16158,7 +16150,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             &|| source().to_string(),
             filename,
             true,
-            Some(interface_file.as_str()),
+            options.current_unit_name().as_deref(),
         ) {
             Ok(inclusion) => interface_inclusion = inclusion,
             Err(error) => {

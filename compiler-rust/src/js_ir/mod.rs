@@ -1393,38 +1393,38 @@ impl Expression {
                 comment,
             },
             ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::EqEqEq, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Lt, left, right) => Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::Ge, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Ge, left, right) => Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::Lt, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Le, left, right) => Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::Gt, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Gt, left, right) => Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::Le, left, right),
                 comment,
             },
             other => {
                 let expr = Expression {
-                    source_loc: None,
+                    source_loc,
                     desc: other,
                     comment,
                 };
@@ -1704,12 +1704,12 @@ fn push_negation(expr: Expression) -> Option<Expression> {
             comment,
         }),
         ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Some(Expression {
-            source_loc: None,
+            source_loc,
             desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
             comment,
         }),
         ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => Some(Expression {
-            source_loc: None,
+            source_loc,
             desc: ExpressionDesc::Bin(BinOp::EqEqEq, left, right),
             comment,
         }),
@@ -1717,7 +1717,7 @@ fn push_negation(expr: Expression) -> Option<Expression> {
             let left = push_negation(*left)?;
             let right = push_negation(*right)?;
             Some(Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::Or, Box::new(left), Box::new(right)),
                 comment,
             })
@@ -1726,7 +1726,7 @@ fn push_negation(expr: Expression) -> Option<Expression> {
             let left = push_negation(*left)?;
             let right = push_negation(*right)?;
             Some(Expression {
-                source_loc: None,
+                source_loc,
                 desc: ExpressionDesc::Bin(BinOp::And, Box::new(left), Box::new(right)),
                 comment,
             })
@@ -1951,11 +1951,10 @@ impl Statement {
     }
 
     /// Create a return statement
+    /// js_stmt_make.ml:29-30: return statements carry no source location of
+    /// their own; the returned expression keeps its location.
     pub fn return_(expr: Expression) -> Self {
-        let source_loc = expr.source_loc.clone();
-        let mut statement = Self::new(StatementDesc::Return(expr));
-        statement.source_loc = source_loc;
-        statement
+        Self::new(StatementDesc::Return(expr))
     }
 
     /// Create a throw statement

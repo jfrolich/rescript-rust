@@ -25,7 +25,7 @@ pub(crate) fn eliminate_ref(
         NodeSnapshot::Prim(Primitive::Pfield(0, _), args, _) if matches!(args.as_slice(), [value] if matches!(store.view(*value), NodeView::Var(id) if id.same(target))) => {
             Ok(store.append(NodeSnapshot::Var(target.clone())))
         }
-        NodeSnapshot::Function(_, _, _, _) => {
+        NodeSnapshot::Function(_, _, _, _, _) => {
             if hit_variable(store, target, node) {
                 Err(RealReference)
             } else {
@@ -298,7 +298,7 @@ mod tests {
                 1,
                 vec![parameter.clone()],
                 body,
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             );
             let mut store = IndexedLambda::from_lambda(function);
             let root = store.root();

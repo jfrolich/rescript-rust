@@ -684,7 +684,9 @@ impl LambdaCompiler {
                         },
                     comment,
                 }) => Expression {
-                    source_loc: None,
+                    // lam_compile.ml:1727-1729: `with_source_loc loc (E.method_ ...)`
+                    // with the method function's own location.
+                    source_loc,
                     desc: ExpressionDesc::Fun {
                         is_method: true,
                         params,

@@ -28,7 +28,7 @@ impl IndexedJsConsumer<'_> {
             }
         }
         let (params, body, attr) = match self.context.store().view(node) {
-            NodeView::Function(_, params, body, attr) => (
+            NodeView::Function(_, params, body, attr, _) => (
                 if attr.one_unit_arg {
                     Vec::new()
                 } else {

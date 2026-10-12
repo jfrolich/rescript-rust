@@ -4,7 +4,7 @@
   [36m/.../fixtures/Iface_module_types/Foo.res[0m
 
   The implementation /.../fixtures/Iface_module_types/Foo.res
-  does not match the interface /.../fixtures/Iface_module_types/foo.cmi:
+  does not match the interface /.../fixtures/Iface_module_types/Foo.resi:
   In module Inner:
   Modules do not match:
     {

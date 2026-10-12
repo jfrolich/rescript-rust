@@ -14,5 +14,5 @@
   [1;31mWe've found a bug for you![0m
   [36m/.../fixtures/Iface_not_compiled/Foo.res[0m
 
-  Could not find the .cmi file for interface
+  Could not compile the interface
   /.../fixtures/Iface_not_compiled/Foo.resi.

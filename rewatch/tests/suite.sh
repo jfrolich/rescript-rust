@@ -131,6 +131,9 @@ fi
 ./compile/19-in-process-namespaced-package-module.sh &&
 ./compile/19-utf8-warning.sh &&
 ./compile/20-schedule-independent-modules-after-error.sh &&
+./compile/21-namespaced-interface-is-checked.sh &&
+./compile/22-worker-store-respects-package-visibility.sh &&
+./compile/23-interface-mismatch-names-the-resi.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&

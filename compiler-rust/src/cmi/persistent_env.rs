@@ -1302,6 +1302,13 @@ impl PersistentEnv {
     }
 
     /// Whether `name` is a registered unit of a package outside the load path.
+    /// Whether this compilation can see the persistent unit `name`: it is
+    /// neither hidden nor in a package outside its load path (OCaml finds a
+    /// unit only through the compilation's load path, env.ml:669-678).
+    pub(crate) fn unit_visible(&self, name: &str) -> bool {
+        !self.view.hidden_modules.contains(name) && !self.outside_load_path(name)
+    }
+
     fn outside_load_path(&self, name: &str) -> bool {
         let Some(visible) = self.visible_package_roots.as_deref() else {
             return false;
@@ -3181,6 +3188,9 @@ fn decode_cmj_lfunction(value: &OcamlValue) -> Option<LFunction> {
         params,
         body: Box::new(decode_cmj_lambda(&fields[1])?),
         attr: decode_cmj_function_attribute(&fields[2])?,
+        // Locations of decoded `.cmj` lambdas are not kept (as for
+        // applications and primitives above).
+        loc: Location::none(),
     })
 }
 

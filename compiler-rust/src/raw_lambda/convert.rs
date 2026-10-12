@@ -288,14 +288,13 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
             ap_info: apply.ap_info,
             ap_transformed_jsx: apply.ap_transformed_jsx,
         })),
-        RawLambda::Lfunction(func) => {
-            RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
-                arity: func.arity,
-                params: func.params,
-                body: Box::new(raw_subst_idents_owned(subst, *func.body)),
-                attr: func.attr,
-            }))
-        }
+        RawLambda::Lfunction(func) => RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
+            arity: func.arity,
+            params: func.params,
+            body: Box::new(raw_subst_idents_owned(subst, *func.body)),
+            attr: func.attr,
+            loc: func.loc,
+        })),
         RawLambda::Llet(kind, id, arg, body) => RawLambda::Llet(
             kind,
             id,
@@ -3593,10 +3592,10 @@ impl<'a> RawLambdaConverter<'a> {
                     },
                 ),
             );
-            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default())
+            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default(), loc.clone())
         };
         let callback =
-            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default());
+            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default(), loc.clone());
         RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "then".to_string(),
@@ -5362,6 +5361,7 @@ impl<'a> RawLambdaConverter<'a> {
                     is_a_functor: true,
                     ..FunctionAttribute::default()
                 },
+                loc.clone(),
             )
         })
     }
@@ -5686,6 +5686,7 @@ impl<'a> RawLambdaConverter<'a> {
                         inline: inline_attribute,
                         ..FunctionAttribute::default()
                     },
+                    loc,
                 )
             }
             ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
@@ -11274,7 +11275,7 @@ impl<'a> RawLambdaConverter<'a> {
         async_: bool,
         directive: Option<String>,
         inline: InlineAttribute,
-        _loc: Location,
+        loc: Location,
     ) -> RawLambda {
         fn pattern_binds_value(pattern: &Pattern) -> bool {
             match &pattern.pat_desc {
@@ -11342,6 +11343,7 @@ impl<'a> RawLambdaConverter<'a> {
                 one_unit_arg,
                 is_a_functor: false,
             },
+            loc,
         )
     }
 
@@ -11776,17 +11778,20 @@ impl<'a> RawLambdaConverter<'a> {
                         loc.clone(),
                         transformed_jsx,
                     ) {
-                        Lambda::Lfunction(func) => {
-                            Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-                                arity: func.arity + 1,
-                                params: std::iter::once(id_arg).chain(func.params).collect(),
-                                body: func.body,
-                                attr: func.attr,
-                            }))
-                        }
-                        lam => {
-                            Lambda::function_(1, vec![id_arg], lam, FunctionAttribute::default())
-                        }
+                        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+                            arity: func.arity + 1,
+                            params: std::iter::once(id_arg).chain(func.params).collect(),
+                            body: func.body,
+                            attr: func.attr,
+                            loc: func.loc,
+                        })),
+                        lam => Lambda::function_(
+                            1,
+                            vec![id_arg],
+                            lam,
+                            FunctionAttribute::default(),
+                            loc.clone(),
+                        ),
                     };
                     defs.into_iter().fold(body, |body, (id, lam)| {
                         Lambda::let_(LetKind::Strict, id, lam, body)
@@ -11911,7 +11916,7 @@ impl<'a> RawLambdaConverter<'a> {
                         handle,
                         next_args_rev,
                         protected_tail,
-                        loc,
+                        loc.clone(),
                         transformed_jsx,
                         inlined,
                     ) {
@@ -11921,11 +11926,16 @@ impl<'a> RawLambdaConverter<'a> {
                                 params: std::iter::once(id_arg).chain(func.params).collect(),
                                 body: func.body,
                                 attr: func.attr,
+                                loc: func.loc,
                             }))
                         }
-                        lam => {
-                            RawLambda::function_(1, vec![id_arg], lam, FunctionAttribute::default())
-                        }
+                        lam => RawLambda::function_(
+                            1,
+                            vec![id_arg],
+                            lam,
+                            FunctionAttribute::default(),
+                            loc,
+                        ),
                     };
                     defs.into_iter().fold(body, |body, (id, lam)| {
                         RawLambda::let_(LetKind::Strict, id, lam, body)
@@ -11971,6 +11981,7 @@ impl<'a> RawLambdaConverter<'a> {
                     none_ids.into_iter().chain(extra_ids).collect(),
                     body,
                     FunctionAttribute::default(),
+                    loc,
                 )
             }
             None => {
@@ -12024,6 +12035,7 @@ impl<'a> RawLambdaConverter<'a> {
                             loc,
                         ),
                         FunctionAttribute::default(),
+                        loc,
                     )
                 }
                 _ => RawLambda::unit(),
@@ -12065,12 +12077,7 @@ impl<'a> RawLambdaConverter<'a> {
             };
             let args = params.iter().cloned().map(RawLambda::var).collect();
             let body = self.transl_external_application(loc, env, prim, val_type, args, false);
-            return RawLambda::function_(
-                prim.prim_arity,
-                params,
-                body,
-                FunctionAttribute::default(),
-            );
+            return RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default(), loc);
         };
         if let Some(warn_loc) = warn_loc {
             self.report_polymorphic_comparison_warning(warn_loc, &primitive, &[]);
@@ -12095,7 +12102,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .map(RawLambda::var)
                 .collect::<Vec<_>>();
             let body = self.mk_builtin(primitive, args, loc);
-            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default())
+            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default(), loc)
         }
     }
 
@@ -12157,6 +12164,7 @@ impl<'a> RawLambdaConverter<'a> {
                 params,
                 Lambda::prim(primitive, args, loc),
                 FunctionAttribute::default(),
+                loc,
             )
         }
     }

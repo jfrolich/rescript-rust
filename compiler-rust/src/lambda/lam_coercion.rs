@@ -520,6 +520,7 @@ pub(crate) fn same_reusable_export_value(left: &Expression, right: &Expression) 
 }
 
 pub(crate) fn push_effect_expression(block: &mut Block, expr: Expression) {
+    let expr = effect_value_without_unit(expr);
     match expr.desc {
         ExpressionDesc::Seq(left, right) => {
             push_effect_expression(block, *left);
@@ -567,5 +568,30 @@ pub(crate) fn statement_allows_undefined_export_reuse(stmt: &Statement) -> bool 
             })
         }
         _ => false,
+    }
+}
+
+/// lam_compile_primitive.ml:30-36 `ensure_value_unit`: in effect position
+/// (`EffectCall Not_tail`) a field or array store is the bare assignment, so
+/// the primitive's `with_source_loc` lands on the assignment itself rather
+/// than on a `(assignment, undefined)` sequence.
+fn effect_value_without_unit(expr: Expression) -> Expression {
+    match expr {
+        Expression {
+            desc: ExpressionDesc::Seq(left, right),
+            source_loc: Some(loc),
+            comment,
+        } if matches!(right.desc, ExpressionDesc::Undefined { is_unit: false })
+            && left.source_loc.is_none()
+            && matches!(left.desc, ExpressionDesc::Bin(crate::js_ir::BinOp::Eq, _, _)) =>
+        {
+            let mut left = *left;
+            left.source_loc = Some(loc);
+            if left.comment.is_none() {
+                left.comment = comment;
+            }
+            left
+        }
+        expr => expr,
     }
 }

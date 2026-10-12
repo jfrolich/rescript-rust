@@ -432,7 +432,7 @@ impl<'a> LambdaInput<'a> {
                     info: i,
                     transformed_jsx: j,
                 }),
-                NodeView::Function(arity, p, b, a) => LambdaInputView::Function(FunctionInput {
+                NodeView::Function(arity, p, b, a, _) => LambdaInputView::Function(FunctionInput {
                     arity,
                     params: p,
                     body: Self::Indexed { store, node: b },

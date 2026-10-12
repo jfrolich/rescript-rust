@@ -197,13 +197,16 @@ impl LambdaCompiler {
                     },
                     if is_last {
                         crate::js_ir::CaseClause {
-                            source_loc: None,
-                            body: self.compile_switch_value_block(&tmp, body),
+                            source_loc: self.source_loc_of_lam(body),
+                            body: {
+                                let value_block = self.compile_switch_value_block(&tmp, body);
+                                self.with_block_source_loc(body, value_block)
+                            },
                             should_break: false,
                             comment: None,
                         }
                     } else {
-                        empty_switch_case_clause()
+                        self.empty_switch_case_clause_for(body)
                     },
                 )
             })
@@ -217,7 +220,10 @@ impl LambdaCompiler {
         let default_block = switch
             .sw_failaction
             .as_ref()
-            .map(|fallback| self.compile_assign_to_target_block(&tmp, fallback));
+            .map(|fallback| {
+                let block = self.compile_assign_to_target_block(&tmp, fallback);
+                self.with_block_source_loc(fallback, block)
+            });
 
         prelude.push(Statement::new(StatementDesc::IntSwitch(
             scrut_compiled.expr,
@@ -305,13 +311,16 @@ impl LambdaCompiler {
                 tag_type: SwitchCaseTag::String(tag),
                 clause: if is_last {
                     crate::js_ir::CaseClause {
-                        source_loc: None,
-                        body: self.compile_switch_value_block(&tmp, body),
+                        source_loc: self.source_loc_of_lam(body),
+                        body: {
+                            let value_block = self.compile_switch_value_block(&tmp, body);
+                            self.with_block_source_loc(body, value_block)
+                        },
                         should_break: false,
                         comment: None,
                     }
                 } else {
-                    empty_switch_case_clause()
+                    self.empty_switch_case_clause_for(body)
                 },
             })
             .collect();
@@ -322,7 +331,10 @@ impl LambdaCompiler {
         // (compiler/core/lam_compile.ml:595-605), so it must not get the
         // case-only trailing `break`.
         let default_block =
-            default.map(|fallback| self.compile_assign_to_target_block(&tmp, fallback));
+            default.map(|fallback| {
+                let block = self.compile_assign_to_target_block(&tmp, fallback);
+                self.with_block_source_loc(fallback, block)
+            });
 
         prelude.push(Statement::new(StatementDesc::StringSwitch(
             scrut_compiled.expr,
@@ -834,7 +846,10 @@ impl LambdaCompiler {
         let block_cases = self.untagged_block_cases(switch)?;
         let default_block = self
             .block_switch_default(switch)
-            .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+            .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
             .unwrap_or_default();
         self.compile_builtin_untagged_block_chain(
             scrut_expr,
@@ -878,7 +893,10 @@ impl LambdaCompiler {
         let block_cases = self.untagged_block_cases(switch)?;
         let default_block = self
             .block_switch_default(switch)
-            .map(|fallback| self.compile_effect_block(fallback))
+            .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
             .unwrap_or_default();
 
         let mut has_effectful_case = !default_block.is_empty();
@@ -911,7 +929,10 @@ impl LambdaCompiler {
         let Some(block_cases) = self.untagged_block_cases(switch) else {
             return self
                 .block_switch_default(switch)
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default();
         };
         if let Some(block) = self.compile_small_untagged_block_switch_assignment(
@@ -980,7 +1001,10 @@ impl LambdaCompiler {
         {
             let default_body = self
                 .block_switch_default(switch)
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback));
+                .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            });
             tail = match default_body {
                 Some(default_block) => vec![Statement::if_(guard, default_block, tail)],
                 None => vec![Statement::if_(Expression::not(guard), tail, Vec::new())],
@@ -1020,7 +1044,10 @@ impl LambdaCompiler {
         match block_cases {
             [] => Some(
                 default
-                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                    .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default(),
             ),
             [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
@@ -1037,7 +1064,10 @@ impl LambdaCompiler {
                     cond,
                     self.compile_assign_to_target_block(result, body),
                     default
-                        .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                        .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                         .unwrap_or_default(),
                 )])
             }
@@ -1252,7 +1282,10 @@ impl LambdaCompiler {
         let Some(block_cases) = self.untagged_block_cases(switch) else {
             return self
                 .block_switch_default(switch)
-                .map(|fallback| self.compile_effect_block(fallback))
+                .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default();
         };
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
@@ -1319,7 +1352,10 @@ impl LambdaCompiler {
         {
             let default_body = self
                 .block_switch_default(switch)
-                .map(|fallback| self.compile_effect_block(fallback));
+                .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            });
             tail = match default_body {
                 Some(default_block) => vec![Statement::if_(guard, default_block, tail)],
                 None if self.return_unit_stack.last().copied() == Some(true) => {
@@ -1362,7 +1398,10 @@ impl LambdaCompiler {
         match block_cases {
             [] => Some(
                 default
-                    .map(|fallback| self.compile_effect_block(fallback))
+                    .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default(),
             ),
             [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
@@ -1377,7 +1416,10 @@ impl LambdaCompiler {
                 )?;
                 let then_block = self.compile_effect_block(body);
                 let else_block = default
-                    .map(|fallback| self.compile_effect_block(fallback))
+                    .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default();
                 Some(self.compile_effect_if(cond, then_block, else_block))
             }
@@ -1446,7 +1488,10 @@ impl LambdaCompiler {
         let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_assignment(
@@ -1614,7 +1659,10 @@ impl LambdaCompiler {
         let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
-                .map(|fallback| self.compile_effect_block(fallback))
+                .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_effect(
@@ -1761,7 +1809,10 @@ impl LambdaCompiler {
         match cases {
             [] => Some(
                 default
-                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                    .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default(),
             ),
             [(_tag, body)] if complete && default.is_none() => {
@@ -1771,7 +1822,10 @@ impl LambdaCompiler {
                 let cond = self.switch_case_test(test, tag);
                 let then_block = self.compile_assign_to_target_block(result, body);
                 let else_block = default
-                    .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                    .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default();
                 Some(self.compile_test_assignment_block(result, cond, then_block, else_block))
             }
@@ -1908,7 +1962,10 @@ impl LambdaCompiler {
         match cases {
             [] => Some(
                 default
-                    .map(|fallback| self.compile_effect_block(fallback))
+                    .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default(),
             ),
             [(_tag, body)] if complete && default.is_none() => {
@@ -1918,7 +1975,10 @@ impl LambdaCompiler {
                 let cond = self.switch_case_test(test, tag);
                 let then_block = self.compile_effect_block(body);
                 let else_block = default
-                    .map(|fallback| self.compile_effect_block(fallback))
+                    .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                     .unwrap_or_default();
                 Some(self.compile_effect_if(cond, then_block, else_block))
             }
@@ -1968,19 +2028,25 @@ impl LambdaCompiler {
                 tag_type: tag,
                 clause: if is_last {
                     CaseClause {
-                        source_loc: None,
-                        body: self.compile_switch_value_block(result, body),
+                        source_loc: self.source_loc_of_lam(body),
+                        body: {
+                            let value_block = self.compile_switch_value_block(result, body);
+                            self.with_block_source_loc(body, value_block)
+                        },
                         should_break: false,
                         comment: None,
                     }
                 } else {
-                    empty_switch_case_clause()
+                    self.empty_switch_case_clause_for(body)
                 },
             })
             .collect();
 
         let default_block =
-            default.map(|fallback| self.compile_assign_to_target_block(result, fallback));
+            default.map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            });
         vec![Statement::new(StatementDesc::StringSwitch(
             test,
             clauses,
@@ -2109,10 +2175,10 @@ impl LambdaCompiler {
                     && !compiled_body.is_empty()
                     && block_terminates(&compiled_body);
 
-                for (tag, _, _) in &grouped_cases[group_start..group_end] {
+                for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                     clauses.push(StringClause {
                         tag_type: tag.clone(),
-                        clause: empty_switch_case_clause(),
+                        clause: self.empty_switch_case_clause_for(case_lam),
                     });
                 }
                 clauses.push(StringClause {
@@ -2134,8 +2200,8 @@ impl LambdaCompiler {
                         let should_break =
                             self.return_case_needs_break_like_ocaml(body, &compiled_body);
                         CaseClause {
-                            source_loc: None,
-                            body: compiled_body,
+                            source_loc: self.source_loc_of_lam(body),
+                            body: self.with_block_source_loc(body, compiled_body),
                             should_break,
                             comment: None,
                         }
@@ -2235,18 +2301,18 @@ impl LambdaCompiler {
             // compiler/core/js_output.ml:88-100).
             let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
-            for (tag, _, _) in &grouped_cases[group_start..group_end] {
+            for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
                     to_tag(tag.clone()),
-                    empty_switch_case_clause(),
+                    self.empty_switch_case_clause_for(case_lam),
                     group_falls_through,
                 ));
             }
             clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
-                    source_loc: None,
-                    body: compiled_body,
+                    source_loc: self.source_loc_of_lam(body),
+                    body: self.with_block_source_loc(body, compiled_body),
                     should_break,
                     comment: None,
                 },
@@ -2331,15 +2397,17 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
-                    let body = self.compile_effect_block(body);
+                    let source_loc = self.source_loc_of_lam(body);
+                    let body_block = self.compile_effect_block(body);
+                    let body = self.with_block_source_loc(body, body_block);
                     CaseClause {
-                        source_loc: None,
+                        source_loc,
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,
                     }
                 } else {
-                    empty_switch_case_clause()
+                    self.empty_switch_case_clause_for(body)
                 };
                 StringClause {
                     tag_type: tag,
@@ -2349,7 +2417,10 @@ impl LambdaCompiler {
             .collect();
 
         let default_block = default
-            .map(|fallback| self.compile_effect_block(fallback))
+            .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
             .filter(|body| !body.is_empty());
         vec![Statement::new(StatementDesc::StringSwitch(
             test,
@@ -2387,7 +2458,10 @@ impl LambdaCompiler {
 
         if const_cases.is_empty() && block_cases.is_empty() {
             return const_default
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default();
         }
 
@@ -2395,7 +2469,10 @@ impl LambdaCompiler {
         let block_complete = self.block_switch_complete(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_assignment(
@@ -2408,7 +2485,10 @@ impl LambdaCompiler {
         };
         let block_branch = if block_cases.is_empty() {
             block_default
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
+                .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_assignment(
@@ -2578,7 +2658,10 @@ impl LambdaCompiler {
 
         if const_cases.is_empty() && block_cases.is_empty() {
             return const_default
-                .map(|fallback| self.compile_effect_block(fallback))
+                .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default();
         }
 
@@ -2586,7 +2669,10 @@ impl LambdaCompiler {
         let block_complete = self.block_switch_complete(switch);
         let const_branch = if const_cases.is_empty() {
             const_default
-                .map(|fallback| self.compile_effect_block(fallback))
+                .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_effect(
@@ -2598,7 +2684,10 @@ impl LambdaCompiler {
         };
         let block_branch = if block_cases.is_empty() {
             block_default
-                .map(|fallback| self.compile_effect_block(fallback))
+                .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
                 .unwrap_or_default()
         } else {
             self.compile_named_string_switch_effect(

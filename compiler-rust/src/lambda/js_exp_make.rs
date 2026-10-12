@@ -91,6 +91,8 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
     }
 }
 
+/// js_exp_make.ml:36-50 `remove_pure_sub_exp`: an impure expression is kept
+/// as it is (`Some x`), including its comment and source location.
 pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> {
     match expr.desc {
         ExpressionDesc::Var(_)
@@ -98,18 +100,18 @@ pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> 
         | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Number(_) => None,
-        ExpressionDesc::ArrayIndex(left, right) => {
+        ExpressionDesc::ArrayIndex(ref left, ref right) => {
             if is_pure_subexpression(left.as_ref()) && is_pure_subexpression(right.as_ref()) {
                 None
             } else {
-                Some(Expression::new(ExpressionDesc::ArrayIndex(left, right)))
+                Some(expr)
             }
         }
-        ExpressionDesc::Array(items, mutable_flag) => {
+        ExpressionDesc::Array(ref items, _) => {
             if items.iter().all(is_pure_subexpression) {
                 None
             } else {
-                Some(Expression::new(ExpressionDesc::Array(items, mutable_flag)))
+                Some(expr)
             }
         }
         ExpressionDesc::Seq(left, right) => {
@@ -118,12 +120,22 @@ pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> 
                 remove_pure_subexpression(*right),
             ) {
                 (None, None) => None,
-                (Some(left), Some(right)) => Some(js_seq(left, right)),
+                // `{x with expression_desc = Seq (u, v)}`.
+                (Some(left), Some(right)) => {
+                    let mut seq = js_seq(left, right);
+                    if seq.source_loc.is_none() {
+                        seq.source_loc = expr.source_loc;
+                    }
+                    if seq.comment.is_none() {
+                        seq.comment = expr.comment;
+                    }
+                    Some(seq)
+                }
                 (None, Some(right)) => Some(right),
                 (Some(left), None) => Some(left),
             }
         }
-        desc => Some(Expression::new(desc)),
+        _ => Some(expr),
     }
 }
 

@@ -341,8 +341,8 @@ impl Simplifier<'_> {
 
     fn simpl_children(&mut self, snapshot: NodeSnapshot) -> NodeId {
         let mapped = match snapshot {
-            NodeSnapshot::Function(a, p, b, attr) => {
-                NodeSnapshot::Function(a, p, self.simpl(b), attr)
+            NodeSnapshot::Function(a, p, b, attr, loc) => {
+                NodeSnapshot::Function(a, p, self.simpl(b), attr, loc)
             }
             NodeSnapshot::Let(k, id, a, b) => {
                 let a = self.simpl(a);
@@ -447,7 +447,7 @@ impl Simplifier<'_> {
             let (module, name) = (module.clone(), name.clone());
             if let Some(lambda) = (self.external)(&module, &name) {
                 let imported = self.store.append_compat_lambda(lambda);
-                if let NodeSnapshot::Function(_,params,body,attr)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen,self.beta_hash_bucket_count,self.beta_diagnostics); return self.simpl(reduced); }
+                if let NodeSnapshot::Function(_,params,body,attr, _)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen,self.beta_hash_bucket_count,self.beta_diagnostics); return self.simpl(reduced); }
             }
         }
         if let NodeView::Var(id) = self.store.view(function) {
@@ -458,7 +458,7 @@ impl Simplifier<'_> {
                     lambda: Some((node, rec_flag)),
                     ..
                 }) => match self.store.snapshot(node) {
-                    NodeSnapshot::Function(_, params, body, attr)
+                    NodeSnapshot::Function(_, params, body, attr, _)
                         if !attr.async_
                             && attr.directive.is_none()
                             && params.len() == args.len() =>
@@ -526,7 +526,7 @@ impl Simplifier<'_> {
             let function = self.simpl(function);
             return append_rebuilt(self.store, NodeSnapshot::Apply(function, args, info, jsx));
         }
-        if let NodeSnapshot::Function(_, params, body, attr) = self.store.snapshot(function)
+        if let NodeSnapshot::Function(_, params, body, attr, _) = self.store.snapshot(function)
             && params.len() == args.len()
             && !attr.async_
             && attr.directive.is_none()
@@ -1060,7 +1060,7 @@ mod tests {
                 vec![Lambda::var(p.clone())],
                 Location::none(),
             ),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         for (flag, should_inline) in [
             (crate::lambda::lam_compile_context::RecFlag::Rec, true),
@@ -1112,7 +1112,7 @@ mod tests {
 
         let free = id("free", 3);
         let open_function =
-            Lambda::function_(1, vec![p], Lambda::var(free), FunctionAttribute::default());
+            Lambda::function_(1, vec![p], Lambda::var(free), FunctionAttribute::default(), crate::location::Location::none());
         let mut open = context_with_function(
             f.clone(),
             open_function.clone(),
@@ -1148,7 +1148,7 @@ mod tests {
             },
         ];
         for attr in variants {
-            let function = Lambda::function_(1, vec![x.clone()], Lambda::var(x.clone()), attr);
+            let function = Lambda::function_(1, vec![x.clone()], Lambda::var(x.clone()), attr, crate::location::Location::none());
             let input = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(function),
                 ap_args: vec![int(1)],
@@ -1163,7 +1163,7 @@ mod tests {
             2,
             vec![x.clone(), id("y", 2)],
             Lambda::var(x),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let input = Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
@@ -1193,7 +1193,7 @@ mod tests {
             1,
             vec![parameter.clone()],
             Lambda::if_(Lambda::var(parameter), int(7), int(8)),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let mut external = |id: &Ident, field: &str| {
             calls.push((id.name().to_string(), field.to_string()));
@@ -1262,7 +1262,7 @@ mod tests {
                 argument_loc.clone(),
             );
             let input = apply(
-                Lambda::function_(1, vec![x], body, FunctionAttribute::default()),
+                Lambda::function_(1, vec![x], body, FunctionAttribute::default(), crate::location::Location::none()),
                 vec![argument.clone()],
                 false,
             );
@@ -1297,7 +1297,7 @@ mod tests {
         let x = id("x", 1);
         let callee = id("callee", 2);
         let input = apply(
-            Lambda::Lfunction(Box::new(LFunction {
+            Lambda::Lfunction(Box::new(LFunction { loc: crate::location::Location::none(),
                 arity: 1,
                 params: vec![x.clone()],
                 body: Box::new(apply(
@@ -1336,7 +1336,7 @@ mod tests {
             Location::none(),
         );
         let input = apply(
-            Lambda::function_(1, vec![x], body, FunctionAttribute::default()),
+            Lambda::function_(1, vec![x], body, FunctionAttribute::default(), crate::location::Location::none()),
             vec![argument.clone()],
             false,
         );
@@ -1469,7 +1469,7 @@ mod tests {
                 vec![Lambda::var(x.clone())],
                 Location::none(),
             ),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let raised = Lambda::static_raise(7, vec![int(9)]);
         let caught = Lambda::static_catch(
@@ -1508,7 +1508,7 @@ mod tests {
                 measurements.metadata_retained_only_side_payload_shallow_bytes,
                 measurements.superseded_unreachable_side_payload_shallow_bytes,
             ),
-            (25, 6, 3, 8, 17, 448, 204, 1004),
+            (25, 6, 3, 8, 17, 488, 244, 1044),
         );
     }
 }
