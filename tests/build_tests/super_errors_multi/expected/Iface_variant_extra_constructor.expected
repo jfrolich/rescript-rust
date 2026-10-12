@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Iface_variant_extra_constructor/Foo.res
-  does not match the interface /.../fixtures/Iface_variant_extra_constructor/foo.cmi:
+  does not match the interface /.../fixtures/Iface_variant_extra_constructor/Foo.resi:
   Type declarations do not match:
     type t = A | B | C
   is not included in

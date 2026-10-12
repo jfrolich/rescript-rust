@@ -10,7 +10,7 @@
   5 [2m│[0m 
 
   The implementation /.../fixtures/Iface_tag_name_mismatch/Foo.res
-  does not match the interface /.../fixtures/Iface_tag_name_mismatch/foo.cmi:
+  does not match the interface /.../fixtures/Iface_tag_name_mismatch/Foo.resi:
   Type declarations do not match:
     type t = @as("a") A | B
   is not included in

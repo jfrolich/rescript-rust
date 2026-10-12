@@ -8,7 +8,7 @@
   3 [2m│[0m 
 
   The implementation /.../fixtures/Iface_missing_value/Foo.res
-  does not match the interface /.../fixtures/Iface_missing_value/foo.cmi:
+  does not match the interface /.../fixtures/Iface_missing_value/Foo.resi:
   The value `b' is required but not provided
   [36m/.../fixtures/Iface_missing_value/Foo.resi[0m:[2m2:1-13[0m:
     Expected declaration

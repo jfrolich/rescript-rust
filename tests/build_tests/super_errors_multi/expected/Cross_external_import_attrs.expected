@@ -9,7 +9,7 @@
   3 [2m│[0m 
 
   The implementation /.../fixtures/Cross_external_import_attrs/Importattrs.res
-  does not match the interface /.../fixtures/Cross_external_import_attrs/importattrs.cmi:
+  does not match the interface /.../fixtures/Cross_external_import_attrs/Importattrs.resi:
   Values do not match:
     @val @module({from: "somepkg", with: {type_: "json", \"some-identifier": "nope"}}) external data: int =
   "default"

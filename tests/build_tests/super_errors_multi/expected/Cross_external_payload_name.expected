@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Cross_external_payload_name/Payload.res
-  does not match the interface /.../fixtures/Cross_external_payload_name/payload.cmi:
+  does not match the interface /.../fixtures/Cross_external_payload_name/Payload.resi:
   Values do not match:
     @val("foo") external f: int => int = ""
   is not included in

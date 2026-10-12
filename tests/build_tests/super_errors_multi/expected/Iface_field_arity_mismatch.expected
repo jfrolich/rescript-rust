@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Iface_field_arity_mismatch/Foo.res
-  does not match the interface /.../fixtures/Iface_field_arity_mismatch/foo.cmi:
+  does not match the interface /.../fixtures/Iface_field_arity_mismatch/Foo.resi:
   Type declarations do not match:
     type t = A(int) | B
   is not included in

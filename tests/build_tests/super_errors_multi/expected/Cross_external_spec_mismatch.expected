@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Cross_external_spec_mismatch/Specmismatch.res
-  does not match the interface /.../fixtures/Cross_external_spec_mismatch/specmismatch.cmi:
+  does not match the interface /.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi:
   Values do not match:
     @val @module("m") external f: int => int = "f"
   is not included in

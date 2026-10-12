@@ -7,7 +7,7 @@
   2 [2m│[0m 
 
   The implementation /.../fixtures/Iface_type_decl_record/Foo.res
-  does not match the interface /.../fixtures/Iface_type_decl_record/foo.cmi:
+  does not match the interface /.../fixtures/Iface_type_decl_record/Foo.resi:
   Type declarations do not match:
     type t = {x: int, z: int}
   is not included in
