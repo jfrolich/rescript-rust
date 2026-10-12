@@ -110,8 +110,14 @@ pub fn constructor_existentials(
             }
             // Collect free vars from the result type
             let res_vars = free_vars(ctx, res_ty);
-            // Existentials = args vars - result vars
-            arg_vars.difference(&res_vars).copied().collect()
+            // Existentials = args vars - result vars, as
+            // `Type_set.elements`: ordered by node (allocation order, OCaml's
+            // `type_expr.id`), which is the order `instance_constructor`
+            // allocates their abstract types in.
+            let mut existentials: Vec<TypeExprRef> =
+                arg_vars.difference(&res_vars).copied().collect();
+            existentials.sort_by_key(|ty| ty.0);
+            existentials
         }
     }
 }

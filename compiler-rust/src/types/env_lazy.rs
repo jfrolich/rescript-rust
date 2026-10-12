@@ -232,6 +232,23 @@ fn build_matching_type_constructors(
 /// `fst (Env.find_type_descrs path env)` for a variant declaration whose
 /// descriptors live at `type_path` (compiler/ml/datarepr.ml:111-172 via
 /// compiler/ml/env.ml:1542-1547), in declaration order.
+/// `Datarepr.constructor_existentials` (datarepr.ml:48-61): the type
+/// variables of the declared arguments (label types for an inline record)
+/// that do not occur in the GADT result.
+fn declared_constructor_existentials(
+    ctx: &super::context::TypeContext,
+    args: &super::decl::ConstructorArguments,
+    res: Option<crate::types::TypeExprRef>,
+) -> Vec<crate::types::TypeExprRef> {
+    let tyl: Vec<crate::types::TypeExprRef> = match args {
+        super::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
+        super::decl::ConstructorArguments::CstrRecord(labels) => {
+            labels.iter().map(|label| label.ld_type).collect()
+        }
+    };
+    super::env::constructor_existentials(ctx, &tyl, res)
+}
+
 pub(crate) fn constructors_of_type_path(
     type_path: &Path,
     decl: &TypeDeclaration,
@@ -384,7 +401,7 @@ fn build_type_constructors(
             ConstructorDescription {
                 cstr_name: cd.cd_id.name().to_string(),
                 cstr_res,
-                cstr_existentials: vec![],
+                cstr_existentials: declared_constructor_existentials(ctx, &cd.cd_args, cd.cd_res),
                 cstr_args,
                 cstr_arity,
                 cstr_kind: ConstructorKind::Ordinary(
@@ -523,7 +540,11 @@ fn build_constructors_for_name(
                     ConstructorDescription {
                         cstr_name: id.name().to_string(),
                         cstr_res,
-                        cstr_existentials: vec![],
+                        cstr_existentials: declared_constructor_existentials(
+                            ctx,
+                            &ext.ext_args,
+                            ext.ext_ret_type,
+                        ),
                         cstr_args,
                         cstr_arity,
                         cstr_kind: ConstructorKind::Extension(ext_path.clone()),
