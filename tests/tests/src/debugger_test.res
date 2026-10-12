@@ -19,3 +19,8 @@ let exterme_g = () => {
   %debugger
   3
 }
+
+let trailing_debugger = () => {
+  ignore(f(1, 2))
+  %debugger
+}
