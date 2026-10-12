@@ -1358,18 +1358,22 @@ fn value_description(arena: &ParseArena, vd: &ValueDescription) -> Sexp {
         Sexp::atom("value_description"),
         Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
         core_type(arena, arena.get_core_type(vd.pval_type)),
-        // res_ast_debugger.ml `Sexp_ast.value_description`.
-        Sexp::list(map_empty(
-            &match &vd.pval_prim {
+        // res_ast_debugger.ml `Sexp_ast.value_description` (lines 412-422):
+        // a plain list, so a non-external prints `()`. Only the parsetree0
+        // printer (line 1491) uses `map_empty`.
+        Sexp::list(
+            match &vd.pval_prim {
                 None => vec![],
                 Some(PrimitiveRepr::PrimName(s)) => vec![arena.get_string(*s).to_string()],
                 Some(PrimitiveRepr::PrimFfi { name, .. }) => {
                     vec![name.clone(), "<ffi spec>".to_string()]
                 }
                 Some(PrimitiveRepr::PrimInlineConst(_)) => vec!["<inline const>".to_string()],
-            },
-            |s| Sexp::atom(&quote_string(s)),
-        )),
+            }
+            .iter()
+            .map(|s| Sexp::atom(&quote_string(s)))
+            .collect(),
+        ),
         attributes(arena, &vd.pval_attributes),
     ])
 }
