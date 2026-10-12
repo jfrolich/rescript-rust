@@ -771,10 +771,8 @@ fn compile_in_process(
         has_interface,
     )?;
     eprint!("{}", result.warnings);
+    // OCaml prints the requested dumps and still emits the JavaScript.
     print_dumps(&result.dumps);
-    if opts.has_dump_output() {
-        return Ok(());
-    }
     if targets.is_empty() {
         print!("{}", result.js_output);
         return Ok(());
