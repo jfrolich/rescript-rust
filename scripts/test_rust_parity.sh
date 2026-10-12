@@ -592,7 +592,7 @@ run_spice_ppx_tests() {
         fi
 
         local rust_exit=0
-        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_out" > /dev/null 2>&1 || rust_exit=$?
+        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$rust_out" > /dev/null 2>&1 || rust_exit=$?
         if [[ $rust_exit -ne 0 ]]; then
             rust_error_count=$((rust_error_count + 1))
             failed_files="$failed_files$file (Rust compile error)\n"
