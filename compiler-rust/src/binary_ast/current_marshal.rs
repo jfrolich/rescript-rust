@@ -1299,7 +1299,8 @@ impl Marshal for ExpressionRecordField {
 impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let is_raw_expansion = is_raw_expansion_expr(self, w);
-        let is_external_raw_expansion = is_external_raw_expansion_expr(self, w);
+        let is_external_raw_expansion =
+            w.in_external_ext() && is_external_raw_expansion_expr(self, w);
         let is_external_ext = is_external_ext_expr(self, w);
         if is_external_raw_expansion {
             if let Some(obj_idx) = w.raw_expansion_expr(self.pexp_loc) {

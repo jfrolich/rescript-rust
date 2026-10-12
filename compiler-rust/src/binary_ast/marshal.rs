@@ -287,6 +287,9 @@ pub struct MarshalWriter<'a> {
     /// OCaml's `%external` rewrite reuses one `raw_exp` node in both `typeof(raw_exp)`
     /// and the `else raw_exp` branch; Rust clones that node, so we restore sharing
     /// here using the extension location as identity.
+    /// Only consulted inside one `%external` expression and cleared when it
+    /// ends, so unrelated raw expansions at the same location (jsConverter's
+    /// `_map` and `_revMap`) are never merged.
     raw_expansion_expr_table: HashMap<LocIdx, u32>,
 
     /// Shared object index for the canonical `internal.expansive` attribute tuple.
@@ -517,6 +520,11 @@ impl<'a> MarshalWriter<'a> {
     #[inline]
     pub fn exit_external_ext(&mut self) {
         self.external_ext_depth = self.external_ext_depth.saturating_sub(1);
+        if self.external_ext_depth == 0 {
+            // The shared `raw_exp` node belongs to one `%external` rewrite;
+            // other raw expansions at the same location are distinct values.
+            self.raw_expansion_expr_table.clear();
+        }
     }
 
     #[inline]
