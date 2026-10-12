@@ -121,10 +121,11 @@ fn run_step(bsc: &Path, step: &Step) -> Option<String> {
     None
 }
 
-fn steps(path: &Path, prod: bool) -> Result<Vec<Step>> {
-    // Discover packages without `initialize_build`: its compiler check and
-    // cleanup would delete the build folders (and the runtime's `lib/ocaml`
-    // sources the in-process build reads).
+/// The project at `path` with every module parsed and its dependencies
+/// read, every module marked dirty. Discovers the packages without
+/// `initialize_build`: its compiler check and cleanup would delete the build
+/// folders (and the runtime's `lib/ocaml` sources the in-process build reads).
+fn parsed_state(path: &Path, prod: bool) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
     let compiler = super::get_compiler_info(&project_context)?;
     let packages = packages::make(&None, &project_context, false, prod, None)?;
@@ -148,6 +149,23 @@ fn steps(path: &Path, prod: bool) -> Result<Vec<Step>> {
     }
     let deleted = AHashSet::new();
     deps::get_deps(&mut build_state, &deleted);
+    Ok(build_state)
+}
+
+/// Compile the project at `path` into a module registry, in process, writing
+/// nothing to disk. `rescript bsc` resolves an `-I` package's modules in it.
+pub fn build_in_memory(path: &Path) -> Result<rescript_compiler::cmi::persistent_env::ModuleRegistry> {
+    let mut build_state = parsed_state(path, false)?;
+    build_state.in_memory_only = true;
+    let (errors, _warnings, _) = compile::compile(&mut build_state, false, || (), |_| ())?;
+    if !errors.is_empty() {
+        return Err(anyhow!("{errors}"));
+    }
+    Ok(build_state.snapshot_module_registry())
+}
+
+fn steps(path: &Path, prod: bool) -> Result<Vec<Step>> {
+    let build_state = parsed_state(path, prod)?;
 
     let mut steps = Vec::new();
     for module_name in topological_order(&build_state)? {

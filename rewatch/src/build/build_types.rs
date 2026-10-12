@@ -301,6 +301,10 @@ pub struct BuildCommandState {
     // What the previous in-process build recorded (see `incremental`). Read
     // during initialization, in-process builds only.
     pub previous_in_process: Option<super::incremental::PreviousInProcessBuild>,
+    // Compile into the module registry only, writing nothing to disk (no
+    // JavaScript, source copies or compiler log): `rescript bsc` builds an
+    // `-I` package this way without touching its files.
+    pub in_memory_only: bool,
     // The incremental plan of a fresh in-process build, consumed by `compile`.
     pub incremental_plan: Option<super::incremental::IncrementalPlan>,
     // When the latest build started, and whether it finished without errors;
@@ -418,6 +422,7 @@ impl BuildCommandState {
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
             previous_in_process: None,
+            in_memory_only: false,
             incremental_plan: None,
             build_started_at: None,
             last_build_ok: false,

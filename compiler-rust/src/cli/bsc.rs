@@ -133,11 +133,13 @@ impl Options {
     }
 }
 
-/// Builds the module registry an in-process compile resolves its
-/// dependencies from (the runtime, compiled in memory).
-/// It receives the runtime package path (`-runtime-path` or the default).
-pub type RegistryProvider =
-    Box<dyn FnOnce(Option<PathBuf>) -> Result<crate::cmi::persistent_env::ModuleRegistry> + Send>;
+/// Builds the module registry an in-process compile resolves other units
+/// in, from the runtime package path (`-runtime-path` or the default) and the
+/// `-I` directories.
+pub type RegistryProvider = Box<
+    dyn FnOnce(Option<PathBuf>, Vec<PathBuf>) -> Result<crate::cmi::persistent_env::ModuleRegistry>
+        + Send,
+>;
 
 /// Run `bsc` with `args` (without the program name); never returns.
 ///
@@ -512,7 +514,11 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
             .into());
         }
         let runtime_path = opts.runtime_path.clone().or_else(default_runtime_path);
-        let registry = registry(runtime_path)?;
+        let include_dirs = opts.include_paths.clone();
+        let registry = registry(runtime_path, include_dirs)?;
+        // Building the registry compiles other units in process, which sets
+        // the color mode and prints reports; a fresh `bsc` has done neither.
+        code_frame::set_color_mode(opts.color_mode);
         code_frame::reset_color_setup();
         return compile_in_process(&input, &opts, registry);
     }
@@ -581,6 +587,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
+        interface_cmi_dir: None,
         gentype_config: opts.gentype.then(|| {
             std::sync::Arc::new(crate::gentype::config::build_config_from_flags(
                 opts.namespace.clone(),

@@ -604,6 +604,7 @@ fn append_compile_warnings(
     build_state: &BuildState,
     mut warning_entries: Vec<CompileWarning>,
     compile_warnings: &mut String,
+    write_log: bool,
 ) {
     warning_entries.sort_by(|a, b| a.module_name.cmp(&b.module_name));
     for CompileWarning {
@@ -612,7 +613,9 @@ fn append_compile_warnings(
         ..
     } in warning_entries
     {
-        if let Some(package) = build_state.get_package(&package_name) {
+        if let Some(package) = build_state.get_package(&package_name)
+            && write_log
+        {
             logs::append(package, &warning);
         }
         compile_warnings.push_str(&warning);
@@ -655,6 +658,7 @@ pub fn compile(
             &build_state.build_state,
             collect_stored_warnings_for_modules_not_recompiled(&build_state.build_state, &AHashSet::new()),
             &mut warnings,
+            !build_state.in_memory_only,
         );
         return Ok((String::new(), warnings, 0));
     }
@@ -1463,7 +1467,9 @@ pub fn compile(
             });
         }
         if let Some(error) = compile_error {
-            logs::append(package, &error);
+            if !build_state.in_memory_only {
+                logs::append(package, &error);
+            }
             compile_errors.push_str(&error);
         }
         if let Some(warning) = interface_warning {
@@ -1474,7 +1480,9 @@ pub fn compile(
             });
         }
         if let Some(error) = interface_error {
-            logs::append(package, &error);
+            if !build_state.in_memory_only {
+                logs::append(package, &error);
+            }
             compile_errors.push_str(&error);
         }
     }
@@ -1500,6 +1508,7 @@ pub fn compile(
             if let Some(module) = build_state.get_module(module_name)
                 && touched_packages.insert(module.package_name.clone())
                 && let Some(package) = build_state.get_package(&module.package_name)
+                && !build_state.in_memory_only
             {
                 logs::append(package, &message);
             }
@@ -1526,7 +1535,12 @@ pub fn compile(
             .into_iter()
             .filter(|warning| !blocked_by_failure.contains(&warning.module_name)),
     );
-    append_compile_warnings(&build_state.build_state, warning_entries, &mut compile_warnings);
+    append_compile_warnings(
+        &build_state.build_state,
+        warning_entries,
+        &mut compile_warnings,
+        !build_state.in_memory_only,
+    );
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
 }
@@ -2170,6 +2184,8 @@ fn build_package_compiler_options(
 
     Ok(rescript_compiler::driver::CompilerOptions {
         include_paths,
+        // The file build compiled from `lib/bs` with `-I ../ocaml` first.
+        interface_cmi_dir: Some(PathBuf::from("../ocaml")),
         runtime_path,
         open_modules,
         collect_unit_reads: true,
@@ -2264,6 +2280,40 @@ fn js_output_suffix_for_registry(root_config: &config::Config) -> Option<String>
         .map(|spec| root_config.get_suffix(spec))
 }
 
+/// The package info a module's `.cmj` records (`-bs-package-output`): per
+/// root package spec, the module system, the directory its JavaScript goes to
+/// relative to the package root, and the suffix.
+fn package_outputs(
+    package: &packages::Package,
+    root_config: &config::Config,
+    source_abs: &Path,
+) -> Vec<rescript_compiler::cmi::persistent_env::CmjPackageInfo> {
+    use rescript_compiler::cmi::persistent_env::{CmjPackageInfo, CmjPackageModuleSystem};
+    let package_root = Path::new(&package.path);
+    let Ok(source_rel) = source_abs.strip_prefix(package_root) else {
+        return Vec::new();
+    };
+    root_config
+        .get_package_specs()
+        .iter()
+        .map(|spec| {
+            let js_path = js_output_path_for_spec(package, source_rel, root_config, spec);
+            let dir = js_path
+                .parent()
+                .and_then(|dir| dir.strip_prefix(package_root).ok())
+                .unwrap_or(Path::new(""));
+            CmjPackageInfo {
+                module_system: match spec.module {
+                    config::PackageModule::CommonJs => CmjPackageModuleSystem::CommonJs,
+                    config::PackageModule::EsModule => CmjPackageModuleSystem::EsModule,
+                },
+                path: dir.to_string_lossy().replace('\\', "/"),
+                suffix: root_config.get_suffix(spec),
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn in_memory_module_info_for_package(
     package: &packages::Package,
@@ -2276,7 +2326,9 @@ fn in_memory_module_info_for_package(
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
+    let package_outputs = package_outputs(package, root_config, &source_path);
     InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime)
+        .with_package_outputs(package_outputs)
         .with_cmj_export_arities(cmj_export_arities)
         .with_cmj_export_lambdas(cmj_export_lambdas)
         .with_cmj_hoisted_exports(hoisted_exports)
@@ -3471,7 +3523,9 @@ fn compile_module_in_process_to_js_boundary(
 
     // Build compiler options from package config
     let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
-    let registry_only = scheduler_hooks.is_some_and(|hooks| hooks.registry_only.contains(module_name));
+    // An in-memory build writes no outputs: every module only registers.
+    let registry_only = build_command_state.in_memory_only
+        || scheduler_hooks.is_some_and(|hooks| hooks.registry_only.contains(module_name));
     if registry_only {
         // A support module's outputs are up to date: GenType only registers
         // its type declarations, which modules importing its types read.
@@ -4315,6 +4369,7 @@ mod tests {
             &build_state,
             collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules),
             &mut compile_warnings,
+            true,
         );
 
         assert_eq!(compile_warnings, "warning: alpha\nwarning: zed\n");
@@ -4345,6 +4400,7 @@ mod tests {
                 },
             ],
             &mut compile_warnings,
+            true,
         );
 
         assert_eq!(compile_warnings, "warning: stored\nwarning: fresh\n");

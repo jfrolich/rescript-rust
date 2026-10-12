@@ -1301,6 +1301,12 @@ pub struct CompilerOptions {
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
+    /// Where the file compile finds the interface's `.cmi`, spelled as its
+    /// `-I` entry (`find_in_path_uncap`, typemod.ml:1742-1749), for the
+    /// interface-mismatch report: a build's is `../ocaml`, its package's
+    /// `lib/ocaml` seen from `lib/bs`. `None`: next to the source, where
+    /// `bsc` writes it.
+    pub interface_cmi_dir: Option<PathBuf>,
     /// GenType configuration derived from `-bs-gentype-*` flags.
     pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
     /// Build-scoped GenType module resolver shared by in-process compilations.
@@ -1511,6 +1517,7 @@ impl Default for CompilerOptions {
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
+            interface_cmi_dir: None,
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
@@ -12715,32 +12722,21 @@ fn format_compunit_mismatch_report(
 
 /// The `.cmi` name `Typemod.type_implementation` reports for an interface:
 /// `find_in_path_uncap !Config.load_path (modulename ^ ".cmi")`
-/// (typemod.ml:1742-1749, misc.ml `find_in_path_uncap`) spelled with the
-/// `-I` entry the file build passes. In-process builds put the package's own
-/// `lib/ocaml` first, which the file build passes as `-I ../ocaml` from
-/// `lib/bs`.
-fn in_process_interface_display_name(
-    options: &CompilerOptions,
-    module_name: &str,
-) -> Option<String> {
-    let filename = format!("{module_name}.cmi");
-    let mut uncap = filename.clone();
-    if let Some(first) = uncap.get_mut(0..1) {
-        first.make_ascii_lowercase();
-    }
-    for (index, dir) in options.include_paths.iter().enumerate() {
-        let display_dir = if index == 0 {
-            std::path::PathBuf::from("../ocaml")
-        } else {
-            dir.clone()
-        };
-        for name in [&uncap, &filename] {
-            if dir.join(name).exists() {
-                return Some(display_dir.join(name).to_string_lossy().into_owned());
-            }
+/// (typemod.ml:1742-1749), the file the interface compile wrote, in
+/// `interface_cmi_dir` (or next to the source).
+fn in_process_interface_display_name(options: &CompilerOptions, source_file: &str) -> String {
+    match &options.interface_cmi_dir {
+        Some(dir) => {
+            let stem = std::path::Path::new(source_file)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            dir.join(format!("{stem}.cmi"))
+                .to_string_lossy()
+                .into_owned()
         }
+        None => interface_cmi_name(source_file),
     }
-    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16155,7 +16151,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // checks, as the file compile does.
     let mut interface_inclusion = None;
     if has_interface {
-        let interface_file = in_process_interface_display_name(options, module_name);
+        let interface_file = in_process_interface_display_name(options, filename);
         match check_compunit_inclusion_for_errors(
             &mut tctx,
             &type_ctx,
@@ -16165,7 +16161,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             &|| source().to_string(),
             filename,
             true,
-            interface_file.as_deref(),
+            Some(interface_file.as_str()),
         ) {
             Ok(inclusion) => interface_inclusion = inclusion,
             Err(error) => {
@@ -16393,7 +16389,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // file compile after the warnings it already printed; report it with
         // the warnings this compile buffered.
         let raw_lambda = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion)
+            raw_converter
+                .convert_structure_with_coercion(&typed_structure, &implementation_coercion)
         })) {
             Ok(raw_lambda) => raw_lambda,
             Err(payload) => return Err(payload),

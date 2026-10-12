@@ -167,6 +167,7 @@ pub fn item_digests(
         info.is_pure.hash(&mut hasher);
         info.package_name.hash(&mut hasher);
         info.js_output_suffix.hash(&mut hasher);
+        info.package_outputs.hash(&mut hasher);
         info.is_runtime.hash(&mut hasher);
     }
     digests.insert(MODULE_LEVEL.to_string(), hasher.finish());

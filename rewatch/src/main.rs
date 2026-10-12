@@ -16,6 +16,41 @@ use rescript::{
     telemetry, watcher,
 };
 
+/// The registry `rescript bsc` compiles against. The file compile finds
+/// other units' `.cmi` files in its `-I` directories; in process, an `-I`
+/// directory that is a package's `lib/ocaml` compiles that package (with its
+/// dependencies) into memory instead, leaving its files alone, and the
+/// runtime is compiled otherwise.
+fn bsc_registry(
+    runtime_path: &Path,
+    include_dirs: &[std::path::PathBuf],
+) -> anyhow::Result<rescript_compiler::cmi::persistent_env::ModuleRegistry> {
+    let runtime = std::fs::canonicalize(runtime_path).ok();
+    let mut packages = Vec::new();
+    for dir in include_dirs {
+        // `lib/ocaml` need not exist yet: the build writes it.
+        if !dir.ends_with("lib/ocaml") {
+            continue;
+        }
+        let Some(Ok(package)) = dir.parent().and_then(Path::parent).map(std::fs::canonicalize) else {
+            continue;
+        };
+        if Some(&package) != runtime.as_ref()
+            && (package.join("rescript.json").exists() || package.join("bsconfig.json").exists())
+        {
+            packages.push(package);
+        }
+    }
+    match packages.as_slice() {
+        [] => rescript::build::compile::runtime_registry(runtime_path),
+        [package] => build::plan::build_in_memory(package)
+            .map_err(|err| anyhow::anyhow!("bsc: building {} failed:\n{err:#}", package.display())),
+        _ => Err(anyhow::anyhow!(
+            "bsc: at most one package's lib/ocaml can be an -I directory in process"
+        )),
+    }
+}
+
 fn main() {
     // Hidden test commands: run the linked compiler one file at a time, as
     // the parity scripts compare it against the OCaml reference compiler.
@@ -25,11 +60,11 @@ fn main() {
             configure_rayon_for_in_process();
             rescript_compiler::cli::bsc::main(
                 args.collect(),
-                Some(Box::new(|runtime_path| {
+                Some(Box::new(|runtime_path, include_dirs| {
                     let runtime_path = runtime_path
                         .or_else(|| std::env::var_os("RESCRIPT_RUNTIME").map(Into::into))
                         .ok_or_else(|| anyhow::anyhow!("bsc: pass -runtime-path or set RESCRIPT_RUNTIME"))?;
-                    rescript::build::compile::runtime_registry(&runtime_path)
+                    bsc_registry(&runtime_path, &include_dirs)
                 })),
             );
             std::process::exit(0);
