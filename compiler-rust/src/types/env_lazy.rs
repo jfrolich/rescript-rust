@@ -1737,7 +1737,15 @@ fn build_local_module_components<'a>(
     {
         let ps = {
             let pers = pers_env.as_mut()?;
-            pers.find_pers_struct(alias_id.name(), ctx)
+            let ps = pers.find_pers_struct(alias_id.name(), ctx);
+            // env.ml:872-875 forces `ps_sig = Subst.signature identity sign`
+            // here, freshening the unit's bound identifiers. Reserve those
+            // stamps (the rename itself stays deferred) so later identifiers
+            // get OCaml's stamps.
+            if ps.is_some() {
+                ctx.trigger_module_sig_rename(alias_id.name());
+            }
+            ps
         };
         if let Some(ps) = ps {
             let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
@@ -1748,9 +1756,7 @@ fn build_local_module_components<'a>(
             // mode the portable signature has already been internalized into
             // the worker store, so share that component signature and let the
             // view apply the selected access path lazily to forced items
-            // instead of renaming and copying the unit's signature. This skips
-            // the rename's stamp consumption, so in-process ident stamps can
-            // differ from OCaml's; in-process builds write no `.cmt` files.
+            // instead of renaming and copying the unit's signature.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),

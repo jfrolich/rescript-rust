@@ -28128,6 +28128,13 @@ fn build_module_components_from_parent_path<'a>(
     {
         let pers = pers_env.as_mut()?;
         if let Some(ps) = pers.find_pers_struct(&alias_target, ctx) {
+            // env.ml:1440-1442 `scrape_alias` reaches `find_module`, whose
+            // persistent branch (env.ml:872-875) forces `ps_sig`, freshening
+            // the unit's bound identifiers. The view below shares the
+            // unrenamed signature, so take the rename's stamps here.
+            if cache_mode.forces_alias_sig() {
+                ctx.trigger_module_sig_rename(&alias_target);
+            }
             let source_prefix = Path::pident(Ident::create_persistent(&alias_target));
             let access_path =
                 Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
