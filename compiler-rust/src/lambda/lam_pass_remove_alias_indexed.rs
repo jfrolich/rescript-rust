@@ -1508,7 +1508,7 @@ mod tests {
                 measurements.metadata_retained_only_side_payload_shallow_bytes,
                 measurements.superseded_unreachable_side_payload_shallow_bytes,
             ),
-            (25, 6, 3, 8, 17, 448, 204, 1004),
+            (25, 6, 3, 8, 17, 488, 244, 1044),
         );
     }
 }
