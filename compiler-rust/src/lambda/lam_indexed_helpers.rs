@@ -62,7 +62,7 @@ pub(crate) fn append_refine_let(
     let kind = match kind {
         LetKind::Strict | LetKind::StrictOpt if safe_to_alias(store, arg) => LetKind::Alias,
         LetKind::Strict
-            if matches!(store.view(arg), NodeView::Function(_, _, _, _))
+            if matches!(store.view(arg), NodeView::Function(_, _, _, _, _))
                 || no_side_effects(store, arg) =>
         {
             LetKind::StrictOpt
@@ -396,7 +396,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                     matches!(store.view(*node), NodeView::Var(id) if param.same(id))
                 }).then(|| outer.to_vec())
             }
-            if let NodeSnapshot::Function(_, params, body, _) = store.snapshot(function) {
+            if let NodeSnapshot::Function(_, params, body, _, _) = store.snapshot(function) {
                 match store.snapshot(body) {
                     NodeSnapshot::Prim(primitive, inner, _)
                         if !matches!(
@@ -457,7 +457,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                 }
             }
             if let NodeSnapshot::Let(kind, id, value, body) = store.snapshot(function)
-                && matches!(store.view(body), NodeView::Function(_, _, _, _))
+                && matches!(store.view(body), NodeView::Function(_, _, _, _, _))
             {
                 let apply = append_rebuilt(store, NodeSnapshot::Apply(body, args, info, jsx));
                 return store.append(NodeSnapshot::Let(kind, id, value, apply));
@@ -695,8 +695,8 @@ pub(crate) fn map_children(
             info,
             jsx,
         ),
-        NodeSnapshot::Function(a, p, body, attr) => {
-            NodeSnapshot::Function(a, p, map(store, body), attr)
+        NodeSnapshot::Function(a, p, body, attr, loc) => {
+            NodeSnapshot::Function(a, p, map(store, body), attr, loc)
         }
         NodeSnapshot::Let(k, id, value, body) => {
             NodeSnapshot::Let(k, id, map(store, value), map(store, body))

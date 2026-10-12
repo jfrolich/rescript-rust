@@ -15,7 +15,7 @@ use crate::location::Location;
 
 fn safe_to_share(store: &IndexedLambda, node: NodeId) -> bool {
     match store.view(node) {
-        NodeView::Var(_) | NodeView::Function(_, _, _, _) => true,
+        NodeView::Var(_) | NodeView::Function(_, _, _, _, _) => true,
         NodeView::Const(
             Constant::Int { .. }
             | Constant::Constructor(_)
@@ -71,7 +71,14 @@ fn transform_under_supply(
     let body = append_rebuilt(store, NodeSnapshot::Apply(function, shared, info, false));
     let mut result = append_rebuilt(
         store,
-        NodeSnapshot::Function(missing, extra_params, body, FunctionAttribute::default()),
+        // lam_eta_conversion.ml:65 (before its removal): `~loc:Location.none`.
+        NodeSnapshot::Function(
+            missing,
+            extra_params,
+            body,
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
+        ),
     );
     // `Ext_list.fold_left bindings rest` wraps each next binding outside the
     // previous result, so the last source binding is outermost.
@@ -158,9 +165,9 @@ fn simplify(
                 }
             }
         }
-        NodeSnapshot::Function(arity, params, body, attr) => {
+        NodeSnapshot::Function(arity, params, body, attr, loc) => {
             let body = simplify(store, metadata, id_gen, external, body);
-            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr))
+            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr, loc))
         }
         NodeSnapshot::Let(kind, id, value, body) => {
             let body = simplify(store, metadata, id_gen, external, body);
@@ -396,7 +403,7 @@ mod tests {
                 .map(|index| id(&format!("p{index}"), stamp + index))
                 .collect(),
             Lambda::const_(Constant::int(0)),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         )
     }
 
@@ -625,7 +632,7 @@ mod tests {
                 1,
                 vec![id("x", 3)],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -634,7 +641,7 @@ mod tests {
                     2,
                     vec![id("a", 4), id("b", 5)],
                     Lambda::const_(Constant::int(0)),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
                 apply(
                     Lambda::var(outer),
@@ -704,7 +711,7 @@ mod tests {
             2,
             vec![p.clone(), q.clone()],
             Lambda::var(p),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         for (args, over) in [
             (
@@ -783,7 +790,7 @@ mod tests {
                 4,
                 vec![id("a", 3), id("b", 4), id("c", 5), id("d", 6)],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             apply(
                 function_expression,
@@ -862,7 +869,7 @@ mod tests {
                 2,
                 vec![id("a", 2), id("b", 3)],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             apply(
                 Lambda::var(function),
@@ -928,7 +935,7 @@ mod tests {
                 2,
                 vec![id("a", 2), id("b", 3)],
                 Lambda::const_(Constant::int(0)),
-                attr.clone(),
+                attr.clone(), crate::location::Location::none(),
             ),
             apply(
                 Lambda::var(function),
@@ -985,7 +992,7 @@ mod tests {
                 2,
                 vec![id("x", 10), id("y", 11)],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
             apply(
                 Lambda::var(known),

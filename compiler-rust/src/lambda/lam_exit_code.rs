@@ -90,7 +90,7 @@ mod tests {
     fn stops_at_lfunction_boundary() {
         use crate::lambda::LFunction;
         let body = Lambda::LstaticRaise(1, vec![]);
-        let func = Lambda::Lfunction(Box::new(LFunction {
+        let func = Lambda::Lfunction(Box::new(LFunction { loc: crate::location::Location::none(),
             arity: 0,
             params: vec![],
             body: Box::new(body),

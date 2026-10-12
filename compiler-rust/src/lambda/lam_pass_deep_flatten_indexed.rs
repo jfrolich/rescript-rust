@@ -137,7 +137,7 @@ fn flatten(
             // `Lam_group.nop_cons` drops pure heads (lam_group.ml:36-39).
             if !matches!(
                 store.view(left),
-                NodeView::Var(_) | NodeView::Const(_) | NodeView::Function(_, _, _, _)
+                NodeView::Var(_) | NodeView::Const(_) | NodeView::Function(_, _, _, _, _)
             ) {
                 groups.push(Group::Nop(left));
             }

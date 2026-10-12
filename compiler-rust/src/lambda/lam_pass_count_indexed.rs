@@ -103,7 +103,7 @@ pub(crate) fn collect_occurs(
         hash_capacity: &mut usize,
     ) {
         match store.snapshot(node) {
-            NodeSnapshot::Function(_, _, body, _) => {
+            NodeSnapshot::Function(_, _, body, _, _) => {
                 count(store, occ, &mut LocalTable::new(), body, hash_capacity)
             }
             NodeSnapshot::For(_, from, to, _, body) => {
@@ -155,7 +155,7 @@ pub(crate) fn collect_occurs(
                 count(store, occ, local, body, hash_capacity);
             }
             NodeSnapshot::Apply(function, args, _, _) => {
-                if let NodeSnapshot::Function(_, params, body, attr) = store.snapshot(function)
+                if let NodeSnapshot::Function(_, params, body, attr, _) = store.snapshot(function)
                     && params.len() == args.len()
                     && !attr.async_
                     && attr.directive.is_none()
@@ -358,7 +358,7 @@ mod tests {
                             sw_dispatch: SwitchDispatch::Direct,
                         }),
                     ),
-                    FunctionAttribute::default(),
+                    FunctionAttribute::default(), crate::location::Location::none(),
                 ),
             ),
         );

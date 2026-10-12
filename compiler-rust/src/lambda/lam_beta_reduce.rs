@@ -517,6 +517,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 params,
                 rewrite_bounded_vars(substitution, &func.body, id_gen),
                 func.attr.clone(),
+                func.loc,
             )
         }
         Lambda::Llet(kind, id, arg, body) => {
@@ -933,7 +934,7 @@ mod tests {
                 1,
                 vec![inner.clone()],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(),
+                FunctionAttribute::default(), crate::location::Location::none(),
             ),
         );
         let args = vec![Lambda::const_(Constant::String("".to_string()))];
@@ -1045,7 +1046,7 @@ mod tests {
             1,
             vec![none.clone()],
             Lambda::var(none.clone()),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 
@@ -1146,7 +1147,7 @@ mod tests {
             1,
             vec![none.clone()],
             Lambda::var(none.clone()),
-            FunctionAttribute::default(),
+            FunctionAttribute::default(), crate::location::Location::none(),
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 

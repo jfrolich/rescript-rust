@@ -908,7 +908,7 @@ fn indexed_lambda(
             ap_info_sexp(info, with_locs),
             bool_sexp(jsx),
         ]),
-        NodeView::Function(_, params, body, attr) => Sexp::list(vec![
+        NodeView::Function(_, params, body, attr, _) => Sexp::list(vec![
             Sexp::atom("Lfunction"),
             Sexp::list(params.iter().map(ident).collect()),
             child(body),

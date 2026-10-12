@@ -10,6 +10,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
+use crate::location::Location;
 use crate::lambda::{ApInfo, FunctionAttribute, Lambda, PrimInfo};
 
 /// Direct port of `Lam_eta_conversion.transform_under_supply`
@@ -71,6 +72,8 @@ pub fn transform_under_supply(
             extra_args,
             Lambda::apply(fn_, all_args, ap_info.clone(), false),
             FunctionAttribute::default(),
+            // lam_eta_conversion.ml:65 (before its removal): `~loc:Location.none`.
+            Location::none(),
         );
     }
 
@@ -79,7 +82,7 @@ pub fn transform_under_supply(
     let mut all_args = args;
     all_args.extend(extra_lambdas);
     let body = Lambda::apply(fn_, all_args, ap_info.clone(), false);
-    let rest = Lambda::function_(n, extra_args, body, FunctionAttribute::default());
+    let rest = Lambda::function_(n, extra_args, body, FunctionAttribute::default(), Location::none());
 
     // OCaml's fold_left applies bindings in order, wrapping innermost first.
     // We collected `bindings` in the same forward order; reversing matches

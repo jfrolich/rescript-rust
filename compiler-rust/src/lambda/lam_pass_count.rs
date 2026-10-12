@@ -396,7 +396,7 @@ mod tests {
                 async_: false,
                 directive: None,
                 one_unit_arg: false,
-            },
+            }, crate::location::Location::none(),
         );
         let lam = Lambda::let_(
             LetKind::Strict,

@@ -85,7 +85,7 @@ struct GlobalPayload(Ident);
 #[derive(Clone)]
 struct ApplyPayload(NodeId, ItemRange, ApInfo, bool);
 #[derive(Clone)]
-struct FunctionPayload(i32, ItemRange, NodeId, FunctionAttribute);
+struct FunctionPayload(i32, ItemRange, NodeId, FunctionAttribute, Location);
 #[derive(Clone)]
 struct LetPayload(LetKind, Ident, NodeId, NodeId);
 #[derive(Clone)]
@@ -128,7 +128,7 @@ pub(crate) enum NodeView<'a> {
     GlobalModule(&'a Ident),
     Const(&'a Constant),
     Apply(NodeId, &'a [NodeId], &'a ApInfo, bool),
-    Function(i32, &'a [Ident], NodeId, &'a FunctionAttribute),
+    Function(i32, &'a [Ident], NodeId, &'a FunctionAttribute, Location),
     Let(LetKind, &'a Ident, NodeId, NodeId),
     LetRec(&'a [(Ident, NodeId)], NodeId),
     Prim(&'a Primitive, &'a [NodeId], &'a Location),
@@ -164,7 +164,7 @@ pub(crate) enum NodeSnapshot {
     GlobalModule(Ident),
     Const(Constant),
     Apply(NodeId, Vec<NodeId>, ApInfo, bool),
-    Function(i32, Vec<Ident>, NodeId, FunctionAttribute),
+    Function(i32, Vec<Ident>, NodeId, FunctionAttribute, Location),
     Let(LetKind, Ident, NodeId, NodeId),
     LetRec(Vec<(Ident, NodeId)>, NodeId),
     Prim(Primitive, Vec<NodeId>, Location),
@@ -293,7 +293,7 @@ impl IndexedLambda {
             }
             IndexedNode::Function(i) => {
                 let p = &self.functions[i as usize];
-                NodeView::Function(p.0, &self.idents[p.1.bounds()], p.2, &p.3)
+                NodeView::Function(p.0, &self.idents[p.1.bounds()], p.2, &p.3, p.4)
             }
             IndexedNode::Let(i) => {
                 let p = &self.lets[i as usize];
@@ -383,12 +383,13 @@ impl IndexedLambda {
                 ap_info: info.clone(),
                 ap_transformed_jsx: jsx,
             })),
-            NodeView::Function(arity, params, body, attr) => {
+            NodeView::Function(arity, params, body, attr, loc) => {
                 Lambda::Lfunction(Box::new(LFunction {
                     arity,
                     params: params.to_vec(),
                     body: Box::new(self.materialize_node(body)),
                     attr: attr.clone(),
+                    loc,
                 }))
             }
             NodeView::Let(kind, ident, value, body) => Lambda::Llet(
@@ -502,8 +503,8 @@ impl IndexedLambda {
             NodeView::Apply(function, args, info, jsx) => {
                 NodeSnapshot::Apply(function, args.to_vec(), info.clone(), jsx)
             }
-            NodeView::Function(arity, params, body, attr) => {
-                NodeSnapshot::Function(arity, params.to_vec(), body, attr.clone())
+            NodeView::Function(arity, params, body, attr, loc) => {
+                NodeSnapshot::Function(arity, params.to_vec(), body, attr.clone(), loc)
             }
             NodeView::Let(kind, id, value, body) => {
                 NodeSnapshot::Let(kind, id.clone(), value, body)
@@ -572,11 +573,11 @@ impl IndexedLambda {
                 let args = self.push_children(args);
                 payload_node!(applies, ApplyPayload(function, args, info, jsx), Apply)
             }
-            NodeSnapshot::Function(arity, params, body, attr) => {
+            NodeSnapshot::Function(arity, params, body, attr, loc) => {
                 let params = self.push_idents(params);
                 payload_node!(
                     functions,
-                    FunctionPayload(arity, params, body, attr),
+                    FunctionPayload(arity, params, body, attr, loc),
                     Function
                 )
             }
@@ -745,7 +746,7 @@ impl IndexedLambda {
                         child(*node);
                     }
                 }
-                NodeView::Function(_, _, body, _) => child(body),
+                NodeView::Function(_, _, body, _, _) => child(body),
                 NodeView::Let(_, _, value, body) => {
                     child(value);
                     child(body);
@@ -890,7 +891,7 @@ impl IndexedLambda {
                 let params = self.push_idents(func.params);
                 payload_node!(
                     functions,
-                    FunctionPayload(func.arity, params, body, func.attr),
+                    FunctionPayload(func.arity, params, body, func.attr, func.loc),
                     Function
                 )
             }
@@ -1184,7 +1185,7 @@ impl IndexedLambdaContext {
                         child(*node);
                     }
                 }
-                NodeView::Function(_, _, body, _) => child(body),
+                NodeView::Function(_, _, body, _, _) => child(body),
                 NodeView::Let(_, _, value, body) => {
                     child(value);
                     child(body);
@@ -1513,7 +1514,7 @@ mod tests {
                 ap_info: info,
                 ap_transformed_jsx: true,
             })),
-            Lambda::Lfunction(Box::new(LFunction {
+            Lambda::Lfunction(Box::new(LFunction { loc: crate::location::Location::none(),
                 arity: 2,
                 params: vec![x.clone(), y.clone()],
                 body: Box::new(var()),
