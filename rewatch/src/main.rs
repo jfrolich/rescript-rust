@@ -90,8 +90,10 @@ fn run_main(otel_enabled: bool) -> Result<()> {
     let show_progress = log_level_filter >= LevelFilter::Info;
 
     match cli.command {
-        cli::Command::BuildPlan { folder, prod } => {
-            println!("{}", build::plan::build_plan(Path::new(&folder), prod)?);
+        cli::Command::BuildReference { folder, bsc, prod } => {
+            if !build::plan::build_reference(Path::new(&folder), Path::new(&bsc), prod)? {
+                std::process::exit(1);
+            }
             Ok(())
         }
         cli::Command::CompilerArgs { path } => {

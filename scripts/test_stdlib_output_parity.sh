@@ -102,7 +102,7 @@ echo -e "${BOLD}Step 1: Building stdlib/runtime with OCaml bsc...${RESET}"
 (
     export RESCRIPT_RUNTIME="$RUNTIME_DIR"
     "$RESCRIPT_CLI" build "$RUNTIME_DIR" > /dev/null 2>&1 || true
-    python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" --bsc "$OCAML_BSC" --rescript "$RESCRIPT_CLI" "$RUNTIME_DIR" 2>&1 | tail -5
+    "$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" "$RUNTIME_DIR" 2>&1 | tail -5
 )
 echo ""
 

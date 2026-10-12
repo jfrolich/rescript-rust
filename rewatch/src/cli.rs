@@ -601,13 +601,17 @@ pub enum Command {
         #[arg(group = "format_input_mode")]
         files: Vec<String>,
     },
-    /// Test-only: print the file-backed `bsc` build of a project as JSON
-    /// steps in dependency order, for building the OCaml reference outputs.
+    /// Test-only: build a project file by file with the given `bsc`
+    /// executable (the OCaml reference compiler), writing its `.ast`, `.cmi`,
+    /// `.cmj` and `.cmt` files and JavaScript.
     #[command(hide = true)]
-    BuildPlan {
+    BuildReference {
         /// The project folder
         #[arg(default_value = ".")]
         folder: String,
+        /// The `bsc` executable to compile with
+        #[arg(long)]
+        bsc: String,
         /// Skip dev-dependencies and dev sources
         #[arg(long, default_value_t = false)]
         prod: bool,

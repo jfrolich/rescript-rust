@@ -4,9 +4,9 @@
 # The two compilers build separately:
 #   - Rust: `rescript build --dump` compiles in process and writes the
 #     intermediate representations of every module to a dump directory.
-#   - OCaml: scripts/build_ocaml_reference.py runs the file-backed build that
-#     `rescript build-plan` prints with the OCaml bsc, writing .ast/.cmi/.cmj
-#     files, so the OCaml bsc can then recompile any single file.
+#   - OCaml: the hidden `rescript build-reference --bsc OCAML_BSC` runs the
+#     file-backed build with the OCaml bsc, writing .ast/.cmi/.cmj files, so
+#     the OCaml bsc can then recompile any single file.
 # Only the OCaml side reads or writes .cmi files.
 
 # The OCaml bsc: the dune build, or its copy in the platform npm package.
@@ -52,8 +52,8 @@ parity_build_ocaml_reference() {
         if [[ "$dir" == "$project" && ( "$project" == "$PARITY_RUNTIME" || "$project" == "$PARITY_BELT" ) ]]; then
             continue
         fi
-        RESCRIPT_RUNTIME="$PARITY_RUNTIME" python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" \
-            --bsc "$OCAML_BSC" --rescript "$RESCRIPT_CLI" "$dir" || status=1
+        RESCRIPT_RUNTIME="$PARITY_RUNTIME" "$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" "$dir" ||
+            status=1
     done
     return $status
 }

@@ -314,9 +314,9 @@ if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/
     # The OCaml side reads the runtime .cmi files: build the runtime with the
     # OCaml bsc after the in-process build that writes its lib/ocaml sources.
     "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
-    python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" "$RESCRIPT_RUNTIME"
+    "$2" build-reference --bsc "$1" "$RESCRIPT_RUNTIME"
     "$2" clean
-    python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" .
+    "$2" build-reference --bsc "$1" .
 ' "$TELLA_BUILD_DIR" "$OCAML_BSC" "$REWATCH_BIN" "$PROJECT_ROOT"; then
     cp "$TEMP_DIR/ocaml-build.log" "$CACHE_DIR/errors/ocaml-build.err" 2>/dev/null || true
     exit 2

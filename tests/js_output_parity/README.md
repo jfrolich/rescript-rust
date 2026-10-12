@@ -7,8 +7,8 @@ ReScript programs that isolate code-generation shapes. Generated `.js`, `.mjs`,
 not be checked in. A fixture can include a sibling `.resi`; the runner compiles
 that interface before the implementation for each compiler. A fixture entry can
 also be a directory; the runner builds the copied directory as a tiny project
-with the OCaml compiler (through `rescript build-plan` and
-`scripts/build_ocaml_reference.py`) and with an in-process `rescript build`,
+with the OCaml compiler (through the hidden
+`rescript build-reference --bsc`) and with an in-process `rescript build`,
 then compares every generated JS output. Directory fixtures can include `rescript.extra.json` for
 extra project-level config such as namespace settings.
 

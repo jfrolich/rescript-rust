@@ -1,13 +1,13 @@
-//! The hidden `rescript build-plan` command (test-only).
+//! The hidden `rescript build-reference` command (test-only).
 //!
 //! Builds compile in-process and write no `.ast`/`.cmi`/`.cmj`/`.cmt` files.
 //! The parity scripts still need a reference build by the OCaml `bsc`, which
-//! reads and writes those files. This prints that build as a plan: every
-//! module in dependency order, with the `bsc` command lines a file-backed
-//! build runs for it (parse to `.ast`, compile the interface, compile the
-//! implementation) and the artifact copies into `lib/ocaml` that let
-//! dependent packages find it. `scripts/build_ocaml_reference.py` runs the
-//! plan with the OCaml `bsc`; rewatch never runs a compiler executable.
+//! reads and writes those files. This runs that file-backed build with a
+//! given `bsc` executable: for every module, after the modules it depends
+//! on, the `bsc` command lines (parse to `.ast`, compile the interface,
+//! compile the implementation), copying the artifacts into `lib/ocaml` after
+//! each command so dependents find them. Normal builds never run a compiler
+//! executable.
 
 use super::build_types::*;
 use super::{compile, deps, mark_modules_dirty, packages, parse};
@@ -16,18 +16,12 @@ use crate::helpers;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Result, anyhow};
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize)]
-struct Plan {
-    steps: Vec<Step>,
-}
-
-/// One module of the plan. Run `commands` in order, each with `bsc` and the
-/// working directory `cwd`, after the steps of every module in `deps`; then
-/// copy each `[from, to]` of `copies` (a missing `from` is skipped).
-#[derive(Serialize)]
+/// One module of the build. Run `commands` in order, each with `bsc` and the
+/// working directory `cwd`, after the steps of every module in `deps`; after
+/// each command copy each `(from, to)` of `copies` (a missing `from` is
+/// skipped).
 struct Step {
     module: String,
     package: String,
@@ -39,7 +33,95 @@ struct Step {
     copies: Vec<(PathBuf, PathBuf)>,
 }
 
-pub fn build_plan(path: &Path, prod: bool) -> Result<String> {
+/// Build the project at `path` with the `bsc` executable `bsc`. Prints the
+/// failures to stderr and returns whether every module built.
+pub fn build_reference(path: &Path, bsc: &Path, prod: bool) -> Result<bool> {
+    use rayon::prelude::*;
+    let bsc = std::fs::canonicalize(bsc)?;
+    let steps = steps(path, prod)?;
+    let index: AHashMap<&str, usize> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| (step.module.as_str(), i))
+        .collect();
+    // 0: pending, 1: built, 2: failed or skipped.
+    let mut state = vec![0u8; steps.len()];
+    let mut failures = Vec::new();
+    loop {
+        let mut ready = Vec::new();
+        for (i, step) in steps.iter().enumerate() {
+            if state[i] != 0 {
+                continue;
+            }
+            let deps: Vec<u8> = step
+                .deps
+                .iter()
+                .filter_map(|dep| index.get(dep.as_str()))
+                .map(|&d| state[d])
+                .collect();
+            if deps.contains(&2) {
+                state[i] = 2;
+            } else if !deps.contains(&0) {
+                ready.push(i);
+            }
+        }
+        if ready.is_empty() {
+            break;
+        }
+        let results: Vec<(usize, Option<String>)> = ready
+            .par_iter()
+            .map(|&i| (i, run_step(&bsc, &steps[i])))
+            .collect();
+        for (i, error) in results {
+            state[i] = if error.is_some() { 2 } else { 1 };
+            failures.extend(error);
+        }
+    }
+    let built = state.iter().filter(|&&s| s == 1).count();
+    for failure in &failures {
+        eprintln!("{failure}");
+    }
+    println!("OCaml reference build: {built} of {} modules built", steps.len());
+    Ok(built == steps.len())
+}
+
+/// Run one step; the compiler output of its failing command, if one fails.
+fn run_step(bsc: &Path, step: &Step) -> Option<String> {
+    for dir in std::iter::once(&step.cwd).chain(&step.mkdirs) {
+        if let Err(err) = std::fs::create_dir_all(dir) {
+            return Some(format!("{}: {}\n{err}", step.package, step.module));
+        }
+    }
+    for args in &step.commands {
+        let output = match std::process::Command::new(bsc)
+            .args(args)
+            .current_dir(&step.cwd)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) => return Some(format!("{}: {}\n{err}", step.package, step.module)),
+        };
+        if !output.status.success() {
+            return Some(format!(
+                "{}: {}\n{}{}",
+                step.package,
+                step.module,
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            ));
+        }
+        // Publish what each command wrote before the next one runs: an
+        // implementation compile finds its interface's .cmi in lib/ocaml.
+        for (from, to) in &step.copies {
+            if from.exists() {
+                let _ = std::fs::copy(from, to);
+            }
+        }
+    }
+    None
+}
+
+fn steps(path: &Path, prod: bool) -> Result<Vec<Step>> {
     // Discover packages without `initialize_build`: its compiler check and
     // cleanup would delete the build folders (and the runtime's `lib/ocaml`
     // sources the in-process build reads).
@@ -79,7 +161,7 @@ pub fn build_plan(path: &Path, prod: bool) -> Result<String> {
         };
         steps.push(step);
     }
-    Ok(serde_json::to_string_pretty(&Plan { steps })?)
+    Ok(steps)
 }
 
 /// Modules in an order where each comes after its dependencies; namespace

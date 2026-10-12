@@ -120,7 +120,7 @@ export RESCRIPT_RUNTIME
 # The OCaml side reads the runtime's .cmi files: build it with the OCaml bsc
 # (after the in-process build that provides its lib/ocaml sources).
 "$REWATCH_BIN" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
-if ! python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" --bsc "$OCAML_BSC" --rescript "$REWATCH_BIN" "$RESCRIPT_RUNTIME" > /dev/null; then
+if ! "$REWATCH_BIN" build-reference --bsc "$OCAML_BSC" "$RESCRIPT_RUNTIME" > /dev/null; then
     echo -e "${RED}OCaml reference build of the runtime failed${RESET}" >&2
     exit 2
 fi
@@ -263,7 +263,7 @@ compare_directory_case() {
     write_directory_project_config "$ocaml_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
     write_directory_project_config "$rust_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
 
-    run_capture "$ocaml_log" python3 "$PROJECT_ROOT/scripts/build_ocaml_reference.py" --bsc "$OCAML_BSC" --rescript "$REWATCH_BIN" "$ocaml_project_dir"
+    run_capture "$ocaml_log" "$REWATCH_BIN" build-reference --bsc "$OCAML_BSC" "$ocaml_project_dir"
     run_capture "$rust_log" "$REWATCH_BIN" build --no-timing true "$rust_project_dir"
 
     local ocaml_status rust_status

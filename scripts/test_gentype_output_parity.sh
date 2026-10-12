@@ -513,9 +513,9 @@ run_suite() {
         # The OCaml side reads the runtime .cmi files: build the runtime with
         # the OCaml bsc after the in-process build of its lib/ocaml sources.
         "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
-        python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" "$RESCRIPT_RUNTIME"
+        "$2" build-reference --bsc "$1" "$RESCRIPT_RUNTIME"
         "$2" clean
-        python3 "$3/scripts/build_ocaml_reference.py" --bsc "$1" --rescript "$2" .
+        "$2" build-reference --bsc "$1" .
     ' "$project_dir" "$OCAML_BSC" "$REWATCH_BIN" "$PROJECT_ROOT"; then
         echo -e "${RED}$suite_name: OCaml build failed; cannot compute parity for this suite${RESET}" >&2
         failed_suites=$((failed_suites + 1))

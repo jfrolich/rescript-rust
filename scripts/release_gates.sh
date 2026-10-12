@@ -64,7 +64,7 @@ summary() {
 
 if [[ $BUILD_OCAML -eq 1 ]]; then
     # The OCaml bsc the parity scripts build their reference with
-    # (scripts/build_ocaml_reference.py, from `rescript build-plan`).
+    # (the hidden `rescript build-reference --bsc`).
     step ocaml-reference make compiler || { summary; exit 1; }
 fi
 
