@@ -27,9 +27,16 @@ function exterme_g() {
   return 3;
 }
 
+function trailing_debugger() {
+  f(1, 2);
+  debugger;
+  
+}
+
 export {
   f,
   g,
   exterme_g,
+  trailing_debugger,
 }
 /* No side effect */

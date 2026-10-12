@@ -782,8 +782,11 @@ impl JsPrinter {
             }
 
             StatementDesc::Debugger => {
+                // js_dump.ml:204-208 `debugger_nl`.
+                self.newline();
                 self.write("debugger");
                 self.semi();
+                self.newline();
             }
         }
     }
