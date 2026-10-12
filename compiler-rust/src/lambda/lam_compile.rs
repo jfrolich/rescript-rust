@@ -822,7 +822,7 @@ impl LambdaCompiler {
             match lam {
                 Lambda::Lapply(apply) => Some(apply.ap_info.loc),
                 Lambda::Lprim(info) => Some(info.loc),
-                Lambda::Lfunction(function) => find(&function.body),
+                Lambda::Lfunction(function) => Some(function.loc),
                 Lambda::Llet(_, _, value, body) => find(value).or_else(|| find(body)),
                 Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => find(body),
                 Lambda::LifThenElse(_, then_, _) => find(then_),
@@ -1491,7 +1491,7 @@ impl LambdaCompiler {
         let PrimInfo {
             primitive: Primitive::Pduprecord,
             args,
-            ..
+            loc,
         } = __prim201.as_ref() else {
             return None;
         };
@@ -1523,7 +1523,11 @@ impl LambdaCompiler {
         props.reverse();
         Some(Compiled {
             prelude,
-            expr: Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props)),
+            // lam_compile.ml:1813-1815: `with_source_loc loc (E.obj ~dup:init_val props)`.
+            expr: Expression {
+                source_loc: self.source_loc(loc).map(Box::new),
+                ..Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props))
+            },
         })
     }
 
@@ -1579,7 +1583,7 @@ impl LambdaCompiler {
                             })
                         })
                     });
-                let expr = Expression::new(ExpressionDesc::Fun {
+                let mut expr = Expression::new(ExpressionDesc::Fun {
                     is_method: false,
                     params,
                     body,
@@ -1588,6 +1592,8 @@ impl LambdaCompiler {
                     async_: func.attr.async_,
                     directive: (func.attr.directive.clone()).map(Box::new),
                 });
+                // lam_compile.ml:1827-1829: `with_source_loc loc (E.ocaml_fun ...)`.
+                expr.source_loc = self.source_loc(&func.loc).map(Box::new);
                 Compiled {
                     prelude: vec![],
                     expr,
@@ -1668,7 +1674,21 @@ impl LambdaCompiler {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
                     return self.compile_short_circuit_expr(op, lhs, rhs);
                 }
-                self.compile_primitive(&info.primitive, &info.args, &info.loc)
+                if let Some(compiled) = self.compile_hoisted_external_field(
+                    &info.primitive,
+                    super::lam_compile_input::LambdaInputs::Recursive(&info.args),
+                ) {
+                    return compiled;
+                }
+                let mut compiled = self.compile_primitive(&info.primitive, &info.args, &info.loc);
+                // lam_compile.ml:1615-1634: only `compile_primitive_default`
+                // wraps its result in `with_source_loc loc`.
+                if compiled.expr.source_loc.is_none()
+                    && primitive_uses_default_compilation(&info.primitive, &info.args)
+                {
+                    compiled.expr.source_loc = self.source_loc(&info.loc).map(Box::new);
+                }
+                compiled
             }
             Lambda::Lswitch(scrut, switch) => self.compile_switch(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
@@ -2554,12 +2574,26 @@ impl LambdaCompiler {
         // result doesn't hide its literal-last terminal from the outer
         // `block_last_is_return_throw_or_continue` check
         // (js_stmt_make.ml:186-193).
-        let mut block = unnest_block(self.compile_effect_block_inner(lam));
-        let source_loc = self.source_loc_of_lam(lam);
+        unnest_block(self.compile_effect_block_inner(lam))
+    }
+
+    /// A grouped switch case that falls through to the next one. OCaml still
+    /// gives it the location of its case lambda (lam_compile.ml:676-683).
+    pub(crate) fn empty_switch_case_clause_for(&self, lam: &Lambda) -> CaseClause {
+        CaseClause {
+            source_loc: self.source_loc_of_lam(lam),
+            ..empty_switch_case_clause()
+        }
+    }
+
+    /// lam_compile.ml:80-84 `with_block_source_loc`: switch-case bodies
+    /// (lam_compile.ml:581-659) tag their first statement with the case
+    /// lambda's location.
+    pub(crate) fn with_block_source_loc(&self, lam: &Lambda, mut block: Block) -> Block {
         if let Some(first) = block.first_mut()
             && first.source_loc.is_none()
         {
-            first.source_loc = (source_loc).map(Box::new);
+            first.source_loc = self.source_loc_of_lam(lam).map(Box::new);
         }
         block
     }
@@ -2892,11 +2926,13 @@ impl LambdaCompiler {
                 block
             }
             Lambda::Lapply(apply) => {
-                let compiled = self.compile_apply_call(apply);
+                let mut compiled = self.compile_apply_call(apply);
+                // lam_compile.ml:1606-1609: `with_source_loc ap_loc (E.call ...)`.
+                if compiled.expr.source_loc.is_none() {
+                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc).map(Box::new);
+                }
                 let mut block = compiled.prelude;
-                let mut statement = Statement::return_(compiled.expr);
-                statement.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
-                block.push(statement);
+                block.push(Statement::return_(compiled.expr));
                 block
             }
             Lambda::LifThenElse(cond, then_, else_) => self
@@ -3561,18 +3597,18 @@ impl LambdaCompiler {
             // `break;` so the appended handler runs once after the switch.
             let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
-            for (tag, _, _) in &grouped_cases[group_start..group_end] {
+            for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
                     to_tag(tag.clone()),
-                    empty_switch_case_clause(),
+                    self.empty_switch_case_clause_for(case_lam),
                     group_falls_through,
                 ));
             }
             clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
-                    source_loc: None,
-                    body: compiled_body,
+                    source_loc: self.source_loc_of_lam(body),
+                    body: self.with_block_source_loc(body, compiled_body),
                     should_break,
                     comment: None,
                 },
@@ -3705,7 +3741,7 @@ impl LambdaCompiler {
         }
         loop_body.extend(body);
 
-        Expression::new(ExpressionDesc::Fun {
+        let mut expr = Expression::new(ExpressionDesc::Fun {
             is_method: false,
             params: lowered_params,
             body: vec![Statement::while_(Expression::bool(true), loop_body)],
@@ -3713,7 +3749,10 @@ impl LambdaCompiler {
             return_unit: func.attr.return_unit,
             async_: func.attr.async_,
             directive: (func.attr.directive.clone()).map(Box::new),
-        })
+        });
+        // lam_compile.ml:436: `with_source_loc loc result`.
+        expr.source_loc = self.source_loc(&func.loc).map(Box::new);
+        expr
     }
 
     pub(crate) fn compile_tail_loop_return_block(
@@ -4034,14 +4073,14 @@ impl LambdaCompiler {
             // compiler/core/js_output.ml:88-100).
             let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
-            for (tag, _, _) in &grouped_cases[group_start..group_end] {
-                cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
+            for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
+                cases.push((tag.clone(), self.empty_switch_case_clause_for(case_lam), group_falls_through));
             }
             cases.push((
                 grouped_cases[group_end].0.clone(),
                 CaseClause {
-                    source_loc: None,
-                    body: compiled_body,
+                    source_loc: self.source_loc_of_lam(body),
+                    body: self.with_block_source_loc(body, compiled_body),
                     should_break,
                     comment: None,
                 },
@@ -5135,13 +5174,16 @@ impl LambdaCompiler {
                     direct_switch_int(tag),
                     if is_last {
                         crate::js_ir::CaseClause {
-                            source_loc: None,
-                            body: self.compile_switch_value_block(result, body),
+                            source_loc: self.source_loc_of_lam(body),
+                            body: {
+                                let value_block = self.compile_switch_value_block(result, body);
+                                self.with_block_source_loc(body, value_block)
+                            },
                             should_break: false,
                             comment: None,
                         }
                     } else {
-                        empty_switch_case_clause()
+                        self.empty_switch_case_clause_for(body)
                     },
                 )
             })
@@ -5150,7 +5192,10 @@ impl LambdaCompiler {
         let default_block = switch
             .sw_failaction
             .as_ref()
-            .map(|fallback| self.compile_assign_to_target_block(result, fallback));
+            .map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            });
 
         block.push(Statement::new(StatementDesc::IntSwitch(
             scrut_compiled.expr,
@@ -5204,19 +5249,25 @@ impl LambdaCompiler {
                 tag_type: SwitchCaseTag::String(tag),
                 clause: if is_last {
                     crate::js_ir::CaseClause {
-                        source_loc: None,
-                        body: self.compile_switch_value_block(result, body),
+                        source_loc: self.source_loc_of_lam(body),
+                        body: {
+                            let value_block = self.compile_switch_value_block(result, body);
+                            self.with_block_source_loc(body, value_block)
+                        },
                         should_break: false,
                         comment: None,
                     }
                 } else {
-                    empty_switch_case_clause()
+                    self.empty_switch_case_clause_for(body)
                 },
             })
             .collect();
 
         let default_block =
-            default.map(|fallback| self.compile_assign_to_target_block(result, fallback));
+            default.map(|fallback| {
+                let block = self.compile_assign_to_target_block(result, fallback);
+                self.with_block_source_loc(fallback, block)
+            });
 
         block.push(Statement::new(StatementDesc::StringSwitch(
             scrut_compiled.expr,
@@ -5281,14 +5332,14 @@ impl LambdaCompiler {
             // switch so the subsequent appended handler reads cleanly.
             let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
-            for (tag, _, _) in &grouped_cases[group_start..group_end] {
-                cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
+            for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
+                cases.push((tag.clone(), self.empty_switch_case_clause_for(case_lam), group_falls_through));
             }
             cases.push((
                 grouped_cases[group_end].0.clone(),
                 crate::js_ir::CaseClause {
-                    source_loc: None,
-                    body: compiled_body,
+                    source_loc: self.source_loc_of_lam(body),
+                    body: self.with_block_source_loc(body, compiled_body),
                     should_break,
                     comment: None,
                 },
@@ -5429,7 +5480,8 @@ impl LambdaCompiler {
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
                     let source_loc = self.source_loc_of_lam(body);
-                    let body = self.compile_effect_block(body);
+                    let body_block = self.compile_effect_block(body);
+                    let body = self.with_block_source_loc(body, body_block);
                     crate::js_ir::CaseClause {
                         source_loc,
                         should_break: !block_terminates(&body),
@@ -5437,7 +5489,7 @@ impl LambdaCompiler {
                         comment: None,
                     }
                 } else {
-                    empty_switch_case_clause()
+                    self.empty_switch_case_clause_for(body)
                 };
                 (direct_switch_int(tag), clause)
             })
@@ -5446,7 +5498,10 @@ impl LambdaCompiler {
         let default_block = switch
             .sw_failaction
             .as_ref()
-            .map(|fallback| self.compile_effect_block(fallback))
+            .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
             .filter(|body| !body.is_empty());
 
         let has_effectful_case = cases.iter().any(|(_, clause)| !clause.body.is_empty())
@@ -5512,7 +5567,8 @@ impl LambdaCompiler {
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
                     let source_loc = self.source_loc_of_lam(body);
-                    let body = self.compile_effect_block(body);
+                    let body_block = self.compile_effect_block(body);
+                    let body = self.with_block_source_loc(body, body_block);
                     crate::js_ir::CaseClause {
                         source_loc,
                         should_break: !block_terminates(&body),
@@ -5520,7 +5576,7 @@ impl LambdaCompiler {
                         comment: None,
                     }
                 } else {
-                    empty_switch_case_clause()
+                    self.empty_switch_case_clause_for(body)
                 };
                 crate::js_ir::StringClause {
                     tag_type: SwitchCaseTag::String(tag),
@@ -5530,7 +5586,10 @@ impl LambdaCompiler {
             .collect();
 
         let default_block = default
-            .map(|fallback| self.compile_effect_block(fallback))
+            .map(|fallback| {
+                let block = self.compile_effect_block(fallback);
+                self.with_block_source_loc(fallback, block)
+            })
             .filter(|body| !body.is_empty());
 
         let has_effectful_case = clauses.iter().any(|clause| !clause.clause.body.is_empty())
@@ -8580,3 +8639,24 @@ fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
 }
 
 
+
+/// Whether `compile_prim` (compiler/core/lam_compile.ml:1635-1766) lowers this
+/// primitive through `compile_primitive_default`, the only branch that attaches
+/// the primitive's source location to the resulting expression.
+fn primitive_uses_default_compilation(primitive: &Primitive, args: &[Lambda]) -> bool {
+    match primitive {
+        // lam_compile.ml:1637-1652: `compile_external_field` on a global
+        // module carries no location (hoisted fields are handled earlier).
+        Primitive::Pfield(_, crate::lambda::lam_compat::FieldDbgInfo::Module { .. }) => {
+            !matches!(args, [Lambda::LglobalModule(_)])
+        }
+        Primitive::Praise => args.len() != 1,
+        Primitive::Psequand | Primitive::Psequor => args.len() != 2,
+        Primitive::Pdebugger
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
+        | Primitive::PjsFnMethod
+        | Primitive::PjsObjectCreate(_) => false,
+        _ => true,
+    }
+}

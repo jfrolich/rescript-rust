@@ -107,7 +107,7 @@ fn flatten_and_mark_dead_statement(
                 LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
             ) {
                 if let Some(Expression {
-                    source_loc,
+                    source_loc: value_loc,
                     desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag_info),
                     comment: value_comment,
                 }) = decl.value
@@ -142,7 +142,7 @@ fn flatten_and_mark_dead_statement(
                         }
 
                         let rewritten_value = Expression {
-                            source_loc: source_loc.clone(),
+                            source_loc: value_loc,
                             desc: ExpressionDesc::CamlBlock(
                                 rewritten_items,
                                 MutableFlag::Immutable,
@@ -185,7 +185,7 @@ fn flatten_and_mark_dead_statement(
                         source_loc: source_loc.clone(),
                         desc: {
                             let rewritten_value = Expression {
-                                source_loc,
+                                source_loc: value_loc,
                                 desc: ExpressionDesc::CamlBlock(
                                     items
                                         .into_iter()
@@ -1343,7 +1343,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
     match desc {
         StatementDesc::Exp(expr) => {
             let Expression {
-                source_loc,
+                source_loc: expr_loc,
                 desc,
                 comment: expr_comment,
             } = expr;
@@ -1351,7 +1351,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             match desc {
                 ExpressionDesc::Seq(_, _) => {
                     let block = flatten_sequence_statements(Expression {
-                        source_loc,
+                        source_loc: expr_loc,
                         desc,
                         comment: expr_comment,
                     });
@@ -1370,7 +1370,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
-                    source_loc,
+                    // js_pass_flatten.ml:54-61 / 79-86 take the condition
+                    // expression's `source_loc`.
+                    source_loc: expr_loc,
                     // OCaml keeps the conditional predicate untouched here;
                     // only the consequent/alternate are re-entered as
                     // statements (compiler/core/js_pass_flatten.ml:54-61).
@@ -1405,9 +1407,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                         Statement::block(block)
                     } else {
                         Statement {
-                            source_loc: source_loc.clone(),
+                            source_loc,
                             desc: StatementDesc::Exp(flatten_expression(Expression {
-                                source_loc,
+                                source_loc: expr_loc,
                                 desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
                                 comment: expr_comment,
                             })),
@@ -1416,9 +1418,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     }
                 }
                 desc => Statement {
-                    source_loc: source_loc.clone(),
+                    source_loc,
                     desc: StatementDesc::Exp(flatten_expression(Expression {
-                        source_loc,
+                        source_loc: expr_loc,
                         desc,
                         comment: expr_comment,
                     })),
@@ -1428,14 +1430,16 @@ fn flatten_statement(stmt: Statement) -> Statement {
         }
         StatementDesc::Return(expr) => {
             let Expression {
-                source_loc,
+                source_loc: expr_loc,
                 desc,
                 comment: expr_comment,
             } = expr;
 
             match desc {
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
-                    source_loc,
+                    // js_pass_flatten.ml:54-61 / 79-86 take the condition
+                    // expression's `source_loc`.
+                    source_loc: expr_loc,
                     // Same predicate preservation as OCaml's Return(Cond)
                     // flatten arm (compiler/core/js_pass_flatten.ml:79-86).
                     desc: StatementDesc::If(
@@ -1449,7 +1453,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     let mut exprs = Vec::new();
                     flatten_sequence_expressions(
                         Expression {
-                            source_loc,
+                            source_loc: expr_loc,
                             desc,
                             comment: expr_comment,
                         },
@@ -1469,9 +1473,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 desc => Statement {
-                    source_loc: source_loc.clone(),
+                    source_loc,
                     desc: StatementDesc::Return(flatten_expression(Expression {
-                        source_loc,
+                        source_loc: expr_loc,
                         desc,
                         comment: expr_comment,
                     })),

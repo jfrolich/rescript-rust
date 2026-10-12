@@ -150,6 +150,17 @@ const outputFilenames = moduleNames.flatMap(moduleName => [
   `${moduleName}.cjs`,
   `${moduleName}.mjs`,
 ]);
+// `Coverage.res` exercises every construct the compiler maps. Its mappings, and
+// those of the other modules, must match the OCaml reference compiler exactly;
+// `expected_mappings.json` holds the mappings that compiler emits.
+const allOutputFilenames = [...outputFilenames, "Coverage.cjs", "Coverage.mjs"];
+/** @type {Record<string, string>} */
+const expectedMappings = JSON.parse(
+  await fs.readFile(
+    path.join(import.meta.dirname, "expected_mappings.json"),
+    "utf8",
+  ),
+);
 
 const demoSourcePath = path.join(import.meta.dirname, "src", "Demo.res");
 const demoSource = await fs.readFile(demoSourcePath, "utf8");
@@ -210,7 +221,7 @@ function configWithMode(mode) {
 }
 
 async function removeGeneratedMapFiles() {
-  for (const filename of outputFilenames) {
+  for (const filename of allOutputFilenames) {
     await fs.rm(path.join(import.meta.dirname, "src", `${filename}.map`), {
       force: true,
     });
@@ -382,7 +393,7 @@ async function assertLinkedOutput() {
   await execBuildOrThrow();
 
   for (const filename of outputFilenames) {
-    const jsPath = path.join(import.meta.dirname, "lib", "bs", "src", filename);
+    const jsPath = path.join(import.meta.dirname, "src", filename);
     const mapPath = `${jsPath}.map`;
 
     const js = await fs.readFile(jsPath, "utf8");
@@ -405,6 +416,16 @@ async function assertLinkedOutput() {
     );
   }
 
+  for (const filename of allOutputFilenames) {
+    const mapPath = path.join(import.meta.dirname, "src", `${filename}.map`);
+    const map = JSON.parse(await fs.readFile(mapPath, "utf8"));
+    assert.equal(
+      map.mappings,
+      expectedMappings[filename],
+      `${filename}.map mappings should match the reference compiler`,
+    );
+  }
+
   await assertNodeStackTraceUsesSourceMap();
 }
 
@@ -416,7 +437,7 @@ async function assertNodeStackTraceUsesSourceMap() {
   await fs.writeFile(
     stackTraceScriptPath,
     `
-    const Demo = require("./lib/bs/src/Demo.cjs");
+    const Demo = require("./src/Demo.cjs");
     Demo.unicodeCrash();
   `,
   );
@@ -447,7 +468,7 @@ async function assertHiddenOutput() {
   await execBuildOrThrow();
 
   for (const filename of outputFilenames) {
-    const jsPath = path.join(import.meta.dirname, "lib", "bs", "src", filename);
+    const jsPath = path.join(import.meta.dirname, "src", filename);
     const mapPath = `${jsPath}.map`;
 
     const js = await fs.readFile(jsPath, "utf8");
@@ -472,7 +493,7 @@ async function assertDefaultOutput() {
 
   const output = new Map();
   for (const filename of outputFilenames) {
-    const jsPath = path.join(import.meta.dirname, "lib", "bs", "src", filename);
+    const jsPath = path.join(import.meta.dirname, "src", filename);
     const mapPath = `${jsPath}.map`;
     const js = await fs.readFile(jsPath, "utf8");
 
@@ -498,7 +519,7 @@ async function assertDisabledOutput(defaultOutput) {
   await execBuildOrThrow();
 
   for (const filename of outputFilenames) {
-    const jsPath = path.join(import.meta.dirname, "lib", "bs", "src", filename);
+    const jsPath = path.join(import.meta.dirname, "src", filename);
     const mapPath = `${jsPath}.map`;
 
     const js = await fs.readFile(jsPath, "utf8");
@@ -528,7 +549,7 @@ async function assertInlineOutput() {
   await execBuildOrThrow();
 
   for (const filename of outputFilenames) {
-    const jsPath = path.join(import.meta.dirname, "lib", "bs", "src", filename);
+    const jsPath = path.join(import.meta.dirname, "src", filename);
     const mapPath = `${jsPath}.map`;
 
     const js = await fs.readFile(jsPath, "utf8");
