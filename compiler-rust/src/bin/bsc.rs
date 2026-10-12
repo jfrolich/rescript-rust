@@ -81,6 +81,7 @@ struct Options {
     ignore_parse_errors: bool,
     formatted: bool,
     bs_ast: bool,
+    absname: bool,
     debug: bool,
     dump_lambda: bool,
     dump_parsetree_sexp_locs: bool,
@@ -432,8 +433,8 @@ fn run() -> Result<()> {
                 }
                 "-bs-read-cmi" => opts.read_cmi = true,
                 "-no-alias-deps" => opts.transparent_modules = true,
-                "-absname"
-                | "-bs-no-implicit-stdlib"
+                "-absname" => opts.absname = true,
+                "-bs-no-implicit-stdlib"
                 | "-unsafe"
                 | "-bs-super-errors"
                 | "-bs-stop-after-cmj"
@@ -466,6 +467,12 @@ fn run() -> Result<()> {
         .input
         .clone()
         .ok_or_else(|| anyhow!("Missing input file"))?;
+    // rescript_compiler_main.ml:43-48 `set_abs_input_name`.
+    let input = if opts.absname && input.is_relative() {
+        absolute_cwd_path(&input)
+    } else {
+        input
+    };
     code_frame::set_color_mode(opts.color_mode);
 
     if opts.bs_ast {
@@ -795,7 +802,7 @@ fn write_outputs(
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((format, dir, suffix)) = parse_package_output(spec) {
-                let out_path = package_output_path(source_path, &dir, &suffix);
+                let out_path = package_output_path(&opts.gentype_flags.project_root, source_path, &dir, &suffix);
                 let mut output_opts = compiler_opts.clone();
                 output_opts.output_path = Some(out_path.clone());
                 output_opts.output_module_format = Some(format);
@@ -937,7 +944,7 @@ fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Re
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((_format, dir, suffix)) = parse_package_output(spec) {
-                let out_path = package_output_path(source_path, &dir, &suffix);
+                let out_path = package_output_path(&opts.gentype_flags.project_root, source_path, &dir, &suffix);
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -993,13 +1000,45 @@ fn parse_module_format(module_system: &str) -> Option<ModuleFormat> {
 // compiler/core/lam_compile_main.ml:484-492 uses the output-prefix basename,
 // not the capitalized module identity. Ext_namespace.change_ext_ns_suffix
 // (compiler/ext/ext_namespace.ml:33-35) strips only the last namespace suffix.
-fn package_output_path(source_path: &Path, directory: &str, suffix: &str) -> PathBuf {
+/// ext_path.ml:91-106 `absolute_cwd_path`: join with the working directory and
+/// drop `.`/`..` components lexically.
+fn absolute_cwd_path(path: &Path) -> PathBuf {
+    let joined = env::current_dir().unwrap_or_default().join(path);
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// lam_compile_main.ml:487-495: package outputs go to
+/// `Ext_path.package_dir () // path // basename`, where `package_dir` is the
+/// `-bs-project-root` directory. Without a project root (which OCaml rejects)
+/// the directory stays relative to the working directory.
+fn package_output_path(
+    project_root: &str,
+    source_path: &Path,
+    directory: &str,
+    suffix: &str,
+) -> PathBuf {
     let stem = source_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Module");
     let basename = stem.rsplit_once('-').map_or(stem, |(base, _)| base);
-    Path::new(directory).join(format!("{basename}{suffix}"))
+    let directory = if project_root.is_empty() {
+        PathBuf::from(directory)
+    } else {
+        // `Filename.concat` appends even an absolute `path`.
+        Path::new(project_root).join(directory.trim_start_matches('/'))
+    };
+    directory.join(format!("{basename}{suffix}"))
 }
 
 #[cfg(test)]
@@ -1016,9 +1055,21 @@ mod tests {
             ("src/first-part-Namespace.res", "out/first-part.mjs"),
         ] {
             assert_eq!(
-                package_output_path(Path::new(source), "out", ".mjs"),
+                package_output_path("", Path::new(source), "out", ".mjs"),
                 Path::new(expected)
             );
         }
+    }
+
+    #[test]
+    fn package_outputs_are_relative_to_the_project_root() {
+        assert_eq!(
+            package_output_path("/proj", Path::new("src/A.ast"), "src", ".res.js"),
+            Path::new("/proj/src/A.res.js")
+        );
+        assert_eq!(
+            package_output_path("/proj", Path::new("src/A.ast"), "lib/es6/src", ".js"),
+            Path::new("/proj/lib/es6/src/A.js")
+        );
     }
 }
