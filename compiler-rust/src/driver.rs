@@ -12304,10 +12304,7 @@ fn compile_source_to_js_with_options_inner(
     }
 
     let (lowered_lambda, export_idents) =
-        crate::raw_lambda::lower::lower_to_translmod_lambda_with_start_stamp(
-            raw_lambda,
-            raw_lambda_current_stamp,
-        );
+        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda);
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dump_lambda {
         use std::io::Write;
@@ -16491,10 +16488,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.lower_lambda").entered();
-        crate::raw_lambda::lower::lower_to_translmod_lambda_with_start_stamp(
-            raw_lambda,
-            raw_lambda_current_stamp,
-        )
+        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda)
     });
     let (lowered_lambda, export_idents) = lowered_lambda;
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.

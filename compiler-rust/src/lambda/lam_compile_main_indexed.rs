@@ -1119,7 +1119,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
     diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     let (raw, id_gen) = indexed_raw.into_parts();
-    let lambda = crate::raw_lambda::lower::lower_to_lambda_with_id_gen(raw, id_gen.clone());
+    let lambda = crate::raw_lambda::lower::lower_to_lambda(raw);
     optimize_for_pre_js_indexed_with_diagnostics(
         lambda,
         export_idents,

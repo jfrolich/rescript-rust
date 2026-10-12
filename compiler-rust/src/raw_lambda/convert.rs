@@ -1077,6 +1077,27 @@ impl<'a> RawLambdaConverter<'a> {
         self.id_gen.set_current_stamp(shared_stamp);
     }
 
+    /// `Translcore.pack_trywith_exn` (translcore.ml:956-959): when the
+    /// handler takes the caught value apart, catch it as `raw_<id>` and bind
+    /// `id` to it converted with `Primitive_exceptions.internalToException`.
+    /// Called where OCaml calls it, so `raw_<id>` takes the next stamp.
+    fn pack_trywith_exn(&mut self, id: Ident, handler: RawLambda) -> (Ident, RawLambda) {
+        if !crate::raw_lambda::lower::exception_id_destructed_raw(&handler, &id) {
+            return (id, handler);
+        }
+        let raw_id = self.fresh_ident(&format!("raw_{}", id.name()));
+        let wrapped = RawLambda::let_(
+            crate::lambda::lam_compat::LetKind::StrictOpt,
+            id,
+            crate::raw_lambda::lower::wrap_exn_raw(
+                Location::none(),
+                RawLambda::var(raw_id.clone()),
+            ),
+            handler,
+        );
+        (raw_id, wrapped)
+    }
+
     fn fresh_ident(&mut self, name: &str) -> Ident {
         // OCaml uses one global `Ident.currentstamp` for both Translcore and
         // Translmod (`compiler/ml/translcore.ml:1250-1271`,
@@ -6747,6 +6768,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let loc = self.loc(expr.exp_loc);
                 let exn_id = self.name_pattern_ident("exn", cases);
                 let handler = self.compile_trywith_handler_raw(&exn_id, cases);
+                let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
                 let body_lam = self.convert_expr_raw(body);
                 RawLambda::LtryWith(Box::new(body_lam), exn_id, Box::new(handler))
             }
@@ -7021,8 +7043,7 @@ impl<'a> RawLambdaConverter<'a> {
                             *partial,
                             expr,
                         );
-                        let start_stamp = self.current_stamp();
-                        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+                        crate::raw_lambda::lower::lower_to_lambda(raw)
                     })
             }
             ExpressionDesc::Texp_tuple(items) => {
@@ -7044,8 +7065,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 _ => {
                     let raw = self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args);
-                    let start_stamp = self.current_stamp();
-                    crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+                    crate::raw_lambda::lower::lower_to_lambda(raw)
                 }
             },
             ExpressionDesc::Texp_variant(tag, arg) => self.convert_poly_variant(tag, arg),
@@ -7163,8 +7183,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => {
                 trace_raw_fallback(Self::expr_desc_name(&expr.exp_desc));
                 let raw = self.convert_expr_raw(expr);
-                let start_stamp = self.current_stamp();
-                crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+                crate::raw_lambda::lower::lower_to_lambda(raw)
             }
         }
     }
@@ -7713,6 +7732,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         // Compile the exception handler: matching on the exception.
         let exn_handler = self.compile_trywith_handler_raw(&exn_id, exn_cases);
+        let (exn_id, exn_handler) = self.pack_trywith_exn(exn_id, exn_handler);
 
         // Compile normal cases with val_id as the scrutinee
         let normal_handler = {
@@ -11284,8 +11304,7 @@ impl<'a> RawLambdaConverter<'a> {
             InlineAttribute::default(),
             loc,
         );
-        let start_stamp = self.current_stamp();
-        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+        crate::raw_lambda::lower::lower_to_lambda(raw)
     }
 
     fn convert_apply_raw(
@@ -11450,8 +11469,7 @@ impl<'a> RawLambdaConverter<'a> {
                         bindings,
                         RawLambda::from_lowered(body),
                     );
-                    let start_stamp = self.current_stamp();
-                    crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+                    crate::raw_lambda::lower::lower_to_lambda(raw)
                 }
             }
             crate::parser::ast::RecFlag::Recursive => {
@@ -11475,8 +11493,7 @@ impl<'a> RawLambdaConverter<'a> {
                         bindings,
                         RawLambda::from_lowered(body),
                     );
-                    let start_stamp = self.current_stamp();
-                    crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+                    crate::raw_lambda::lower::lower_to_lambda(raw)
                 }
             }
         }
@@ -12267,7 +12284,12 @@ mod tests {
         let RawLambda::LtryWith(_, _, handler) = raw else {
             return None;
         };
-        let RawLambda::LstaticCatch(_, (id, params), _) = handler.as_ref() else {
+        // `pack_trywith_exn` binds the caught value around the handler.
+        let handler = match handler.as_ref() {
+            RawLambda::Llet(_, _, _, body) => body.as_ref(),
+            handler => handler,
+        };
+        let RawLambda::LstaticCatch(_, (id, params), _) = handler else {
             return None;
         };
         if params.is_empty() { Some(*id) } else { None }
@@ -12532,14 +12554,14 @@ mod tests {
                 result.exports()[0].stamp(),
                 result.exports()[0].flags()
             ),
-            ("value", 104, crate::ident::IdentFlags::NONE)
+            ("value", 103, crate::ident::IdentFlags::NONE)
         );
         let consumer = result.generator().create("consumer");
         assert_eq!(
             (consumer.name(), consumer.stamp(), consumer.flags()),
-            ("consumer", 105, crate::ident::IdentFlags::NONE)
+            ("consumer", 104, crate::ident::IdentFlags::NONE)
         );
-        assert_eq!(generator.current_stamp(), 105);
+        assert_eq!(generator.current_stamp(), 104);
     }
 
     #[test]
