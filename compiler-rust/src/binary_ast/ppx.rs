@@ -7630,12 +7630,16 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             };
             let inner = arena.get_expr(inner_idx).clone();
             let rw = rewrite_expression(&inner, arena);
+            // Ast_mapper rebuilds braces with `Exp.braces`, whose location is
+            // the mapped inner expression's (ast_helper.ml:166-167): a
+            // rewritten `{await e}` takes the ghost location of the await.
+            let pexp_loc = rw.pexp_loc;
             return Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
                     expr: arena.push_expr(rw),
                     braces_loc: braces.braces_loc,
                 }))),
-                pexp_loc: expr.pexp_loc,
+                pexp_loc,
                 pexp_attributes: rewrite_attributes(&attrs, arena).into(),
             };
         }
