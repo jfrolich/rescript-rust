@@ -10,6 +10,7 @@ Usage:
     python3 scripts/inspect_binary_ast.py summary <file.ast>
     python3 scripts/inspect_binary_ast.py sharing <file.ast>
     python3 scripts/inspect_binary_ast.py test <source.res>
+    python3 scripts/inspect_binary_ast.py same-values <a> <b>
 """
 
 import struct
@@ -1165,12 +1166,71 @@ def cmd_test(args):
 
 # ── Main entry point ────────────────────────────────────────────────────
 
+def split_marshal_sections(raw):
+    """Split a file into its plain byte runs and its marshalled values.
+
+    Returns (plain, values): `plain` is the list of byte runs outside the
+    marshal sections (dependency lists, source paths, AST magic), `values`
+    the decoded (root, decoder) of each marshal section in order.
+    """
+    plain, values, pos = [], [], 0
+    while True:
+        start = raw.find(MARSHAL_MAGIC, pos)
+        if start < 0:
+            plain.append(raw[pos:])
+            return plain, values
+        plain.append(raw[pos:start])
+        reader = BinaryReader(raw[start + 4:start + 20])
+        data_len = reader.read_u32()
+        payload = raw[start + 20:start + 20 + data_len]
+        decoder = MarshalDecoder(payload)
+        values.append((decoder.decode(), decoder))
+        pos = start + 20 + data_len
+
+
+def cmd_same_values(args):
+    """Exit 0 when two files hold the same values, ignoring Marshal sharing.
+
+    The bytes outside marshal sections must be identical; each marshal
+    section must decode to the same value, whichever strings or blocks the
+    encoder shared. Prints the first differences and exits 1 otherwise.
+    """
+    if len(args) != 2:
+        print("Usage: inspect_binary_ast.py same-values <a> <b>", file=sys.stderr)
+        sys.exit(2)
+    with open(args[0], "rb") as f:
+        raw_a = f.read()
+    with open(args[1], "rb") as f:
+        raw_b = f.read()
+    if raw_a == raw_b:
+        sys.exit(0)
+    plain_a, values_a = split_marshal_sections(raw_a)
+    plain_b, values_b = split_marshal_sections(raw_b)
+    if plain_a != plain_b:
+        print("Bytes outside the marshal sections differ:")
+        for index, (a, b) in enumerate(zip(plain_a, plain_b)):
+            if a != b:
+                print(f"  section {index}: {a[:120]!r} vs {b[:120]!r}")
+        if len(plain_a) != len(plain_b):
+            print(f"  marshal section count: {len(values_a)} vs {len(values_b)}")
+        sys.exit(1)
+    for index, ((root_a, dec_a), (root_b, dec_b)) in enumerate(zip(values_a, values_b)):
+        diffs = compare_value_trees(root_a, root_b, dec_a, dec_b)
+        if diffs:
+            print(f"Marshal section {index} decodes to different values:")
+            for diff in diffs:
+                print(f"  {diff}")
+            sys.exit(1)
+    sys.exit(0)
+
+
 SUBCOMMANDS = {
     "decode": cmd_decode,
     "compare": cmd_compare,
     "summary": cmd_summary,
     "sharing": cmd_sharing,
     "test": cmd_test,
+    "same-values": cmd_same_values,
 }
 
 def main():
