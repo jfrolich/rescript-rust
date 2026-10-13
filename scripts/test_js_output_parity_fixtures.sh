@@ -75,8 +75,11 @@ PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUST_TARGET="${RUST_TARGET:-debug}"
 REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
 OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/bsc.exe}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
-"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
+if [[ -z "${RUST_BSC:-}" ]]; then
+    # The default Rust bsc is the wrapper script around the linked compiler.
+    RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
+    "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
+fi
 REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 RUST_BUILD_FLAG=""
