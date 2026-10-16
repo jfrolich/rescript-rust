@@ -1,7 +1,5 @@
-===== Foo.res =====
-
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_module_types/Foo.res[0m
+We've found a bug for you!
+  /.../fixtures/Iface_module_types/Foo.res
 
   The implementation /.../fixtures/Iface_module_types/Foo.res
   does not match the interface /.../fixtures/Iface_module_types/Foo.resi:
@@ -16,7 +14,7 @@
 }
   In module Inner:
   Values do not match: let value: string is not included in let value: int
-  [36m/.../fixtures/Iface_module_types/Foo.resi[0m:[2m2:3-16[0m:
+  /.../fixtures/Iface_module_types/Foo.resi:2:3-16:
     Expected declaration
-  [36m/.../fixtures/Iface_module_types/Foo.res[0m:[2m2:7-11[0m:
+  /.../fixtures/Iface_module_types/Foo.res:2:7-11:
     Actual declaration

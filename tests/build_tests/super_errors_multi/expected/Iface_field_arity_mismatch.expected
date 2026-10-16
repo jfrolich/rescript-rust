@@ -1,10 +1,8 @@
-===== Foo.res =====
+We've found a bug for you!
+  /.../fixtures/Iface_field_arity_mismatch/Foo.res:1:1-19
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_field_arity_mismatch/Foo.res[0m:[2m1:1-19[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t = A(int) | B[0m
-  2 [2m│[0m 
+  1 │ type t = A(int) | B
+  2 │ 
 
   The implementation /.../fixtures/Iface_field_arity_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_field_arity_mismatch/Foo.resi:
@@ -12,8 +10,8 @@
     type t = A(int) | B
   is not included in
     type t = A(int, int) | B
-  [36m/.../fixtures/Iface_field_arity_mismatch/Foo.resi[0m:[2m1:1-24[0m:
+  /.../fixtures/Iface_field_arity_mismatch/Foo.resi:1:1-24:
     Expected declaration
-  [36m/.../fixtures/Iface_field_arity_mismatch/Foo.res[0m:[2m1:1-19[0m:
+  /.../fixtures/Iface_field_arity_mismatch/Foo.res:1:1-19:
     Actual declaration
   The arities for field A differ.

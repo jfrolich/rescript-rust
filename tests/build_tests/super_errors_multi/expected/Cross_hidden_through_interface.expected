@@ -1,13 +1,11 @@
-===== User.res =====
+We've found a bug for you!
+  /.../fixtures/Cross_hidden_through_interface/User.res:2:16
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Cross_hidden_through_interface/User.res[0m:[2m2:16[0m
+  1 │ let v = Defs.make()
+  2 │ let leaked = v.x
+  3 │ 
 
-  1 [2m│[0m let v = Defs.make()
-  [1;31m2[0m [2m│[0m let leaked = v.[1;31mx[0m
-  3 [2m│[0m 
-
-  You're trying to access the record field [1;33mx[0m, but the thing you're trying to access it on is not a record. 
+  You're trying to access the record field x, but the thing you're trying to access it on is not a record. 
   
 The type of the thing you're trying to access it on is:
   

@@ -1,7 +1,5 @@
-===== Foo.res =====
-
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_extension_constructors/Foo.res[0m
+We've found a bug for you!
+  /.../fixtures/Iface_extension_constructors/Foo.res
 
   The implementation /.../fixtures/Iface_extension_constructors/Foo.res
   does not match the interface /.../fixtures/Iface_extension_constructors/Foo.resi:
@@ -9,7 +7,7 @@
     type t +=  Boom(string)
   is not included in
     type t +=  Boom(int)
-  [36m/.../fixtures/Iface_extension_constructors/Foo.res[0m:
+  /.../fixtures/Iface_extension_constructors/Foo.res:
     Expected declaration
-  [36m/.../fixtures/Iface_extension_constructors/Foo.res[0m:[2m4:3-16[0m:
+  /.../fixtures/Iface_extension_constructors/Foo.res:4:3-16:
     Actual declaration

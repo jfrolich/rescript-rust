@@ -1,10 +1,8 @@
-===== Specmismatch.res =====
+We've found a bug for you!
+  /.../fixtures/Cross_external_spec_mismatch/Specmismatch.res:1:1-46
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Cross_external_spec_mismatch/Specmismatch.res[0m:[2m1:1-46[0m
-
-  [1;31m1[0m [2m│[0m [1;31m@val @module("m") external f: int => int = "f"[0m
-  2 [2m│[0m 
+  1 │ @val @module("m") external f: int => int = "f"
+  2 │ 
 
   The implementation /.../fixtures/Cross_external_spec_mismatch/Specmismatch.res
   does not match the interface /.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi:
@@ -12,7 +10,7 @@
     @val @module("m") external f: int => int = "f"
   is not included in
     @val external f: int => int = "f"
-  [36m/.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi[0m:[2m1:1-33[0m:
+  /.../fixtures/Cross_external_spec_mismatch/Specmismatch.resi:1:1-33:
     Expected declaration
-  [36m/.../fixtures/Cross_external_spec_mismatch/Specmismatch.res[0m:[2m1:1-46[0m:
+  /.../fixtures/Cross_external_spec_mismatch/Specmismatch.res:1:1-46:
     Actual declaration
