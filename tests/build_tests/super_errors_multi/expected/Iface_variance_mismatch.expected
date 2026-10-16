@@ -1,10 +1,8 @@
-===== Foo.res =====
+We've found a bug for you!
+  /.../fixtures/Iface_variance_mismatch/Foo.res:1:1-21
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_variance_mismatch/Foo.res[0m:[2m1:1-21[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t<'a> = 'a => 'a[0m
-  2 [2m│[0m 
+  1 │ type t<'a> = 'a => 'a
+  2 │ 
 
   The implementation /.../fixtures/Iface_variance_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_variance_mismatch/Foo.resi:
@@ -12,8 +10,8 @@
     type t<'a> = 'a => 'a
   is not included in
     type t<+'a>
-  [36m/.../fixtures/Iface_variance_mismatch/Foo.resi[0m:[2m1:1-11[0m:
+  /.../fixtures/Iface_variance_mismatch/Foo.resi:1:1-11:
     Expected declaration
-  [36m/.../fixtures/Iface_variance_mismatch/Foo.res[0m:[2m1:1-21[0m:
+  /.../fixtures/Iface_variance_mismatch/Foo.res:1:1-21:
     Actual declaration
   Their variances do not agree.

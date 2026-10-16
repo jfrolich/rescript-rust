@@ -1,9 +1,7 @@
-===== User.res =====
+We've found a bug for you!
+  /.../fixtures/Cross_exception_arity_mismatch/User.res:1:28-52
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Cross_exception_arity_mismatch/User.res[0m:[2m1:28-52[0m
+  1 │ let raise_it = () => throw(Errors.ParseError("oops"))
+  2 │ 
 
-  [1;31m1[0m [2m│[0m let raise_it = () => throw([1;31mErrors.ParseError("oops")[0m)
-  2 [2m│[0m 
-
-  This variant constructor [1;33mErrors.ParseError[0m expects 2 arguments, but it's only being passed 1.
+  This variant constructor Errors.ParseError expects 2 arguments, but it's only being passed 1.

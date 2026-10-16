@@ -1,12 +1,10 @@
-===== Foo.res =====
+We've found a bug for you!
+  /.../fixtures/Iface_variant_representation_mismatch/Foo.res:1:1-3:5
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_variant_representation_mismatch/Foo.res[0m:[2m1:1-3:5[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t =[0m
-  [1;31m2[0m [2m│[0m [1;31m  | @as(0) A[0m
-  [1;31m3[0m [2m│[0m [1;31m  | B[0m
-  4 [2m│[0m 
+  1 │ type t =
+  2 │   | @as(0) A
+  3 │   | B
+  4 │ 
 
   The implementation /.../fixtures/Iface_variant_representation_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_variant_representation_mismatch/Foo.resi:
@@ -14,8 +12,8 @@
     type t = @as(0) A | B
   is not included in
     type t = @as("zero") A | B
-  [36m/.../fixtures/Iface_variant_representation_mismatch/Foo.resi[0m:[2m1:1-3:5[0m:
+  /.../fixtures/Iface_variant_representation_mismatch/Foo.resi:1:1-3:5:
     Expected declaration
-  [36m/.../fixtures/Iface_variant_representation_mismatch/Foo.res[0m:[2m1:1-3:5[0m:
+  /.../fixtures/Iface_variant_representation_mismatch/Foo.res:1:1-3:5:
     Actual declaration
   The internal representations for case A are not equal.

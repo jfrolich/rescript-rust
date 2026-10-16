@@ -1,10 +1,8 @@
-===== Foo.res =====
+We've found a bug for you!
+  /.../fixtures/Iface_manifest_mismatch/Foo.res:1:1-15
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_manifest_mismatch/Foo.res[0m:[2m1:1-15[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t = string[0m
-  2 [2m│[0m 
+  1 │ type t = string
+  2 │ 
 
   The implementation /.../fixtures/Iface_manifest_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_manifest_mismatch/Foo.resi:
@@ -12,7 +10,7 @@
     type t = string
   is not included in
     type t = int
-  [36m/.../fixtures/Iface_manifest_mismatch/Foo.resi[0m:[2m1:1-12[0m:
+  /.../fixtures/Iface_manifest_mismatch/Foo.resi:1:1-12:
     Expected declaration
-  [36m/.../fixtures/Iface_manifest_mismatch/Foo.res[0m:[2m1:1-15[0m:
+  /.../fixtures/Iface_manifest_mismatch/Foo.res:1:1-15:
     Actual declaration

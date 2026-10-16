@@ -1,10 +1,8 @@
-===== Foo.res =====
+We've found a bug for you!
+  /.../fixtures/Iface_constraint_mismatch/Foo.res:1:1-35
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_constraint_mismatch/Foo.res[0m:[2m1:1-35[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t<'a> = 'a constraint 'a = int[0m
-  2 [2m│[0m 
+  1 │ type t<'a> = 'a constraint 'a = int
+  2 │ 
 
   The implementation /.../fixtures/Iface_constraint_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_constraint_mismatch/Foo.resi:
@@ -13,8 +11,8 @@
   constraint 'a = int
   is not included in
     type t<'a>
-  [36m/.../fixtures/Iface_constraint_mismatch/Foo.resi[0m:[2m1:1-10[0m:
+  /.../fixtures/Iface_constraint_mismatch/Foo.resi:1:1-10:
     Expected declaration
-  [36m/.../fixtures/Iface_constraint_mismatch/Foo.res[0m:[2m1:1-35[0m:
+  /.../fixtures/Iface_constraint_mismatch/Foo.res:1:1-35:
     Actual declaration
   Their constraints differ.

@@ -1,7 +1,5 @@
-===== Foo.res =====
-
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_modtype_infos/Foo.res[0m
+We've found a bug for you!
+  /.../fixtures/Iface_modtype_infos/Foo.res
 
   The implementation /.../fixtures/Iface_modtype_infos/Foo.res
   does not match the interface /.../fixtures/Iface_modtype_infos/Foo.resi:
@@ -24,7 +22,7 @@
 }
   At position module type T = <here>
   Values do not match: let v: string is not included in let v: int
-  [36m/.../fixtures/Iface_modtype_infos/Foo.resi[0m:[2m2:3-12[0m:
+  /.../fixtures/Iface_modtype_infos/Foo.resi:2:3-12:
     Expected declaration
-  [36m/.../fixtures/Iface_modtype_infos/Foo.res[0m:[2m2:3-15[0m:
+  /.../fixtures/Iface_modtype_infos/Foo.res:2:3-15:
     Actual declaration
