@@ -378,7 +378,13 @@ fn build_type_constructors(
             ConstructorDescription {
                 cstr_name: cd.cd_id.name().to_string(),
                 cstr_res,
-                cstr_existentials: vec![],
+                // datarepr.ml:62-75: the variables of the arguments that the
+                // GADT result type does not mention.
+                cstr_existentials: super::env::constructor_existentials(
+                    ctx,
+                    &cstr_args,
+                    cd.cd_res.map(|_| cstr_res),
+                ),
                 cstr_args,
                 cstr_arity,
                 cstr_kind: ConstructorKind::Ordinary(
@@ -517,7 +523,12 @@ fn build_constructors_for_name(
                     ConstructorDescription {
                         cstr_name: id.name().to_string(),
                         cstr_res,
-                        cstr_existentials: vec![],
+                        // datarepr.ml:62-75, extension_descr.
+                        cstr_existentials: super::env::constructor_existentials(
+                            ctx,
+                            &cstr_args,
+                            ext.ext_ret_type,
+                        ),
                         cstr_args,
                         cstr_arity,
                         cstr_kind: ConstructorKind::Extension(ext_path.clone()),
