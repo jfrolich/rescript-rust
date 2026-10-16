@@ -34,7 +34,10 @@ struct Step {
 }
 
 /// Build the project at `path` with the `bsc` executable `bsc`. Prints the
-/// failures to stderr and returns whether every module built.
+/// failures to stderr and returns whether every module built. Each package's
+/// compiler output (colours stripped) goes to its `lib/bs/.compiler.log` as a
+/// `rescript build` writes it (compile.rs): errors as modules fail, then the
+/// warnings sorted by module name.
 pub fn build_reference(path: &Path, bsc: &Path, prod: bool) -> Result<bool> {
     use rayon::prelude::*;
     let bsc = std::fs::canonicalize(bsc)?;
@@ -47,6 +50,14 @@ pub fn build_reference(path: &Path, bsc: &Path, prod: bool) -> Result<bool> {
     // 0: pending, 1: built, 2: failed or skipped.
     let mut state = vec![0u8; steps.len()];
     let mut failures = Vec::new();
+    // Per package build folder, the errors in build order and the warnings
+    // with their module names.
+    let mut logs: Vec<(PathBuf, String, Vec<(String, String)>)> = Vec::new();
+    for step in &steps {
+        if !logs.iter().any(|(dir, _, _)| *dir == step.cwd) {
+            logs.push((step.cwd.clone(), String::new(), Vec::new()));
+        }
+    }
     loop {
         let mut ready = Vec::new();
         for (i, step) in steps.iter().enumerate() {
@@ -68,13 +79,30 @@ pub fn build_reference(path: &Path, bsc: &Path, prod: bool) -> Result<bool> {
         if ready.is_empty() {
             break;
         }
-        let results: Vec<(usize, Option<String>)> = ready
+        let results: Vec<(usize, StepOutput)> = ready
             .par_iter()
             .map(|&i| (i, run_step(&bsc, &steps[i])))
             .collect();
-        for (i, error) in results {
-            state[i] = if error.is_some() { 2 } else { 1 };
-            failures.extend(error);
+        for (i, output) in results {
+            state[i] = if output.failure.is_some() { 2 } else { 1 };
+            if let Some((_, errors, warnings)) = logs.iter_mut().find(|(dir, _, _)| *dir == steps[i].cwd) {
+                errors.push_str(&output.error);
+                if !output.warnings.is_empty() {
+                    warnings.push((steps[i].module.clone(), output.warnings));
+                }
+            }
+            failures.extend(output.failure);
+        }
+    }
+    for (dir, errors, warnings) in &mut logs {
+        warnings.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut log = std::mem::take(errors);
+        for (_, warning) in warnings.iter() {
+            log.push_str(warning);
+        }
+        let log = format!("#Start(0)\n{}#Done(0)\n", super::logs::escape_colours(&log));
+        if let Err(err) = std::fs::write(dir.join(".compiler.log"), log) {
+            eprintln!("{}: {err}", dir.display());
         }
     }
     let built = state.iter().filter(|&&s| s == 1).count();
@@ -85,8 +113,27 @@ pub fn build_reference(path: &Path, bsc: &Path, prod: bool) -> Result<bool> {
     Ok(built == steps.len())
 }
 
-/// Run one step; the compiler output of its failing command, if one fails.
-fn run_step(bsc: &Path, step: &Step) -> Option<String> {
+struct StepOutput {
+    /// What the successful commands printed to stderr.
+    warnings: String,
+    /// What the failing command printed to stderr.
+    error: String,
+    /// The report of the failing command, if one failed.
+    failure: Option<String>,
+}
+
+/// Run one step's commands, stopping at the first that fails.
+fn run_step(bsc: &Path, step: &Step) -> StepOutput {
+    let mut output = StepOutput {
+        warnings: String::new(),
+        error: String::new(),
+        failure: None,
+    };
+    output.failure = run_step_commands(bsc, step, &mut output);
+    output
+}
+
+fn run_step_commands(bsc: &Path, step: &Step, out: &mut StepOutput) -> Option<String> {
     for dir in std::iter::once(&step.cwd).chain(&step.mkdirs) {
         if let Err(err) = std::fs::create_dir_all(dir) {
             return Some(format!("{}: {}\n{err}", step.package, step.module));
@@ -102,6 +149,7 @@ fn run_step(bsc: &Path, step: &Step) -> Option<String> {
             Err(err) => return Some(format!("{}: {}\n{err}", step.package, step.module)),
         };
         if !output.status.success() {
+            out.error.push_str(&String::from_utf8_lossy(&output.stderr));
             return Some(format!(
                 "{}: {}\n{}{}",
                 step.package,
@@ -110,6 +158,7 @@ fn run_step(bsc: &Path, step: &Step) -> Option<String> {
                 String::from_utf8_lossy(&output.stdout)
             ));
         }
+        out.warnings.push_str(&String::from_utf8_lossy(&output.stderr));
         // Publish what each command wrote before the next one runs: an
         // implementation compile finds its interface's .cmi in lib/ocaml.
         for (from, to) in &step.copies {
