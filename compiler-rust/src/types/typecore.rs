@@ -5825,8 +5825,9 @@ fn type_pattern_construct(
                 if let ConstructorDisambiguationSource::ExpectedType { tpath } = &resolution.source
                     && resolution.desc.cstr_generalized
                 {
+                    // typecore.ml:1435-1437 reports at `lid.loc`.
                     return Err(TypeCoreError::UnqualifiedGadtPattern {
-                        loc,
+                        loc: lid.loc,
                         tpath: tpath.clone(),
                         name: resolution.desc.cstr_name.clone(),
                     });

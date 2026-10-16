@@ -7215,10 +7215,17 @@ fn add_signature_to_env_with_options_inner(
                                 ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
                             };
 
+                            // datarepr.ml:62-75: the variables of the arguments
+                            // that the GADT result type does not mention.
+                            let cstr_existentials = crate::types::env::constructor_existentials(
+                                ctx,
+                                &cstr_args,
+                                cd.cd_res.map(|_| cstr_res),
+                            );
                             let cstr_desc = ConstructorDescription {
                                 cstr_name: cd.cd_id.name().to_string(),
                                 cstr_res,
-                                cstr_existentials: vec![],
+                                cstr_existentials,
                                 cstr_args,
                                 cstr_arity,
                                 cstr_kind: ConstructorKind::Ordinary(
@@ -7454,16 +7461,22 @@ fn add_signature_to_env_with_options_inner(
                 pos += 1; // Extension constructors occupy runtime slots
                 let ext_type_path = substitute_path(&ext.ext_type_path);
                 // Add extension constructor
+                let ext_cstr_args: Vec<TypeExprRef> = match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        labels.iter().map(|l| l.ld_type).collect()
+                    }
+                };
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
                     cstr_res: ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone()),
-                    cstr_existentials: vec![],
-                    cstr_args: match &ext.ext_args {
-                        crate::types::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
-                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                            labels.iter().map(|l| l.ld_type).collect()
-                        }
-                    },
+                    // datarepr.ml:62-75, extension_descr.
+                    cstr_existentials: crate::types::env::constructor_existentials(
+                        ctx,
+                        &ext_cstr_args,
+                        ext.ext_ret_type,
+                    ),
+                    cstr_args: ext_cstr_args,
                     cstr_arity: match &ext.ext_args {
                         crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                             args.len() as i32

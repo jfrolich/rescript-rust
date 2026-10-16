@@ -1,12 +1,10 @@
-===== User.res =====
+We've found a bug for you!
+  /.../fixtures/Cross_async_promise_mismatch/User.res:1:29-44
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Cross_async_promise_mismatch/User.res[0m:[2m1:29-44[0m
+  1 │ let consume = (): string => Lib.fetch("api")
+  2 │ 
 
-  [1;31m1[0m [2m│[0m let consume = (): string => [1;31mLib.fetch("api")[0m
-  2 [2m│[0m 
-
-  This has type: [1;31mpromise<string>[0m
-  But it's expected to have type: [1;33mstring[0m
+  This has type: promise<string>
+  But it's expected to have type: string
 
   - Did you mean to await this promise before using it?

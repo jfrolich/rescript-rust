@@ -559,10 +559,14 @@ fn format_include_error(
                 output.push_str(&expected_text);
                 output.push('\n');
             } else {
+                // The descriptions are emitted with `Format.pp_print_string`
+                // (res_outcome_printer.ml:963-965), so their own line breaks
+                // are copied verbatim and the box indentation does not apply
+                // to continuation lines.
                 output.push_str("  Values do not match:\n    ");
-                output.push_str(&indent_lines(&actual_text, "    ").trim_start());
+                output.push_str(&actual_text);
                 output.push_str("\n  is not included in\n    ");
-                output.push_str(&indent_lines(&expected_text, "    ").trim_start());
+                output.push_str(&expected_text);
                 output.push('\n');
             }
             if let Some((actual_arity, expected_arity)) = arity_mismatch {
@@ -769,13 +773,6 @@ fn format_modtype_declaration(
     let tree =
         crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype_declaration(id, decl);
     crate::types::printtyp::print_out_sig_item(&tree)
-}
-
-fn indent_lines(text: &str, prefix: &str) -> String {
-    text.lines()
-        .map(|line| format!("{prefix}{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDescription) -> String {

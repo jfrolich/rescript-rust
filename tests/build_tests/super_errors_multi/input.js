@@ -1,82 +1,82 @@
 // @ts-check
 
-import { readdirSync, statSync } from "node:fs";
+// Multi-file error fixtures. Each fixture directory is built as a small
+// project with `rescript build`, the way users compile, and the diagnostics the
+// build writes to `lib/bs/.compiler.log` are compared with the snapshot. The
+// compiler resolves interfaces, namespaces and dependency order itself, so the
+// harness passes no per-file flags.
+//
+//   node input.js            check with the default (in-process) build
+//   node input.js --ocaml    check with the OCaml reference compiler
+//   node input.js update     regenerate snapshots with the OCaml reference
+//
+// The OCaml reference build runs `bsc` per file (RESCRIPT_SUBPROCESS_BUILD)
+// with $RESCRIPT_BSC_EXE, defaulting to the dune build of the compiler.
+
+import { existsSync, readdirSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setup } from "#dev/process";
 import { normalizeNewlines } from "#dev/utils";
 
-const { bsc } = setup(import.meta.dirname);
-
 const fixturesDir = path.join(import.meta.dirname, "fixtures");
 const expectedDir = path.join(import.meta.dirname, "expected");
+const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
 const fixtures = readdirSync(fixturesDir)
   .filter(name => statSync(path.join(fixturesDir, name)).isDirectory())
   .sort();
 
-// `-bs-cmi-only` stops the pipeline after typechecking. Without it, bsc tries
-// to emit .mjs and resolve sibling .js files for cross-module imports, which
-// fails in this harness because we don't run the build system.
-const bscFlags = [
-  "-w",
-  "+A",
-  "-bs-jsx",
-  "4",
-  "-color",
-  "always",
-  "-bs-cmi-only",
-];
+const updateTests = process.argv.includes("update");
+const useOcaml = updateTests || process.argv.includes("--ocaml");
 
-const updateTests = process.argv[2] === "update";
+/** @type {NodeJS.ProcessEnv} */
+const buildEnv = {
+  // The projects live in a temporary directory, outside any node_modules.
+  RESCRIPT_RUNTIME: path.join(repoRoot, "packages", "@rescript", "runtime"),
+  ...process.env,
+};
+if (useOcaml) {
+  const ocamlBsc =
+    process.env.RESCRIPT_BSC_EXE ??
+    path.join(repoRoot, "_build", "install", "default", "bin", "bsc");
+  if (!existsSync(ocamlBsc)) {
+    console.error(
+      `OCaml reference bsc not found at ${ocamlBsc}; build it with dune or set RESCRIPT_BSC_EXE.`,
+    );
+    process.exit(1);
+  }
+  buildEnv.RESCRIPT_SUBPROCESS_BUILD = "1";
+  buildEnv.RESCRIPT_BSC_EXE = ocamlBsc;
+}
+
+const projectConfig = {
+  name: "super-errors-multi-fixture",
+  sources: "src",
+  "package-specs": { module: "esmodule", "in-source": true },
+  suffix: ".res.js",
+  warnings: { number: "+A" },
+  jsx: { version: 4 },
+};
 
 /**
  * @param {string} fixtureName
- * @param {string} output
+ * @param {string[]} projectDirs spellings of the project directory
+ * @param {string} log
  * @return {string}
  */
-function postProcessErrorOutput(fixtureName, output) {
-  let result = output;
-  result = result.trimEnd();
-  result = result.replace(
-    new RegExp(
-      `(?:[A-Z]:)?[\\\\/][^ ]+?tests[\\\\/]build_tests[\\\\/]super_errors_multi[\\\\/]fixtures[\\\\/]${fixtureName}[\\\\/]([^:\\s]+)`,
-      "g",
-    ),
-    (_match, file) =>
-      `/.../fixtures/${fixtureName}/${file.replace(/\\/g, "/")}`,
-  );
-  // `find_in_path_uncap` resolves `.cmi` lookups case-insensitively, so the
-  // path printed in error messages picks up whichever case the host
-  // filesystem returns (lowercase on macOS APFS/HFS+, capitalised on Linux
-  // ext4). Normalise every `.cmi` basename to lowercase so snapshots are
-  // platform-independent.
-  result = result.replace(
-    /([^/\s]+)\.cmi\b/g,
-    (_, stem) => `${stem.toLowerCase()}.cmi`,
-  );
-  return normalizeNewlines(result);
-}
-
-/**
- * Per-fixture artifact extensions to clean between runs so each invocation
- * compiles against a known-empty .cmi/.cmj/.cmt set.
- */
-const artifactExts = [".cmi", ".cmj", ".cmt", ".cmti", ".mjs", ".js"];
-
-/**
- * @param {string} dir
- */
-async function cleanArtifacts(dir) {
-  const entries = await fs.readdir(dir);
-  await Promise.all(
-    entries.map(async name => {
-      if (artifactExts.includes(path.extname(name))) {
-        await fs.unlink(path.join(dir, name));
-      }
-    }),
-  );
+function postProcessErrorOutput(fixtureName, projectDirs, log) {
+  let result = log
+    .split("\n")
+    .filter(line => !/^#(Start|Done)\(\d+\)$/.test(line))
+    .join("\n");
+  for (const dir of projectDirs) {
+    result = result.split(path.join(dir, "src") + path.sep).join(
+      `/.../fixtures/${fixtureName}/`,
+    );
+  }
+  return normalizeNewlines(result.trim());
 }
 
 /**
@@ -85,94 +85,78 @@ async function cleanArtifacts(dir) {
  */
 async function runFixture(fixtureName) {
   const fixtureDir = path.join(fixturesDir, fixtureName);
-
-  // Compile sources in alphabetical order, with one tweak: for any module
-  // that has both `.resi` and `.res`, the interface goes first so the
-  // implementation type-checks against the produced `.cmi`. Fixtures that
-  // need a specific dependency order across modules can prefix filenames
-  // with numeric labels (e.g. `01_Foo.res`, `02_Bar.res`).
-  const sources = (await fs.readdir(fixtureDir))
-    .filter(name => name.endsWith(".res") || name.endsWith(".resi"))
-    .sort((a, b) => {
-      const aStem = a.replace(/\.resi?$/, "");
-      const bStem = b.replace(/\.resi?$/, "");
-      if (aStem === bStem) {
-        return a.endsWith(".resi") ? -1 : 1;
-      }
-      return aStem < bStem ? -1 : aStem > bStem ? 1 : 0;
-    });
-
-  await cleanArtifacts(fixtureDir);
-
-  // Modules that have both an interface and an implementation need
-  // `-bs-read-cmi` on the implementation so the `.cmi` produced from the
-  // interface is enforced rather than overwritten.
-  const hasInterface = new Set();
-  for (const source of sources) {
-    if (source.endsWith(".resi")) hasInterface.add(source.slice(0, -5));
-  }
-
-  const chunks = [];
-  for (const source of sources) {
-    const stem = source.replace(/\.resi?$/, "");
-    const extraFlags =
-      source.endsWith(".res") && hasInterface.has(stem) ? ["-bs-read-cmi"] : [];
-    const { stderr } = await bsc(
-      [
-        ...bscFlags,
-        ...extraFlags,
-        "-I",
-        fixtureDir,
-        path.join(fixtureDir, source),
-      ],
-      { cwd: fixtureDir },
-    );
-    const stderrStr = stderr.toString();
-    if (stderrStr.length > 0) {
-      // Tag each chunk so a reader can tell which file produced which
-      // diagnostic — important when the same error gets re-emitted in the
-      // downstream consumer.
-      chunks.push(`===== ${source} =====\n${stderrStr}`);
-    }
-  }
-
-  const actualErrorOutput = postProcessErrorOutput(
-    fixtureName,
-    chunks.join("\n"),
+  const projectDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), `super-errors-multi-${fixtureName}-`),
   );
-  const expectedFilePath = path.join(expectedDir, `${fixtureName}.expected`);
-
-  if (updateTests) {
-    await fs.writeFile(expectedFilePath, actualErrorOutput);
-    return { fixtureName, failure: null };
-  }
-
-  let expectedErrorOutput;
   try {
-    expectedErrorOutput = postProcessErrorOutput(
-      fixtureName,
-      await fs.readFile(expectedFilePath, "utf-8"),
+    await fs.mkdir(path.join(projectDir, "src"));
+    for (const name of await fs.readdir(fixtureDir)) {
+      if (name.endsWith(".res") || name.endsWith(".resi")) {
+        await fs.copyFile(
+          path.join(fixtureDir, name),
+          path.join(projectDir, "src", name),
+        );
+      }
+    }
+    await fs.writeFile(
+      path.join(projectDir, "rescript.json"),
+      `${JSON.stringify(projectConfig, null, 2)}\n`,
     );
-  } catch {
+
+    const { execBuild } = setup(projectDir);
+    const { stdout, stderr } = await execBuild([], { env: buildEnv });
+    let log;
+    try {
+      log = await fs.readFile(
+        path.join(projectDir, "lib", "bs", ".compiler.log"),
+        "utf-8",
+      );
+    } catch {
+      return {
+        fixtureName,
+        failure: `The build of ${fixtureName} wrote no .compiler.log:\n${stdout}${stderr}`,
+      };
+    }
+    const actualErrorOutput = postProcessErrorOutput(
+      fixtureName,
+      [projectDir, await fs.realpath(projectDir)],
+      log,
+    );
+    const expectedFilePath = path.join(expectedDir, `${fixtureName}.expected`);
+
+    if (updateTests) {
+      await fs.writeFile(expectedFilePath, `${actualErrorOutput}\n`);
+      return { fixtureName, failure: null };
+    }
+
+    let expectedErrorOutput;
+    try {
+      expectedErrorOutput = normalizeNewlines(
+        (await fs.readFile(expectedFilePath, "utf-8")).trim(),
+      );
+    } catch {
+      return {
+        fixtureName,
+        failure: `Missing expected snapshot for ${fixtureName} (run with 'update' to create)`,
+      };
+    }
+
+    if (expectedErrorOutput === actualErrorOutput) {
+      return { fixtureName, failure: null };
+    }
     return {
       fixtureName,
-      failure: `Missing expected snapshot for ${fixtureName} (run with 'update' to create)`,
+      failure: [
+        `The old and new error output for fixture ${fixtureName} aren't the same`,
+        "\n=== Old:",
+        expectedErrorOutput,
+        "\n=== New:",
+        actualErrorOutput,
+      ].join("\n"),
     };
+  } finally {
+    await fs.rm(projectDir, { recursive: true, force: true });
   }
-
-  if (expectedErrorOutput === actualErrorOutput) {
-    return { fixtureName, failure: null };
-  }
-  return {
-    fixtureName,
-    failure: [
-      `The old and new error output for fixture ${fixtureName} aren't the same`,
-      "\n=== Old:",
-      expectedErrorOutput,
-      "\n=== New:",
-      actualErrorOutput,
-    ].join("\n"),
-  };
 }
 
 const concurrency = Math.max(1, os.availableParallelism());

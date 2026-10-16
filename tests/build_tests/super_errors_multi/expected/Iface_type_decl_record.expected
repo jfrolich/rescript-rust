@@ -1,10 +1,8 @@
-===== Foo.res =====
+We've found a bug for you!
+  /.../fixtures/Iface_type_decl_record/Foo.res:1:1-25
 
-  [1;31mWe've found a bug for you![0m
-  [36m/.../fixtures/Iface_type_decl_record/Foo.res[0m:[2m1:1-25[0m
-
-  [1;31m1[0m [2m│[0m [1;31mtype t = {x: int, z: int}[0m
-  2 [2m│[0m 
+  1 │ type t = {x: int, z: int}
+  2 │ 
 
   The implementation /.../fixtures/Iface_type_decl_record/Foo.res
   does not match the interface /.../fixtures/Iface_type_decl_record/Foo.resi:
@@ -12,8 +10,8 @@
     type t = {x: int, z: int}
   is not included in
     type t = {x: int, y: int}
-  [36m/.../fixtures/Iface_type_decl_record/Foo.resi[0m:[2m1:1-25[0m:
+  /.../fixtures/Iface_type_decl_record/Foo.resi:1:1-25:
     Expected declaration
-  [36m/.../fixtures/Iface_type_decl_record/Foo.res[0m:[2m1:1-25[0m:
+  /.../fixtures/Iface_type_decl_record/Foo.res:1:1-25:
     Actual declaration
   Fields number 2 have different names, z and y.
