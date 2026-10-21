@@ -322,9 +322,8 @@ where
 }
 
 pub(crate) fn get_arity(arena: &IndexedLambda, meta: &IndexedLamStats, node: NodeId) -> Arity {
-    let mut lookup = |module: &Ident, field: &str| {
-        cached_external(&meta.external_arities, module, field)
-    };
+    let mut lookup =
+        |module: &Ident, field: &str| cached_external(&meta.external_arities, module, field);
     get_arity_impl(arena, &meta.ident_tbl, node, &mut lookup)
 }
 
@@ -336,9 +335,8 @@ pub(crate) fn get_arity_external(
 ) -> Arity {
     let table = &meta.ident_tbl;
     let external = &mut meta.external_arities;
-    let mut lookup = |module: &Ident, field: &str| {
-        lookup_external(external, module, field, resolver)
-    };
+    let mut lookup =
+        |module: &Ident, field: &str| lookup_external(external, module, field, resolver);
     get_arity_impl(arena, table, node, &mut lookup)
 }
 
@@ -371,10 +369,9 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
     }
     fn inner(arena: &IndexedLambda, node: NodeId) -> Option<i32> {
         match arena.view(node) {
-            NodeView::Var(_)
-            | NodeView::GlobalModule(_)
-            | NodeView::Break
-            | NodeView::Continue => Some(1),
+            NodeView::Var(_) | NodeView::GlobalModule(_) | NodeView::Break | NodeView::Continue => {
+                Some(1)
+            }
             NodeView::Const(constant) => Some(constant_size(constant)),
             NodeView::Let(_, _, value, body) => {
                 Some(1 + inner(arena, value)? + inner(arena, body)?)
@@ -879,7 +876,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::Lvar(x),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let makeblock = Lambda::prim(
             Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable),
@@ -956,7 +954,8 @@ mod tests {
                 arity,
                 (0..arity).map(|n| id("p", 100 + n)).collect(),
                 Lambda::Lconst(Constant::int(0)),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             )
         }
         fn assert_same(lambda: Lambda) {
@@ -1033,7 +1032,8 @@ mod tests {
                 FunctionAttribute {
                     inline,
                     ..FunctionAttribute::default()
-                }, crate::location::Location::none(),
+                },
+                crate::location::Location::none(),
             )
         }
         let always = id("always", 20);
@@ -1148,7 +1148,8 @@ mod tests {
     #[test]
     fn bound_functions_always_retain_node_ids_like_ocaml_collect() {
         fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
-            Lambda::Lfunction(Box::new(crate::lambda::LFunction { loc: crate::location::Location::none(),
+            Lambda::Lfunction(Box::new(crate::lambda::LFunction {
+                loc: crate::location::Location::none(),
                 arity: params.len() as i32,
                 params,
                 body: Box::new(body),
@@ -1411,16 +1412,14 @@ mod tests {
             Lambda::Lvar(exported.clone()),
         );
         let mut tree_meta = LamStats::new(vec![exported.clone()]);
-        let mut tree_resolver = |_: &Ident, _: &str| {
-            Some(ExternalArityInfo::Single(Arity::info(vec![2], false)))
-        };
+        let mut tree_resolver =
+            |_: &Ident, _: &str| Some(ExternalArityInfo::Single(Arity::info(vec![2], false)));
         tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
 
         let indexed = IndexedLambda::from_lambda(lambda);
         let mut indexed_meta = IndexedLamStats::new([exported.clone()]);
-        let mut indexed_resolver = |_: &Ident, _: &str| {
-            Some(ExternalArityInfo::Single(Arity::info(vec![2], false)))
-        };
+        let mut indexed_resolver =
+            |_: &Ident, _: &str| Some(ExternalArityInfo::Single(Arity::info(vec![2], false)));
         collect_info_with_external_arity(
             &indexed,
             &mut indexed_meta,

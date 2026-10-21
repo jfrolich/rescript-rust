@@ -5,9 +5,8 @@ use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::typedtree::{
-    Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc,
-    ModuleTypeConstraint, Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc,
-    ValueBinding,
+    Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc, ModuleTypeConstraint,
+    Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
 #[allow(non_snake_case)]
@@ -30,7 +29,12 @@ pub fn addAnnotationsToTypes_(
                         a_type: a_type.clone(),
                     }),
                     None => {
-                        out.extend(addAnnotationsToTypes_(arena, config, body, &arg_types[index..]));
+                        out.extend(addAnnotationsToTypes_(
+                            arena,
+                            config,
+                            body,
+                            &arg_types[index..],
+                        ));
                         break;
                     }
                 }
@@ -77,9 +81,13 @@ pub fn add_annotations_to_fields(
 ) -> (Vec<crate::gentype::gen_type_common::Field>, Vec<ArgType>) {
     // Mirrors compiler/gentype/translate_structure.ml:41-53.
     let Some((field, next_fields)) = fields.split_first() else {
-        return (vec![], add_annotations_to_types(arena, config, expr, arg_types));
+        return (
+            vec![],
+            add_annotations_to_types(arena, config, expr, arg_types),
+        );
     };
-    let (next_fields1, types1) = add_annotations_to_fields(arena, config, expr, next_fields, arg_types);
+    let (next_fields1, types1) =
+        add_annotations_to_fields(arena, config, expr, next_fields, arg_types);
     let mut field = field.clone();
     field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
         arena,

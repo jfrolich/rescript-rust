@@ -445,7 +445,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
 
         let fv = free_variables_with_stats(&HashSet::new(), HashMap::new(), &func);
@@ -488,7 +489,8 @@ mod tests {
             1,
             vec![param.clone()],
             Lambda::var(param.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         assert!(is_closed(&func));
     }

@@ -227,7 +227,13 @@ impl<'a> Checker<'a> {
                 for (index, tdcl) in tdcls.iter().enumerate() {
                     self.type_declaration(tdcl, index == last)?;
                 }
-                run_derivers(tdcls, self.arena, in_structure, &payload, &mut self.warnings)
+                run_derivers(
+                    tdcls,
+                    self.arena,
+                    in_structure,
+                    &payload,
+                    &mut self.warnings,
+                )
             }
             None => {
                 for tdcl in tdcls {
@@ -496,7 +502,8 @@ impl<'a> Checker<'a> {
                         | WithConstraint::Pwith_typesubst(_, tdcl) => {
                             self.type_declaration(tdcl, false)?;
                         }
-                        WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
+                        WithConstraint::Pwith_module(_, _)
+                        | WithConstraint::Pwith_modsubst(_, _) => {}
                     }
                 }
                 self.module_type(*mod_type)
@@ -624,8 +631,9 @@ impl<'a> Checker<'a> {
             | PatternDesc::Ppat_interval(_)
             | PatternDesc::Ppat_type(_)
             | PatternDesc::Ppat_unpack(_) => Ok(()),
-            PatternDesc::Ppat_alias(inner, _)
-            | PatternDesc::Ppat_exception(inner) => self.pat(*inner),
+            PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
+                self.pat(*inner)
+            }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
                 for item in items.iter() {
                     self.pat(*item)?;
@@ -688,7 +696,10 @@ impl<'a> Checker<'a> {
             _ => false,
         };
         if awaits && !self.async_context {
-            return Err(PpxError::at_loc(expr.pexp_loc, AWAIT_NOT_ASYNC_CONTEXT_ERROR));
+            return Err(PpxError::at_loc(
+                expr.pexp_loc,
+                AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+            ));
         }
         Ok(())
     }
@@ -870,8 +881,11 @@ impl<'a> Checker<'a> {
             && self.arena.value_constraint(vb.pvb_pat).is_none()
             && self.is_record_pattern(vb.pvb_pat)
             && !matches!(
-                &*crate::parser::parsetree_viewer::unwrap_braces(self.arena, self.arena.get_expr(vb.pvb_expr))
-                    .pexp_desc,
+                &*crate::parser::parsetree_viewer::unwrap_braces(
+                    self.arena,
+                    self.arena.get_expr(vb.pvb_expr)
+                )
+                .pexp_desc,
                 ExpressionDesc::Pexp_pack(_)
             )
         {
@@ -1004,7 +1018,8 @@ impl<'a> Checker<'a> {
             }
             ExpressionDesc::Pexp_braces(braces) => self.expr(braces.expr),
             ExpressionDesc::Pexp_regexp(_) => Ok(()),
-            ExpressionDesc::Pexp_sequence(first, second) | ExpressionDesc::Pexp_while(first, second) => {
+            ExpressionDesc::Pexp_sequence(first, second)
+            | ExpressionDesc::Pexp_while(first, second) => {
                 self.expr(*second)?;
                 self.expr(*first)
             }
@@ -1084,9 +1099,8 @@ impl<'a> Checker<'a> {
                     self.jsx_props(&element.props)
                 }
             },
-            ExpressionDesc::Pexp_comptime_typeinfo(typ) | ExpressionDesc::Pexp_comptime_typename(typ) => {
-                self.typ(*typ)
-            }
+            ExpressionDesc::Pexp_comptime_typeinfo(typ)
+            | ExpressionDesc::Pexp_comptime_typename(typ) => self.typ(*typ),
             ExpressionDesc::Pexp_comptime_field(inner) => {
                 self.expr(inner.1)?;
                 self.expr(inner.0)

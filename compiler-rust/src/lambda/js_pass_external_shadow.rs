@@ -120,13 +120,19 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label,
             id,
-            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
+            Box::new(rewrite_global_static_index_expr(
+                *iterable,
+                shadowed_globals,
+            )),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
             label,
             id,
-            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
+            Box::new(rewrite_global_static_index_expr(
+                *iterable,
+                shadowed_globals,
+            )),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label),
@@ -292,10 +298,12 @@ fn rewrite_expr_children(
             strings,
             values.into_iter().map(&mut *rewrite).collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values.into_iter().map(&mut *rewrite).collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values.into_iter().map(&mut *rewrite).collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(obj, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(rewrite(*obj)), field, pos)
         }

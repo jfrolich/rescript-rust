@@ -92,7 +92,8 @@ fn indexed_eta_emits_runtime_js_and_honors_function_guards() {
                 2,
                 vec![left.clone(), right.clone()],
                 Lambda::prim(Primitive::Pobjorder, args, Location::none()),
-                attr, crate::location::Location::none(),
+                attr,
+                crate::location::Location::none(),
             ),
             [],
         );
@@ -131,14 +132,16 @@ fn primitive_js_boundary_preserves_prelude_and_shared_dynamic_import_allocator()
     ));
     let prelude_text = print_block(&vec![before.clone()]);
     let compiled = compiler.compile_primitive_js(
-        &Primitive::Pimport(Box::new(crate::lambda::lam_primitive::ImportSource::ImportExternal {
-            module_: crate::lambda::lam_primitive::ExternalModuleName {
-                bundle: "external-package".into(),
-                module_bind_name: crate::lambda::lam_primitive::ModuleBindName::PhintNothing,
-                import_attributes: None,
+        &Primitive::Pimport(Box::new(
+            crate::lambda::lam_primitive::ImportSource::ImportExternal {
+                module_: crate::lambda::lam_primitive::ExternalModuleName {
+                    bundle: "external-package".into(),
+                    module_bind_name: crate::lambda::lam_primitive::ModuleBindName::PhintNothing,
+                    import_attributes: None,
+                },
+                path: vec!["value".into()],
             },
-            path: vec!["value".into()],
-        })),
+        )),
         vec![],
         vec![before],
         &Location::none(),

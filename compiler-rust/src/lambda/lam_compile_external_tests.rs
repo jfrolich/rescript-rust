@@ -46,7 +46,9 @@ fn lowers_js_var_without_args_to_a_value() {
             prim_name: "process".to_string(),
             arg_types: vec![],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "process".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "process".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -77,7 +79,9 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
             prim_name: "foo1".to_string(),
             arg_types: vec![],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "foo1".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "foo1".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -129,7 +133,9 @@ fn lowers_module_external_calls_to_namespace_imports() {
             prim_name: "describe".to_string(),
             arg_types: vec![],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "describe".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "describe".to_string(),
+                },
                 module_: (Some(external_module("mocha"))).map(ModuleSource::ModuleNamed),
                 scopes: vec![],
                 variadic: false,
@@ -253,7 +259,9 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
             prim_name: "join".to_string(),
             arg_types: vec![Param::dummy()],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "join".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "join".to_string(),
+                },
                 module_: (Some(external_module("path"))).map(ModuleSource::ModuleNamed),
                 scopes: vec![],
                 variadic: true,
@@ -302,7 +310,9 @@ fn lowers_js_new_to_new_expression() {
             prim_name: "URL".to_string(),
             arg_types: vec![],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclNew { name: "URL".to_string() },
+                kind: DeclKind::DeclNew {
+                    name: "URL".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -362,7 +372,9 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                 },
             ],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "formatDate".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "formatDate".to_string(),
+                },
                 module_: (Some(external_module("SomeModule"))).map(ModuleSource::ModuleNamed),
                 scopes: vec![],
                 variadic: false,
@@ -405,7 +417,9 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                 },
             ],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclSend { name: "toString".to_string() },
+                kind: DeclKind::DeclSend {
+                    name: "toString".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -441,7 +455,9 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                 },
             ],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclNew { name: "RegExp".to_string() },
+                kind: DeclKind::DeclNew {
+                    name: "RegExp".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -487,7 +503,9 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                 },
             ],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "consume".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "consume".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -519,7 +537,9 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 arg_label: LabelNoname::ArgEmpty,
             }],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "handle".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "handle".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -587,7 +607,9 @@ fn lowers_marshaled_constant_args_in_js_call() {
                 arg_label: LabelNoname::ArgEmpty,
             }],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "somefn".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "somefn".to_string(),
+                },
                 module_: None,
                 scopes: vec!["somescope".to_string()],
                 variadic: false,
@@ -1095,7 +1117,9 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                 },
             ],
             ffi: Box::new(ExternalDecl {
-                kind: DeclKind::DeclVal { name: "somefn".to_string() },
+                kind: DeclKind::DeclVal {
+                    name: "somefn".to_string(),
+                },
                 module_: None,
                 scopes: vec![],
                 variadic: false,
@@ -1381,8 +1405,9 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
 #[test]
 fn collects_static_module_dependencies() {
     let mut compiler = LambdaCompiler::new();
-    let deps =
-        compiler.compile_deps_program(&Lambda::global_module(Ident::create_persistent("Belt_List")));
+    let deps = compiler.compile_deps_program(&Lambda::global_module(Ident::create_persistent(
+        "Belt_List",
+    )));
 
     assert_eq!(deps.modules.len(), 1);
     assert_eq!(deps.modules[0].id.name(), "Belt_List");

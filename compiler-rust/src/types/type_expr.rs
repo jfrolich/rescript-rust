@@ -517,7 +517,10 @@ impl TypeExprRef {
     /// Index into the shared pool.
     #[inline]
     pub(crate) fn shared_index(self) -> u32 {
-        debug_assert!(self.is_shared(), "non-shared type reference used as a shared index");
+        debug_assert!(
+            self.is_shared(),
+            "non-shared type reference used as a shared index"
+        );
         self.0 & !SHARED_REF_BITS
     }
 
@@ -790,7 +793,6 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
-
 /// Number of keys a `TypeExprRefSet` holds inline before it spills to a
 /// hash set.
 const TYPE_EXPR_SET_INLINE: usize = 16;
@@ -1053,7 +1055,8 @@ pub enum FieldMutability {
 pub struct MutabilityRef(pub u32);
 
 /// Next persistent cell identity, process-wide.
-static NEXT_PERSISTENT_MUTABILITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static NEXT_PERSISTENT_MUTABILITY: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 impl MutabilityRef {
     #[inline]

@@ -1060,7 +1060,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(x.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let s = lambda_to_string(&func);
         assert!(s.contains("function"));

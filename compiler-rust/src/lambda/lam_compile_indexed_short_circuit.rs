@@ -1,7 +1,7 @@
 //! Distinct native short-circuit continuations (lam_compile.ml:1137-1220).
+use super::context::{Continuation, TailType};
 use super::output::Output;
 use super::*;
-use super::context::{Continuation, TailType};
 
 impl IndexedJsConsumer<'_> {
     fn short_circuit_parts(&self, node: NodeId) -> (ShortCircuitOp, NodeId, NodeId) {

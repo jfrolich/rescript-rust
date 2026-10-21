@@ -21,8 +21,8 @@ use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    Comment, Parser, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
-    jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
+    Comment, Parser, ParserWarning, Scanner, SignatureItem, Structure, code_frame, jsx_ppx,
+    ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::fs;
@@ -100,7 +100,6 @@ struct Args {
     /// JSX module
     #[arg(long = "jsx-module", default_value = "react")]
     jsx_module: String,
-
 
     /// Test AST conversion
     #[arg(long = "test-ast-conversion")]

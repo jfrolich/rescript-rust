@@ -66,16 +66,16 @@ pub mod lam_pass_exits;
 pub mod lam_pass_exits_indexed;
 pub mod lam_pass_guard_raises;
 pub mod lam_pass_lets_dce;
-pub mod lam_pass_sroa;
-pub mod lambda_traverse;
 pub(crate) mod lam_pass_lets_dce_indexed;
 pub mod lam_pass_remove_alias;
 pub(crate) mod lam_pass_remove_alias_indexed;
+pub mod lam_pass_sroa;
 pub mod lam_primitive;
 pub mod lam_print;
 pub mod lam_subst;
 pub mod lam_tag_info;
 pub mod lam_util;
+pub mod lambda_traverse;
 pub mod sexp_lambda;
 
 use crate::ident::Ident;
@@ -219,7 +219,10 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
             TagInfo::Tuple => ValueKind::IsArray,
             TagInfo::Record { fields, .. } => {
                 if !fields.is_empty()
-                    && fields.iter().enumerate().all(|(i, (name, _))| i.to_string() == *name)
+                    && fields
+                        .iter()
+                        .enumerate()
+                        .all(|(i, (name, _))| i.to_string() == *name)
                 {
                     ValueKind::IsArray
                 } else {
@@ -244,7 +247,10 @@ fn ocaml_float_of_string(s: &str) -> Option<f64> {
 
 /// lambda.ml `literal_denotes_same`: runtime equality rather than equality
 /// of tags; bigint spellings are not compared.
-fn literal_denotes_same(a: &crate::types::VariantLiteralTag, b: &crate::types::VariantLiteralTag) -> bool {
+fn literal_denotes_same(
+    a: &crate::types::VariantLiteralTag,
+    b: &crate::types::VariantLiteralTag,
+) -> bool {
     use crate::types::VariantLiteralTag as L;
     match (a, b) {
         (L::String(x), L::String(y)) => x == y,
@@ -302,7 +308,10 @@ fn untagged_action(
     match &kind {
         ValueKind::UnknownValue => UntaggedAction::Undecided,
         ValueKind::IsLiteral(literal)
-            if facts.literal_tags.iter().any(|tag| literal_denotes_same(literal, tag)) =>
+            if facts
+                .literal_tags
+                .iter()
+                .any(|tag| literal_denotes_same(literal, tag)) =>
         {
             // The literal side wins, exactly as it does at runtime.
             UntaggedAction::Case(
@@ -310,9 +319,9 @@ fn untagged_action(
                     .sw_consts
                     .iter()
                     .find(|(key, _)| match key {
-                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
-                            literal_denotes_same(literal, &literal_of_tag(tag))
-                        }
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
+                            tag,
+                        )) => literal_denotes_same(literal, &literal_of_tag(tag)),
                         _ => false,
                     })
                     .map(|(_, action)| action.clone()),
@@ -320,17 +329,20 @@ fn untagged_action(
         }
         _ => {
             // Not a declared literal, so the payload's runtime shape decides.
-            let matches_block =
-                |block_type: &crate::types::VariantBlockType| value_has_block_type(&facts.block_types, &kind, block_type);
+            let matches_block = |block_type: &crate::types::VariantBlockType| {
+                value_has_block_type(&facts.block_types, &kind, block_type)
+            };
             if facts.block_types.iter().any(matches_block) {
                 UntaggedAction::Case(
                     switch
                         .sw_blocks
                         .iter()
                         .find(|(key, _)| match key {
-                            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                                crate::types::VariantBlock::Untagged { block_type, .. },
-                            )) => matches_block(block_type),
+                            SwitchKey::Constructor(
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock::Untagged { block_type, .. },
+                                ),
+                            ) => matches_block(block_type),
                             _ => false,
                         })
                         .map(|(_, action)| action.clone()),
@@ -613,7 +625,8 @@ impl Lambda {
                 },
                 // lam.ml:491-492 — Pstringlength on bare string literal.
                 (Primitive::Pstringlength, Constant::String(s)) => Lambda::Lconst(Constant::int(
-                    crate::string_literal::utf16_length(s).expect("String_literal.utf16_length: Invalid_utf8")
+                    crate::string_literal::utf16_length(s)
+                        .expect("String_literal.utf16_length: Invalid_utf8")
                         as i32,
                 )),
                 // lam.ml:496-497
@@ -722,11 +735,9 @@ impl Lambda {
                 (Primitive::Psequor, Constant::JsFalse, Constant::JsTrue) => Lambda::true_(),
                 (Primitive::Psequor, Constant::JsFalse, Constant::JsFalse) => Lambda::false_(),
                 // lam.ml:539-542
-                (
-                    Primitive::Pstringadd,
-                    Constant::String(a_s),
-                    Constant::String(b_s),
-                ) => Lambda::Lconst(Constant::String(format!("{}{}", a_s, b_s))),
+                (Primitive::Pstringadd, Constant::String(a_s), Constant::String(b_s)) => {
+                    Lambda::Lconst(Constant::String(format!("{}{}", a_s, b_s)))
+                }
                 // lam.ml:543-547 — Pstringrefs / Pstringrefu on (String, Int).
                 (
                     Primitive::Pstringrefs | Primitive::Pstringrefu,
@@ -790,7 +801,9 @@ impl Lambda {
                 .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == i))
                 .map(|(_, branch)| branch.clone())
                 .or_else(|| switch.sw_failaction.as_deref().cloned())
-                .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), Box::new(switch))),
+                .unwrap_or_else(|| {
+                    Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), Box::new(switch))
+                }),
             Lambda::Lconst(Constant::Block { tag_info, elements }) => {
                 let runtime = match &*tag_info {
                     TagInfo::Constructor { runtime, .. } => {
@@ -837,11 +850,15 @@ impl Lambda {
         };
 
         match scrutinee {
-            Lambda::Lconst(
-                ref constant @ Constant::String(ref s),
-            ) => matched(s).unwrap_or_else(|| {
-                Lambda::LstringSwitch(Box::new(Lambda::Lconst(constant.clone())), cases, default)
-            }),
+            Lambda::Lconst(ref constant @ Constant::String(ref s)) => {
+                matched(s).unwrap_or_else(|| {
+                    Lambda::LstringSwitch(
+                        Box::new(Lambda::Lconst(constant.clone())),
+                        cases,
+                        default,
+                    )
+                })
+            }
             Lambda::Lconst(ref constant @ Constant::ImmString(ref s)) => {
                 matched(s).unwrap_or_else(|| {
                     Lambda::LstringSwitch(
@@ -895,18 +912,21 @@ impl Lambda {
     /// Create a sequence
     pub fn seq(first: Lambda, second: Lambda) -> Self {
         match first {
-            Lambda::Lprim(__prim8) if matches!(__prim8.as_ref(), PrimInfo {
-                primitive: _primitive @ Primitive::Pmakeblock(_, _),
-                args: _,
-                loc,
-            }) => {
-            let PrimInfo {
-                primitive: primitive @ Primitive::Pmakeblock(_, _),
-                args,
-                loc,
-            } = *__prim8 else {
-                unreachable!()
-            };
+            Lambda::Lprim(__prim8)
+                if matches!(__prim8.as_ref(), PrimInfo {
+                    primitive: _primitive @ Primitive::Pmakeblock(_, _),
+                    args: _,
+                    loc,
+                }) =>
+            {
+                let PrimInfo {
+                    primitive: primitive @ Primitive::Pmakeblock(_, _),
+                    args,
+                    loc,
+                } = *__prim8
+                else {
+                    unreachable!()
+                };
 
                 let mut args = args.into_iter();
                 let Some(first_arg) = args.next() else {
@@ -921,20 +941,23 @@ impl Lambda {
                 };
                 Lambda::seq(args.fold(first_arg, Lambda::seq), second)
             }
-            Lambda::Lprim(__prim7) if matches!(__prim7.as_ref(), PrimInfo {
+            Lambda::Lprim(__prim7)
+                if matches!(__prim7.as_ref(), PrimInfo {
                 primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
                 args,
                 ..
-            } if args.len() == 1) => {
-            let PrimInfo {
-                primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
-                mut args,
-                ..
-            } = *__prim7 else {
-                unreachable!()
-            };
-            Lambda::seq(args.remove(0), second)
-        },
+            } if args.len() == 1) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+                    mut args,
+                    ..
+                } = *__prim7
+                else {
+                    unreachable!()
+                };
+                Lambda::seq(args.remove(0), second)
+            }
             first => Lambda::Lsequence(Box::new(first), Box::new(second)),
         }
     }
@@ -1008,11 +1031,13 @@ impl Lambda {
                             };
 
                             if let Lambda::LifThenElse(pred, _, branch_false) = &then_ {
-                                if let Lambda::Lprim(__prim205) = pred.as_ref() && let PrimInfo {
-                                    primitive: Primitive::Pintcomp(Comparison::Eq),
-                                    args: pred_args,
-                                    ..
-                                } = __prim205.as_ref() {
+                                if let Lambda::Lprim(__prim205) = pred.as_ref()
+                                    && let PrimInfo {
+                                        primitive: Primitive::Pintcomp(Comparison::Eq),
+                                        args: pred_args,
+                                        ..
+                                    } = __prim205.as_ref()
+                                {
                                     if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
                                         pred_args.as_slice()
                                     {
@@ -1023,11 +1048,13 @@ impl Lambda {
                                 }
                             }
 
-                            if let Lambda::Lprim(__prim204) = &then_ && let PrimInfo {
-                                primitive: Primitive::Pintcomp(Comparison::Eq),
-                                args: pred_args,
-                                ..
-                            } = __prim204.as_ref() {
+                            if let Lambda::Lprim(__prim204) = &then_
+                                && let PrimInfo {
+                                    primitive: Primitive::Pintcomp(Comparison::Eq),
+                                    args: pred_args,
+                                    ..
+                                } = __prim204.as_ref()
+                            {
                                 if let [Lambda::Lvar(j), Lambda::Lconst(_)] = pred_args.as_slice() {
                                     if i.same(j) && lambda_eq_approx(&Lambda::false_(), &else_) {
                                         return then_;
@@ -1036,11 +1063,13 @@ impl Lambda {
                             }
 
                             if let Lambda::LifThenElse(pred, branch_true, branch_false) = &then_ {
-                                if let Lambda::Lprim(__prim203) = pred.as_ref() && let PrimInfo {
-                                    primitive: Primitive::Pintcomp(Comparison::Neq),
-                                    args: pred_args,
-                                    loc,
-                                } = __prim203.as_ref() {
+                                if let Lambda::Lprim(__prim203) = pred.as_ref()
+                                    && let PrimInfo {
+                                        primitive: Primitive::Pintcomp(Comparison::Neq),
+                                        args: pred_args,
+                                        loc,
+                                    } = __prim203.as_ref()
+                                {
                                     if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
                                         pred_args.as_slice()
                                     {
@@ -1060,18 +1089,24 @@ impl Lambda {
                             }
 
                             match &then_ {
-                                Lambda::Lprim(__prim6) if matches!(__prim6.as_ref(), PrimInfo {
-                                    primitive: Primitive::Pintcomp(Comparison::Neq),
-                                    args: _pred_args,
-                                    loc: _,
-                                }) => {
-            let PrimInfo {
-                                    primitive: Primitive::Pintcomp(Comparison::Neq),
-                                    args: pred_args,
-                                    loc,
-                                } = __prim6.as_ref() else {
-                unreachable!()
-            };
+                                Lambda::Lprim(__prim6)
+                                    if matches!(
+                                        __prim6.as_ref(),
+                                        PrimInfo {
+                                            primitive: Primitive::Pintcomp(Comparison::Neq),
+                                            args: _pred_args,
+                                            loc: _,
+                                        }
+                                    ) =>
+                                {
+                                    let PrimInfo {
+                                        primitive: Primitive::Pintcomp(Comparison::Neq),
+                                        args: pred_args,
+                                        loc,
+                                    } = __prim6.as_ref()
+                                    else {
+                                        unreachable!()
+                                    };
 
                                     if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
                                         pred_args.as_slice()
@@ -1085,26 +1120,32 @@ impl Lambda {
                                         }
                                     }
                                 }
-                                Lambda::Lprim(__prim5) if matches!(__prim5.as_ref(), PrimInfo {
-                                    primitive: Primitive::Pnot,
-                                    args: _outer_args,
-                                    ..
-                                }) => {
-            let PrimInfo {
-                                    primitive: Primitive::Pnot,
-                                    args: outer_args,
-                                    ..
-                                } = __prim5.as_ref() else {
-                unreachable!()
-            };
+                                Lambda::Lprim(__prim5)
+                                    if matches!(
+                                        __prim5.as_ref(),
+                                        PrimInfo {
+                                            primitive: Primitive::Pnot,
+                                            args: _outer_args,
+                                            ..
+                                        }
+                                    ) =>
+                                {
+                                    let PrimInfo {
+                                        primitive: Primitive::Pnot,
+                                        args: outer_args,
+                                        ..
+                                    } = __prim5.as_ref()
+                                    else {
+                                        unreachable!()
+                                    };
 
-                                    if let [
-                                        Lambda::Lprim(__prim202),
-                                    ] = outer_args.as_slice() && let PrimInfo {
+                                    if let [Lambda::Lprim(__prim202)] = outer_args.as_slice()
+                                        && let PrimInfo {
                                             primitive: Primitive::Pintcomp(Comparison::Eq),
                                             args: pred_args,
                                             loc,
-                                        } = __prim202.as_ref() {
+                                        } = __prim202.as_ref()
+                                    {
                                         if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
                                             pred_args.as_slice()
                                         {
@@ -1226,26 +1267,31 @@ fn eta_reduce_function_apply(
     ap_info: &ApInfo,
 ) -> Option<Lambda> {
     match function.body.as_ref() {
-        Lambda::Lprim(__prim4) if matches!(__prim4.as_ref(), PrimInfo {
-            primitive:
-                Primitive::PnullToOpt
-                | Primitive::PnullUndefinedToOpt
-                | Primitive::PisNull
-                | Primitive::PisNullUndefined
-                | Primitive::Ptypeof,
-            args: _wrap_args,
-            ..
-        }) => {
+        Lambda::Lprim(__prim4)
+            if matches!(
+                __prim4.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::PnullToOpt
+                        | Primitive::PnullUndefinedToOpt
+                        | Primitive::PisNull
+                        | Primitive::PisNullUndefined
+                        | Primitive::Ptypeof,
+                    args: _wrap_args,
+                    ..
+                }
+            ) =>
+        {
             let PrimInfo {
-            primitive:
-                Primitive::PnullToOpt
-                | Primitive::PnullUndefinedToOpt
-                | Primitive::PisNull
-                | Primitive::PisNullUndefined
-                | Primitive::Ptypeof,
-            args: wrap_args,
-            ..
-        } = __prim4.as_ref() else {
+                primitive:
+                    Primitive::PnullToOpt
+                    | Primitive::PnullUndefinedToOpt
+                    | Primitive::PisNull
+                    | Primitive::PisNullUndefined
+                    | Primitive::Ptypeof,
+                args: wrap_args,
+                ..
+            } = __prim4.as_ref()
+            else {
                 unreachable!()
             };
 
@@ -1255,13 +1301,16 @@ fn eta_reduce_function_apply(
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
             let wrap = function_primitive(function.body.as_ref())?;
-            let inner =
-                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
+            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
             Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
-            Some(Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()))
+            Some(Lambda::prim(
+                inner_call.primitive.clone(),
+                eta_args,
+                ap_info.loc.clone(),
+            ))
         }
         Lambda::Lsequence(first, second) => {
             let Lambda::Lprim(inner_call) = first.as_ref() else {
@@ -1285,7 +1334,7 @@ fn function_primitive(body: &Lambda) -> Option<Primitive> {
         Lambda::Lprim(__prim3) => {
             let PrimInfo { primitive, .. } = __prim3.as_ref();
             Some(primitive.clone())
-        },
+        }
         _ => None,
     }
 }
@@ -1357,15 +1406,15 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
     // of that module with a matching name — mirrors the `pos = 0 && field1 = f1`
     // test in OCaml at lam.ml:566-573.
     let first = args.first()?;
-    let Lambda::Lprim(__prim201) = first
-    else {
+    let Lambda::Lprim(__prim201) = first else {
         return None;
     };
-        let PrimInfo {
+    let PrimInfo {
         primitive: Primitive::Pfield(pos, lam_compat::FieldDbgInfo::Module { name: f1 }),
         args: first_args,
         ..
-    } = __prim201.as_ref() else {
+    } = __prim201.as_ref()
+    else {
         return None;
     };
     if *pos != 0 || f1 != &fields[0] {
@@ -1385,15 +1434,15 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
     // SAME source module — mirrors the recursive `aux` helper at
     // lam.ml:552-563.
     for (i, (arg, expected_name)) in args.iter().zip(fields.iter()).enumerate().skip(1) {
-        let Lambda::Lprim(__prim200) = arg
-        else {
+        let Lambda::Lprim(__prim200) = arg else {
             return None;
         };
         let PrimInfo {
             primitive: Primitive::Pfield(pos, lam_compat::FieldDbgInfo::Module { name }),
             args: inner_args,
             ..
-        } = __prim200.as_ref() else {
+        } = __prim200.as_ref()
+        else {
             return None;
         };
         if *pos as usize != i || name != expected_name {
@@ -1416,64 +1465,75 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
 
 fn lambda_not(loc: Location, lam: Lambda) -> Lambda {
     match lam {
-        Lambda::Lprim(__prim2) if matches!(__prim2.as_ref(), PrimInfo {
-            primitive: Primitive::Pintcomp(Comparison::Neq),
-            args: _,
-            loc,
-        }) => {
+        Lambda::Lprim(__prim2)
+            if matches!(
+                __prim2.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pintcomp(Comparison::Neq),
+                    args: _,
+                    loc,
+                }
+            ) =>
+        {
             let PrimInfo {
-            primitive: Primitive::Pintcomp(Comparison::Neq),
-            args,
-            loc,
-        } = *__prim2 else {
+                primitive: Primitive::Pintcomp(Comparison::Neq),
+                args,
+                loc,
+            } = *__prim2
+            else {
                 unreachable!()
             };
             Lambda::Lprim(Box::new(PrimInfo {
-            primitive: Primitive::Pintcomp(Comparison::Eq),
-            args,
-            loc,
-        }))
-        },
+                primitive: Primitive::Pintcomp(Comparison::Eq),
+                args,
+                loc,
+            }))
+        }
         lam => Lambda::prim(Primitive::Pnot, vec![lam], loc),
     }
 }
 
 fn has_boolean_type(lam: &Lambda) -> Option<Location> {
     match lam {
-        Lambda::Lprim(__prim1) if matches!(__prim1.as_ref(), PrimInfo {
-            primitive:
-                Primitive::Pnot
-                | Primitive::Psequand
-                | Primitive::Psequor
-                | Primitive::PisNotNone
-                | Primitive::Pobjcomp(_)
-                | Primitive::Pboolcomp(_)
-                | Primitive::Pintcomp(_)
-                | Primitive::Pfloatcomp(_)
-                | Primitive::Pbigintcomp(_)
-                | Primitive::Pstringcomp(_),
-            loc,
-            ..
-        }) => {
+        Lambda::Lprim(__prim1)
+            if matches!(
+                __prim1.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pnot
+                        | Primitive::Psequand
+                        | Primitive::Psequor
+                        | Primitive::PisNotNone
+                        | Primitive::Pobjcomp(_)
+                        | Primitive::Pboolcomp(_)
+                        | Primitive::Pintcomp(_)
+                        | Primitive::Pfloatcomp(_)
+                        | Primitive::Pbigintcomp(_)
+                        | Primitive::Pstringcomp(_),
+                    loc,
+                    ..
+                }
+            ) =>
+        {
             let PrimInfo {
-            primitive:
-                Primitive::Pnot
-                | Primitive::Psequand
-                | Primitive::Psequor
-                | Primitive::PisNotNone
-                | Primitive::Pobjcomp(_)
-                | Primitive::Pboolcomp(_)
-                | Primitive::Pintcomp(_)
-                | Primitive::Pfloatcomp(_)
-                | Primitive::Pbigintcomp(_)
-                | Primitive::Pstringcomp(_),
-            loc,
-            ..
-        } = __prim1.as_ref() else {
+                primitive:
+                    Primitive::Pnot
+                    | Primitive::Psequand
+                    | Primitive::Psequor
+                    | Primitive::PisNotNone
+                    | Primitive::Pobjcomp(_)
+                    | Primitive::Pboolcomp(_)
+                    | Primitive::Pintcomp(_)
+                    | Primitive::Pfloatcomp(_)
+                    | Primitive::Pbigintcomp(_)
+                    | Primitive::Pstringcomp(_),
+                loc,
+                ..
+            } = __prim1.as_ref()
+            else {
                 unreachable!()
             };
             Some(loc.clone())
-        },
+        }
         _ => None,
     }
 }
@@ -1587,7 +1647,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(x.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
 
         match func {
@@ -1694,17 +1755,23 @@ mod tests {
         );
 
         match if_expr {
-            Lambda::Lprim(__prim0) if matches!(__prim0.as_ref(), PrimInfo {
-                primitive: Primitive::Pintcomp(Comparison::Eq),
-                ..
-            }) => {
-            let PrimInfo {
-                primitive: Primitive::Pintcomp(Comparison::Eq),
-                ..
-            } = *__prim0 else {
-                unreachable!()
-            };
-}
+            Lambda::Lprim(__prim0)
+                if matches!(
+                    __prim0.as_ref(),
+                    PrimInfo {
+                        primitive: Primitive::Pintcomp(Comparison::Eq),
+                        ..
+                    }
+                ) =>
+            {
+                let PrimInfo {
+                    primitive: Primitive::Pintcomp(Comparison::Eq),
+                    ..
+                } = *__prim0
+                else {
+                    unreachable!()
+                };
+            }
             _ => panic!("Expected negated integer comparison"),
         }
     }
@@ -1735,12 +1802,12 @@ mod tests {
                 match *first {
                     Lambda::LifThenElse(_, then_, else_) => {
                         assert!(matches!(
-                            *then_,
-                            Lambda::Lprim(__prim100) if matches!(__prim100.as_ref(), PrimInfo {
-                                primitive: Primitive::Praise,
-                                ..
-                            })
-));
+                                                    *then_,
+                                                    Lambda::Lprim(__prim100) if matches!(__prim100.as_ref(), PrimInfo {
+                                                        primitive: Primitive::Praise,
+                                                        ..
+                                                    })
+                        ));
                         assert!(matches!(
                             *else_,
                             Lambda::Lconst(Constant::JsUndefined { is_unit: true })
@@ -1805,4 +1872,3 @@ mod node_size_tests {
         assert_eq!(size_of::<super::Lambda>(), 56);
     }
 }
-

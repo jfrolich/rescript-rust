@@ -49,7 +49,10 @@ pub fn dig(types: &TypeContext, mut te: TypeExprRef) -> TypeExprRef {
 }
 
 fn is_module_type(declared: &Declared<Module>) -> bool {
-    matches!(declared.module_path, ModulePath::ExportedModule { is_type: true, .. })
+    matches!(
+        declared.module_path,
+        ModulePath::ExportedModule { is_type: true, .. }
+    )
 }
 
 /// `add_declared`.
@@ -68,7 +71,15 @@ fn add_declared<T: Clone>(
         Some((exported, kind)) => exported.add(kind, &name.txt, stamp),
         None => true,
     };
-    let declared = attrs::new_declared(item, extent, name, stamp, env.module_path.clone(), is_exported, attributes);
+    let declared = attrs::new_declared(
+        item,
+        extent,
+        name,
+        stamp,
+        env.module_path.clone(),
+        is_exported,
+        attributes,
+    );
     add_stamp(stamp, declared.clone());
     declared
 }
@@ -77,7 +88,13 @@ fn attrs_to_docstring(attributes: Attrs<'_>) -> Vec<String> {
     attrs::find_doc_attribute(attributes).into_iter().collect()
 }
 
-fn module_item(kind: ModuleItemKind, name: &Located<String>, docstring: &[String], deprecated: &Option<String>, loc: Loc) -> ModuleItem {
+fn module_item(
+    kind: ModuleItemKind,
+    name: &Located<String>,
+    docstring: &[String],
+    deprecated: &Option<String>,
+    loc: Loc,
+) -> ModuleItem {
     ModuleItem {
         kind,
         name: name.txt.clone(),
@@ -141,7 +158,12 @@ pub struct Processor<'a> {
 
 impl Processor<'_> {
     /// `for_type_signature_item`.
-    fn for_type_signature_item(&mut self, env: &ProcessEnv, exported: &mut Exported, item: &SignatureItem) -> Vec<ModuleItem> {
+    fn for_type_signature_item(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        item: &SignatureItem,
+    ) -> Vec<ModuleItem> {
         match item {
             SignatureItem::SigValue(ident, vd) => {
                 let stamp = ident.binding_time();
@@ -181,10 +203,13 @@ impl Processor<'_> {
                 let kind = match &decl.type_kind {
                     decl::TypeKind::TypeAbstract => match decl.type_manifest {
                         Some(manifest) => match &*self.ctx.types.get_desc(manifest) {
-                            TypeDesc::Tconstr { path, args, .. } => {
-                                TypeKind::Abstract(Some((path.clone(), args.iter().copied().collect())))
+                            TypeDesc::Tconstr { path, args, .. } => TypeKind::Abstract(Some((
+                                path.clone(),
+                                args.iter().copied().collect(),
+                            ))),
+                            TypeDesc::Ttuple(items) => {
+                                TypeKind::Tuple(items.iter().copied().collect())
                             }
-                            TypeDesc::Ttuple(items) => TypeKind::Tuple(items.iter().copied().collect()),
                             _ => TypeKind::Abstract(None),
                         },
                         None => TypeKind::Abstract(None),
@@ -202,10 +227,14 @@ impl Processor<'_> {
                                     cname: Located::mknoloc(cname.clone()),
                                     args: match &cd.cd_args {
                                         decl::ConstructorArguments::CstrTuple(args) => {
-                                            ConstructorArgs::Args(args.iter().map(|t| (*t, Loc::none())).collect())
+                                            ConstructorArgs::Args(
+                                                args.iter().map(|t| (*t, Loc::none())).collect(),
+                                            )
                                         }
                                         decl::ConstructorArguments::CstrRecord(fields) => {
-                                            ConstructorArgs::InlineRecord(fields.iter().map(map_record_field).collect())
+                                            ConstructorArgs::InlineRecord(
+                                                fields.iter().map(map_record_field).collect(),
+                                            )
                                         }
                                     },
                                     res: cd.cd_res,
@@ -227,7 +256,9 @@ impl Processor<'_> {
                             })
                             .collect(),
                     ),
-                    decl::TypeKind::TypeRecord(fields, _) => TypeKind::Record(fields.iter().map(map_record_field).collect()),
+                    decl::TypeKind::TypeRecord(fields, _) => {
+                        TypeKind::Record(fields.iter().map(map_record_field).collect())
+                    }
                 };
                 let attributes = Attrs::Decl(&decl.type_attributes);
                 let item = Type {
@@ -271,7 +302,12 @@ impl Processor<'_> {
     }
 
     /// `for_type_signature`.
-    fn for_type_signature(&mut self, name: &str, env: &ProcessEnv, signature: &[SignatureItem]) -> Structure {
+    fn for_type_signature(
+        &mut self,
+        name: &str,
+        env: &ProcessEnv,
+        signature: &[SignatureItem],
+    ) -> Structure {
         let mut exported = Exported::default();
         let mut items = Vec::new();
         // `List.fold_right`: the last item first.
@@ -290,9 +326,16 @@ impl Processor<'_> {
     }
 
     /// `for_type_module`.
-    fn for_type_module(&mut self, name: &str, env: &ProcessEnv, module_type: &decl::ModuleType) -> Module {
+    fn for_type_module(
+        &mut self,
+        name: &str,
+        env: &ProcessEnv,
+        module_type: &decl::ModuleType,
+    ) -> Module {
         match module_type {
-            decl::ModuleType::MtyIdent(path) | decl::ModuleType::MtyAlias(_, path) => Module::Ident(path.clone()),
+            decl::ModuleType::MtyIdent(path) | decl::ModuleType::MtyAlias(_, path) => {
+                Module::Ident(path.clone())
+            }
             decl::ModuleType::MtySignature(signature) => {
                 Module::Structure(Arc::new(self.for_type_signature(name, env, signature)))
             }
@@ -301,16 +344,24 @@ impl Processor<'_> {
     }
 
     /// `for_type_declaration`.
-    fn for_type_declaration(&mut self, env: &ProcessEnv, exported: &mut Exported, td: &tt::TypedTypeDeclaration, rec_status: RecStatus) -> ModuleItem {
+    fn for_type_declaration(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        td: &tt::TypedTypeDeclaration,
+        rec_status: RecStatus,
+    ) -> ModuleItem {
         let stamp = td.typ_id.binding_time();
         let typ_type = Arc::new(td.typ_type.clone());
         let kind = match &td.typ_kind {
             tt::TypedTypeKind::Ttype_abstract => match &td.typ_manifest {
                 Some(manifest) => match &manifest.ctyp_desc {
-                    tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => {
-                        TypeKind::Abstract(Some((path.clone(), args.iter().map(|t| t.ctyp_type).collect())))
+                    tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => TypeKind::Abstract(Some(
+                        (path.clone(), args.iter().map(|t| t.ctyp_type).collect()),
+                    )),
+                    tt::TypedCoreTypeDesc::Ttyp_tuple(items) => {
+                        TypeKind::Tuple(items.iter().map(|t| t.ctyp_type).collect())
                     }
-                    tt::TypedCoreTypeDesc::Ttyp_tuple(items) => TypeKind::Tuple(items.iter().map(|t| t.ctyp_type).collect()),
                     _ => TypeKind::Abstract(None),
                 },
                 None => TypeKind::Abstract(None),
@@ -328,25 +379,36 @@ impl Processor<'_> {
                             cname: cname.clone(),
                             deprecated: attrs::find_deprecated_attribute(cd_attributes),
                             args: match &cd.cd_args {
-                                tt::TypedConstructorArguments::Cstr_tuple(args) => ConstructorArgs::Args(
-                                    args.iter().map(|t| (t.ctyp_type, self.ctx.loc(t.ctyp_loc))).collect(),
-                                ),
-                                tt::TypedConstructorArguments::Cstr_record(fields) => ConstructorArgs::InlineRecord(
-                                    fields
-                                        .iter()
-                                        .map(|f| {
-                                            let f_attributes = self.ctx.parsed(&f.ld_attributes);
-                                            Field {
-                                                stamp: f.ld_id.binding_time(),
-                                                fname: Located::mknoloc(f.ld_id.name().to_string()),
-                                                typ: f.ld_type.ctyp_type,
-                                                optional: f.ld_optional,
-                                                docstring: attrs_to_docstring(f_attributes),
-                                                deprecated: attrs::find_deprecated_attribute(f_attributes),
-                                            }
-                                        })
-                                        .collect(),
-                                ),
+                                tt::TypedConstructorArguments::Cstr_tuple(args) => {
+                                    ConstructorArgs::Args(
+                                        args.iter()
+                                            .map(|t| (t.ctyp_type, self.ctx.loc(t.ctyp_loc)))
+                                            .collect(),
+                                    )
+                                }
+                                tt::TypedConstructorArguments::Cstr_record(fields) => {
+                                    ConstructorArgs::InlineRecord(
+                                        fields
+                                            .iter()
+                                            .map(|f| {
+                                                let f_attributes =
+                                                    self.ctx.parsed(&f.ld_attributes);
+                                                Field {
+                                                    stamp: f.ld_id.binding_time(),
+                                                    fname: Located::mknoloc(
+                                                        f.ld_id.name().to_string(),
+                                                    ),
+                                                    typ: f.ld_type.ctyp_type,
+                                                    optional: f.ld_optional,
+                                                    docstring: attrs_to_docstring(f_attributes),
+                                                    deprecated: attrs::find_deprecated_attribute(
+                                                        f_attributes,
+                                                    ),
+                                                }
+                                            })
+                                            .collect(),
+                                    )
+                                }
                             },
                             res: cd.cd_res.as_ref().map(|t| t.ctyp_type),
                             type_decl: (td.typ_name.txt.clone(), typ_type.clone()),
@@ -405,7 +467,13 @@ impl Processor<'_> {
         type_item(&declared, rec_status)
     }
 
-    fn type_declarations(&mut self, env: &ProcessEnv, exported: &mut Exported, rec_flag: &crate::parser::ast::RecFlag, decls: &[tt::TypedTypeDeclaration]) -> Vec<ModuleItem> {
+    fn type_declarations(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        rec_flag: &crate::parser::ast::RecFlag,
+        decls: &[tt::TypedTypeDeclaration],
+    ) -> Vec<ModuleItem> {
         decls
             .iter()
             .enumerate()
@@ -421,7 +489,12 @@ impl Processor<'_> {
     }
 
     /// `for_signature_item`.
-    fn for_signature_item(&mut self, env: &ProcessEnv, exported: &mut Exported, item: &tt::TypedSignatureItemDesc) -> Vec<ModuleItem> {
+    fn for_signature_item(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        item: &tt::TypedSignatureItemDesc,
+    ) -> Vec<ModuleItem> {
         match item {
             tt::TypedSignatureItemDesc::Tsig_value(vd) => {
                 let stamps = &mut self.stamps;
@@ -440,10 +513,16 @@ impl Processor<'_> {
                 );
                 vec![value_item(&declared)]
             }
-            tt::TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => self.type_declarations(env, exported, rec_flag, decls),
+            tt::TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
+                self.type_declarations(env, exported, rec_flag, decls)
+            }
             tt::TypedSignatureItemDesc::Tsig_module(md) => {
                 let name = self.ctx.located(&md.md_name);
-                let item = self.for_type_module(&name.txt, &env.add_module(&name.txt), &md.md_type.mty_type);
+                let item = self.for_type_module(
+                    &name.txt,
+                    &env.add_module(&name.txt),
+                    &md.md_type.mty_type,
+                );
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     name,
@@ -459,12 +538,22 @@ impl Processor<'_> {
             }
             tt::TypedSignatureItemDesc::Tsig_recmodule(mds) => mds
                 .iter()
-                .flat_map(|md| self.for_signature_item(env, exported, &tt::TypedSignatureItemDesc::Tsig_module(md.clone())))
+                .flat_map(|md| {
+                    self.for_signature_item(
+                        env,
+                        exported,
+                        &tt::TypedSignatureItemDesc::Tsig_module(md.clone()),
+                    )
+                })
                 .collect(),
             tt::TypedSignatureItemDesc::Tsig_include(incl) => {
                 let env = match &incl.incl_mod.mty_desc {
-                    tt::ModuleTypeDesc::Tmty_ident(path, _) | tt::ModuleTypeDesc::Tmty_alias(path, _) => ProcessEnv {
-                        module_path: ModulePath::IncludedModule(path.clone(), Box::new(env.module_path.clone())),
+                    tt::ModuleTypeDesc::Tmty_ident(path, _)
+                    | tt::ModuleTypeDesc::Tmty_alias(path, _) => ProcessEnv {
+                        module_path: ModulePath::IncludedModule(
+                            path.clone(),
+                            Box::new(env.module_path.clone()),
+                        ),
                     },
                     _ => env.clone(),
                 };
@@ -481,7 +570,12 @@ impl Processor<'_> {
     }
 
     /// `for_signature`.
-    pub fn for_signature(&mut self, name: &str, env: &ProcessEnv, sig_items: &[tt::TypedSignatureItem]) -> Structure {
+    pub fn for_signature(
+        &mut self,
+        name: &str,
+        env: &ProcessEnv,
+        sig_items: &[tt::TypedSignatureItem],
+    ) -> Structure {
         let mut exported = Exported::default();
         let items = sig_items
             .iter()
@@ -505,22 +599,31 @@ impl Processor<'_> {
     }
 
     /// `handle_pattern` of a `Tstr_value`.
-    fn handle_pattern(&mut self, env: &ProcessEnv, exported: &mut Exported, items: &mut Vec<ModuleItem>, attributes: Option<&crate::parser::ast::Attributes>, pat: &tt::Pattern) {
+    fn handle_pattern(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        items: &mut Vec<ModuleItem>,
+        attributes: Option<&crate::parser::ast::Attributes>,
+        pat: &tt::Pattern,
+    ) {
         let empty = crate::parser::ast::Attributes::new();
         let attributes = attributes.unwrap_or(&empty);
         match &pat.pat_desc {
-            tt::PatternDesc::Tpat_var(ident, name) | tt::PatternDesc::Tpat_alias(_, ident, name) => {
+            tt::PatternDesc::Tpat_var(ident, name)
+            | tt::PatternDesc::Tpat_alias(_, ident, name) => {
                 let name = self.ctx.located(name);
                 let stamp = ident.binding_time();
                 // Detect first-class module unpack patterns and register them
                 // as modules.
-                let unpack_loc = pat
-                    .pat_extra
-                    .iter()
-                    .find_map(|(extra, loc, _)| matches!(extra, tt::PatExtra::Tpat_unpack).then_some(*loc));
-                let unpacked_path = unpack_loc.and_then(|_| match &*self.ctx.types.get_desc(dig(self.ctx.types, pat.pat_type)) {
-                    TypeDesc::Tpackage { path, .. } => Some(path.clone()),
-                    _ => None,
+                let unpack_loc = pat.pat_extra.iter().find_map(|(extra, loc, _)| {
+                    matches!(extra, tt::PatExtra::Tpat_unpack).then_some(*loc)
+                });
+                let unpacked_path = unpack_loc.and_then(|_| {
+                    match &*self.ctx.types.get_desc(dig(self.ctx.types, pat.pat_type)) {
+                        TypeDesc::Tpackage { path, .. } => Some(path.clone()),
+                        _ => None,
+                    }
                 });
                 if let (Some(unpack_loc), Some(path)) = (unpack_loc, unpacked_path) {
                     let declared = attrs::new_declared(
@@ -549,7 +652,9 @@ impl Processor<'_> {
                     items.insert(0, value_item(&declared));
                 }
             }
-            tt::PatternDesc::Tpat_tuple(pats) | tt::PatternDesc::Tpat_array(pats) | tt::PatternDesc::Tpat_construct(_, _, pats) => {
+            tt::PatternDesc::Tpat_tuple(pats)
+            | tt::PatternDesc::Tpat_array(pats)
+            | tt::PatternDesc::Tpat_construct(_, _, pats) => {
                 for p in pats {
                     self.handle_pattern(env, exported, items, None, p);
                 }
@@ -576,18 +681,33 @@ impl Processor<'_> {
                     items.insert(0, value_item(&declared));
                 }
             }
-            tt::PatternDesc::Tpat_variant(_, Some(p), _) => self.handle_pattern(env, exported, items, None, p),
-            tt::PatternDesc::Tpat_variant(_, None, _) | tt::PatternDesc::Tpat_any | tt::PatternDesc::Tpat_constant(_) => {}
+            tt::PatternDesc::Tpat_variant(_, Some(p), _) => {
+                self.handle_pattern(env, exported, items, None, p)
+            }
+            tt::PatternDesc::Tpat_variant(_, None, _)
+            | tt::PatternDesc::Tpat_any
+            | tt::PatternDesc::Tpat_constant(_) => {}
         }
     }
 
     /// `for_structure_item`.
-    fn for_structure_item(&mut self, env: &ProcessEnv, exported: &mut Exported, item: &tt::StructureItemDesc) -> Vec<ModuleItem> {
+    fn for_structure_item(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        item: &tt::StructureItemDesc,
+    ) -> Vec<ModuleItem> {
         match item {
             tt::StructureItemDesc::Tstr_value(_, bindings) => {
                 let mut items = Vec::new();
                 for binding in bindings {
-                    self.handle_pattern(env, exported, &mut items, Some(&binding.vb_attributes), &binding.vb_pat);
+                    self.handle_pattern(
+                        env,
+                        exported,
+                        &mut items,
+                        Some(&binding.vb_attributes),
+                        &binding.vb_pat,
+                    );
                 }
                 for binding in bindings {
                     self.scan_let_modules(env, &binding.vb_expr);
@@ -613,7 +733,13 @@ impl Processor<'_> {
             }
             tt::StructureItemDesc::Tstr_recmodule(mbs) => mbs
                 .iter()
-                .flat_map(|mb| self.for_structure_item(env, exported, &tt::StructureItemDesc::Tstr_module(mb.clone())))
+                .flat_map(|mb| {
+                    self.for_structure_item(
+                        env,
+                        exported,
+                        &tt::StructureItemDesc::Tstr_module(mb.clone()),
+                    )
+                })
                 .collect(),
             tt::StructureItemDesc::Tstr_modtype(mtd) => {
                 let Some(mtd_type) = &mtd.mtd_type else {
@@ -638,7 +764,10 @@ impl Processor<'_> {
             tt::StructureItemDesc::Tstr_include(incl) => {
                 let env = match get_module_path(&incl.incl_mod.mod_desc) {
                     Some(path) => ProcessEnv {
-                        module_path: ModulePath::IncludedModule(path, Box::new(env.module_path.clone())),
+                        module_path: ModulePath::IncludedModule(
+                            path,
+                            Box::new(env.module_path.clone()),
+                        ),
                     },
                     None => env.clone(),
                 };
@@ -664,7 +793,9 @@ impl Processor<'_> {
                 );
                 vec![value_item(&declared)]
             }
-            tt::StructureItemDesc::Tstr_type(rec_flag, decls) => self.type_declarations(env, exported, rec_flag, decls),
+            tt::StructureItemDesc::Tstr_type(rec_flag, decls) => {
+                self.type_declarations(env, exported, rec_flag, decls)
+            }
             _ => Vec::new(),
         }
     }
@@ -672,18 +803,32 @@ impl Processor<'_> {
     /// `Jsx_hacks.primitive_is_fragment`.
     fn primitive_is_fragment(&self, vd: &tt::TypedValueDescription) -> bool {
         vd.val_name.txt == "fragment" && {
-            let file = self.ctx.arena.get_string(self.ctx.arena.loc_start(vd.val_loc).file_name);
-            std::path::Path::new(file).file_name().is_some_and(|name| name == "ReasonReact.res")
+            let file = self
+                .ctx
+                .arena
+                .get_string(self.ctx.arena.loc_start(vd.val_loc).file_name);
+            std::path::Path::new(file)
+                .file_name()
+                .is_some_and(|name| name == "ReasonReact.res")
         }
     }
 
     /// `for_module`.
-    fn for_module(&mut self, env: &ProcessEnv, mod_desc: &tt::ModuleExprDesc, module_name: &str) -> Module {
+    fn for_module(
+        &mut self,
+        env: &ProcessEnv,
+        mod_desc: &tt::ModuleExprDesc,
+        module_name: &str,
+    ) -> Module {
         match mod_desc {
             tt::ModuleExprDesc::Tmod_ident(path, _) => Module::Ident(path.clone()),
             tt::ModuleExprDesc::Tmod_structure(structure) => {
                 let env = env.add_module(module_name);
-                Module::Structure(Arc::new(self.for_structure(module_name, &env, &structure.str_items)))
+                Module::Structure(Arc::new(self.for_structure(
+                    module_name,
+                    &env,
+                    &structure.str_items,
+                )))
             }
             tt::ModuleExprDesc::Tmod_functor(ident, arg_name, maybe_type, result) => {
                 if let Some(t) = maybe_type {
@@ -691,12 +836,22 @@ impl Processor<'_> {
                     let kind = self.for_type_module(&name.txt, env, &t.mty_type);
                     let stamp = ident.binding_time();
                     let extent = name.loc;
-                    let declared = attrs::new_declared(kind, extent, name, stamp, ModulePath::NotVisible, false, Attrs::Decl(&[]));
+                    let declared = attrs::new_declared(
+                        kind,
+                        extent,
+                        name,
+                        stamp,
+                        ModulePath::NotVisible,
+                        false,
+                        Attrs::Decl(&[]),
+                    );
                     self.stamps.add_module(stamp, declared);
                 }
                 self.for_module(env, &result.mod_desc, module_name)
             }
-            tt::ModuleExprDesc::Tmod_apply(functor, _, _) => self.for_module(env, &functor.mod_desc, module_name),
+            tt::ModuleExprDesc::Tmod_apply(functor, _, _) => {
+                self.for_module(env, &functor.mod_desc, module_name)
+            }
             tt::ModuleExprDesc::Tmod_unpack(_, module_type) => {
                 let env = env.add_module(module_name);
                 self.for_type_module(module_name, &env, module_type)
@@ -719,7 +874,15 @@ impl Processor<'_> {
                 let item = self.for_module(env, &mexpr.mod_desc, &name.txt);
                 let name = self.ctx.located(name);
                 let extent = name.loc;
-                let declared = attrs::new_declared(item, extent, name, stamp, ModulePath::NotVisible, false, Attrs::Decl(&[]));
+                let declared = attrs::new_declared(
+                    item,
+                    extent,
+                    name,
+                    stamp,
+                    ModulePath::NotVisible,
+                    false,
+                    Attrs::Decl(&[]),
+                );
                 self.stamps.add_module(stamp, declared);
                 self.scan_let_modules(env, body);
             }
@@ -777,7 +940,12 @@ impl Processor<'_> {
     }
 
     /// `for_structure`.
-    pub fn for_structure(&mut self, name: &str, env: &ProcessEnv, str_items: &[tt::StructureItem]) -> Structure {
+    pub fn for_structure(
+        &mut self,
+        name: &str,
+        env: &ProcessEnv,
+        str_items: &[tt::StructureItem],
+    ) -> Structure {
         let mut exported = Exported::default();
         let mut items = Vec::new();
         // `List.fold_right`: the last item first.
@@ -810,7 +978,9 @@ fn get_module_path(mod_desc: &tt::ModuleExprDesc) -> Option<crate::types::Path> 
         tt::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
         tt::ModuleExprDesc::Tmod_apply(functor, _, _) => get_module_path(&functor.mod_desc),
         tt::ModuleExprDesc::Tmod_constraint(expr, _, _, _) => get_module_path(&expr.mod_desc),
-        tt::ModuleExprDesc::Tmod_structure(_) | tt::ModuleExprDesc::Tmod_functor(..) | tt::ModuleExprDesc::Tmod_unpack(..) => None,
+        tt::ModuleExprDesc::Tmod_structure(_)
+        | tt::ModuleExprDesc::Tmod_functor(..)
+        | tt::ModuleExprDesc::Tmod_unpack(..) => None,
     }
 }
 
@@ -822,14 +992,23 @@ pub enum Annots<'a> {
 }
 
 /// `file_for_cmt_infos`.
-pub fn file_for_annots(ctx: Ctx<'_>, module: ModuleId, module_name: &str, uri: String, annots: Annots<'_>) -> File {
+pub fn file_for_annots(
+    ctx: Ctx<'_>,
+    module: ModuleId,
+    module_name: &str,
+    uri: String,
+    annots: Annots<'_>,
+) -> File {
     let env = ProcessEnv {
         module_path: ModulePath::File {
             uri: uri.clone(),
             module_name: module_name.to_string(),
         },
     };
-    let mut processor = Processor { ctx, stamps: Stamps::default() };
+    let mut processor = Processor {
+        ctx,
+        stamps: Stamps::default(),
+    };
     let structure = match annots {
         Annots::Implementation(items) => processor.for_structure(module_name, &env, items),
         Annots::Interface(items) => processor.for_signature(module_name, &env, items),

@@ -37,7 +37,9 @@ pub fn subst_lambda(s: &Subst, lam: Lambda) -> Lambda {
                 Some(value) => (value.clone(), true),
                 None => (lam, false),
             },
-            lam => crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| go(s, inner)),
+            lam => {
+                crate::lambda::lambda_traverse::shallow_map_sharing(lam, &mut |inner| go(s, inner))
+            }
         }
     }
     go(s, lam).0
@@ -282,7 +284,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
 
         let s = singleton(y, Lambda::const_(Constant::int(42)));
@@ -409,7 +412,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let letrec = Lambda::letrec(vec![(f.clone(), func)], Lambda::var(f.clone()));
 

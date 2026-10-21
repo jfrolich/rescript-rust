@@ -13,12 +13,12 @@ use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
 };
 use crate::parser::ast::{
-    Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    Case, ConstructorArguments, CoreType, CoreTypeDesc, Expression, ExpressionDesc, Extension,
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
     Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
-    Extension, TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
+    TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
 };
 use crate::parser::ast::{PexpApply, PexpFun};
 use crate::parser::longident::Longident;
@@ -35,14 +35,20 @@ pub fn extract_structure_deps(arena: &ParseArena, structure: &[StructureItem]) -
 
 /// The `[%error]` extension OCaml `Depend` raises on while extracting the
 /// dependencies of a structure (depend.ml:92-96), if any.
-pub fn structure_error_extension(arena: &ParseArena, structure: &[StructureItem]) -> Option<Extension> {
+pub fn structure_error_extension(
+    arena: &ParseArena,
+    structure: &[StructureItem],
+) -> Option<Extension> {
     let mut collector = DependencyCollector::new(arena);
     collector.add_structure(structure);
     collector.error_extension
 }
 
 /// The `[%error]` extension OCaml `Depend` raises on for a signature.
-pub fn signature_error_extension(arena: &ParseArena, signature: &[SignatureItem]) -> Option<Extension> {
+pub fn signature_error_extension(
+    arena: &ParseArena,
+    signature: &[SignatureItem],
+) -> Option<Extension> {
     let mut collector = DependencyCollector::new(arena);
     collector.add_signature(signature);
     collector.error_extension
@@ -752,7 +758,11 @@ impl<'a> DependencyCollector<'a> {
                         match items[0].pstr_desc.as_ref() {
                             StructureItemDesc::Pstr_eval(inner) => {
                                 match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
-                                    ExpressionDesc::Pexp_construct(c, args) if args.txt.is_empty() => Some(c.txt),
+                                    ExpressionDesc::Pexp_construct(c, args)
+                                        if args.txt.is_empty() =>
+                                    {
+                                        Some(c.txt)
+                                    }
                                     _ => None,
                                 }
                             }
@@ -1363,8 +1373,8 @@ impl<'a> DependencyCollector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ast::Attributes;
     use crate::parse_arena::{LocIdx, Located};
+    use crate::parser::ast::Attributes;
 
     /// Parse a dotted string like "Foo.Bar.baz" into a Longident using the arena.
     fn parse_longident(arena: &mut ParseArena, s: &str) -> Longident {

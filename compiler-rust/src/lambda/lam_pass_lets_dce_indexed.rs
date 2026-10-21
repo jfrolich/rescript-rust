@@ -184,7 +184,9 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 string_value(store, state, left),
                 string_value(store, state, right),
             ) {
-                (Some(left), Some(right)) => store.append(NodeSnapshot::Const(Constant::String(left + &right))),
+                (Some(left), Some(right)) => {
+                    store.append(NodeSnapshot::Const(Constant::String(left + &right)))
+                }
                 _ => append_rebuilt(
                     store,
                     NodeSnapshot::Prim(Primitive::Pstringadd, vec![left, right], loc),
@@ -197,7 +199,10 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
         | NodeSnapshot::Continue => node,
         NodeSnapshot::Function(arity, params, body, attr, loc) => {
             let body = simplify(store, state, body);
-            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr, loc))
+            append_rebuilt(
+                store,
+                NodeSnapshot::Function(arity, params, body, attr, loc),
+            )
         }
         NodeSnapshot::LetRec(bindings, body) => {
             let body = simplify(store, state, body);
@@ -486,7 +491,8 @@ mod tests {
                         vec![Lambda::var(parameter.clone()), int(1)],
                         Location::none(),
                     ),
-                    attr, crate::location::Location::none(),
+                    attr,
+                    crate::location::Location::none(),
                 ),
                 vec![int(2)],
                 crate::lambda::ApInfo {
@@ -526,7 +532,8 @@ mod tests {
                     ],
                     Location::none(),
                 ),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             ),
             (0..65).map(int).collect(),
             crate::lambda::ApInfo {
@@ -590,7 +597,8 @@ mod tests {
                             Lambda::var(value.clone()),
                             Lambda::var(recursive),
                         ),
-                        FunctionAttribute::default(), crate::location::Location::none(),
+                        FunctionAttribute::default(),
+                        crate::location::Location::none(),
                     ),
                 )],
                 Lambda::var(value.clone()),
@@ -653,7 +661,13 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             function.clone(),
-            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr.clone(), crate::location::Location::none()),
+            Lambda::function_(
+                2,
+                vec![id("a", 2), id("b", 3)],
+                int(0),
+                attr.clone(),
+                crate::location::Location::none(),
+            ),
             Lambda::apply(
                 Lambda::var(function.clone()),
                 vec![int(1)],
@@ -682,7 +696,13 @@ mod tests {
         let expected = Lambda::let_(
             LetKind::StrictOpt,
             function.clone(),
-            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr, crate::location::Location::none()),
+            Lambda::function_(
+                2,
+                vec![id("a", 2), id("b", 3)],
+                int(0),
+                attr,
+                crate::location::Location::none(),
+            ),
             Lambda::function_(
                 1,
                 vec![expected_param.clone()],
@@ -696,7 +716,8 @@ mod tests {
                     },
                     false,
                 ),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             ),
         );
         assert_exact(&context.materialize(), &expected);
@@ -819,7 +840,8 @@ mod tests {
                 vec![Lambda::var(reference.clone())],
                 Location::none(),
             ),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,

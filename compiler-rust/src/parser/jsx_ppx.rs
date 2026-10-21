@@ -173,7 +173,8 @@ pub fn transform_structure(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> Structure {
-    transform_structure_result(structure, initial_version, initial_module, arena).expect("JSX PPX transform failed")
+    transform_structure_result(structure, initial_version, initial_module, arena)
+        .expect("JSX PPX transform failed")
 }
 
 /// Transform a structure, applying JSX PPX transformations.
@@ -183,8 +184,12 @@ pub fn transform_structure_result(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Structure> {
-    let (structure, _) =
-        transform_structure_with_warnings_result(structure, initial_version, initial_module, arena)?;
+    let (structure, _) = transform_structure_with_warnings_result(
+        structure,
+        initial_version,
+        initial_module,
+        arena,
+    )?;
     Ok(structure)
 }
 
@@ -219,7 +224,10 @@ pub fn transform_structure_collecting_warnings(
     initial_version: i32,
     initial_module: &str,
     arena: &mut ParseArena,
-) -> (JsxPreprocessorResult<Structure>, Vec<JsxPreprocessorWarning>) {
+) -> (
+    JsxPreprocessorResult<Structure>,
+    Vec<JsxPreprocessorWarning>,
+) {
     // Extract file name from first item's location
     let file_name = structure
         .first()
@@ -259,7 +267,8 @@ pub fn transform_signature(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> Signature {
-    transform_signature_result(signature, initial_version, initial_module, arena).expect("JSX PPX transform failed")
+    transform_signature_result(signature, initial_version, initial_module, arena)
+        .expect("JSX PPX transform failed")
 }
 
 /// Transform a signature, applying JSX PPX transformations.
@@ -269,8 +278,12 @@ pub fn transform_signature_result(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Signature> {
-    let (signature, _) =
-        transform_signature_with_warnings_result(signature, initial_version, initial_module, arena)?;
+    let (signature, _) = transform_signature_with_warnings_result(
+        signature,
+        initial_version,
+        initial_module,
+        arena,
+    )?;
     Ok(signature)
 }
 
@@ -2473,9 +2486,7 @@ fn component_with_props_forward_ref_error_loc(
         return None;
     };
     match apply.args.as_slice() {
-        [(ArgLabel::Nolabel, func_expr)]
-            if is_forward_ref(arena, arena.get_expr(apply.funct)) =>
-        {
+        [(ArgLabel::Nolabel, func_expr)] if is_forward_ref(arena, arena.get_expr(apply.funct)) => {
             component_with_props_forward_ref_fun_error_loc(arena, *func_expr)
         }
         _ => None,
@@ -2567,7 +2578,9 @@ fn find_function_expression(
         ExpressionDesc::Pexp_constraint(inner) => {
             find_function_expression(arena, inner.0, through_application)
         }
-        ExpressionDesc::Pexp_let(inner) => find_function_expression(arena, inner.2, through_application),
+        ExpressionDesc::Pexp_let(inner) => {
+            find_function_expression(arena, inner.2, through_application)
+        }
         ExpressionDesc::Pexp_sequence(_, body) => {
             find_function_expression(arena, *body, through_application)
         }
@@ -3137,7 +3150,14 @@ fn recursively_extract_named_args(
     let mut newtypes = vec![];
     let mut warnings = vec![];
     let mut error = None;
-    extract_args_rec(arena, expr, &mut args, &mut newtypes, &mut warnings, &mut error);
+    extract_args_rec(
+        arena,
+        expr,
+        &mut args,
+        &mut newtypes,
+        &mut warnings,
+        &mut error,
+    );
     (args, newtypes, None, warnings, error)
 }
 
@@ -3662,11 +3682,12 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                         let last_str = arena.get_string(last_idx);
                         match last_str {
                             "version" => {
-                                if let ExpressionDesc::Pexp_constant(c) = &*crate::ast_payload::unwrap_braces(
-                                    arena,
-                                    arena.get_expr(field.expr),
-                                )
-                                .pexp_desc
+                                if let ExpressionDesc::Pexp_constant(c) =
+                                    &*crate::ast_payload::unwrap_braces(
+                                        arena,
+                                        arena.get_expr(field.expr),
+                                    )
+                                    .pexp_desc
                                 {
                                     if let Constant::Integer(s, _) = &**c {
                                         if let Ok(v) = s.parse::<i32>() {
@@ -4182,18 +4203,24 @@ fn transform_expression(
             let value = arena.push_expr(transformed_value);
             let obj_expr = arena.get_expr(obj).clone();
             let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_object_set(Box::new((arena.push_expr(transformed_obj), name, value)))
+            ExpressionDesc::Pexp_object_set(Box::new((
+                arena.push_expr(transformed_obj),
+                name,
+                value,
+            )))
         }
-        ExpressionDesc::Pexp_object_literal(fields) => ExpressionDesc::Pexp_object_literal(Box::new(
-            fields
-                .into_iter()
-                .map(|(name, e)| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    (name, arena.push_expr(transformed))
-                })
-                .collect(),
-        )),
+        ExpressionDesc::Pexp_object_literal(fields) => {
+            ExpressionDesc::Pexp_object_literal(Box::new(
+                fields
+                    .into_iter()
+                    .map(|(name, e)| {
+                        let e_expr = arena.get_expr(e).clone();
+                        let transformed = transform_expression(e_expr, config, arena);
+                        (name, arena.push_expr(transformed))
+                    })
+                    .collect(),
+            ))
+        }
         ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array(Box::new(
             elems
                 .into_iter()
@@ -4856,7 +4883,9 @@ fn transform_jsx_unary(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div />
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(name)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
+                    name,
+                )))),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: Attributes::new(),
             };
@@ -4947,7 +4976,9 @@ fn transform_jsx_container(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div>...</div>
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(name)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
+                    name,
+                )))),
                 pexp_loc: tag_loc.clone(),
                 pexp_attributes: Attributes::new(),
             };
@@ -5184,7 +5215,9 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
                         || child(case.pc_rhs, memo)
                 })
         }
-        ExpressionDesc::Pexp_template(template) => template.values.iter().any(|item| child(*item, memo)),
+        ExpressionDesc::Pexp_template(template) => {
+            template.values.iter().any(|item| child(*item, memo))
+        }
         ExpressionDesc::Pexp_tagged_template(template) => {
             child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
         }

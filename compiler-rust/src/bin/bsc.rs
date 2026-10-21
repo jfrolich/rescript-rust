@@ -16,8 +16,8 @@ use rescript_compiler::binary_ast::{
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
     CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
-    error_extension_to_anyhow,
-    run_implementation_frontend, run_interface_frontend, typecheck_interface_file,
+    error_extension_to_anyhow, run_implementation_frontend, run_interface_frontend,
+    typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::js_ir::source_map::SourceMapMode;
@@ -180,11 +180,9 @@ fn main() {
 fn format_file(input: &str, output: Option<&Path>, ignore_parse_errors: bool) -> Result<()> {
     let is_res = input.ends_with(".res") || input.ends_with(".resi");
     if !is_res {
-        return Err(UserDiagnostic::new(
-            format!("bsc: don't know what to do with {input}\n"),
-            2,
-        )
-        .into());
+        return Err(
+            UserDiagnostic::new(format!("bsc: don't know what to do with {input}\n"), 2).into(),
+        );
     }
     let source = fs::read(input).with_context(|| input.to_string())?;
     let (report, formatted) =
@@ -444,7 +442,9 @@ fn run() -> Result<()> {
                 // rescript_compiler_main.ml:440-450
                 "-ignore-parse-errors" | "-editor-mode" => opts.ignore_parse_errors = true,
                 "-format" => {
-                    let file = args.next().ok_or_else(|| anyhow!("-format requires a file"))?;
+                    let file = args
+                        .next()
+                        .ok_or_else(|| anyhow!("-format requires a file"))?;
                     code_frame::set_color_mode(opts.color_mode);
                     format_file(&file, opts.output.as_deref(), opts.ignore_parse_errors)?;
                     opts.formatted = true;
@@ -802,7 +802,12 @@ fn write_outputs(
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((format, dir, suffix)) = parse_package_output(spec) {
-                let out_path = package_output_path(&opts.gentype_flags.project_root, source_path, &dir, &suffix);
+                let out_path = package_output_path(
+                    &opts.gentype_flags.project_root,
+                    source_path,
+                    &dir,
+                    &suffix,
+                );
                 let mut output_opts = compiler_opts.clone();
                 output_opts.output_path = Some(out_path.clone());
                 output_opts.output_module_format = Some(format);
@@ -944,7 +949,12 @@ fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Re
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((_format, dir, suffix)) = parse_package_output(spec) {
-                let out_path = package_output_path(&opts.gentype_flags.project_root, source_path, &dir, &suffix);
+                let out_path = package_output_path(
+                    &opts.gentype_flags.project_root,
+                    source_path,
+                    &dir,
+                    &suffix,
+                );
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }

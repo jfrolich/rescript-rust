@@ -711,9 +711,11 @@ fn coerce_and_group(
                     get_arity_external(store, metadata, value, external_arity)
                 };
                 if !arity.first_arity_na() {
-                    let lambda =
-                        matches!(context.store().view(value), NodeView::Function(_, _, _, _, _))
-                            .then_some((value, RecFlag::NonRec));
+                    let lambda = matches!(
+                        context.store().view(value),
+                        NodeView::Function(_, _, _, _, _)
+                    )
+                    .then_some((value, RecFlag::NonRec));
                     context
                         .metadata_mut_for_backend()
                         .ident_tbl
@@ -939,7 +941,10 @@ fn add_hoisted_aliases(
             .join("$");
         let js_name = crate::js_ir::printer::convert_ident_name(&name);
         if !occupied.insert(js_name) {
-            let loc = if matches!(context.store().view(target), NodeView::Function(_, _, _, _, _)) {
+            let loc = if matches!(
+                context.store().view(target),
+                NodeView::Function(_, _, _, _, _)
+            ) {
                 item.target_loc
             } else {
                 item.loc
@@ -1626,7 +1631,13 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             binding.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
+            Lambda::function_(
+                0,
+                vec![],
+                Lambda::unit(),
+                Default::default(),
+                crate::location::Location::none(),
+            ),
             Lambda::let_(
                 LetKind::Strict,
                 module.clone(),
@@ -1759,9 +1770,16 @@ mod tests {
                     crate::lambda::FunctionAttribute {
                         inline: crate::lambda::InlineAttribute::Always,
                         ..Default::default()
-                    }, crate::location::Location::none(),
+                    },
+                    crate::location::Location::none(),
                 ),
-                Lambda::function_(1, vec![id("y", 5)], Lambda::unit(), Default::default(), crate::location::Location::none()),
+                Lambda::function_(
+                    1,
+                    vec![id("y", 5)],
+                    Lambda::unit(),
+                    Default::default(),
+                    crate::location::Location::none(),
+                ),
             ],
         );
         let mut result = run(input, &[], Arc::new(IdGenerator::with_start_stamp(20))).unwrap();
@@ -1898,10 +1916,7 @@ mod tests {
         );
         assert_eq!(
             trace,
-            vec![
-                ("First".into(), "a".into()),
-                ("Second".into(), "b".into())
-            ]
+            vec![("First".into(), "a".into()), ("Second".into(), "b".into())]
         );
         trace.clear();
         {
@@ -1927,7 +1942,13 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             binding.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
+            Lambda::function_(
+                0,
+                vec![],
+                Lambda::unit(),
+                Default::default(),
+                crate::location::Location::none(),
+            ),
             Lambda::let_(
                 LetKind::Strict,
                 module.clone(),
@@ -2061,11 +2082,23 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             occupied.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
+            Lambda::function_(
+                0,
+                vec![],
+                Lambda::unit(),
+                Default::default(),
+                crate::location::Location::none(),
+            ),
             Lambda::let_(
                 LetKind::Strict,
                 binding.clone(),
-                Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
+                Lambda::function_(
+                    0,
+                    vec![],
+                    Lambda::unit(),
+                    Default::default(),
+                    crate::location::Location::none(),
+                ),
                 Lambda::let_(
                     LetKind::Strict,
                     module.clone(),
@@ -2228,11 +2261,23 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Strict,
             first.clone(),
-            Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
+            Lambda::function_(
+                0,
+                vec![],
+                Lambda::unit(),
+                Default::default(),
+                crate::location::Location::none(),
+            ),
             Lambda::let_(
                 LetKind::Strict,
                 second.clone(),
-                Lambda::function_(0, vec![], Lambda::unit(), Default::default(), crate::location::Location::none()),
+                Lambda::function_(
+                    0,
+                    vec![],
+                    Lambda::unit(),
+                    Default::default(),
+                    crate::location::Location::none(),
+                ),
                 Lambda::let_(
                     LetKind::Strict,
                     module.clone(),
@@ -2341,7 +2386,8 @@ mod tests {
             0,
             vec![],
             Lambda::unit(),
-            Default::default(), crate::location::Location::none(),
+            Default::default(),
+            crate::location::Location::none(),
         ));
         let nop = context.store_mut().append_compat_lambda(Lambda::Lbreak);
         let groups = vec![

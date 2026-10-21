@@ -237,7 +237,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
 
         let fv = free_variables(&func);
@@ -256,7 +257,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(x.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
 
         let fv = free_variables(&func);
@@ -275,7 +277,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(y.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
 
         let letrec = Lambda::letrec(vec![(f.clone(), func)], Lambda::var(f.clone()));
@@ -403,7 +406,8 @@ mod tests {
             1,
             vec![x.clone()],
             Lambda::var(x.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         assert!(is_closed(&func));
 

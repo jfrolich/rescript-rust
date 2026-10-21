@@ -21,7 +21,10 @@ pub struct DecodeError(pub String);
 type R<T> = Result<T, DecodeError>;
 
 fn err<T>(what: &str, v: &OcamlValue) -> R<T> {
-    Err(DecodeError(format!("expected {what}, found {}", v.short_debug())))
+    Err(DecodeError(format!(
+        "expected {what}, found {}",
+        v.short_debug()
+    )))
 }
 
 /// Decodes Parsetree0 values, interning strings in the parse arena so that
@@ -70,7 +73,11 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn list<T>(&mut self, v: &OcamlValue, mut f: impl FnMut(&mut Self, &OcamlValue) -> R<T>) -> R<Vec<T>> {
+    fn list<T>(
+        &mut self,
+        v: &OcamlValue,
+        mut f: impl FnMut(&mut Self, &OcamlValue) -> R<T>,
+    ) -> R<Vec<T>> {
         let mut out = Vec::new();
         let mut cur = v;
         loop {
@@ -85,7 +92,11 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn option<T>(&mut self, v: &OcamlValue, f: impl FnOnce(&mut Self, &OcamlValue) -> R<T>) -> R<Option<T>> {
+    fn option<T>(
+        &mut self,
+        v: &OcamlValue,
+        f: impl FnOnce(&mut Self, &OcamlValue) -> R<T>,
+    ) -> R<Option<T>> {
         match v {
             OcamlValue::Int(0) => Ok(None),
             OcamlValue::Block(0, fields) if fields.len() == 1 => Ok(Some(f(self, &fields[0])?)),
@@ -122,7 +133,11 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    fn located<T>(&mut self, v: &OcamlValue, f: impl FnOnce(&mut Self, &OcamlValue) -> R<T>) -> R<Located<T>> {
+    fn located<T>(
+        &mut self,
+        v: &OcamlValue,
+        f: impl FnOnce(&mut Self, &OcamlValue) -> R<T>,
+    ) -> R<Located<T>> {
         let fields = self.fields(v, 2, "loc")?;
         let txt = f(self, &fields[0])?;
         let loc = self.location(&fields[1])?;
@@ -141,7 +156,10 @@ impl<'a> Decoder<'a> {
                 let prefix = self.longident(&f[0])?;
                 Longident::Ldot(Box::new(prefix), self.arena.intern(&self.string(&f[1])?))
             }
-            (2, 2) => Longident::Lapply(Box::new(self.longident(&f[0])?), Box::new(self.longident(&f[1])?)),
+            (2, 2) => Longident::Lapply(
+                Box::new(self.longident(&f[0])?),
+                Box::new(self.longident(&f[1])?),
+            ),
             _ => return err("longident", v),
         })
     }
@@ -153,27 +171,51 @@ impl<'a> Decoder<'a> {
     // ========== Asttypes ==========
 
     fn rec_flag(&self, v: &OcamlValue) -> R<RecFlag> {
-        Ok(if self.int(v)? == 0 { RecFlag::Nonrecursive } else { RecFlag::Recursive })
+        Ok(if self.int(v)? == 0 {
+            RecFlag::Nonrecursive
+        } else {
+            RecFlag::Recursive
+        })
     }
 
     fn direction_flag(&self, v: &OcamlValue) -> R<DirectionFlag> {
-        Ok(if self.int(v)? == 0 { DirectionFlag::Upto } else { DirectionFlag::Downto })
+        Ok(if self.int(v)? == 0 {
+            DirectionFlag::Upto
+        } else {
+            DirectionFlag::Downto
+        })
     }
 
     fn private_flag(&self, v: &OcamlValue) -> R<PrivateFlag> {
-        Ok(if self.int(v)? == 0 { PrivateFlag::Private } else { PrivateFlag::Public })
+        Ok(if self.int(v)? == 0 {
+            PrivateFlag::Private
+        } else {
+            PrivateFlag::Public
+        })
     }
 
     fn mutable_flag(&self, v: &OcamlValue) -> R<MutableFlag> {
-        Ok(if self.int(v)? == 0 { MutableFlag::Immutable } else { MutableFlag::Mutable })
+        Ok(if self.int(v)? == 0 {
+            MutableFlag::Immutable
+        } else {
+            MutableFlag::Mutable
+        })
     }
 
     fn override_flag(&self, v: &OcamlValue) -> R<OverrideFlag> {
-        Ok(if self.int(v)? == 0 { OverrideFlag::Override } else { OverrideFlag::Fresh })
+        Ok(if self.int(v)? == 0 {
+            OverrideFlag::Override
+        } else {
+            OverrideFlag::Fresh
+        })
     }
 
     fn closed_flag(&self, v: &OcamlValue) -> R<ClosedFlag> {
-        Ok(if self.int(v)? == 0 { ClosedFlag::Closed } else { ClosedFlag::Open })
+        Ok(if self.int(v)? == 0 {
+            ClosedFlag::Closed
+        } else {
+            ClosedFlag::Open
+        })
     }
 
     fn variance(&self, v: &OcamlValue) -> R<Variance> {
@@ -257,8 +299,14 @@ impl<'a> Decoder<'a> {
                 Box::new(self.core_type(&f[2])?),
             ),
             2 => CoreTypeDesc::Tuple(self.list(&f[0], |d, t| d.core_type(t))?),
-            3 => CoreTypeDesc::Constr(self.longident_loc(&f[0])?, self.list(&f[1], |d, t| d.core_type(t))?),
-            4 => CoreTypeDesc::Object(self.list(&f[0], |d, o| d.object_field(o))?, self.closed_flag(&f[1])?),
+            3 => CoreTypeDesc::Constr(
+                self.longident_loc(&f[0])?,
+                self.list(&f[1], |d, t| d.core_type(t))?,
+            ),
+            4 => CoreTypeDesc::Object(
+                self.list(&f[0], |d, o| d.object_field(o))?,
+                self.closed_flag(&f[1])?,
+            ),
             5 => CoreTypeDesc::Class,
             6 => CoreTypeDesc::Alias(Box::new(self.core_type(&f[0])?), self.string(&f[1])?),
             7 => CoreTypeDesc::Variant(
@@ -266,7 +314,10 @@ impl<'a> Decoder<'a> {
                 self.closed_flag(&f[1])?,
                 self.option(&f[2], |d, l| d.list(l, |d, s| d.string(s)))?,
             ),
-            8 => CoreTypeDesc::Poly(self.list(&f[0], |d, s| d.string_loc(s))?, Box::new(self.core_type(&f[1])?)),
+            8 => CoreTypeDesc::Poly(
+                self.list(&f[0], |d, s| d.string_loc(s))?,
+                Box::new(self.core_type(&f[1])?),
+            ),
             9 => CoreTypeDesc::Package(self.package_type(&f[0])?),
             10 => CoreTypeDesc::Extension(self.attribute(&f[0])?),
             _ => return err("core_type_desc", v),
@@ -300,7 +351,11 @@ impl<'a> Decoder<'a> {
     fn object_field(&mut self, v: &OcamlValue) -> R<ObjectField> {
         let (tag, f) = self.block(v, "object_field")?;
         Ok(match tag {
-            0 => ObjectField::Otag(self.string_loc(&f[0])?, self.attributes(&f[1])?, self.core_type(&f[2])?),
+            0 => ObjectField::Otag(
+                self.string_loc(&f[0])?,
+                self.attributes(&f[1])?,
+                self.core_type(&f[2])?,
+            ),
             1 => ObjectField::Oinherit(self.core_type(&f[0])?),
             _ => return err("object_field", v),
         })
@@ -342,8 +397,14 @@ impl<'a> Decoder<'a> {
                 self.closed_flag(&f[1])?,
             ),
             8 => PatternDesc::Array(self.list(&f[0], |d, p| d.pattern(p))?),
-            9 => PatternDesc::Or(Box::new(self.pattern(&f[0])?), Box::new(self.pattern(&f[1])?)),
-            10 => PatternDesc::Constraint(Box::new(self.pattern(&f[0])?), Box::new(self.core_type(&f[1])?)),
+            9 => PatternDesc::Or(
+                Box::new(self.pattern(&f[0])?),
+                Box::new(self.pattern(&f[1])?),
+            ),
+            10 => PatternDesc::Constraint(
+                Box::new(self.pattern(&f[0])?),
+                Box::new(self.core_type(&f[1])?),
+            ),
             11 => PatternDesc::Type(self.longident_loc(&f[0])?),
             12 => PatternDesc::Lazy(Box::new(self.pattern(&f[0])?)),
             13 => PatternDesc::Unpack(self.string_loc(&f[0])?),
@@ -424,9 +485,17 @@ impl<'a> Decoder<'a> {
                 self.opt_expression(&f[1])?,
             ),
             12 => ExpressionDesc::Field(self.boxed(&f[0])?, self.longident_loc(&f[1])?),
-            13 => ExpressionDesc::Setfield(self.boxed(&f[0])?, self.longident_loc(&f[1])?, self.boxed(&f[2])?),
+            13 => ExpressionDesc::Setfield(
+                self.boxed(&f[0])?,
+                self.longident_loc(&f[1])?,
+                self.boxed(&f[2])?,
+            ),
             14 => ExpressionDesc::Array(self.list(&f[0], |d, e| d.expression(e))?),
-            15 => ExpressionDesc::Ifthenelse(self.boxed(&f[0])?, self.boxed(&f[1])?, self.opt_expression(&f[2])?),
+            15 => ExpressionDesc::Ifthenelse(
+                self.boxed(&f[0])?,
+                self.boxed(&f[1])?,
+                self.opt_expression(&f[2])?,
+            ),
             16 => ExpressionDesc::Sequence(self.boxed(&f[0])?, self.boxed(&f[1])?),
             17 => ExpressionDesc::While(self.boxed(&f[0])?, self.boxed(&f[1])?),
             18 => ExpressionDesc::For(
@@ -450,7 +519,9 @@ impl<'a> Decoder<'a> {
                 Box::new(self.module_expr(&f[1])?),
                 self.boxed(&f[2])?,
             ),
-            26 => ExpressionDesc::Letexception(self.extension_constructor(&f[0])?, self.boxed(&f[1])?),
+            26 => {
+                ExpressionDesc::Letexception(self.extension_constructor(&f[0])?, self.boxed(&f[1])?)
+            }
             27 => ExpressionDesc::Assert(self.boxed(&f[0])?),
             28 => ExpressionDesc::Lazy(self.boxed(&f[0])?),
             29 => ExpressionDesc::Poly(
@@ -460,7 +531,11 @@ impl<'a> Decoder<'a> {
             30 => ExpressionDesc::Object,
             31 => ExpressionDesc::Newtype(self.string_loc(&f[0])?, self.boxed(&f[1])?),
             32 => ExpressionDesc::Pack(Box::new(self.module_expr(&f[0])?)),
-            33 => ExpressionDesc::Open(self.override_flag(&f[0])?, self.longident_loc(&f[1])?, self.boxed(&f[2])?),
+            33 => ExpressionDesc::Open(
+                self.override_flag(&f[0])?,
+                self.longident_loc(&f[1])?,
+                self.boxed(&f[2])?,
+            ),
             34 => ExpressionDesc::Extension(self.attribute(&f[0])?),
             _ => return err("expression_desc", v),
         })
@@ -517,12 +592,12 @@ impl<'a> Decoder<'a> {
         match v {
             OcamlValue::Int(0) => Ok(TypeKind::Abstract),
             OcamlValue::Int(1) => Ok(TypeKind::Open),
-            OcamlValue::Block(0, f) if f.len() == 1 => {
-                Ok(TypeKind::Variant(self.list(&f[0], |d, c| d.constructor_declaration(c))?))
-            }
-            OcamlValue::Block(1, f) if f.len() == 1 => {
-                Ok(TypeKind::Record(self.list(&f[0], |d, l| d.label_declaration(l))?))
-            }
+            OcamlValue::Block(0, f) if f.len() == 1 => Ok(TypeKind::Variant(
+                self.list(&f[0], |d, c| d.constructor_declaration(c))?,
+            )),
+            OcamlValue::Block(1, f) if f.len() == 1 => Ok(TypeKind::Record(
+                self.list(&f[0], |d, l| d.label_declaration(l))?,
+            )),
             _ => err("type_kind", v),
         }
     }
@@ -628,7 +703,9 @@ impl<'a> Decoder<'a> {
         Ok(match tag {
             0 => WithConstraint::Type(self.longident_loc(&f[0])?, self.type_declaration(&f[1])?),
             1 => WithConstraint::Module(self.longident_loc(&f[0])?, self.longident_loc(&f[1])?),
-            2 => WithConstraint::TypeSubst(self.longident_loc(&f[0])?, self.type_declaration(&f[1])?),
+            2 => {
+                WithConstraint::TypeSubst(self.longident_loc(&f[0])?, self.type_declaration(&f[1])?)
+            }
             3 => WithConstraint::ModSubst(self.longident_loc(&f[0])?, self.longident_loc(&f[1])?),
             _ => return err("with_constraint", v),
         })
@@ -652,7 +729,10 @@ impl<'a> Decoder<'a> {
         let (tag, f) = self.block(v, "signature_item_desc")?;
         Ok(match tag {
             0 => SignatureItemDesc::Value(self.value_description(&f[0])?),
-            1 => SignatureItemDesc::Type(self.rec_flag(&f[0])?, self.list(&f[1], |d, t| d.type_declaration(t))?),
+            1 => SignatureItemDesc::Type(
+                self.rec_flag(&f[0])?,
+                self.list(&f[1], |d, t| d.type_declaration(t))?,
+            ),
             2 => SignatureItemDesc::Typext(self.type_extension(&f[0])?),
             3 => SignatureItemDesc::Exception(self.extension_constructor(&f[0])?),
             4 => SignatureItemDesc::Module(self.module_declaration(&f[0])?),
@@ -732,8 +812,14 @@ impl<'a> Decoder<'a> {
                 self.option(&f[1], |d, m| d.module_type(m))?.map(Box::new),
                 Box::new(self.module_expr(&f[2])?),
             ),
-            3 => ModuleExprDesc::Apply(Box::new(self.module_expr(&f[0])?), Box::new(self.module_expr(&f[1])?)),
-            4 => ModuleExprDesc::Constraint(Box::new(self.module_expr(&f[0])?), Box::new(self.module_type(&f[1])?)),
+            3 => ModuleExprDesc::Apply(
+                Box::new(self.module_expr(&f[0])?),
+                Box::new(self.module_expr(&f[1])?),
+            ),
+            4 => ModuleExprDesc::Constraint(
+                Box::new(self.module_expr(&f[0])?),
+                Box::new(self.module_type(&f[1])?),
+            ),
             5 => ModuleExprDesc::Unpack(self.boxed(&f[0])?),
             6 => ModuleExprDesc::Extension(self.attribute(&f[0])?),
             _ => return err("module_expr_desc", v),
@@ -758,9 +844,15 @@ impl<'a> Decoder<'a> {
         let (tag, f) = self.block(v, "structure_item_desc")?;
         Ok(match tag {
             0 => StructureItemDesc::Eval(self.expression(&f[0])?, self.attributes(&f[1])?),
-            1 => StructureItemDesc::Value(self.rec_flag(&f[0])?, self.list(&f[1], |d, vb| d.value_binding(vb))?),
+            1 => StructureItemDesc::Value(
+                self.rec_flag(&f[0])?,
+                self.list(&f[1], |d, vb| d.value_binding(vb))?,
+            ),
             2 => StructureItemDesc::Primitive(self.value_description(&f[0])?),
-            3 => StructureItemDesc::Type(self.rec_flag(&f[0])?, self.list(&f[1], |d, t| d.type_declaration(t))?),
+            3 => StructureItemDesc::Type(
+                self.rec_flag(&f[0])?,
+                self.list(&f[1], |d, t| d.type_declaration(t))?,
+            ),
             4 => StructureItemDesc::Typext(self.type_extension(&f[0])?),
             5 => StructureItemDesc::Exception(self.extension_constructor(&f[0])?),
             6 => StructureItemDesc::Module(self.module_binding(&f[0])?),

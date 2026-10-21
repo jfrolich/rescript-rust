@@ -44,13 +44,17 @@ impl SignatureIndex {
         for (idx, item) in signature.iter().enumerate() {
             match item {
                 SignatureItem::SigValue(id, desc) => {
-                    index.values.insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
+                    index
+                        .values
+                        .insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
                     if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                         runtime_pos += 1;
                     }
                 }
                 SignatureItem::SigType(id, _, _) => {
-                    index.types.insert(smol_str::SmolStr::new_static(id.name()), idx);
+                    index
+                        .types
+                        .insert(smol_str::SmolStr::new_static(id.name()), idx);
                 }
                 SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
                     runtime_pos += 1;
@@ -62,7 +66,9 @@ impl SignatureIndex {
                     ) {
                         index.alias_modules.push((idx, runtime_pos));
                     }
-                    index.modules.insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
+                    index
+                        .modules
+                        .insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),
@@ -629,7 +635,10 @@ struct StructureComponentTables {
     in_store: std::cell::Cell<bool>,
     store_pieces: RefCell<HashMap<(ForcedKind, String), Arc<super::context::StorePiece>>>,
     /// The layer tables `open` adds for this view, built on first open.
-    opened_layers: OnceCell<(Arc<super::env::OpenedLayers>, Option<Arc<super::context::StorePiece>>)>,
+    opened_layers: OnceCell<(
+        Arc<super::env::OpenedLayers>,
+        Option<Arc<super::context::StorePiece>>,
+    )>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1077,7 +1086,6 @@ impl QualifiedModuleComponents {
         self.tables.index.values.get(name).copied()
     }
 
-
     fn cached_type_index(&self, name: &str) -> Option<usize> {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
@@ -1100,8 +1108,14 @@ impl QualifiedModuleComponents {
         }
     }
 
-    pub(crate) fn lookup_value_for_access(&self, name: &str, ctx: &super::context::TypeContext) -> Option<(usize, Ident, ValueDescription)> {
-        self.force_entry(ForcedKind::Value, name, ctx, || self.lookup_value_for_access_inner(name, ctx))
+    pub(crate) fn lookup_value_for_access(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ValueDescription)> {
+        self.force_entry(ForcedKind::Value, name, ctx, || {
+            self.lookup_value_for_access_inner(name, ctx)
+        })
     }
 
     fn lookup_value_for_access_inner(
@@ -1167,8 +1181,14 @@ impl QualifiedModuleComponents {
         result
     }
 
-    pub(crate) fn lookup_constructors(&self, name: &str, ctx: &super::context::TypeContext) -> Arc<Vec<ConstructorDescription>> {
-        self.force_entry(ForcedKind::Constructors, name, ctx, || self.lookup_constructors_inner(name, ctx))
+    pub(crate) fn lookup_constructors(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<ConstructorDescription>> {
+        self.force_entry(ForcedKind::Constructors, name, ctx, || {
+            self.lookup_constructors_inner(name, ctx)
+        })
     }
 
     fn lookup_constructors_inner(
@@ -1190,12 +1210,8 @@ impl QualifiedModuleComponents {
         // signature immutable and forces only the requested constructor bucket,
         // preserving env.ml:1132-1137 lookup semantics without materializing
         // every constructor in large dependency signatures.
-        let mut built = build_constructors_for_name(
-            self.access_path(),
-            self.signature.as_ref(),
-            name,
-            ctx,
-        );
+        let mut built =
+            build_constructors_for_name(self.access_path(), self.signature.as_ref(), name, ctx);
         reroot_constructor_descriptions(
             &mut built,
             self.signature.as_ref(),
@@ -1217,8 +1233,14 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_labels(&self, name: &str, ctx: &super::context::TypeContext) -> Arc<Vec<LabelDescription>> {
-        self.force_entry(ForcedKind::Labels, name, ctx, || self.lookup_labels_inner(name, ctx))
+    pub(crate) fn lookup_labels(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<LabelDescription>> {
+        self.force_entry(ForcedKind::Labels, name, ctx, || {
+            self.lookup_labels_inner(name, ctx)
+        })
     }
 
     fn lookup_labels_inner(
@@ -1237,12 +1259,8 @@ impl QualifiedModuleComponents {
         // selected component path. For normal compilation, force just the label
         // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
         // avoids constructing hundreds of unused JSX record labels per module view.
-        let mut built = build_labels_for_name(
-            self.access_path(),
-            self.signature.as_ref(),
-            name,
-            ctx,
-        );
+        let mut built =
+            build_labels_for_name(self.access_path(), self.signature.as_ref(), name, ctx);
         reroot_label_descriptions(&mut built, self.signature.as_ref(), self.access_path(), ctx);
         let built = Arc::new(built);
         if self.compiler_counters_enabled {
@@ -1326,8 +1344,14 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_qualified_module_shared(&self, name: &str, ctx: &super::context::TypeContext) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
-        self.force_entry(ForcedKind::QualifiedModule, name, ctx, || self.lookup_qualified_module_shared_inner(name, ctx))
+    pub(crate) fn lookup_qualified_module_shared(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
+        self.force_entry(ForcedKind::QualifiedModule, name, ctx, || {
+            self.lookup_qualified_module_shared_inner(name, ctx)
+        })
     }
 
     fn lookup_qualified_module_shared_inner(
@@ -1358,9 +1382,14 @@ impl QualifiedModuleComponents {
             // separate component views (`Stdlib.JSON` and `Stdlib_JSON`), so share the
             // forced declaration at the TypeContext level to preserve the same stamp
             // consumption.
-            if let Some((id, md)) = ctx.find_qualified_module_decl(self.access_path.as_ref(), name) {
-                let selected_path =
-                    qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
+            if let Some((id, md)) = ctx.find_qualified_module_decl(self.access_path.as_ref(), name)
+            {
+                let selected_path = qualified_submodule_access_path(
+                    self.access_path.as_ref(),
+                    name,
+                    runtime_pos,
+                    &md,
+                );
                 if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                     self.tables
                         .qualified_modules
@@ -1408,8 +1437,12 @@ impl QualifiedModuleComponents {
                 let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name) else {
                     continue;
                 };
-                let selected_path =
-                    qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
+                let selected_path = qualified_submodule_access_path(
+                    self.access_path.as_ref(),
+                    name,
+                    runtime_pos,
+                    &md,
+                );
                 if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                     // Same sharing as above, but reached from the flattened backing
                     // component view after the selected path forced the declaration.
@@ -1908,7 +1941,12 @@ fn build_local_module_components<'a>(
         // A child of an in-process unit's components: its items name each
         // other through the unit (`Unit.Sub.u`); `prefix_idents`
         // (env.ml:1454-1481, 1530-1538) puts them at the access path.
-        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(&qualified_sig, source, access_path, ctx);
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+            &qualified_sig,
+            source,
+            access_path,
+            ctx,
+        );
         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
             &mut qualified_sig,
             source,
@@ -2102,7 +2140,8 @@ impl StoredModuleComponents {
                 ctx.poison_store_build_for("local-stored-components");
                 return Some(f(components.as_ref()));
             }
-            let (components, piece) = ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
+            let (components, piece) =
+                ctx.build_in_store(|| self.build_components(pers_env, ctx, cache_mode));
             let components = Arc::new(components?);
             if cache_mode.publishes() {
                 match piece {

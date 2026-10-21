@@ -23,8 +23,8 @@ use super::type_expr::{TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
-use crate::intern::StrIdx;
 use crate::fast_hash::AHashMap as HashMap;
+use crate::intern::StrIdx;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -160,7 +160,11 @@ impl SharedTypePool {
         let (base, end) = self.reserve(nodes, layouts)?;
         let (descs, built_layouts) = build(base);
         assert_eq!(descs.len(), nodes, "shared graph node count changed");
-        assert_eq!(built_layouts.len(), layouts, "shared graph layout count changed");
+        assert_eq!(
+            built_layouts.len(),
+            layouts,
+            "shared graph layout count changed"
+        );
         let graph = Arc::new(SharedGraph {
             base,
             nodes: descs
@@ -275,13 +279,18 @@ mod tests {
                 )
             })
             .unwrap();
-        let second = pool.publish(1, 0, |_| (vec![(TypeDesc::Tnil, 1)], Vec::new())).unwrap();
+        let second = pool
+            .publish(1, 0, |_| (vec![(TypeDesc::Tnil, 1)], Vec::new()))
+            .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);
         assert_ne!(base, second);
         let reader = pool.clone();
         std::thread::spawn(move || {
             assert_eq!(reader.node(base + 1).level, 8);
-            assert!(matches!(reader.node(base + 1).desc, TypeDesc::Tvar(Some(_))));
+            assert!(matches!(
+                reader.node(base + 1).desc,
+                TypeDesc::Tvar(Some(_))
+            ));
             assert!(reader.contains(base + 2));
             assert!(!reader.contains(base + 3));
             let r = shared_ref(base, 2);

@@ -8,17 +8,14 @@ use std::borrow::Cow;
 use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
 
 use super::ast::*;
-use super::core::{
-    ExprContext, ast_helper, if_let_attr, mknoloc,
-    recover, with_loc,
-};
+use super::core::{ExprContext, ast_helper, if_let_attr, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
-use crate::location::Position;
 use super::grammar;
 use super::grammar::Grammar;
 use super::longident::Longident;
 use super::state::Parser;
 use super::token::Token;
+use crate::location::Position;
 
 // ============================================================================
 // Constants
@@ -27,7 +24,12 @@ use super::token::Token;
 /// OCaml `parse_string_constant` (res_core.ml): validate an ordinary string
 /// literal body, reporting an invalid escape or code point unless a scanner
 /// diagnostic already covers the literal.
-pub fn parse_string_constant(p: &mut Parser<'_>, start_pos: Position, end_pos: Position, source: &str) -> Constant {
+pub fn parse_string_constant(
+    p: &mut Parser<'_>,
+    start_pos: Position,
+    end_pos: Position,
+    source: &str,
+) -> Constant {
     match crate::string_literal::string_from_source(source) {
         Some(payload) => Constant::String(payload),
         None => {
@@ -41,7 +43,11 @@ pub fn parse_string_constant(p: &mut Parser<'_>, start_pos: Position, end_pos: P
                 } else {
                     "Invalid code point"
                 };
-                p.err_at(start_pos, end_pos, DiagnosticCategory::Message(message.to_string()));
+                p.err_at(
+                    start_pos,
+                    end_pos,
+                    DiagnosticCategory::Message(message.to_string()),
+                );
             }
             Constant::String(crate::string_literal::invalid_string_for_recovery(source))
         }
@@ -386,7 +392,9 @@ fn parse_coerced_expr(p: &mut Parser<'_>, expr: Expression) -> Expression {
     let expr_idx = p.arena_mut().push_expr(expr);
     let typ_idx = p.arena_mut().push_core_type(typ);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((expr_idx, None, typ_idx)))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
+            expr_idx, None, typ_idx,
+        )))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -445,7 +453,10 @@ fn parse_constructor_args(p: &mut Parser<'_>) -> Located<Vec<ExprIdx>> {
     } else {
         args
     };
-    let txt = args.into_iter().map(|e| p.arena_mut().push_expr(e)).collect();
+    let txt = args
+        .into_iter()
+        .map(|e| p.arena_mut().push_expr(e))
+        .collect();
     Located { txt, loc }
 }
 
@@ -933,7 +944,6 @@ fn parse_es6_arrow_expression_internal(
         ..arrow_expr
     }
 }
-
 
 /// Parse function parameters.
 fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
@@ -1653,7 +1663,10 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 None
             };
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let arg = args.unwrap_or(Located { txt: Vec::new(), loc });
+            let arg = args.unwrap_or(Located {
+                txt: Vec::new(),
+                loc,
+            });
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((tag, arg)))),
                 pexp_loc: loc,
@@ -2192,7 +2205,9 @@ fn parse_bracket_access(
                 let (obj, name) = *inner;
                 let rhs_idx = p.arena_mut().push_expr(rhs);
                 return Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_object_set(Box::new((obj, name, rhs_idx)))),
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_object_set(Box::new((
+                        obj, name, rhs_idx,
+                    )))),
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
                 };
@@ -3149,16 +3164,6 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // Blocks, braced expressions and record expressions
 // (OCaml compiler/syntax/src/res_core.ml:3099-3688)
@@ -3248,8 +3253,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                             p.start_pos,
                             p.end_pos,
                             DiagnosticCategory::Message(
-                                super::core::error_messages::RECORD_FIELD_MISSING_COLON
-                                    .to_string(),
+                                super::core::error_messages::RECORD_FIELD_MISSING_COLON.to_string(),
                             ),
                         );
                     }
@@ -3287,9 +3291,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
             p.expect(Token::Rbrace);
             expr
         }
-        Token::Lident(ref s)
-            if s == "async" && super::core::is_es6_arrow_expression(p, false) =>
-        {
+        Token::Lident(ref s) if s == "async" && super::core::is_es6_arrow_expression(p, false) => {
             let async_pos_idx = p.start_pos_idx();
             p.expect(Token::Lident("async".into()));
             let expr = parse_es6_arrow_expression_async(
@@ -3342,8 +3344,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                             p.start_pos,
                             p.end_pos,
                             DiagnosticCategory::Message(
-                                super::core::error_messages::RECORD_FIELD_MISSING_COLON
-                                    .to_string(),
+                                super::core::error_messages::RECORD_FIELD_MISSING_COLON.to_string(),
                             ),
                         );
                     }
@@ -3489,7 +3490,10 @@ fn remove_module_name_from_punned_field_value(p: &mut Parser<'_>, exp: Expressio
     let last = p.arena().get_longident(path_ident.txt).last_idx();
     let lid_idx = p.push_longident(Longident::Lident(last));
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, path_ident.loc))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
+            lid_idx,
+            path_ident.loc,
+        ))),
         ..exp
     }
 }
@@ -3514,8 +3518,7 @@ fn parse_record_expr_row(p: &mut Parser<'_>) -> Option<ExpressionRecordField> {
                             p.start_pos,
                             p.end_pos,
                             DiagnosticCategory::Message(
-                                super::core::error_messages::RECORD_FIELD_MISSING_COLON
-                                    .to_string(),
+                                super::core::error_messages::RECORD_FIELD_MISSING_COLON.to_string(),
                             ),
                         );
                     }
@@ -3784,7 +3787,9 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let block_expr = p.arena_mut().push_expr(block_expr);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(Box::new((ext, block_expr)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_letexception(Box::new((
+                    ext, block_expr,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -3828,7 +3833,9 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let next = p.arena_mut().push_expr(next);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, next)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                    rec_flag, bindings, next,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -3950,10 +3957,6 @@ fn parse_module_name(p: &mut Parser<'_>) -> Located<StrIdx> {
         }
     }
 }
-
-
-
-
 
 // ============================================================================
 // Control Flow Expressions
@@ -4181,7 +4184,9 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
     let loc = LocIdx::none();
     let warning_str_idx = p.arena_mut().intern("warning");
     let warning_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string("-4")))),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
+            "-4",
+        )))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -4678,9 +4683,9 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let loc = LocIdx::none();
 
             let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                    std::borrow::Cow::Owned(JS_BODY.to_string()),
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                    Constant::RawSource(std::borrow::Cow::Owned(JS_BODY.to_string())),
+                ))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4732,9 +4737,9 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let loc = LocIdx::none();
 
             let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                    std::borrow::Cow::Owned(JS_BODY.to_string()),
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                    Constant::RawSource(std::borrow::Cow::Owned(JS_BODY.to_string())),
+                ))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4795,9 +4800,9 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let loc = LocIdx::none();
 
             let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                    std::borrow::Cow::Owned(JS_BODY.to_string()),
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                    Constant::RawSource(std::borrow::Cow::Owned(JS_BODY.to_string())),
+                ))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -5098,7 +5103,9 @@ fn read_jsx_tag_name(p: &mut Parser<'_>) -> Result<(JsxTagName, LocIdx), String>
 fn jsx_tag_name_segments(tag_name: &JsxTagName, p: &Parser<'_>) -> Vec<String> {
     fn lid_segments(lid: &super::longident::Longident, arena: &ParseArena, out: &mut Vec<String>) {
         match lid {
-            super::longident::Longident::Lident(idx) => out.push(arena.get_string(*idx).to_string()),
+            super::longident::Longident::Lident(idx) => {
+                out.push(arena.get_string(*idx).to_string())
+            }
             super::longident::Longident::Ldot(prefix, idx) => {
                 lid_segments(prefix, arena, out);
                 out.push(arena.get_string(*idx).to_string());
@@ -5112,7 +5119,9 @@ fn jsx_tag_name_segments(tag_name: &JsxTagName, p: &Parser<'_>) -> Vec<String> {
     let mut out = Vec::new();
     match tag_name {
         JsxTagName::Lower(name) | JsxTagName::Invalid(name) => out.push(name.clone()),
-        JsxTagName::Upper(lid_idx) => lid_segments(p.arena().get_longident(*lid_idx), p.arena(), &mut out),
+        JsxTagName::Upper(lid_idx) => {
+            lid_segments(p.arena().get_longident(*lid_idx), p.arena(), &mut out)
+        }
         JsxTagName::QualifiedLower { path, name } => {
             lid_segments(p.arena().get_longident(*path), p.arena(), &mut out);
             out.push(name.clone());
@@ -5148,7 +5157,10 @@ fn jsx_expression(desc: JsxElement, loc: LocIdx) -> Expression {
 }
 
 /// OCaml `parse_jsx_opening_or_self_closing_element` (res_core.ml:2837-2961).
-fn parse_jsx_opening_or_self_closing_element(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
+fn parse_jsx_opening_or_self_closing_element(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+) -> Expression {
     let start_pos = p.arena().get_position(start_pos_idx).clone();
     let (name, name_loc) = parse_jsx_name(p);
     let props = parse_jsx_props(p);
@@ -5197,7 +5209,10 @@ fn parse_jsx_opening_or_self_closing_element(p: &mut Parser<'_>, start_pos_idx: 
                     let (end_tag_name, closing_tag_end) = if matches {
                         let closing_tag_end = p.start_pos_idx();
                         p.expect(Token::GreaterThan);
-                        (closing_name_res.ok().expect("matched closing name"), closing_tag_end)
+                        (
+                            closing_name_res.ok().expect("matched closing name"),
+                            closing_tag_end,
+                        )
                     } else {
                         let end = p.prev_end_pos;
                         if super::grammar::is_structure_item_start(&token0) {
@@ -5500,7 +5515,9 @@ fn parse_template_literal_with_prefix(
                 p.err_at(
                     start,
                     end,
-                    DiagnosticCategory::Message("`json` literals do not support interpolation".to_string()),
+                    DiagnosticCategory::Message(
+                        "`json` literals do not support interpolation".to_string(),
+                    ),
                 );
             }
             let source = source_texts.into_iter().next().unwrap_or(Cow::Borrowed(""));
@@ -5520,7 +5537,10 @@ fn parse_template_literal_with_prefix(
                     p.err_at(start, end, DiagnosticCategory::Message(message.to_string()));
                 }
             }
-            let values = values.into_iter().map(|v| p.arena_mut().push_expr(v)).collect();
+            let values = values
+                .into_iter()
+                .map(|v| p.arena_mut().push_expr(v))
+                .collect();
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_template(Box::new(PexpTemplate {
                     source_segments: sources,
@@ -5533,20 +5553,28 @@ fn parse_template_literal_with_prefix(
         Some((prefix_ident, prefix_loc)) => {
             let prefix_loc_idx = prefix_loc;
             let tag_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(prefix_ident, prefix_loc_idx))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
+                    prefix_ident,
+                    prefix_loc_idx,
+                ))),
                 pexp_loc: prefix_loc_idx,
                 pexp_attributes: Attributes::new(),
             };
             let tag = p.arena_mut().push_expr(tag_expr);
-            let values = values.into_iter().map(|v| p.arena_mut().push_expr(v)).collect();
+            let values = values
+                .into_iter()
+                .map(|v| p.arena_mut().push_expr(v))
+                .collect();
             let start_idx = p.loc_start_idx(prefix_loc_idx);
             let loc = p.mk_loc_idx_to_prev_end(start_idx);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_tagged_template(Box::new(PexpTaggedTemplate {
-                    tag,
-                    raw_sources: sources,
-                    values,
-                }))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_tagged_template(Box::new(
+                    PexpTaggedTemplate {
+                        tag,
+                        raw_sources: sources,
+                        values,
+                    },
+                ))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -5592,7 +5620,9 @@ mod tests {
     #[test]
     fn test_parse_constant_string() {
         let c = parse_constant_with_timeout("\"hello\"");
-        assert!(matches!(c, Constant::String(ref s) if s.source() == "hello" && s.semantic() == "hello"));
+        assert!(
+            matches!(c, Constant::String(ref s) if s.source() == "hello" && s.semantic() == "hello")
+        );
     }
 
     #[test]

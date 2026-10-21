@@ -24,8 +24,8 @@
 //! - OCaml runtime: runtime/extern.c
 //! - OCaml runtime: runtime/caml/intext.h
 
-use std::borrow::Cow;
 use crate::fast_hash::AHashMap as HashMap;
+use std::borrow::Cow;
 
 use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PosIdx, StrIdx};

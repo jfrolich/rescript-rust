@@ -3,7 +3,7 @@
 
 use crate::ident::Ident;
 use crate::types::decl::{RecStatus, TypeDeclaration};
-use crate::types::printtyp::{print_out_sig_item_doc_with, print_out_type_doc, Printtyp};
+use crate::types::printtyp::{Printtyp, print_out_sig_item_doc_with, print_out_type_doc};
 use crate::types::{Path, TypeContext, TypeDesc, TypeExprRef};
 
 /// `Shared.dig`.
@@ -49,7 +49,9 @@ pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths
     }
     fn walk(types: &TypeContext, te: TypeExprRef, paths: &mut Vec<Path>) {
         match &*types.get_desc(te) {
-            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) | TypeDesc::Tpoly { body: t, .. } => walk(types, *t, paths),
+            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) | TypeDesc::Tpoly { body: t, .. } => {
+                walk(types, *t, paths)
+            }
             TypeDesc::Tconstr { path, args, .. } => {
                 add_path(paths, path);
                 for arg in args.iter() {
@@ -80,7 +82,11 @@ pub fn unwrap_if_option(types: &TypeContext, t: TypeExprRef) -> TypeExprRef {
     match &*types.get_desc(t) {
         TypeDesc::Tlink(t1) | TypeDesc::Tsubst(t1) => unwrap_if_option(types, *t1),
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => unwrap_if_option(types, *body),
-        TypeDesc::Tconstr { path: Path::Pident(id), args, .. } if id.name() == "option" && args.len() == 1 => args[0],
+        TypeDesc::Tconstr {
+            path: Path::Pident(id),
+            args,
+            ..
+        } if id.name() == "option" && args.len() == 1 => args[0],
         _ => t,
     }
 }

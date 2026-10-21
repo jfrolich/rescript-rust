@@ -393,13 +393,15 @@ impl TailcallInlineState {
                     .map(|expr| self.transform_expression(expr))
                     .collect(),
             ),
-            ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-                segments,
-                values: values
-                    .into_iter()
-                    .map(|expr| self.transform_expression(expr))
-                    .collect(),
-            },
+            ExpressionDesc::InterpolatedTemplate { segments, values } => {
+                ExpressionDesc::InterpolatedTemplate {
+                    segments,
+                    values: values
+                        .into_iter()
+                        .map(|expr| self.transform_expression(expr))
+                        .collect(),
+                }
+            }
             ExpressionDesc::StaticIndex(target, field, position) => ExpressionDesc::StaticIndex(
                 Box::new(self.transform_expression(*target)),
                 field,
@@ -852,7 +854,12 @@ fn collect_once_pure_inline_decls_statement(
                 inline_decls.insert(decl.ident.clone(), inline_decl);
             }
             if let Some(value) = &decl.value {
-                collect_once_pure_inline_decls_expression(value, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    value,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
@@ -869,20 +876,35 @@ fn collect_once_pure_inline_decls_statement(
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
             if let Some(start) = start {
-                collect_once_pure_inline_decls_expression(start, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    start,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
             collect_once_pure_inline_decls_expression(finish, statuses, tail_callees, inline_decls);
             collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls);
         }
         StatementDesc::ForOf(_, _, iterable, body)
         | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            collect_once_pure_inline_decls_expression(iterable, statuses, tail_callees, inline_decls);
+            collect_once_pure_inline_decls_expression(
+                iterable,
+                statuses,
+                tail_callees,
+                inline_decls,
+            );
             collect_once_pure_inline_decls_block(body, statuses, tail_callees, inline_decls);
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
             collect_once_pure_inline_decls_expression(test, statuses, tail_callees, inline_decls);
             for (_, clause) in clauses {
-                collect_once_pure_inline_decls_block(&clause.body, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_block(
+                    &clause.body,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
             if let Some(default) = default {
                 collect_once_pure_inline_decls_block(default, statuses, tail_callees, inline_decls);
@@ -891,7 +913,12 @@ fn collect_once_pure_inline_decls_statement(
         StatementDesc::StringSwitch(test, clauses, default) => {
             collect_once_pure_inline_decls_expression(test, statuses, tail_callees, inline_decls);
             for clause in clauses {
-                collect_once_pure_inline_decls_block(&clause.clause.body, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_block(
+                    &clause.clause.body,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
             if let Some(default) = default {
                 collect_once_pure_inline_decls_block(default, statuses, tail_callees, inline_decls);
@@ -954,30 +981,60 @@ fn collect_once_pure_inline_decls_expression(
         }
         ExpressionDesc::Cond(test, consequent, alternate) => {
             collect_once_pure_inline_decls_expression(test, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_expression(consequent, statuses, tail_callees, inline_decls);
-            collect_once_pure_inline_decls_expression(alternate, statuses, tail_callees, inline_decls);
+            collect_once_pure_inline_decls_expression(
+                consequent,
+                statuses,
+                tail_callees,
+                inline_decls,
+            );
+            collect_once_pure_inline_decls_expression(
+                alternate,
+                statuses,
+                tail_callees,
+                inline_decls,
+            );
         }
         ExpressionDesc::Call(func, args, _) => {
             collect_once_pure_inline_decls_expression(func, statuses, tail_callees, inline_decls);
             for arg in args {
-                collect_once_pure_inline_decls_expression(arg, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    arg,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
             collect_once_pure_inline_decls_expression(tag, statuses, tail_callees, inline_decls);
             for value in values {
-                collect_once_pure_inline_decls_expression(value, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    value,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         ExpressionDesc::InterpolatedTemplate { values, .. } => {
             for value in values {
-                collect_once_pure_inline_decls_expression(value, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    value,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         ExpressionDesc::New(target, Some(args)) => {
             collect_once_pure_inline_decls_expression(target, statuses, tail_callees, inline_decls);
             for arg in args {
-                collect_once_pure_inline_decls_expression(arg, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    arg,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         ExpressionDesc::Fun { body, .. } => {
@@ -985,20 +1042,40 @@ fn collect_once_pure_inline_decls_expression(
         }
         ExpressionDesc::Array(items, _) => {
             for item in items {
-                collect_once_pure_inline_decls_expression(item, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    item,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
-                collect_once_pure_inline_decls_expression(item, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    item,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
-                collect_once_pure_inline_decls_expression(dup, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    dup,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
             for (_, value) in props {
-                collect_once_pure_inline_decls_expression(value, statuses, tail_callees, inline_decls);
+                collect_once_pure_inline_decls_expression(
+                    value,
+                    statuses,
+                    tail_callees,
+                    inline_decls,
+                );
             }
         }
     }
@@ -1123,11 +1200,9 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
                     .iter()
                     .any(|expr| expression_assigns_ident(expr, ident))
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values
-                    .iter()
-                    .any(|expr| expression_assigns_ident(expr, ident))
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values
+            .iter()
+            .any(|expr| expression_assigns_ident(expr, ident)),
         ExpressionDesc::StaticIndex(target, _, _) => expression_assigns_ident(target, ident),
         ExpressionDesc::New(target, args) => {
             expression_assigns_ident(target, ident)
@@ -1407,13 +1482,15 @@ fn substitute_inline_expression(
                 .map(|expr| substitute_inline_expression(expr, substitution))
                 .collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values
-                .into_iter()
-                .map(|expr| substitute_inline_expression(expr, substitution))
-                .collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values
+                    .into_iter()
+                    .map(|expr| substitute_inline_expression(expr, substitution))
+                    .collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(target, field, position) => ExpressionDesc::StaticIndex(
             Box::new(substitute_inline_expression(*target, substitution)),
             field,
@@ -1684,10 +1761,11 @@ fn collect_tail_callees(block: &Block) -> HashSet<Ident> {
     impl<'a> crate::js_ir::walk::Visitor<'a> for TailCallees {
         fn visit_block(&mut self, block: &'a Block) {
             if let Some(Statement {
-                desc: StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Call(func, _, _),
-                    ..
-                }),
+                desc:
+                    StatementDesc::Return(Expression {
+                        desc: ExpressionDesc::Call(func, _, _),
+                        ..
+                    }),
                 ..
             }) = block.last()
                 && let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &func.desc

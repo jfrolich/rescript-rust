@@ -740,7 +740,9 @@ impl<'src> Parser<'src> {
             Token::ForwardslashDot => 2,
             _ => unreachable!("next_regex_token on a non-slash token"),
         };
-        let result = self.scanner.scan_regex(self.start_pos.clone(), prefix_length);
+        let result = self
+            .scanner
+            .scan_regex(self.start_pos.clone(), prefix_length);
 
         // Propagate scanner diagnostics to parser
         let scanner_diagnostics = self.scanner.take_diagnostics();

@@ -716,7 +716,9 @@ pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn Signature
     }
     fn module_type(mty: &mut ModuleType, v: &mut dyn SignatureLocationVisitor) {
         match mty {
-            ModuleType::MtySignature(sig) => walk_signature_locations(&mut std::sync::Arc::make_mut(sig)[..], v),
+            ModuleType::MtySignature(sig) => {
+                walk_signature_locations(&mut std::sync::Arc::make_mut(sig)[..], v)
+            }
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {

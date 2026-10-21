@@ -683,7 +683,11 @@ impl<'src> Scanner<'src> {
                     let mut has_digit = false;
                     while let Some(digit) = self.ch.to_digit(16) {
                         has_digit = true;
-                        x = if x > (max - digit) / 16 { max + 1 } else { x * 16 + digit };
+                        x = if x > (max - digit) / 16 {
+                            max + 1
+                        } else {
+                            x * 16 + digit
+                        };
                         self.next();
                     }
                     if self.ch == '}' {
@@ -747,7 +751,13 @@ impl<'src> Scanner<'src> {
         value
     }
 
-    fn scan_string_escape_digits_max(&mut self, start_pos: &Position, digits: usize, base: u32, max: i64) {
+    fn scan_string_escape_digits_max(
+        &mut self,
+        start_pos: &Position,
+        digits: usize,
+        base: u32,
+        max: i64,
+    ) {
         let value = self.scan_string_escape_digits(start_pos, digits, base);
         if value > max || (0xD800..0xE000).contains(&value) {
             self.invalid_unicode_code_point(start_pos);
@@ -1400,7 +1410,10 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("unterminated regex".to_string()),
                     );
-                    break (Cow::Borrowed(self.substring(pattern_start, self.offset)), Cow::Borrowed(""));
+                    break (
+                        Cow::Borrowed(self.substring(pattern_start, self.offset)),
+                        Cow::Borrowed(""),
+                    );
                 }
                 '\\' => {
                     self.next();
@@ -1649,7 +1662,8 @@ mod tests {
                 return false;
             }
             let chars: Vec<char> = src.chars().collect();
-            let left_ok = start_cnum <= chars.len() && Scanner::is_whitespace(chars[start_cnum - 1]);
+            let left_ok =
+                start_cnum <= chars.len() && Scanner::is_whitespace(chars[start_cnum - 1]);
             let right_ok = end_cnum >= chars.len() || Scanner::is_whitespace(chars[end_cnum]);
             left_ok && right_ok
         }

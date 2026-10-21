@@ -17,8 +17,8 @@ pub struct JsRawInfo {
 }
 
 pub use crate::types::external_ffi_types::{
-    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportAttributes, Label,
-    LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportAttributes, Label, LabelNoname,
+    ModuleBindName, ModuleSource, ObjParam, Param,
 };
 
 /// `Lambda.import_source`: the target of a dynamic `import`, resolved at
@@ -46,7 +46,10 @@ impl ImportSource {
     pub fn debug_string(&self) -> String {
         use crate::types::external_ffi_types::debug::{module_name, quote};
         let path = |p: &[String]| {
-            format!("[{}]", p.iter().map(|s| quote(s)).collect::<Vec<_>>().join(";"))
+            format!(
+                "[{}]",
+                p.iter().map(|s| quote(s)).collect::<Vec<_>>().join(";")
+            )
         };
         match self {
             ImportSource::ImportModule { module_, path: p } => {
@@ -575,7 +578,6 @@ mod tests {
         assert!(
             !Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Neq))
         );
-
     }
 
     #[test]

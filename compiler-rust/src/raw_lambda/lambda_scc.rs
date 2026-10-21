@@ -39,7 +39,10 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
             exists_var(p, arg)
                 || sw.sw_consts.iter().any(|(_, lam)| exists_var(p, lam))
                 || sw.sw_blocks.iter().any(|(_, lam)| exists_var(p, lam))
-                || sw.sw_failaction.as_deref().is_some_and(|lam| exists_var(p, lam))
+                || sw
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|lam| exists_var(p, lam))
         }
         RawLambda::LstringSwitch(arg, cases, default) => {
             exists_var(p, arg)
@@ -73,7 +76,11 @@ fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
                 },
                 lam,
             );
-            mask_order.iter().copied().filter(|index| hit[*index]).collect()
+            mask_order
+                .iter()
+                .copied()
+                .filter(|index| hit[*index])
+                .collect()
         })
         .collect()
 }
@@ -239,14 +246,19 @@ fn ocaml_hash_final_mix(mut h: u32) -> u32 {
     h
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lambda::FunctionAttribute;
 
     fn function(param: &str, body: RawLambda) -> RawLambda {
-        RawLambda::function_(1, vec![Ident::create_local(param)], body, FunctionAttribute::default(), crate::location::Location::none())
+        RawLambda::function_(
+            1,
+            vec![Ident::create_local(param)],
+            body,
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
+        )
     }
 
     #[test]
@@ -259,10 +271,16 @@ mod tests {
                     find_end.clone(),
                     function(
                         "n",
-                        RawLambda::seq(RawLambda::var(find_end.clone()), RawLambda::var(find_beg.clone())),
+                        RawLambda::seq(
+                            RawLambda::var(find_end.clone()),
+                            RawLambda::var(find_beg.clone()),
+                        ),
                     ),
                 ),
-                (find_beg.clone(), function("p", RawLambda::var(find_beg.clone()))),
+                (
+                    find_beg.clone(),
+                    function("p", RawLambda::var(find_beg.clone())),
+                ),
             ],
             RawLambda::var(find_end.clone()),
         );
@@ -280,7 +298,10 @@ mod tests {
     #[test]
     fn demotes_a_non_recursive_binding() {
         let f = Ident::create_local("f");
-        let lam = bind_rec(vec![(f.clone(), function("x", RawLambda::unit()))], RawLambda::var(f));
+        let lam = bind_rec(
+            vec![(f.clone(), function("x", RawLambda::unit()))],
+            RawLambda::var(f),
+        );
         assert!(matches!(lam, RawLambda::Llet(LetKind::Strict, _, _, _)));
     }
 }

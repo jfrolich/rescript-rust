@@ -934,7 +934,8 @@ mod tests {
                 1,
                 vec![inner.clone()],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             ),
         );
         let args = vec![Lambda::const_(Constant::String("".to_string()))];
@@ -1046,7 +1047,8 @@ mod tests {
             1,
             vec![none.clone()],
             Lambda::var(none.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 
@@ -1147,7 +1149,8 @@ mod tests {
             1,
             vec![none.clone()],
             Lambda::var(none.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 

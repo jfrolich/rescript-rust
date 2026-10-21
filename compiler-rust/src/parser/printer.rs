@@ -583,7 +583,10 @@ fn print_comments_before_marker_by_pos(
             after_marker
         }
     };
-    let doc = Doc::concat(vec![print_comments_by_pos(doc, cmt_tbl, pos_range, full_loc), marker]);
+    let doc = Doc::concat(vec![
+        print_comments_by_pos(doc, cmt_tbl, pos_range, full_loc),
+        marker,
+    ]);
     if after_marker.is_empty() {
         doc
     } else {
@@ -1033,16 +1036,22 @@ pub fn print_constant(c: &Constant) -> Doc {
             Doc::text("`"),
         ]),
         Constant::RawSource(source) => {
-            let delimiter = if raw_source_fits_double_quotes(source) { "\"" } else { "`" };
+            let delimiter = if raw_source_fits_double_quotes(source) {
+                "\""
+            } else {
+                "`"
+            };
             Doc::concat(vec![
                 Doc::text(delimiter),
                 print_string_contents(source),
                 Doc::text(delimiter),
             ])
         }
-        Constant::Char { source, .. } => {
-            Doc::concat(vec![Doc::text("'"), Doc::text(source.clone()), Doc::text("'")])
-        }
+        Constant::Char { source, .. } => Doc::concat(vec![
+            Doc::text("'"),
+            Doc::text(source.clone()),
+            Doc::text("'"),
+        ]),
         Constant::Float(s, _) => Doc::text(s.clone()),
     }
 }
@@ -1148,9 +1157,13 @@ pub fn print_expression(
         }
         // Constants
         ExpressionDesc::Pexp_constant(c) => print_constant(c),
-        ExpressionDesc::Pexp_template(template) => {
-            print_template_literal(state, &template.source_segments, &template.values, cmt_tbl, arena)
-        }
+        ExpressionDesc::Pexp_template(template) => print_template_literal(
+            state,
+            &template.source_segments,
+            &template.values,
+            cmt_tbl,
+            arena,
+        ),
         ExpressionDesc::Pexp_tagged_template(template) => print_tagged_template_literal(
             state,
             arena.get_expr(template.tag),
@@ -1163,9 +1176,7 @@ pub fn print_expression(
         ExpressionDesc::Pexp_break => Doc::text("break"),
         ExpressionDesc::Pexp_continue => Doc::text("continue"),
         // Unit constructor: ()
-        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()") => {
-            Doc::text("()")
-        }
+        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()") => Doc::text("()"),
         // Empty list: []
         ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
             Doc::concat(vec![
@@ -1653,7 +1664,13 @@ pub fn print_expression(
         ExpressionDesc::Pexp_comptime_record_field(_) => Doc::text("@recordField(...)"),
         ExpressionDesc::Pexp_object_get(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;
-            print_object_get_doc(state, arena.get_expr(*parent_expr_idx), label, cmt_tbl, arena)
+            print_object_get_doc(
+                state,
+                arena.get_expr(*parent_expr_idx),
+                label,
+                cmt_tbl,
+                arena,
+            )
         }
         ExpressionDesc::Pexp_object_set(inner) => {
             let (ref obj, ref member, ref rhs) = **inner;
@@ -1727,7 +1744,8 @@ fn print_expression_args(
     };
     match args {
         [] => Doc::nil(),
-        [arg] if matches!(&*arena.get_expr(*arg).pexp_desc,
+        [arg]
+            if matches!(&*arena.get_expr(*arg).pexp_desc,
             ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")) =>
         {
             Doc::text("()")
@@ -1751,7 +1769,10 @@ fn print_expression_args(
             ])
         }
         args => {
-            let docs = args.iter().map(|idx| print_arg(arena.get_expr(*idx), cmt_tbl)).collect();
+            let docs = args
+                .iter()
+                .map(|idx| print_arg(arena.get_expr(*idx), cmt_tbl))
+                .collect();
             Doc::concat(vec![
                 Doc::lparen(),
                 Doc::indent(Doc::concat(vec![
@@ -1776,7 +1797,8 @@ fn print_pattern_args(
 ) -> Doc {
     match patterns {
         [] => Doc::nil(),
-        [arg] if matches!(&*arena.get_pat(*arg).ppat_desc,
+        [arg]
+            if matches!(&*arena.get_pat(*arg).ppat_desc,
             PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()")) =>
         {
             Doc::concat(vec![
@@ -1816,7 +1838,10 @@ fn print_pattern_args(
                 Doc::soft_line(),
                 Doc::join(
                     Doc::concat(vec![Doc::comma(), Doc::line()]),
-                    patterns.iter().map(|p| print_pattern(state, arena.get_pat(*p), cmt_tbl, arena)).collect(),
+                    patterns
+                        .iter()
+                        .map(|p| print_pattern(state, arena.get_pat(*p), cmt_tbl, arena))
+                        .collect(),
                 ),
             ])),
             Doc::trailing_comma(),
@@ -1982,7 +2007,9 @@ fn print_pexp_fun(
             | ExpressionDesc::Pexp_letmodule(_)
             | ExpressionDesc::Pexp_letexception(_)
             | ExpressionDesc::Pexp_open(_) => false,
-            ExpressionDesc::Pexp_jsx_element(element) => !matches!(&**element, JsxElement::Fragment(_)),
+            ExpressionDesc::Pexp_jsx_element(element) => {
+                !matches!(&**element, JsxElement::Fragment(_))
+            }
             _ => true,
         };
 
@@ -2284,7 +2311,11 @@ fn print_exp_fun_parameter(
                 _ => Doc::nil(),
             };
 
-            let doc = Doc::group(Doc::concat(vec![attrs_doc, label_with_pattern, default_doc]));
+            let doc = Doc::group(Doc::concat(vec![
+                attrs_doc,
+                label_with_pattern,
+                default_doc,
+            ]));
 
             // Wrap with comments using combined location (like OCaml's print_exp_fun_parameter)
             // The location spans from the label (if present) to the end of pattern or default_expr
@@ -2322,8 +2353,7 @@ fn print_object_literal(
 ) -> Doc {
     // If the object is written over multiple lines, break automatically.
     let loc = arena.get_location(loc);
-    let force_break =
-        arena.get_position(loc.loc_start).line < arena.get_position(loc.loc_end).line;
+    let force_break = arena.get_position(loc.loc_start).line < arena.get_position(loc.loc_end).line;
     let rows_doc = Doc::join(
         Doc::concat(vec![Doc::text(","), Doc::line()]),
         fields
@@ -3499,7 +3529,11 @@ fn print_template_literal(
                 ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
                 ParenKind::Nothing => doc,
             };
-            Doc::group(Doc::concat(vec![Doc::text("${"), Doc::indent(doc), Doc::rbrace()]))
+            Doc::group(Doc::concat(vec![
+                Doc::text("${"),
+                Doc::indent(doc),
+                Doc::rbrace(),
+            ]))
         })
         .collect();
     let content = interleave_template_parts(strings, values);
@@ -3694,7 +3728,8 @@ fn print_arguments_with_underscore_subst(
         let arg = arena.get_expr(*arg);
         matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
             && (cmt_tbl.has_any_trailing_line_comment_at(PosRange::argument(arena, label, arg))
-                || cmt_tbl.has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
+                || cmt_tbl
+                    .has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
     });
     let mut all_docs: Vec<Doc> = args
         .iter()
@@ -3704,21 +3739,24 @@ fn print_arguments_with_underscore_subst(
         all_docs.push(Doc::text("..."));
     }
 
-    Doc::breakable_group(Doc::concat(vec![
-        Doc::lparen(),
-        Doc::indent(Doc::concat(vec![
+    Doc::breakable_group(
+        Doc::concat(vec![
+            Doc::lparen(),
+            Doc::indent(Doc::concat(vec![
+                Doc::soft_line(),
+                Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), all_docs),
+            ])),
+            // Don't add trailing comma for partial application
+            if partial {
+                Doc::nil()
+            } else {
+                Doc::trailing_comma()
+            },
             Doc::soft_line(),
-            Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), all_docs),
-        ])),
-        // Don't add trailing comma for partial application
-        if partial {
-            Doc::nil()
-        } else {
-            Doc::trailing_comma()
-        },
-        Doc::soft_line(),
-        Doc::rparen(),
-    ]), force_break)
+            Doc::rparen(),
+        ]),
+        force_break,
+    )
 }
 
 /// Print arguments with callback in first position, with underscore substitution.
@@ -3961,7 +3999,9 @@ fn print_array_access_member(
     };
     let should_inline = matches!(
         &*member_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_braces(_)
+        ExpressionDesc::Pexp_constant(_)
+            | ExpressionDesc::Pexp_ident(_)
+            | ExpressionDesc::Pexp_braces(_)
     );
     if should_inline {
         member_doc
@@ -4284,10 +4324,7 @@ fn print_binary_operator_with_spacing(operator: &str, inline_rhs: bool) -> Doc {
 /// Attributes of `expr` split as res_parsetree_viewer.ml:578-579
 /// `partition_printable_attributes`, as an expression copy that keeps only the
 /// internal ones (`{expr with pexp_attributes = internal_attrs}`).
-fn with_internal_attributes(
-    arena: &ParseArena,
-    expr: &Expression,
-) -> (Attributes, Expression) {
+fn with_internal_attributes(arena: &ParseArena, expr: &Expression) -> (Attributes, Expression) {
     let (printable, internal): (Vec<Attribute>, Vec<Attribute>) = expr
         .pexp_attributes
         .iter()
@@ -4581,14 +4618,31 @@ fn print_binary_expression(
             || !parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes).is_empty())
     {
         let lhs_has_comment_below = has_comment_below(cmt_tbl, lhs.pexp_loc, arena);
-        let lhs_doc =
-            print_binary_operand(state, force_pipe_breaks, true, false, lhs, operator, cmt_tbl, arena);
+        let lhs_doc = print_binary_operand(
+            state,
+            force_pipe_breaks,
+            true,
+            false,
+            lhs,
+            operator,
+            cmt_tbl,
+            arena,
+        );
         // For pipe RHS, use the pipe-specific rewrite that omits a redundant
         // first underscore.
         let rhs_doc = if parsetree_viewer::is_underscore_apply_sugar(arena, rhs) {
             print_underscore_apply_in_pipe(state, rhs, cmt_tbl, arena)
         } else {
-            print_binary_operand(state, force_pipe_breaks, false, false, rhs, operator, cmt_tbl, arena)
+            print_binary_operand(
+                state,
+                force_pipe_breaks,
+                false,
+                false,
+                rhs,
+                operator,
+                cmt_tbl,
+                arena,
+            )
         };
         return Doc::group(Doc::concat(vec![
             print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena),
@@ -4995,7 +5049,8 @@ fn print_arguments(
         let arg = arena.get_expr(*arg);
         matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
             && (cmt_tbl.has_any_trailing_line_comment_at(PosRange::argument(arena, label, arg))
-                || cmt_tbl.has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
+                || cmt_tbl
+                    .has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
     });
     let args_doc: Vec<Doc> = args
         .iter()
@@ -5008,21 +5063,24 @@ fn print_arguments(
         all_docs.push(Doc::text("..."));
     }
 
-    Doc::breakable_group(Doc::concat(vec![
-        Doc::lparen(),
-        Doc::indent(Doc::concat(vec![
+    Doc::breakable_group(
+        Doc::concat(vec![
+            Doc::lparen(),
+            Doc::indent(Doc::concat(vec![
+                Doc::soft_line(),
+                Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), all_docs),
+            ])),
+            // Don't add trailing comma for partial application
+            if partial {
+                Doc::nil()
+            } else {
+                Doc::trailing_comma()
+            },
             Doc::soft_line(),
-            Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), all_docs),
-        ])),
-        // Don't add trailing comma for partial application
-        if partial {
-            Doc::nil()
-        } else {
-            Doc::trailing_comma()
-        },
-        Doc::soft_line(),
-        Doc::rparen(),
-    ]), force_break)
+            Doc::rparen(),
+        ]),
+        force_break,
+    )
 }
 
 /// Print a single function argument (like OCaml's print_argument).
@@ -5084,9 +5142,7 @@ fn print_argument(
             if let ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc {
                 if let Longident::Lident(ident_idx) = arena.get_longident(lid.txt) {
                     let ident_str = arena.get_string(*ident_idx);
-                    if ident_str == name_str
-                        && expr.pexp_attributes.is_empty()
-                    {
+                    if ident_str == name_str && expr.pexp_attributes.is_empty() {
                         // Punned: ~name - create combined location from label to expression end
                         let (pos_range, full_loc) =
                             make_combined_pos_range(name.loc, expr.pexp_loc, arena);
@@ -5106,8 +5162,7 @@ fn print_argument(
                     if let ExpressionDesc::Pexp_ident(lid) = &*inner_expr.pexp_desc {
                         if let Longident::Lident(ident_idx) = arena.get_longident(lid.txt) {
                             let ident_str = arena.get_string(*ident_idx);
-                            if ident_str == name_str
-                            {
+                            if ident_str == name_str {
                                 // Punned with type: ~name: type
                                 let (pos_range, full_loc) =
                                     make_combined_pos_range(name.loc, expr.pexp_loc, arena);
@@ -5228,7 +5283,8 @@ fn argument_requires_regular_layout(
     let has_leading_label_comments = match lbl {
         ArgLabel::Nolabel => false,
         ArgLabel::Labelled(_) | ArgLabel::Optional(_) => {
-            cmt_tbl.has_leading_comments_at(loc) || cmt_tbl.has_leading_comments(arg.pexp_loc, arena)
+            cmt_tbl.has_leading_comments_at(loc)
+                || cmt_tbl.has_leading_comments(arg.pexp_loc, arena)
         }
     };
     has_leading_label_comments
@@ -5242,8 +5298,9 @@ fn arguments_require_regular_layout(
     args: &[(ArgLabel, ExprIdx)],
     arena: &ParseArena,
 ) -> bool {
-    args.iter()
-        .any(|(lbl, arg)| argument_requires_regular_layout(cmt_tbl, lbl, arena.get_expr(*arg), arena))
+    args.iter().any(|(lbl, arg)| {
+        argument_requires_regular_layout(cmt_tbl, lbl, arena.get_expr(*arg), arena)
+    })
 }
 
 /// Check if there's a leading line comment at a location.
@@ -5339,21 +5396,17 @@ pub fn print_pattern(
             Doc::text("]"),
         ])),
         // ()
-        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()") => {
-            Doc::concat(vec![
-                Doc::lparen(),
-                print_comments_inside(cmt_tbl, pat.ppat_loc, arena),
-                Doc::rparen(),
-            ])
-        }
+        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()") => Doc::concat(vec![
+            Doc::lparen(),
+            print_comments_inside(cmt_tbl, pat.ppat_loc, arena),
+            Doc::rparen(),
+        ]),
         // list{}
-        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]") => {
-            Doc::concat(vec![
-                Doc::text("list{"),
-                print_comments_inside(cmt_tbl, pat.ppat_loc, arena),
-                Doc::rbrace(),
-            ])
-        }
+        PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]") => Doc::concat(vec![
+            Doc::text("list{"),
+            print_comments_inside(cmt_tbl, pat.ppat_loc, arena),
+            Doc::rbrace(),
+        ]),
         // list{p1, p2, ...spread}
         PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "::") => {
             print_list_pattern(state, pat, cmt_tbl, arena)
@@ -5565,8 +5618,8 @@ fn print_list_pattern(
         &*tail.ppat_desc,
         PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]")
     );
-    let should_hug = matches!(patterns.as_slice(), [single] if is_huggable_pattern(single))
-        && tail_is_nil;
+    let should_hug =
+        matches!(patterns.as_slice(), [single] if is_huggable_pattern(single)) && tail_is_nil;
     let mut docs: Vec<Doc> = Vec::with_capacity(patterns.len());
     for p in &patterns {
         docs.push(print_pattern(state, p, cmt_tbl, arena));
@@ -5574,12 +5627,19 @@ fn print_list_pattern(
     let tail_doc = if tail_is_nil {
         Doc::nil()
     } else {
-        let doc = Doc::concat(vec![Doc::text("..."), print_pattern(state, tail, cmt_tbl, arena)]);
+        let doc = Doc::concat(vec![
+            Doc::text("..."),
+            print_pattern(state, tail, cmt_tbl, arena),
+        ]);
         let tail_doc = print_comments(doc, cmt_tbl, tail.ppat_loc, arena);
         Doc::concat(vec![Doc::text(","), Doc::line(), tail_doc])
     };
     let children = Doc::concat(vec![
-        if should_hug { Doc::nil() } else { Doc::soft_line() },
+        if should_hug {
+            Doc::nil()
+        } else {
+            Doc::soft_line()
+        },
         Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), docs),
         tail_doc,
     ]);
@@ -6175,11 +6235,20 @@ fn print_type_parameter(
         Some(name) => {
             let (pos_range, full_loc) =
                 make_combined_pos_range(name.loc, param.typ.ptyp_loc, arena);
-            print_comments_before_marker_by_pos(doc, cmt_tbl, pos_range, &full_loc, optional_indicator)
+            print_comments_before_marker_by_pos(
+                doc,
+                cmt_tbl,
+                pos_range,
+                &full_loc,
+                optional_indicator,
+            )
         }
         None => {
             // Nolabel: use type's location only
-            Doc::concat(vec![print_comments(doc, cmt_tbl, param.typ.ptyp_loc, arena), optional_indicator])
+            Doc::concat(vec![
+                print_comments(doc, cmt_tbl, param.typ.ptyp_loc, arena),
+                optional_indicator,
+            ])
         }
     }
 }
@@ -6527,11 +6596,13 @@ fn join_attributes_with_sep(
     let mut docs = Vec::with_capacity(attrs.len() * 2);
     for (i, attr) in attrs.iter().enumerate() {
         if i > 0 {
-            docs.push(if parsetree_viewer::is_doc_comment_attribute(arena, attrs[i - 1]) {
-                Doc::hard_line()
-            } else {
-                Doc::line()
-            });
+            docs.push(
+                if parsetree_viewer::is_doc_comment_attribute(arena, attrs[i - 1]) {
+                    Doc::hard_line()
+                } else {
+                    Doc::line()
+                },
+            );
         }
         docs.push(print_attribute(state, attr, false, cmt_tbl, arena));
     }
@@ -7549,7 +7620,8 @@ fn print_cases(
 
         // Track end line for next iteration
         // Use braces attribute location if present, matching get_case_pos_range and full_loc
-        prev_end_line = match parsetree_viewer::process_braces(arena, arena.get_expr(case.pc_rhs)).0 {
+        prev_end_line = match parsetree_viewer::process_braces(arena, arena.get_expr(case.pc_rhs)).0
+        {
             Some(braces_loc) => arena.loc_end(braces_loc).line as i32,
             None => arena.loc_end(arena.get_expr(case.pc_rhs).pexp_loc).line as i32,
         };
@@ -7591,18 +7663,19 @@ fn print_case_content(
     };
 
     // Check if RHS should be on the same line
-    let should_inline_rhs = !is_block_rhs && match &*rhs_expr.pexp_desc {
-        ExpressionDesc::Pexp_construct(lid, _) => {
-            let name = match arena.get_longident(lid.txt) {
-                crate::parser::longident::Longident::Lident(s) => arena.get_string(*s),
-                _ => "",
-            };
-            matches!(name, "()" | "true" | "false")
-        }
-        ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_ident(_) => true,
-        _ if parsetree_viewer::is_huggable_rhs(arena, rhs_expr) => true,
-        _ => false,
-    };
+    let should_inline_rhs = !is_block_rhs
+        && match &*rhs_expr.pexp_desc {
+            ExpressionDesc::Pexp_construct(lid, _) => {
+                let name = match arena.get_longident(lid.txt) {
+                    crate::parser::longident::Longident::Lident(s) => arena.get_string(*s),
+                    _ => "",
+                };
+                matches!(name, "()" | "true" | "false")
+            }
+            ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_ident(_) => true,
+            _ if parsetree_viewer::is_huggable_rhs(arena, rhs_expr) => true,
+            _ => false,
+        };
 
     // Check if pattern should be indented
     let should_indent_pattern = !matches!(&*lhs.ppat_desc, PatternDesc::Ppat_or(_, _));
@@ -7730,8 +7803,12 @@ fn print_value_binding(
                 .collect(),
         );
         let pat_doc = print_pattern(state, arena.get_pat(vb.pvb_pat), cmt_tbl, arena);
-        let typ_doc =
-            print_typ_expr(state, arena.get_core_type(constraint.pvc_type), cmt_tbl, arena);
+        let typ_doc = print_typ_expr(
+            state,
+            arena.get_core_type(constraint.pvc_type),
+            cmt_tbl,
+            arena,
+        );
         let expr_doc = print_expression_with_comments_and_parens(
             state,
             arena.get_expr(vb.pvb_expr),
@@ -7804,7 +7881,8 @@ fn print_value_binding(
                 let expr = arena.get_expr(*expr_idx);
                 // Use the constraint's type and expression
                 let typ_doc = print_typ_expr(state, arena.get_core_type(*typ), cmt_tbl, arena);
-                let expr_doc = print_expression_with_comments_and_parens(state, expr, cmt_tbl, arena);
+                let expr_doc =
+                    print_expression_with_comments_and_parens(state, expr, cmt_tbl, arena);
 
                 return Doc::group(Doc::concat(vec![
                     attrs_doc,
@@ -7823,7 +7901,8 @@ fn print_value_binding(
             } else {
                 // Use pat_typ from the pattern constraint
                 let typ_doc = print_typ_expr(state, pat_typ, cmt_tbl, arena);
-                let expr_doc = print_expression_with_comments_and_parens(state, vb_expr, cmt_tbl, arena);
+                let expr_doc =
+                    print_expression_with_comments_and_parens(state, vb_expr, cmt_tbl, arena);
 
                 return Doc::group(Doc::concat(vec![
                     attrs_doc,
@@ -8158,7 +8237,12 @@ fn print_payload(
                 Some(g) => Doc::concat(vec![
                     Doc::line(),
                     Doc::text("if "),
-                    print_expression_with_comments_and_parens(state, arena.get_expr(*g), cmt_tbl, arena),
+                    print_expression_with_comments_and_parens(
+                        state,
+                        arena.get_expr(*g),
+                        cmt_tbl,
+                        arena,
+                    ),
                 ]),
                 None => Doc::nil(),
             };
@@ -8326,13 +8410,13 @@ fn print_module_declaration(
 ) -> Doc {
     let decl_mod_type = arena.get_mod_type(decl.pmd_type);
     let attrs_doc = print_attributes_with_loc(
-                state,
-                &decl.pmd_attributes,
-                Some(decl.pmd_name.loc),
-                cmt_tbl,
-                arena,
-                false,
-            );
+        state,
+        &decl.pmd_attributes,
+        Some(decl.pmd_name.loc),
+        cmt_tbl,
+        arena,
+        false,
+    );
     let name_doc = Doc::text(arena.get_string(decl.pmd_name.txt));
     let name_doc = print_comments(name_doc, cmt_tbl, decl.pmd_name.loc, arena);
 
@@ -8586,11 +8670,10 @@ fn print_type_declarations_with_rec_flag(
     // Check if we need to handle inline record definitions
     if has_inline_type_definitions(decls) {
         // Partition declarations into inline records and regular declarations
-        let (inline_record_definitions, regular_declarations): (Vec<_>, Vec<_>) =
-            decls
-                .iter()
-                .cloned()
-                .partition(|decl| decl.ptype_origin == TypeDeclarationOrigin::Inline_record_definition);
+        let (inline_record_definitions, regular_declarations): (Vec<_>, Vec<_>) = decls
+            .iter()
+            .cloned()
+            .partition(|decl| decl.ptype_origin == TypeDeclarationOrigin::Inline_record_definition);
 
         if regular_declarations.is_empty() {
             if let Some(pending) =
@@ -8897,7 +8980,8 @@ fn print_constructor_declaration2(
     arena: &ParseArena,
 ) -> Doc {
     let all_attrs = crate::ast_helper_type::constructor_attributes(arena, cd);
-    let (comment_attrs, attrs) = parsetree_viewer::partition_doc_comment_attributes(arena, &all_attrs);
+    let (comment_attrs, attrs) =
+        parsetree_viewer::partition_doc_comment_attributes(arena, &all_attrs);
     let comment_doc = if comment_attrs.is_empty() {
         Doc::nil()
     } else {
@@ -9361,13 +9445,13 @@ fn print_module_binding(
 ) -> Doc {
     let binding_expr = arena.get_mod_expr(binding.pmb_expr);
     let attrs_doc = print_attributes_with_loc(
-                state,
-                &binding.pmb_attributes,
-                Some(binding.pmb_name.loc),
-                cmt_tbl,
-                arena,
-                false,
-            );
+        state,
+        &binding.pmb_attributes,
+        Some(binding.pmb_name.loc),
+        cmt_tbl,
+        arena,
+        false,
+    );
 
     // Wrap module name with print_comments for its location (like OCaml reference)
     let name_doc = Doc::text(arena.get_string(binding.pmb_name.txt));

@@ -226,7 +226,10 @@ impl LayoutRef {
     #[inline]
     pub(crate) fn from_shared_index(idx: u32) -> Self {
         let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
-        assert!(idx & bits == 0, "shared variant layout index exceeds the tag range");
+        assert!(
+            idx & bits == 0,
+            "shared variant layout index exceeds the tag range"
+        );
         Self(idx | bits)
     }
 
@@ -361,9 +364,15 @@ pub fn plain_layout(
     let constructors = cases
         .into_iter()
         .map(|(name, has_payload)| {
-            let tag = Tag { name, literal: None };
+            let tag = Tag {
+                name,
+                literal: None,
+            };
             if has_payload {
-                ConstructorCase::Block(Block::Tagged(TaggedBlock { tag, tag_name: None }))
+                ConstructorCase::Block(Block::Tagged(TaggedBlock {
+                    tag,
+                    tag_name: None,
+                }))
             } else {
                 ConstructorCase::Constant(tag)
             }

@@ -1,7 +1,7 @@
 //! Indexed consumer's native Js_output value/finished protocol. No Lambda
 //! representation appears here. See compiler/core/js_output.ml:28-143.
-use super::*;
 use super::context::{Continuation, TailType};
+use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Finished {
@@ -68,7 +68,11 @@ impl Output {
                     ident: id.clone(),
                     // Js_stmt_make.define_variable: every Undefined becomes
                     // a declaration without an initializer, unit or not.
-                    value: if matches!(expr.desc, ExpressionDesc::Undefined { .. }) { None } else { Some(expr) },
+                    value: if matches!(expr.desc, ExpressionDesc::Undefined { .. }) {
+                        None
+                    } else {
+                        Some(expr)
+                    },
                     property: *kind,
                     ident_info: IdentInfo::default(),
                 }));

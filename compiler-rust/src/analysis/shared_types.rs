@@ -12,7 +12,9 @@ use std::sync::Arc;
 pub type ModulePathList = Vec<String>;
 
 /// A source position (`Lexing.position` without the file name).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Pos {
     pub line: i32,
     pub bol: i32,
@@ -36,7 +38,9 @@ impl Pos {
 
 /// A source location (`Location.t`). The derived order is OCaml's
 /// polymorphic compare on the record, file names aside.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Loc {
     pub start: Pos,
     pub end: Pos,
@@ -46,7 +50,11 @@ pub struct Loc {
 impl Loc {
     /// `Location.none`.
     pub fn none() -> Loc {
-        let pos = Pos { line: 1, bol: 0, cnum: -1 };
+        let pos = Pos {
+            line: 1,
+            bol: 0,
+            cnum: -1,
+        };
         Loc {
             start: pos,
             end: pos,
@@ -97,8 +105,14 @@ impl Loc {
         let (sl, sc) = self.start.line_col();
         let (el, ec) = self.end.line_col();
         super::Range {
-            start: super::Position { line: sl, character: sc },
-            end: super::Position { line: el, character: ec },
+            start: super::Position {
+                line: sl,
+                character: sc,
+            },
+            end: super::Position {
+                line: el,
+                character: ec,
+            },
         }
     }
 }
@@ -113,7 +127,10 @@ pub struct Located<T> {
 impl<T> Located<T> {
     /// `Location.mknoloc`.
     pub fn mknoloc(txt: T) -> Self {
-        Located { txt, loc: Loc::none() }
+        Located {
+            txt,
+            loc: Loc::none(),
+        }
     }
 }
 
@@ -123,7 +140,10 @@ pub type ModuleId = usize;
 /// `Module_path.t`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModulePath {
-    File { uri: String, module_name: String },
+    File {
+        uri: String,
+        module_name: String,
+    },
     NotVisible,
     IncludedModule(Path, Box<ModulePath>),
     ExportedModule {
@@ -142,7 +162,11 @@ impl ModulePath {
             match module_path {
                 ModulePath::File { .. } | ModulePath::NotVisible => break,
                 ModulePath::IncludedModule(_, inner) => module_path = inner,
-                ModulePath::ExportedModule { name, module_path: inner, .. } => {
+                ModulePath::ExportedModule {
+                    name,
+                    module_path: inner,
+                    ..
+                } => {
                     current.insert(0, name.clone());
                     module_path = inner;
                 }

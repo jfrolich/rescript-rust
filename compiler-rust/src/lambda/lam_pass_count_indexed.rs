@@ -358,7 +358,8 @@ mod tests {
                             sw_dispatch: SwitchDispatch::Direct,
                         }),
                     ),
-                    FunctionAttribute::default(), crate::location::Location::none(),
+                    FunctionAttribute::default(),
+                    crate::location::Location::none(),
                 ),
             ),
         );

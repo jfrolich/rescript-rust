@@ -10,9 +10,9 @@ use super::js_exp_make::{
     compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
     int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
     int32_minus, int32_mul, int32_offset, int32_pow, is_nullish_literal, is_optional_block,
-    is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
-    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access,
-    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, to_int32,
+    is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects, js_seq,
+    ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access, runtime_compare_call_args,
+    runtime_member_for_eta_wrapped_primitive, to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
@@ -124,15 +124,20 @@ impl LambdaCompiler {
             PtaggedTemplate(strings) => {
                 let mut args = std::mem::take(&mut compiled_args).into_iter();
                 let tag = args.next().expect("a tagged template has a tag");
-                Expression::new(ExpressionDesc::TaggedTemplate(Box::new(tag), strings.clone(), args.collect()))
+                Expression::new(ExpressionDesc::TaggedTemplate(
+                    Box::new(tag),
+                    strings.clone(),
+                    args.collect(),
+                ))
             }
             // `Ptemplate [segment] when args = []` / `Ptemplate segments`.
             Ptemplate(segments) if segments.len() == 1 && compiled_args.is_empty() => {
                 Expression::new(ExpressionDesc::TemplateLiteral(segments[0].clone()))
             }
-            Ptemplate(segments) => {
-                crate::lambda::js_exp_make::interpolated_template(segments.clone(), std::mem::take(&mut compiled_args))
-            }
+            Ptemplate(segments) => crate::lambda::js_exp_make::interpolated_template(
+                segments.clone(),
+                std::mem::take(&mut compiled_args),
+            ),
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
             // direct call of the first argument with the remaining arguments.
             PjsApply => match compiled_args.split_first() {
@@ -696,21 +701,20 @@ impl LambdaCompiler {
                 Some(expr) => expr,
                 None => Expression::undefined(false),
             },
-            PjsObjectGet(name) | PjsObjectSet(name) => match (
-                matches!(prim, PjsObjectSet(_)),
-                compiled_args.as_slice(),
-            ) {
-                (false, [receiver]) => self.static_index(receiver.clone(), name),
-                (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
-                    Box::new(Expression::bin(
-                        BinOp::Eq,
-                        self.static_index(receiver.clone(), name),
-                        value.clone(),
+            PjsObjectGet(name) | PjsObjectSet(name) => {
+                match (matches!(prim, PjsObjectSet(_)), compiled_args.as_slice()) {
+                    (false, [receiver]) => self.static_index(receiver.clone(), name),
+                    (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
+                        Box::new(Expression::bin(
+                            BinOp::Eq,
+                            self.static_index(receiver.clone(), name),
+                            value.clone(),
+                        )),
+                        Box::new(Expression::undefined(true)),
                     )),
-                    Box::new(Expression::undefined(true)),
-                )),
-                _ => Expression::undefined(false),
-            },
+                    _ => Expression::undefined(false),
+                }
+            }
             Pimport(source) => self.compile_import(loc, source),
             PjsCall {
                 prim_name,

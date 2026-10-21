@@ -20,7 +20,8 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
+    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc,
+    TypeExprRef,
 };
 use crate::types::variance::Variance;
 
@@ -77,12 +78,13 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     let id = read_ident(&fields[0]);
-                    let debug_this_value = crate::debug_flags::debug_sig_value().is_some_and(|raw| {
-                        raw.split(',')
-                            .map(|part| part.trim())
-                            .filter(|part| !part.is_empty())
-                            .any(|target| target == id.name())
-                    });
+                    let debug_this_value =
+                        crate::debug_flags::debug_sig_value().is_some_and(|raw| {
+                            raw.split(',')
+                                .map(|part| part.trim())
+                                .filter(|part| !part.is_empty())
+                                .any(|target| target == id.name())
+                        });
                     if debug_this_value {
                         eprintln!(
                             "[sig-read] raw value={} before read_type_expr ids={}",
@@ -396,7 +398,9 @@ impl<'a> SigReadContext<'a> {
         let (_, fields) = value.as_block();
         crate::types::VariantTag {
             name: fields[0].as_string().to_string(),
-            literal: fields[1].as_option().map(|v| self.read_variant_literal_tag(v)),
+            literal: fields[1]
+                .as_option()
+                .map(|v| self.read_variant_literal_tag(v)),
         }
     }
 
@@ -440,7 +444,9 @@ impl<'a> SigReadContext<'a> {
     fn read_label_declaration(&mut self, value: &OcamlValue) -> LabelDeclaration {
         let fields = &value.as_block().1;
         let ld_id = read_ident(&fields[0]);
-        let ld_runtime_name = fields[1].as_option().map(|name| name.as_string().to_string());
+        let ld_runtime_name = fields[1]
+            .as_option()
+            .map(|name| name.as_string().to_string());
         let ld_mutable = read_mutable_flag(&fields[2]);
         let ld_optional = fields[3].as_bool();
         let ld_type = self.read_type_expr(&fields[4]);
@@ -470,7 +476,9 @@ impl<'a> SigReadContext<'a> {
     fn read_constructor_declaration(&mut self, value: &OcamlValue) -> ConstructorDeclaration {
         let fields = &value.as_block().1;
         let cd_id = read_ident(&fields[0]);
-        let cd_runtime_tag = fields[1].as_option().map(|tag| self.read_variant_literal_tag(tag));
+        let cd_runtime_tag = fields[1]
+            .as_option()
+            .map(|tag| self.read_variant_literal_tag(tag));
         let cd_args = self.read_constructor_arguments(&fields[2]);
         let cd_res = fields[3].as_option().map(|te| self.read_type_expr(te));
         let cd_loc = read_location(self.ctx, &fields[4]);
@@ -750,7 +758,11 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     let abbrev = self.ctx.alloc_abbrev_nil();
 
-                    TypeDesc::Tconstr { path, args: args.into(), abbrev }
+                    TypeDesc::Tconstr {
+                        path,
+                        args: args.into(),
+                        abbrev,
+                    }
                 }
                 4 => {
                     // Tobject of type_expr
@@ -799,7 +811,10 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpoly { body, vars: vars.into() }
+                    TypeDesc::Tpoly {
+                        body,
+                        vars: vars.into(),
+                    }
                 }
                 11 => {
                     // Tpackage(Path.t, Longident.t list, type_expr list)
@@ -814,7 +829,11 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpackage { path, lids: Box::new(lids), args: args.into() }
+                    TypeDesc::Tpackage {
+                        path,
+                        lids: Box::new(lids),
+                        args: args.into(),
+                    }
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar
@@ -1485,7 +1504,9 @@ fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
             return None;
         }
         match v {
-            OcamlValue::Block(2, fields) if fields.len() == 1 && string_literal_semantic(&fields[0]).is_some() => {
+            OcamlValue::Block(2, fields)
+                if fields.len() == 1 && string_literal_semantic(&fields[0]).is_some() =>
+            {
                 string_literal_semantic(&fields[0])
             }
             OcamlValue::Block(_, fields) => fields

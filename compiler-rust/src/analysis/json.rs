@@ -24,7 +24,12 @@ impl Json {
     }
 
     pub fn assoc<const N: usize>(fields: [(&str, Json); N]) -> Json {
-        Json::Assoc(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        Json::Assoc(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
     }
 
     /// `Yojson.Safe.pretty_to_string`.
@@ -74,7 +79,11 @@ fn is_atom(x: &Json) -> bool {
 }
 
 /// `pp_list sep ppx`: elements separated by `sep` and a space break.
-fn pp_list<T>(f: &mut Formatter<&mut Vec<u8>>, items: &[T], mut ppx: impl FnMut(&mut Formatter<&mut Vec<u8>>, &T)) {
+fn pp_list<T>(
+    f: &mut Formatter<&mut Vec<u8>>,
+    items: &[T],
+    mut ppx: impl FnMut(&mut Formatter<&mut Vec<u8>>, &T),
+) {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             f.string(",");
@@ -98,7 +107,11 @@ fn format(f: &mut Formatter<&mut Vec<u8>>, x: &Json, inside_box: bool) {
             }
             // Atom lists wrap like a paragraph (`hov`); other lists are all
             // on one line or one element per line (`hv`).
-            let kind = if l.iter().all(is_atom) { BoxKind::HOV } else { BoxKind::HV };
+            let kind = if l.iter().all(is_atom) {
+                BoxKind::HOV
+            } else {
+                BoxKind::HV
+            };
             f.string("[");
             f.break_(1, 0);
             f.open_box(kind, 0);
@@ -140,7 +153,12 @@ mod tests {
 
     #[test]
     fn prints_like_yojson() {
-        let pos = |line, character| Json::assoc([("character", Json::Int(character)), ("line", Json::Int(line))]);
+        let pos = |line, character| {
+            Json::assoc([
+                ("character", Json::Int(character)),
+                ("line", Json::Int(line)),
+            ])
+        };
         let range = Json::assoc([("end", pos(31, 12)), ("start", pos(31, 0))]);
         let symbol = Json::assoc([
             ("kind", Json::Int(16)),

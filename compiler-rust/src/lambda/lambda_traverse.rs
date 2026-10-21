@@ -95,9 +95,19 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             if !(c1 || c2) {
                 return (lam, false);
             }
-            let Lambda::Lapply(ap) = lam else { unreachable!() };
-            let Apply { ap_func, ap_args, ap_info, ap_transformed_jsx } = *ap;
-            return (Lambda::apply(*ap_func, ap_args, ap_info, ap_transformed_jsx), true);
+            let Lambda::Lapply(ap) = lam else {
+                unreachable!()
+            };
+            let Apply {
+                ap_func,
+                ap_args,
+                ap_info,
+                ap_transformed_jsx,
+            } = *ap;
+            return (
+                Lambda::apply(*ap_func, ap_args, ap_info, ap_transformed_jsx),
+                true,
+            );
         }
         Lambda::Lfunction(func) => map_in(&mut func.body, f),
         Lambda::Llet(_, _, e, b) => {
@@ -114,8 +124,14 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             if !map_list(&mut prim.args, f) {
                 return (lam, false);
             }
-            let Lambda::Lprim(prim) = lam else { unreachable!() };
-            let PrimInfo { primitive, args, loc } = *prim;
+            let Lambda::Lprim(prim) = lam else {
+                unreachable!()
+            };
+            let PrimInfo {
+                primitive,
+                args,
+                loc,
+            } = *prim;
             return (Lambda::prim(primitive, args, loc), true);
         }
         Lambda::Lswitch(e, sw) => {
@@ -126,7 +142,9 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             if !(c1 || c2 || c3 || c4) {
                 return (lam, false);
             }
-            let Lambda::Lswitch(e, sw) = lam else { unreachable!() };
+            let Lambda::Lswitch(e, sw) = lam else {
+                unreachable!()
+            };
             return (Lambda::switch(*e, *sw), true);
         }
         Lambda::LstringSwitch(e, cases, d) => {
@@ -136,7 +154,9 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             if !(c1 || c2 || c3) {
                 return (lam, false);
             }
-            let Lambda::LstringSwitch(e, cases, d) = lam else { unreachable!() };
+            let Lambda::LstringSwitch(e, cases, d) = lam else {
+                unreachable!()
+            };
             return (Lambda::string_switch(*e, cases, d), true);
         }
         Lambda::LstaticRaise(_, args) => map_list(args, f),
@@ -157,7 +177,9 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             if !(c1 || c2 || c3) {
                 return (lam, false);
             }
-            let Lambda::LifThenElse(a, b, c) = lam else { unreachable!() };
+            let Lambda::LifThenElse(a, b, c) = lam else {
+                unreachable!()
+            };
             return (Lambda::if_(*a, *b, *c), true);
         }
         Lambda::Lsequence(a, b) => {
@@ -166,7 +188,9 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             if !(c1 || c2) {
                 return (lam, false);
             }
-            let Lambda::Lsequence(a, b) = lam else { unreachable!() };
+            let Lambda::Lsequence(a, b) = lam else {
+                unreachable!()
+            };
             return (Lambda::seq(*a, *b), true);
         }
         Lambda::Lwhile(a, b) | Lambda::Lfor_of(_, a, b) | Lambda::Lfor_await_of(_, a, b) => {

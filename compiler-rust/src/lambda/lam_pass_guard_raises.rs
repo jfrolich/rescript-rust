@@ -6,8 +6,8 @@
 //! [`Lambda::if_`]: matching inspects the terms it builds, and rewriting them
 //! during construction would leave static raises without their catch.
 
-use crate::lambda::lambda_traverse::{shallow_map_sharing, Mapped};
 use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::lambda_traverse::{Mapped, shallow_map_sharing};
 use crate::lambda::{Lambda, PrimInfo};
 
 /// `Lam_pass_guard_raises.guard_raises`.

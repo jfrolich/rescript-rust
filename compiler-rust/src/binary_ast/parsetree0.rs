@@ -84,7 +84,6 @@ pub enum ArgLabel {
     Optional(StrIdx),
 }
 
-
 // ========== Constants ==========
 
 /// Constant values in the AST
@@ -259,7 +258,12 @@ pub enum ExpressionDesc {
     Function(Vec<Case>),
     /// fun ~l:(P = E0) -> E1: one parameter; `(P1, P2) => E` is a chain
     /// wrapped in `Function$` with a `res.arity` attribute.
-    Fun(ArgLabel, Option<Box<Expression>>, Box<Pattern>, Box<Expression>),
+    Fun(
+        ArgLabel,
+        Option<Box<Expression>>,
+        Box<Pattern>,
+        Box<Expression>,
+    ),
     /// E0 ~l1:E1 ... ~ln:En
     Apply(Box<Expression>, Vec<(ArgLabel, Expression)>),
     /// Match: match E with P1 -> E1 | ... | Pn -> En
@@ -274,7 +278,10 @@ pub enum ExpressionDesc {
     Variant(Label, Option<Box<Expression>>),
     /// Record: { l1=E1; ...; ln=En } or { E with l1=E1; ...; ln=En }
     /// Optional fields carry the `res.optional` attribute.
-    Record(Vec<(Located<Longident>, Expression)>, Option<Box<Expression>>),
+    Record(
+        Vec<(Located<Longident>, Expression)>,
+        Option<Box<Expression>>,
+    ),
     /// Field access: E.l
     Field(Box<Expression>, Located<Longident>),
     /// Field update: E1.l <- E2

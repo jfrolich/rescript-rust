@@ -104,7 +104,10 @@ pub fn field(
 ) -> LabelDeclaration {
     let (pld_runtime_name, pld_attributes) = match runtime_name {
         Some(txt) => (
-            Some(Located::new(crate::string_literal::string_from_semantic(txt), name.loc)),
+            Some(Located::new(
+                crate::string_literal::string_from_semantic(txt),
+                name.loc,
+            )),
             attrs,
         ),
         None => take_as(arena, attrs, false, ast_payload::string_literal_of_payload),
@@ -163,15 +166,22 @@ fn put_back_as(
     let expression = target.push_expr(expression);
     let arena = target.arena();
     let item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expression, Attributes::new())))),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            expression,
+            Attributes::new(),
+        )))),
         pstr_loc: loc,
     };
     let name = arena.as_attribute_name();
     let attr: Attribute = (Located::new(name, loc), Payload::PStr(Box::new(vec![item])));
-    let cnum = |arena: &ParseArena, loc: LocIdx| arena.get_position(arena.get_location(loc).loc_start).cnum;
+    let cnum = |arena: &ParseArena, loc: LocIdx| {
+        arena.get_position(arena.get_location(loc).loc_start).cnum
+    };
     let pos = cnum(arena, loc);
-    let (mut earlier, later): (Vec<Attribute>, Vec<Attribute>) =
-        attrs.iter().cloned().partition(|other| cnum(arena, other.0.loc) <= pos);
+    let (mut earlier, later): (Vec<Attribute>, Vec<Attribute>) = attrs
+        .iter()
+        .cloned()
+        .partition(|other| cnum(arena, other.0.loc) <= pos);
     earlier.push(attr);
     earlier.extend(later);
     Attributes::from_vec(earlier)
@@ -184,7 +194,10 @@ pub fn constructor_attributes(arena: &ParseArena, cd: &ConstructorDeclaration) -
 }
 
 /// [`constructor_attributes`] for attributes that become part of the AST.
-pub fn constructor_attributes_owned(arena: &mut ParseArena, cd: &ConstructorDeclaration) -> Attributes {
+pub fn constructor_attributes_owned(
+    arena: &mut ParseArena,
+    cd: &ConstructorDeclaration,
+) -> Attributes {
     constructor_attributes_in(PayloadArena::Owned(arena), cd)
 }
 

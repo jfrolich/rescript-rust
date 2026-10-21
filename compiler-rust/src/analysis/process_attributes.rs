@@ -31,7 +31,9 @@ fn single_eval(payload: &Payload) -> Option<ExprIdx> {
 /// `Ast_payload.semantic_string_of_expression`. OCaml raises on an invalid
 /// escape; the compiler has already rejected such a file.
 fn string_constant(arena: &ParseArena, e: ExprIdx) -> Option<String> {
-    crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(e)).ok().flatten()
+    crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(e))
+        .ok()
+        .flatten()
 }
 
 /// `Utils.flatten_long_ident` without its options.
@@ -58,7 +60,9 @@ pub fn find_doc_attribute(attrs: Attrs<'_>) -> Option<String> {
             if !is_doc_name(arena.get_string(name.txt)) {
                 return None;
             }
-            crate::ast_payload::semantic_string_of_payload(arena, payload).ok().flatten()
+            crate::ast_payload::semantic_string_of_payload(arena, payload)
+                .ok()
+                .flatten()
         }),
         Attrs::Decl(attrs) => attrs.iter().find_map(|attr| {
             if !is_doc_name(&attr.attr_name.txt) {
@@ -102,7 +106,9 @@ pub fn find_deprecated_attribute(attrs: Attrs<'_>) -> Option<String> {
             }
         }
         Attrs::Decl(attrs) => {
-            let attr = attrs.iter().find(|attr| attr.attr_name.txt == "deprecated")?;
+            let attr = attrs
+                .iter()
+                .find(|attr| attr.attr_name.txt == "deprecated")?;
             match &attr.attr_payload {
                 decl::AttributePayload::Str(msg) => Some(msg.clone()),
                 decl::AttributePayload::Deprecated { reason, .. } => Some(reason.clone()),

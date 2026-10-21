@@ -15,7 +15,10 @@ pub fn unwrap_braces<'a>(arena: &'a ParseArena, expression: &'a Expression) -> &
 
 /// The expression of a single-expression payload `PStr [Pstr_eval (e, _)]`,
 /// under any explicit braces (OCaml `Ast_payload.unwrap_payload_expression`).
-pub fn unwrapped_payload_expression<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<&'a Expression> {
+pub fn unwrapped_payload_expression<'a>(
+    arena: &'a ParseArena,
+    payload: &Payload,
+) -> Option<&'a Expression> {
     if let Payload::PStr(items) = payload
         && let [item] = items.as_slice()
         && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
@@ -34,7 +37,10 @@ pub struct PayloadError {
 
 /// OCaml `Ast_payload.reject_json_literal_payload`: the location of a payload
 /// that is a single `json` literal, which callers must reject.
-pub fn reject_json_literal_payload(arena: &ParseArena, payload: &Payload) -> Result<(), PayloadError> {
+pub fn reject_json_literal_payload(
+    arena: &ParseArena,
+    payload: &Payload,
+) -> Result<(), PayloadError> {
     if let Some(expression) = unwrapped_payload_expression(arena, payload) {
         if let ExpressionDesc::Pexp_constant(constant) = &*expression.pexp_desc
             && let Constant::Json(_) = &**constant
@@ -77,7 +83,10 @@ pub fn semantic_string_of_expression(
 }
 
 /// OCaml `Ast_payload.semantic_string_of_payload`.
-pub fn semantic_string_of_payload(arena: &ParseArena, payload: &Payload) -> Result<Option<String>, PayloadError> {
+pub fn semantic_string_of_payload(
+    arena: &ParseArena,
+    payload: &Payload,
+) -> Result<Option<String>, PayloadError> {
     if let Payload::PStr(items) = payload
         && let [item] = items.as_slice()
         && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
@@ -185,7 +194,9 @@ fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
 fn is_single_ident<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<Option<&'a str>> {
     match &*single_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
-            crate::parser::longident::Longident::Lident(name) => Some(Some(arena.get_string(*name))),
+            crate::parser::longident::Longident::Lident(name) => {
+                Some(Some(arena.get_string(*name)))
+            }
             _ => Some(None),
         },
         _ => None,

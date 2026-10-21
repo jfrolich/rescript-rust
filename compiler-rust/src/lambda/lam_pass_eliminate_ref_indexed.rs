@@ -262,7 +262,10 @@ mod tests {
                     reference.clone(),
                     Lambda::prim(
                         Primitive::Paddint,
-                        vec![Lambda::var(reference.clone()), Lambda::const_(Constant::int(1))],
+                        vec![
+                            Lambda::var(reference.clone()),
+                            Lambda::const_(Constant::int(1)),
+                        ],
                         Location::none(),
                     ),
                 ),
@@ -295,7 +298,8 @@ mod tests {
                 1,
                 vec![parameter.clone()],
                 body,
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             );
             let mut store = IndexedLambda::from_lambda(function);
             let root = store.root();

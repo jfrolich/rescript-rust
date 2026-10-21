@@ -99,12 +99,23 @@ pub fn translate_arrow_type(
                         .unwrap_or_default();
                 match remove_option(label, &arg.typ) {
                     None => {
-                        let label = if as_label.is_empty() { label_name(label) } else { as_label };
+                        let label = if as_label.is_empty() {
+                            label_name(label)
+                        } else {
+                            as_label
+                        };
                         (Label::Label(label), &*arg.typ)
                     }
                     Some((lbl, typ)) => {
-                        let translation =
-                            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &typ);
+                        let translation = translateCoreType_(
+                            ctx,
+                            arena,
+                            config,
+                            type_vars_gen,
+                            false,
+                            type_env,
+                            &typ,
+                        );
                         all_deps.extend(translation.dependencies);
                         labeled_convertable_types.push((Label::OptLabel(lbl), translation.type_));
                         continue;
@@ -112,7 +123,8 @@ pub fn translate_arrow_type(
                 }
             }
         };
-        let translation = translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, typ);
+        let translation =
+            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, typ);
         all_deps.extend(translation.dependencies);
         labeled_convertable_types.push((label, translation.type_));
     }

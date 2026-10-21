@@ -145,7 +145,10 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
                 state.string_table.insert(v.clone(), s.clone());
                 let (simplified_body, _) = simplif(state, *lbody);
-                return (Lambda::let_(LetKind::Alias, v, new_l1, simplified_body), true);
+                return (
+                    Lambda::let_(LetKind::Alias, v, new_l1, simplified_body),
+                    true,
+                );
             }
             let (simplified_body, c2) = simplif(state, *lbody);
             refine_let_original(LetKind::StrictOpt, v, new_l1, simplified_body, !(c1 || c2))
@@ -156,7 +159,11 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
                 let (new_l1, _) = simplif(state, *l1);
                 let (new_l2, _) = simplif(state, *l2);
                 return (
-                    if no_side_effects(&new_l1) { new_l2 } else { Lambda::seq(new_l1, new_l2) },
+                    if no_side_effects(&new_l1) {
+                        new_l2
+                    } else {
+                        Lambda::seq(new_l1, new_l2)
+                    },
                     true,
                 );
             }
@@ -165,7 +172,10 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
                 if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
                     state.string_table.insert(v.clone(), s.clone());
                     let (simplified_body, _) = simplif(state, *l2);
-                    return (Lambda::let_(LetKind::Alias, v, new_l1, simplified_body), true);
+                    return (
+                        Lambda::let_(LetKind::Alias, v, new_l1, simplified_body),
+                        true,
+                    );
                 }
             }
             let (simplified_body, c2) = simplif(state, *l2);
@@ -176,7 +186,9 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             if matches!(apply.ap_func.as_ref(), Lambda::Lfunction(func)
                 if func.params.len() == apply.ap_args.len() && lfunction_can_be_inlined(func)) =>
         {
-            let Apply { ap_func, ap_args, .. } = *apply;
+            let Apply {
+                ap_func, ap_args, ..
+            } = *apply;
             let Lambda::Lfunction(func) = *ap_func else {
                 unreachable!()
             };

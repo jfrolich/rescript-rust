@@ -289,10 +289,14 @@ fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Op
                     Some(codepoint) if add_codepoint(&mut buf, codepoint) => index += 4,
                     _ => return None,
                 },
-                b'u' if index + 2 < len && s[index + 2] == b'{' => match decode_braced_hex(index + 3) {
-                    Some((codepoint, next)) if add_codepoint(&mut buf, codepoint) => index = next,
-                    _ => return None,
-                },
+                b'u' if index + 2 < len && s[index + 2] == b'{' => {
+                    match decode_braced_hex(index + 3) {
+                        Some((codepoint, next)) if add_codepoint(&mut buf, codepoint) => {
+                            index = next
+                        }
+                        _ => return None,
+                    }
+                }
                 b'u' => match decode_fixed_hex(index + 2, 4) {
                     Some(high) if is_high_surrogate(high) => {
                         if index + 7 < len && s[index + 6] == b'\\' && s[index + 7] == b'u' {
@@ -577,7 +581,10 @@ mod tests {
         assert_eq!(decode_js_escapes("\\u{}"), None);
         assert_eq!(decode_js_template_escapes("a${b"), None);
         assert_eq!(decode_js_template_escapes("\\1"), None);
-        assert_eq!(decode_js_template_escapes("a\r\nb").as_deref(), Some("a\nb"));
+        assert_eq!(
+            decode_js_template_escapes("a\r\nb").as_deref(),
+            Some("a\nb")
+        );
     }
 
     #[test]

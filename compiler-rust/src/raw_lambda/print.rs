@@ -352,10 +352,7 @@ fn print_switch_cases_with_exn<W: Write>(
             crate::lambda::SwitchKey::Int(value) => f.print(format_args!("case tag {value}:")),
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                 block,
-            )) => f.print(format_args!(
-                "case constructor {:?}:",
-                block.tag().name
-            )),
+            )) => f.print(format_args!("case constructor {:?}:", block.tag().name)),
             crate::lambda::SwitchKey::Constructor(
                 crate::types::VariantConstructorCase::Constant(_),
             ) => unreachable!("constant key in block cases"),

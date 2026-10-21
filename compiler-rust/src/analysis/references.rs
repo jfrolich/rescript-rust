@@ -18,7 +18,12 @@ fn check_pos((line, char): (i32, i32), loc: &Loc) -> bool {
 
 /// `loc_items_for_pos`, in OCaml's list order (most recently added first).
 pub fn loc_items_for_pos(extra: &Extra, pos: (i32, i32)) -> Vec<&LocItem> {
-    extra.loc_items.iter().rev().filter(|item| check_pos(pos, &item.loc)).collect()
+    extra
+        .loc_items
+        .iter()
+        .rev()
+        .filter(|item| check_pos(pos, &item.loc))
+        .collect()
 }
 
 /// `normalize_external_reference_key`.
@@ -44,7 +49,12 @@ fn is_uncurried_internal(path: &Path) -> bool {
 }
 
 /// `get_loc_item`. `pos` is 0-based.
-pub fn get_loc_item(full: &Loaded, pos: (i32, i32), debug: bool, out: &mut super::Output) -> Option<LocItem> {
+pub fn get_loc_item(
+    full: &Loaded,
+    pos: (i32, i32),
+    debug: bool,
+    out: &mut super::Output,
+) -> Option<LocItem> {
     let log = |out: &mut super::Output, n: i32, msg: &str| {
         if debug {
             out.print(&format!("getLocItem #{n}: {msg}\n"));
@@ -67,11 +77,17 @@ pub fn get_loc_item(full: &Loaded, pos: (i32, i32), debug: bool, out: &mut super
     let items: Vec<LocItem> = loc_items.into_iter().cloned().collect();
     match items.as_slice() {
         [li1, li2, li3, li4, ..]
-            if typed_name(li4).as_deref() == Some("makeProps") && uri::is_interface(&full.file.uri) =>
+            if typed_name(li4).as_deref() == Some("makeProps")
+                && uri::is_interface(&full.file.uri) =>
         {
             log(out, 1, "heuristic for makeProps in interface files");
             if debug {
-                out.print(&format!("n1:{} n2:{} n3:{}\n", name_of(li1), name_of(li2), name_of(li3)));
+                out.print(&format!(
+                    "n1:{} n2:{} n3:{}\n",
+                    name_of(li1),
+                    name_of(li2),
+                    name_of(li3)
+                ));
             }
             Some(li4.clone())
         }
@@ -83,7 +99,8 @@ pub fn get_loc_item(full: &Loaded, pos: (i32, i32), debug: bool, out: &mut super
             Some(li2.clone())
         }
         [li1, li2, ..]
-            if typed_name(li1).as_deref() == Some("makeProps") && typed_name(li2).as_deref() == Some("make") =>
+            if typed_name(li1).as_deref() == Some("makeProps")
+                && typed_name(li2).as_deref() == Some("make") =>
         {
             log(
                 out,
@@ -93,7 +110,9 @@ pub fn get_loc_item(full: &Loaded, pos: (i32, i32), debug: bool, out: &mut super
             Some(li2.clone())
         }
         [li1, li2]
-            if matches!(kind(li1), Some(LocKind::LocalReference(..))) && kind(li2).is_some() && li1.loc == li2.loc =>
+            if matches!(kind(li1), Some(LocKind::LocalReference(..)))
+                && kind(li2).is_some()
+                && li1.loc == li2.loc =>
         {
             log(
                 out,
@@ -214,7 +233,12 @@ pub fn get_constructor<'a>(file: &'a File, stamp: i32, name: &str) -> Option<&'a
 }
 
 /// `exported_for_tip`.
-pub fn exported_for_tip(session: &ProjectSession<'_>, env: &QueryEnv, path: &[String], tip: &Tip) -> Option<(QueryEnv, String, i32)> {
+pub fn exported_for_tip(
+    session: &ProjectSession<'_>,
+    env: &QueryEnv,
+    path: &[String],
+    tip: &Tip,
+) -> Option<(QueryEnv, String, i32)> {
     let (env, name) = resolve_path::resolve_path(session, env, path)?;
     let kind = match tip {
         Tip::Value => ExportedKind::Value,
@@ -234,7 +258,11 @@ pub enum Defined {
 }
 
 /// `defined_for_loc`.
-pub fn defined_for_loc(session: &ProjectSession<'_>, file: &File, loc_kind: &LocKind) -> Option<(Vec<String>, Defined)> {
+pub fn defined_for_loc(
+    session: &ProjectSession<'_>,
+    file: &File,
+    loc_kind: &LocKind,
+) -> Option<(Vec<String>, Defined)> {
     let inner = |file: &File, stamp: i32, tip: &Tip| match tip {
         Tip::Constructor(name) => {
             let constructor = get_constructor(file, stamp, name)?;
@@ -244,7 +272,9 @@ pub fn defined_for_loc(session: &ProjectSession<'_>, file: &File, loc_kind: &Loc
             ))
         }
         Tip::Field(name) => Some((
-            get_field(file, stamp, name).map(|f| f.docstring.clone()).unwrap_or_default(),
+            get_field(file, stamp, name)
+                .map(|f| f.docstring.clone())
+                .unwrap_or_default(),
             Defined::Field,
         )),
         _ => {
@@ -254,7 +284,9 @@ pub fn defined_for_loc(session: &ProjectSession<'_>, file: &File, loc_kind: &Loc
     };
     match loc_kind {
         LocKind::NotFound => None,
-        LocKind::LocalReference(stamp, tip) | LocKind::Definition(stamp, tip) => inner(file, *stamp, tip),
+        LocKind::LocalReference(stamp, tip) | LocKind::Definition(stamp, tip) => {
+            inner(file, *stamp, tip)
+        }
         LocKind::GlobalReference(module_name, path, tip) => {
             let file = session.file_for_module(module_name)?;
             let env = QueryEnv::from_file(file);
@@ -276,7 +308,11 @@ pub fn alternate_declared<'s>(
     let (Some(res), Some(resi)) = (paths.implementation, paths.interface) else {
         return None;
     };
-    let alternate = if uri::is_interface(&file.uri) { res } else { resi };
+    let alternate = if uri::is_interface(&file.uri) {
+        res
+    } else {
+        resi
+    };
     let full = session.full_from_path(&alternate)?;
     let env = QueryEnv::from_file(&full.file);
     let path = declared.module_path.to_path(&declared.name.txt);
@@ -314,7 +350,8 @@ pub fn resolve_module_reference<'s>(
                 Resolution::Exported(env, name) => find(env, &name),
                 Resolution::Global(module_name, path) => {
                     let file = session.file_for_module(&module_name)?;
-                    let (env, name) = resolve_path::resolve_path(session, &QueryEnv::from_file(file), &path)?;
+                    let (env, name) =
+                        resolve_path::resolve_path(session, &QueryEnv::from_file(file), &path)?;
                     find(env, &name)
                 }
                 Resolution::Stamp(stamp) => {
@@ -342,7 +379,11 @@ pub fn resolve_module_reference<'s>(
 pub fn validate_loc(loc: Loc, backup: Loc) -> Loc {
     if loc.start.cnum == -1 {
         if backup.start.cnum == -1 {
-            let pos = Pos { line: 1, bol: 0, cnum: 0 };
+            let pos = Pos {
+                line: 1,
+                bol: 0,
+                cnum: 0,
+            };
             Loc {
                 ghost: true,
                 start: pos,
@@ -358,7 +399,11 @@ pub fn validate_loc(loc: Loc, backup: Loc) -> Loc {
 
 /// `Uri.to_top_level_loc`.
 pub fn top_level_loc() -> Loc {
-    let pos = Pos { line: 1, bol: 0, cnum: 0 };
+    let pos = Pos {
+        line: 1,
+        bol: 0,
+        cnum: 0,
+    };
     Loc {
         start: pos,
         end: pos,
@@ -367,7 +412,11 @@ pub fn top_level_loc() -> Loc {
 }
 
 /// `resolve_module_definition`.
-fn resolve_module_definition(session: &ProjectSession<'_>, file: &File, stamp: i32) -> Option<(String, Loc)> {
+fn resolve_module_definition(
+    session: &ProjectSession<'_>,
+    file: &File,
+    stamp: i32,
+) -> Option<(String, Loc)> {
     let md = file.stamps.find_module(stamp)?;
     // `file` may be the command's own module, which the session also holds.
     let file = session.file(file.module);
@@ -380,15 +429,26 @@ fn resolve_module_definition(session: &ProjectSession<'_>, file: &File, stamp: i
 }
 
 /// `definition`.
-fn definition(session: &ProjectSession<'_>, file: &File, stamp: i32, tip: &Tip) -> Option<(String, Loc)> {
+fn definition(
+    session: &ProjectSession<'_>,
+    file: &File,
+    stamp: i32,
+    tip: &Tip,
+) -> Option<(String, Loc)> {
     match tip {
-        Tip::Constructor(name) => Some((file.uri.clone(), get_constructor(file, stamp, name)?.cname.loc)),
+        Tip::Constructor(name) => Some((
+            file.uri.clone(),
+            get_constructor(file, stamp, name)?.cname.loc,
+        )),
         Tip::Field(name) => Some((file.uri.clone(), get_field(file, stamp, name)?.fname.loc)),
         Tip::Module => resolve_module_definition(session, file, stamp),
         _ => {
             let declared = declared_for_tip(&file.stamps, stamp, tip)?;
-            let (file_impl, declared_impl) = match alternate_declared(session, file, &declared, tip) {
-                Some((full, declared_impl)) if uri::is_interface(&file.uri) => (&full.file, declared_impl),
+            let (file_impl, declared_impl) = match alternate_declared(session, file, &declared, tip)
+            {
+                Some((full, declared_impl)) if uri::is_interface(&file.uri) => {
+                    (&full.file, declared_impl)
+                }
                 _ => (file, declared),
             };
             let loc = validate_loc(declared_impl.name.loc, declared_impl.extent_loc);
@@ -400,7 +460,11 @@ fn definition(session: &ProjectSession<'_>, file: &File, stamp: i32, tip: &Tip) 
 }
 
 /// `definition_for_loc_item`.
-pub fn definition_for_loc_item(session: &ProjectSession<'_>, full: &Loaded, loc_item: &LocItem) -> Option<(String, Loc)> {
+pub fn definition_for_loc_item(
+    session: &ProjectSession<'_>,
+    full: &Loaded,
+    loc_item: &LocItem,
+) -> Option<(String, Loc)> {
     let file = &full.file;
     match &loc_item.loc_type {
         LocType::Typed(_, _, LocKind::Definition(stamp, tip)) => {
@@ -422,7 +486,8 @@ pub fn definition_for_loc_item(session: &ProjectSession<'_>, full: &Loaded, loc_
             let uri = paths.interface.or(paths.implementation)?;
             Some((uri.to_string_lossy().into_owned(), top_level_loc()))
         }
-        LocType::LModule(LocKind::LocalReference(stamp, tip)) | LocType::Typed(_, _, LocKind::LocalReference(stamp, tip)) => {
+        LocType::LModule(LocKind::LocalReference(stamp, tip))
+        | LocType::Typed(_, _, LocKind::LocalReference(stamp, tip)) => {
             definition(session, file, *stamp, tip)
         }
         LocType::LModule(LocKind::GlobalReference(module_name, path, tip))
@@ -436,7 +501,11 @@ pub fn definition_for_loc_item(session: &ProjectSession<'_>, full: &Loaded, loc_
 }
 
 /// `dig_constructor`.
-pub fn dig_constructor<'s>(session: &'s ProjectSession<'_>, env: &QueryEnv, path: &Path) -> Option<(QueryEnv, &'s Declared<Type>)> {
+pub fn dig_constructor<'s>(
+    session: &'s ProjectSession<'_>,
+    env: &QueryEnv,
+    path: &Path,
+) -> Option<(QueryEnv, &'s Declared<Type>)> {
     match resolve_path::resolve_from_compiler_path(session, env, path) {
         Resolution::Stamp(stamp) => {
             let t = session.file(env.file).stamps.find_type(stamp)?;
@@ -452,7 +521,11 @@ pub fn dig_constructor<'s>(session: &'s ProjectSession<'_>, env: &QueryEnv, path
 }
 
 /// `type_definition_for_loc_item`.
-pub fn type_definition_for_loc_item(session: &ProjectSession<'_>, full: &Loaded, loc_item: &LocItem) -> Option<(String, Loc)> {
+pub fn type_definition_for_loc_item(
+    session: &ProjectSession<'_>,
+    full: &Loaded,
+    loc_item: &LocItem,
+) -> Option<(String, Loc)> {
     match &loc_item.loc_type {
         LocType::Constant(_) | LocType::TopLevelModule(_) | LocType::LModule(_) => None,
         LocType::TypeDefinition(..) => Some((full.file.uri.clone(), loc_item.loc)),
@@ -503,7 +576,12 @@ fn local_stamp(file: &File, stamp: i32, tip: &Tip) -> Option<i32> {
 }
 
 /// `for_local_stamp`.
-fn for_local_stamp(session: &ProjectSession<'_>, full: &Loaded, stamp: i32, tip: &Tip) -> Vec<Reference> {
+fn for_local_stamp(
+    session: &ProjectSession<'_>,
+    full: &Loaded,
+    stamp: i32,
+    tip: &Tip,
+) -> Vec<Reference> {
     let file = &full.file;
     let Some(local) = local_stamp(file, stamp, tip) else {
         return Vec::new();
@@ -533,7 +611,11 @@ fn for_local_stamp(session: &ProjectSession<'_>, full: &Loaded, stamp: i32, tip:
                     continue;
                 }
                 for other in session.fulls_from_module(&module_name) {
-                    if let Some(refs) = other.extra.external_references.find(&normalized_module_name) {
+                    if let Some(refs) = other
+                        .extra
+                        .external_references
+                        .find(&normalized_module_name)
+                    {
                         for (p, t, loc) in refs {
                             if *p == normalized_path && t == tip {
                                 externals.push(Reference {
@@ -562,7 +644,11 @@ fn for_local_stamp(session: &ProjectSession<'_>, full: &Loaded, stamp: i32, tip:
 }
 
 /// `all_references_for_loc_item`.
-pub fn all_references_for_loc_item(session: &ProjectSession<'_>, full: &Loaded, loc_item: &LocItem) -> Vec<Reference> {
+pub fn all_references_for_loc_item(
+    session: &ProjectSession<'_>,
+    full: &Loaded,
+    loc_item: &LocItem,
+) -> Vec<Reference> {
     match &loc_item.loc_type {
         LocType::TopLevelModule(module_name) => {
             let mut other_modules_references = Vec::new();
@@ -579,24 +665,31 @@ pub fn all_references_for_loc_item(session: &ProjectSession<'_>, full: &Loaded, 
                     }
                 }
             }
-            let mut references: Vec<Reference> = match session.project().paths_for_module(module_name) {
-                None => Vec::new(),
-                Some(paths) => paths
-                    .interface
-                    .into_iter()
-                    .chain(paths.implementation)
-                    .map(|src| Reference {
-                        uri: src.to_string_lossy().into_owned(),
-                        loc: None,
-                    })
-                    .collect(),
-            };
+            let mut references: Vec<Reference> =
+                match session.project().paths_for_module(module_name) {
+                    None => Vec::new(),
+                    Some(paths) => paths
+                        .interface
+                        .into_iter()
+                        .chain(paths.implementation)
+                        .map(|src| Reference {
+                            uri: src.to_string_lossy().into_owned(),
+                            loc: None,
+                        })
+                        .collect(),
+                };
             references.extend(other_modules_references);
             references
         }
-        LocType::Typed(_, _, LocKind::NotFound) | LocType::LModule(LocKind::NotFound) | LocType::Constant(_) => Vec::new(),
+        LocType::Typed(_, _, LocKind::NotFound)
+        | LocType::LModule(LocKind::NotFound)
+        | LocType::Constant(_) => Vec::new(),
         LocType::TypeDefinition(_, _, stamp) => for_local_stamp(session, full, *stamp, &Tip::Type),
-        LocType::Typed(_, _, LocKind::LocalReference(stamp, tip) | LocKind::Definition(stamp, tip))
+        LocType::Typed(
+            _,
+            _,
+            LocKind::LocalReference(stamp, tip) | LocKind::Definition(stamp, tip),
+        )
         | LocType::LModule(LocKind::LocalReference(stamp, tip) | LocKind::Definition(stamp, tip)) => {
             for_local_stamp(session, full, *stamp, tip)
         }

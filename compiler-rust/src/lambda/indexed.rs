@@ -1514,7 +1514,8 @@ mod tests {
                 ap_info: info,
                 ap_transformed_jsx: true,
             })),
-            Lambda::Lfunction(Box::new(LFunction { loc: crate::location::Location::none(),
+            Lambda::Lfunction(Box::new(LFunction {
+                loc: crate::location::Location::none(),
                 arity: 2,
                 params: vec![x.clone(), y.clone()],
                 body: Box::new(var()),

@@ -76,31 +76,35 @@ impl LambdaCompiler {
                     unreachable!()
                 };
                 match &tag.runtime_tag {
-                Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
-                // OCaml `Js_exp_make.tag_type`: `String s -> str s`.
-                Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str(value.clone())),
-                Some(ConstructorRuntimeTag::Float(value)) => {
-                    Expression::number(Number::float(value.clone()))
+                    Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
+                    // OCaml `Js_exp_make.tag_type`: `String s -> str s`.
+                    Some(ConstructorRuntimeTag::String(value)) => {
+                        Expression::new(ExpressionDesc::Str(value.clone()))
+                    }
+                    Some(ConstructorRuntimeTag::Float(value)) => {
+                        Expression::number(Number::float(value.clone()))
+                    }
+                    Some(ConstructorRuntimeTag::BigInt(value)) => {
+                        Expression::number(Number::bigint(true, value.clone()))
+                    }
+                    Some(ConstructorRuntimeTag::Bool(value)) => Expression::bool(*value),
+                    Some(ConstructorRuntimeTag::Null) => Expression::null(),
+                    Some(ConstructorRuntimeTag::Undefined) => Expression::undefined(false),
+                    None if tag.name != "[]" => Expression::string(tag.name.clone()),
+                    None => Expression::with_comment(
+                        ExpressionDesc::Number(Number::int(*i)),
+                        tag.name.clone(),
+                    ),
                 }
-                Some(ConstructorRuntimeTag::BigInt(value)) => {
-                    Expression::number(Number::bigint(true, value.clone()))
-                }
-                Some(ConstructorRuntimeTag::Bool(value)) => Expression::bool(*value),
-                Some(ConstructorRuntimeTag::Null) => Expression::null(),
-                Some(ConstructorRuntimeTag::Undefined) => Expression::undefined(false),
-                None if tag.name != "[]" => Expression::string(tag.name.clone()),
-                None => Expression::with_comment(
-                    ExpressionDesc::Number(Number::int(*i)),
-                    tag.name.clone(),
-                ),
             }
-            },
-            Constant::Int { i, comment } => match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
-                Some(comment) => {
-                    Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
+            Constant::Int { i, comment } => {
+                match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {
+                    Some(comment) => {
+                        Expression::with_comment(ExpressionDesc::Number(Number::int(*i)), comment)
+                    }
+                    None => Expression::number(Number::int(*i)),
                 }
-                None => Expression::number(Number::int(*i)),
-            },
+            }
             Constant::Constructor(tag) => match &tag.literal {
                 Some(crate::types::VariantLiteralTag::Int(value)) => {
                     Expression::number(Number::int(*value as i32))

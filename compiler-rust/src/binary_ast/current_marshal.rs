@@ -14,16 +14,16 @@ use super::marshal::{EmptyPayloadShareKind, MarshalWriter, PrimListShareKind};
 use super::serialize::Marshal;
 use crate::parse_arena::LocIdx;
 use crate::parser::ast::{
-    PrimitiveRepr, ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments, ConstructorTag,
-    ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
-    ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind, FunParam,
-    IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
-    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag,
-    ObjectField, OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload,
-    PexpApply, PexpFun, PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem,
-    SignatureItemDesc, StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
-    TypeExtension, TypeKind, ValueBinding, ValueConstraint, ValueDescription, Variance,
-    WithConstraint,
+    ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
+    ConstructorDeclaration, ConstructorTag, CoreType, CoreTypeDesc, DirectionFlag, Expression,
+    ExpressionDesc, ExpressionRecordField, Extension, ExtensionConstructor,
+    ExtensionConstructorKind, FunParam, IncludeDeclaration, IncludeDescription, LabelDeclaration,
+    ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
+    ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField, OpenDescription, OverrideFlag,
+    Pattern, PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, PrimitiveRepr,
+    PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem, SignatureItemDesc, StringLoc,
+    StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
+    ValueBinding, ValueConstraint, ValueDescription, Variance, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -817,7 +817,10 @@ impl Marshal for Arity {
 
 /// `String_literal.payload`: `Valid {source; semantic}` is tag 0, and
 /// `Invalid_source of string` is tag 1.
-fn marshal_string_literal(payload: &crate::string_literal::StringLiteral, w: &mut MarshalWriter<'_>) {
+fn marshal_string_literal(
+    payload: &crate::string_literal::StringLiteral,
+    w: &mut MarshalWriter<'_>,
+) {
     match payload {
         crate::string_literal::StringLiteral::Valid { source, semantic } => {
             w.write_block_header(0, 2);
@@ -2206,12 +2209,18 @@ fn marshal_prim(prim: &Option<PrimitiveRepr>, w: &mut MarshalWriter<'_>) {
     // while many other prim strings are physically shared.
     let share_by_idx = {
         let prim_str = w.get_arena().get_string(prim);
-        !prim_str.contains('-') && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
+        !prim_str.contains('-')
+            && !matches!(prim_str, "open" | "type" | "begin" | "end" | "in" | "to")
     };
     if share_by_idx {
         w.write_str_idx(prim);
     } else {
-        let prim_bytes: Vec<u8> = w.get_arena().get_string(prim).chars().map(|c| c as u8).collect();
+        let prim_bytes: Vec<u8> = w
+            .get_arena()
+            .get_string(prim)
+            .chars()
+            .map(|c| c as u8)
+            .collect();
         w.write_string(&prim_bytes);
     }
 }

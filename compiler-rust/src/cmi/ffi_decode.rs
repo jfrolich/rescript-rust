@@ -99,7 +99,9 @@ fn label(value: &OcamlValue) -> Option<Label> {
     match value {
         OcamlValue::Int(0) => Some(Label::ObjEmpty),
         _ => match value.as_block_opt()? {
-            (0, [name]) => Some(Label::ObjLabel { name: string(name)? }),
+            (0, [name]) => Some(Label::ObjLabel {
+                name: string(name)?,
+            }),
             (1, [name, sure]) => Some(Label::ObjOptional {
                 name: string(name)?,
                 for_sure_no_nested_option: int(sure)? != 0,

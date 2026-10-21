@@ -93,7 +93,8 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
                 1,
                 vec![param.clone()],
                 Lambda::var(param),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             ),
         )]))),
     );
@@ -153,7 +154,8 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
                     exception.clone(),
                     Box::new(Lambda::unit()),
                 ),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             ),
         )]))),
     );
@@ -208,7 +210,8 @@ fn rejected_cmj_does_not_import_and_lowers_arguments_after_arity_query_rtl() {
                 2,
                 vec![Ident::create_persistent("a"), Ident::create_persistent("b")],
                 Lambda::unit(),
-                attr, crate::location::Location::none(),
+                attr,
+                crate::location::Location::none(),
             ),
         )]))),
     );
@@ -491,7 +494,8 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
                 directive: Some("use server".into()),
                 return_unit: true,
                 ..FunctionAttribute::default()
-            }, crate::location::Location::none(),
+            },
+            crate::location::Location::none(),
         ),
         [],
     );
@@ -669,8 +673,8 @@ fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() 
 
 #[test]
 fn indexed_output_keeps_native_finished_and_dummy_append_protocol() {
-    use super::output::{Finished, Output};
     use super::context::{Continuation, TailType};
+    use super::output::{Finished, Output};
     let first = Output {
         block: vec![Statement::break_()],
         value: Some(Expression::call(

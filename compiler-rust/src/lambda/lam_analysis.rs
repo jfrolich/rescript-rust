@@ -578,7 +578,8 @@ mod tests {
             1,
             vec![Ident::create_local("x")],
             Lambda::const_(Constant::int(1)),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         assert!(no_side_effects(&func));
     }
@@ -753,7 +754,8 @@ mod tests {
     #[test]
     fn test_lfunction_can_be_inlined() {
         // Normal function can be inlined
-        let func = LFunction { loc: crate::location::Location::none(),
+        let func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -762,7 +764,8 @@ mod tests {
         assert!(lfunction_can_be_inlined(&func));
 
         // Async function cannot be inlined
-        let async_func = LFunction { loc: crate::location::Location::none(),
+        let async_func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -774,7 +777,8 @@ mod tests {
         assert!(!lfunction_can_be_inlined(&async_func));
 
         // Function with directive cannot be inlined
-        let directive_func = LFunction { loc: crate::location::Location::none(),
+        let directive_func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -793,7 +797,8 @@ mod tests {
             1,
             vec![Ident::create_local("x")],
             Lambda::const_(Constant::int(1)),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         assert!(safe_to_inline(&func));
 
@@ -851,7 +856,8 @@ mod tests {
                 crate::location::Location::none(),
             )
         };
-        let func = LFunction { loc: crate::location::Location::none(),
+        let func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![checked.clone()],
             body: Box::new(Lambda::if_(Lambda::var(checked), branch(), branch())),
@@ -876,7 +882,8 @@ mod tests {
     #[test]
     fn test_ok_to_inline_fun_when_app_folds_switch_on_constant_scrutinee_like_ocaml() {
         let x = Ident::create_local("x");
-        let func = LFunction { loc: crate::location::Location::none(),
+        let func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![x.clone()],
             body: Box::new(Lambda::Lswitch(

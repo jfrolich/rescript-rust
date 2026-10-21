@@ -4,10 +4,10 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{
-    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr,
-    is_nullish_literal, is_optional_block, is_pure_subexpression,
-    js_expr_no_side_effects, js_seq, poly_var_tag_access, poly_var_value_access,
-    remove_pure_subexpression, runtime_member_for_eta_wrapped_primitive, string_switch_iife,
+    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, is_nullish_literal,
+    is_optional_block, is_pure_subexpression, js_expr_no_side_effects, js_seq, poly_var_tag_access,
+    poly_var_value_access, remove_pure_subexpression, runtime_member_for_eta_wrapped_primitive,
+    string_switch_iife,
 };
 use super::lam_compile::{
     Compiled, ExternalModuleCacheKey, LambdaCompiler, call_info_of_apply_status,
@@ -17,17 +17,17 @@ use crate::ident::Ident;
 use crate::js_ir::op::{
     IdentInfo, ImportAttributes as JsImportAttributes, Kind, Number, PropertyName, UsedStats,
 };
+use crate::js_ir::printer::js_export_name;
 use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
-    VIdent, VariableDeclaration, expression_has_no_side_effects,
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc, VIdent,
+    VariableDeclaration, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
-use crate::js_ir::printer::js_export_name;
 use crate::lambda::lam_primitive::{
-    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label,
-    LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
+    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
+    ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 use crate::lambda::{ApplyStatus, Lambda, TagInfo};
 use crate::location::Location;
@@ -176,15 +176,15 @@ impl LambdaCompiler {
             ExpressionDesc::CamlBlock(items, _, tag)
                 if matches!(**tag, TagInfo::PolyVar(_))
                     && matches!(
-                    items.as_slice(),
-                    [
-                        Expression {
-                            desc: ExpressionDesc::Str(_),
-                            ..
-                        },
-                        value,
-                    ] if expression_has_no_side_effects(value)
-                ) =>
+                        items.as_slice(),
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Str(_),
+                                ..
+                            },
+                            value,
+                        ] if expression_has_no_side_effects(value)
+                    ) =>
             {
                 let [
                     Expression {
@@ -296,9 +296,9 @@ impl LambdaCompiler {
             return None;
         };
         if func.params.len() != args.len()
-            || !func.params.iter().zip(args.iter()).all(|(param, arg)| {
-                matches!(arg.view(), LambdaInputView::Var(id) if id.same(param))
-            })
+            || !func.params.iter().zip(args.iter()).all(
+                |(param, arg)| matches!(arg.view(), LambdaInputView::Var(id) if id.same(param)),
+            )
         {
             return None;
         }
@@ -632,8 +632,8 @@ impl LambdaCompiler {
         arg_type: &Attr,
     ) -> (Vec<Expression>, Option<Expression>) {
         // Only `Unwrap` of an optional argument reads the raw argument again.
-        let keep_raw = matches!(arg_type, Attr::Unwrap)
-            && matches!(arg_label, LabelNoname::ArgOptional);
+        let keep_raw =
+            matches!(arg_type, Attr::Unwrap) && matches!(arg_label, LabelNoname::ArgOptional);
         let (arg, raw_arg) = match arg_label {
             LabelNoname::ArgOptional => {
                 let raw_copy = keep_raw.then(|| raw_arg.clone());
@@ -661,9 +661,7 @@ impl LambdaCompiler {
                 self.external_polyvar_event_exprs(arg, descr.as_deref()),
                 None,
             ),
-            Attr::Int(dispatches) => {
-                (vec![self.external_polyvar_int_expr(arg, dispatches)], None)
-            }
+            Attr::Int(dispatches) => (vec![self.external_polyvar_int_expr(arg, dispatches)], None),
             Attr::Unwrap => {
                 let value = match arg_label {
                     LabelNoname::ArgOptional => self.external_option_unwrap_expr(
@@ -1149,7 +1147,11 @@ impl LambdaCompiler {
             async_: false,
             directive: None,
         });
-        Expression::call(self.static_index(import, "then"), vec![callback], CallInfo::default())
+        Expression::call(
+            self.static_index(import, "then"),
+            vec![callback],
+            CallInfo::default(),
+        )
     }
 
     fn import_of_path(path: String) -> Expression {
@@ -1188,12 +1190,9 @@ impl LambdaCompiler {
                     _ => {
                         // a nested path is importable when the target is a
                         // hoisted root-level export; the cmj knows
-                        let hoisted = self
-                            .module_path_resolver
-                            .as_ref()
-                            .and_then(|resolver| {
-                                resolver.module_cmj_hoisted_export(module_.name(), path)
-                            });
+                        let hoisted = self.module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_hoisted_export(module_.name(), path)
+                        });
                         match hoisted {
                             Some(hoisted_name) => {
                                 self.wrap_then_path(import, &[js_export_name(&hoisted_name)])

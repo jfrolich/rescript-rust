@@ -1060,7 +1060,8 @@ mod tests {
                 vec![Lambda::var(p.clone())],
                 Location::none(),
             ),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         for (flag, should_inline) in [
             (crate::lambda::lam_compile_context::RecFlag::Rec, true),
@@ -1111,8 +1112,13 @@ mod tests {
         );
 
         let free = id("free", 3);
-        let open_function =
-            Lambda::function_(1, vec![p], Lambda::var(free), FunctionAttribute::default(), crate::location::Location::none());
+        let open_function = Lambda::function_(
+            1,
+            vec![p],
+            Lambda::var(free),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
+        );
         let mut open = context_with_function(
             f.clone(),
             open_function.clone(),
@@ -1148,7 +1154,13 @@ mod tests {
             },
         ];
         for attr in variants {
-            let function = Lambda::function_(1, vec![x.clone()], Lambda::var(x.clone()), attr, crate::location::Location::none());
+            let function = Lambda::function_(
+                1,
+                vec![x.clone()],
+                Lambda::var(x.clone()),
+                attr,
+                crate::location::Location::none(),
+            );
             let input = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(function),
                 ap_args: vec![int(1)],
@@ -1163,7 +1175,8 @@ mod tests {
             2,
             vec![x.clone(), id("y", 2)],
             Lambda::var(x),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let input = Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
@@ -1193,7 +1206,8 @@ mod tests {
             1,
             vec![parameter.clone()],
             Lambda::if_(Lambda::var(parameter), int(7), int(8)),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let mut external = |id: &Ident, field: &str| {
             calls.push((id.name().to_string(), field.to_string()));
@@ -1262,7 +1276,13 @@ mod tests {
                 argument_loc.clone(),
             );
             let input = apply(
-                Lambda::function_(1, vec![x], body, FunctionAttribute::default(), crate::location::Location::none()),
+                Lambda::function_(
+                    1,
+                    vec![x],
+                    body,
+                    FunctionAttribute::default(),
+                    crate::location::Location::none(),
+                ),
                 vec![argument.clone()],
                 false,
             );
@@ -1297,7 +1317,8 @@ mod tests {
         let x = id("x", 1);
         let callee = id("callee", 2);
         let input = apply(
-            Lambda::Lfunction(Box::new(LFunction { loc: crate::location::Location::none(),
+            Lambda::Lfunction(Box::new(LFunction {
+                loc: crate::location::Location::none(),
                 arity: 1,
                 params: vec![x.clone()],
                 body: Box::new(apply(
@@ -1336,7 +1357,13 @@ mod tests {
             Location::none(),
         );
         let input = apply(
-            Lambda::function_(1, vec![x], body, FunctionAttribute::default(), crate::location::Location::none()),
+            Lambda::function_(
+                1,
+                vec![x],
+                body,
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
+            ),
             vec![argument.clone()],
             false,
         );
@@ -1469,7 +1496,8 @@ mod tests {
                 vec![Lambda::var(x.clone())],
                 Location::none(),
             ),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let raised = Lambda::static_raise(7, vec![int(9)]);
         let caught = Lambda::static_catch(

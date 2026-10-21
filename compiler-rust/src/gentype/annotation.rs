@@ -91,10 +91,16 @@ pub fn tag_is_intern_local(s: &str) -> bool {
 
 fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> {
     // Mirrors compiler/gentype/Annotation.ml:43-68.
-    if let Some(s) = crate::ast_payload::semantic_string_of_expression(arena, expr).ok().flatten() {
+    if let Some(s) = crate::ast_payload::semantic_string_of_expression(arena, expr)
+        .ok()
+        .flatten()
+    {
         return Some(AttributePayload::StringPayload(s));
     }
-    match crate::ast_payload::unwrap_braces(arena, expr).pexp_desc.as_ref() {
+    match crate::ast_payload::unwrap_braces(arena, expr)
+        .pexp_desc
+        .as_ref()
+    {
         ExpressionDesc::Pexp_constant(constant) => match constant.as_ref() {
             Constant::Integer(n, _) => Some(AttributePayload::IntPayload(n.to_string())),
             Constant::Float(s, _) => Some(AttributePayload::FloatPayload(s.to_string())),

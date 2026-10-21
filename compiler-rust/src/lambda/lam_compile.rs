@@ -640,33 +640,33 @@ impl LambdaCompiler {
                     Option<Arc<AHashMap<String, CmjExportArity>>>,
                 > = HashMap::new();
                 let mut external_inline = |module_id: &Ident, field_name: &str| {
-                        if !cross_module_inline {
-                            return None;
-                        }
-                        if !cmj_lambda_cache.contains_key(module_id.name()) {
-                            let lambdas = module_path_resolver.as_ref().and_then(|resolver| {
-                                resolver.module_cmj_export_lambdas(module_id.name())
-                            });
-                            cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
-                        }
-                        cmj_lambda_cache
-                            .get(module_id.name())
-                            .and_then(|exports| exports.as_ref())
-                            .and_then(|exports| exports.get(field_name).cloned())
-                    };
+                    if !cross_module_inline {
+                        return None;
+                    }
+                    if !cmj_lambda_cache.contains_key(module_id.name()) {
+                        let lambdas = module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_export_lambdas(module_id.name())
+                        });
+                        cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
+                    }
+                    cmj_lambda_cache
+                        .get(module_id.name())
+                        .and_then(|exports| exports.as_ref())
+                        .and_then(|exports| exports.get(field_name).cloned())
+                };
                 let mut external_arity = |module_id: &Ident, field_name: &str| {
-                        if !cmj_arity_cache.contains_key(module_id.name()) {
-                            let arities = module_path_resolver.as_ref().and_then(|resolver| {
-                                resolver.module_cmj_export_arities(module_id.name())
-                            });
-                            cmj_arity_cache.insert(module_id.name().to_string(), arities);
-                        }
-                        cmj_arity_cache
-                            .get(module_id.name())
-                            .and_then(|exports| exports.as_ref())
-                            .and_then(|exports| exports.get(field_name).cloned())
-                            .map(cmj_export_arity_to_external)
-                    };
+                    if !cmj_arity_cache.contains_key(module_id.name()) {
+                        let arities = module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_export_arities(module_id.name())
+                        });
+                        cmj_arity_cache.insert(module_id.name().to_string(), arities);
+                    }
+                    cmj_arity_cache
+                        .get(module_id.name())
+                        .and_then(|exports| exports.as_ref())
+                        .and_then(|exports| exports.get(field_name).cloned())
+                        .map(cmj_export_arity_to_external)
+                };
                 crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_and_meta_owned(
                     lam,
                     jsx_preserve,
@@ -1172,15 +1172,15 @@ impl LambdaCompiler {
     }
 
     fn module_field_apply_target<'a>(&self, lam: &'a Lambda) -> Option<(ModuleId, &'a str)> {
-        let Lambda::Lprim(__prim202) = lam
-        else {
+        let Lambda::Lprim(__prim202) = lam else {
             return None;
         };
         let crate::lambda::PrimInfo {
             primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
             args,
             ..
-        } = __prim202.as_ref() else {
+        } = __prim202.as_ref()
+        else {
             return None;
         };
         let [Lambda::LglobalModule(id)] = args.as_slice() else {
@@ -1271,8 +1271,7 @@ impl LambdaCompiler {
             let [base] = field_args.as_slice() else {
                 return None;
             };
-            let NodeSnapshot::GlobalModule(id) = context.store().snapshot(*base)
-            else {
+            let NodeSnapshot::GlobalModule(id) = context.store().snapshot(*base) else {
                 return None;
             };
             (
@@ -1451,18 +1450,21 @@ impl LambdaCompiler {
     ) -> bool {
         match lam {
             Lambda::Lsequence(set, rest) => match set.as_ref() {
-                Lambda::Lprim(__prim5) if matches!(__prim5.as_ref(), PrimInfo {
+                Lambda::Lprim(__prim5)
+                    if matches!(__prim5.as_ref(), PrimInfo {
                     primitive: Primitive::Psetfield(_, field_info),
                     args,
                     ..
-                } if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id)) => {
-            let PrimInfo {
-                    primitive: Primitive::Psetfield(_, field_info),
-                    args,
-                    ..
-                } = __prim5.as_ref() else {
-                unreachable!()
-            };
+                } if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id)) =>
+                {
+                    let PrimInfo {
+                        primitive: Primitive::Psetfield(_, field_info),
+                        args,
+                        ..
+                    } = __prim5.as_ref()
+                    else {
+                        unreachable!()
+                    };
 
                     overrides.push((field_info, &args[1]));
                     Self::collect_record_spread_overrides(copy_id, rest, overrides)
@@ -1484,15 +1486,15 @@ impl LambdaCompiler {
         value: &Lambda,
         body: &Lambda,
     ) -> Option<Compiled> {
-        let Lambda::Lprim(__prim201) = value
-        else {
+        let Lambda::Lprim(__prim201) = value else {
             return None;
         };
         let PrimInfo {
             primitive: Primitive::Pduprecord,
             args,
             loc,
-        } = __prim201.as_ref() else {
+        } = __prim201.as_ref()
+        else {
             return None;
         };
         let [init] = args.as_slice() else {
@@ -1615,9 +1617,7 @@ impl LambdaCompiler {
                 // expression context.
                 let is_top_level_let = matches!(
                     body.as_ref(),
-                    Lambda::Llet(..)
-                        | Lambda::Lletrec(..)
-                        | Lambda::Lsequence(..)
+                    Lambda::Llet(..) | Lambda::Lletrec(..) | Lambda::Lsequence(..)
                 ) || matches!(
                     body.as_ref(),
                     Lambda::Lprim(prim)
@@ -1648,9 +1648,7 @@ impl LambdaCompiler {
                 // `loop_label_counter` (`lam_compile_main.ml:77`).
                 let is_top_level = matches!(
                     body.as_ref(),
-                    Lambda::Llet(..)
-                        | Lambda::Lletrec(..)
-                        | Lambda::Lsequence(..)
+                    Lambda::Llet(..) | Lambda::Lletrec(..) | Lambda::Lsequence(..)
                 ) || matches!(
                     body.as_ref(),
                     Lambda::Lprim(prim)
@@ -1806,9 +1804,7 @@ impl LambdaCompiler {
                 // groups (`lam_compile_main.ml:86`).
                 let head_is_top_level = matches!(
                     b.as_ref(),
-                    Lambda::Llet(..)
-                        | Lambda::Lletrec(..)
-                        | Lambda::Lsequence(..)
+                    Lambda::Llet(..) | Lambda::Lletrec(..) | Lambda::Lsequence(..)
                 ) || matches!(
                     b.as_ref(),
                     Lambda::Lprim(prim)
@@ -3695,7 +3691,9 @@ impl LambdaCompiler {
     ) -> Expression {
         let has_self_tailcall = function_has_self_tailcall(tail_targets, &func.body);
         if !has_self_tailcall {
-            return self.compile_expr(&Lambda::Lfunction(Box::new(func.clone()))).expr;
+            return self
+                .compile_expr(&Lambda::Lfunction(Box::new(func.clone())))
+                .expr;
         }
 
         let params = if func.attr.one_unit_arg {
@@ -3707,7 +3705,9 @@ impl LambdaCompiler {
         let body = self.compile_tail_loop_return_block(&func.body, &mut tail_loop);
 
         if !tail_loop.triggered {
-            return self.compile_expr(&Lambda::Lfunction(Box::new(func.clone()))).expr;
+            return self
+                .compile_expr(&Lambda::Lfunction(Box::new(func.clone())))
+                .expr;
         }
 
         let lowered_params = params
@@ -4074,7 +4074,11 @@ impl LambdaCompiler {
             let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
-                cases.push((tag.clone(), self.empty_switch_case_clause_for(case_lam), group_falls_through));
+                cases.push((
+                    tag.clone(),
+                    self.empty_switch_case_clause_for(case_lam),
+                    group_falls_through,
+                ));
             }
             cases.push((
                 grouped_cases[group_end].0.clone(),
@@ -5009,7 +5013,9 @@ impl LambdaCompiler {
             }
             // compile_sequand / compile_sequor with an `Assign v` continuation
             // (lam_compile.ml:1138-1210).
-            Lambda::Lprim(info) if short_circuit_primitive(&info.primitive, &info.args).is_some() => {
+            Lambda::Lprim(info)
+                if short_circuit_primitive(&info.primitive, &info.args).is_some() =>
+            {
                 let (op, lhs, rhs) =
                     short_circuit_primitive(&info.primitive, &info.args).expect("checked above");
                 let lhs_compiled = self.compile_expr(lhs);
@@ -5027,7 +5033,11 @@ impl LambdaCompiler {
                         ShortCircuitOp::And => BinOp::And,
                         ShortCircuitOp::Or => BinOp::Or,
                     };
-                    block.push(assign(Expression::bin(op, lhs_compiled.expr, rhs_compiled.expr)));
+                    block.push(assign(Expression::bin(
+                        op,
+                        lhs_compiled.expr,
+                        rhs_compiled.expr,
+                    )));
                     return block;
                 }
                 let mut rhs_block = rhs_compiled.prelude;
@@ -5189,13 +5199,10 @@ impl LambdaCompiler {
             })
             .collect();
 
-        let default_block = switch
-            .sw_failaction
-            .as_ref()
-            .map(|fallback| {
-                let block = self.compile_assign_to_target_block(result, fallback);
-                self.with_block_source_loc(fallback, block)
-            });
+        let default_block = switch.sw_failaction.as_ref().map(|fallback| {
+            let block = self.compile_assign_to_target_block(result, fallback);
+            self.with_block_source_loc(fallback, block)
+        });
 
         block.push(Statement::new(StatementDesc::IntSwitch(
             scrut_compiled.expr,
@@ -5263,11 +5270,10 @@ impl LambdaCompiler {
             })
             .collect();
 
-        let default_block =
-            default.map(|fallback| {
-                let block = self.compile_assign_to_target_block(result, fallback);
-                self.with_block_source_loc(fallback, block)
-            });
+        let default_block = default.map(|fallback| {
+            let block = self.compile_assign_to_target_block(result, fallback);
+            self.with_block_source_loc(fallback, block)
+        });
 
         block.push(Statement::new(StatementDesc::StringSwitch(
             scrut_compiled.expr,
@@ -5333,7 +5339,11 @@ impl LambdaCompiler {
             let should_break = self.return_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
-                cases.push((tag.clone(), self.empty_switch_case_clause_for(case_lam), group_falls_through));
+                cases.push((
+                    tag.clone(),
+                    self.empty_switch_case_clause_for(case_lam),
+                    group_falls_through,
+                ));
             }
             cases.push((
                 grouped_cases[group_end].0.clone(),
@@ -6811,28 +6821,31 @@ fn lower_ocaml_for_range_direction<'a>(
     finish: &'a Lambda,
 ) -> (&'a Lambda, ForDirection) {
     match (direction, finish) {
-        (
-            crate::lambda::DirectionFlag::Upto,
-            Lambda::Lprim(__prim3),
-        ) if matches!(__prim3.as_ref(), crate::lambda::PrimInfo {
-                primitive: Primitive::Psubint,
-                args,
-                ..
-            }) => {
+        (crate::lambda::DirectionFlag::Upto, Lambda::Lprim(__prim3))
+            if matches!(
+                __prim3.as_ref(),
+                crate::lambda::PrimInfo {
+                    primitive: Primitive::Psubint,
+                    args,
+                    ..
+                }
+            ) =>
+        {
             let crate::lambda::PrimInfo {
                 primitive: Primitive::Psubint,
                 args,
                 ..
-            } = __prim3.as_ref() else {
+            } = __prim3.as_ref()
+            else {
                 unreachable!()
             };
             match args.as_slice() {
-            [new_finish, Lambda::Lconst(Constant::Int { i: 1, .. })] => {
-                (new_finish, ForDirection::Up)
+                [new_finish, Lambda::Lconst(Constant::Int { i: 1, .. })] => {
+                    (new_finish, ForDirection::Up)
+                }
+                _ => (finish, ForDirection::Upto),
             }
-            _ => (finish, ForDirection::Upto),
         }
-        },
         (crate::lambda::DirectionFlag::Upto, _) => (finish, ForDirection::Upto),
         (crate::lambda::DirectionFlag::Downto, _) => (finish, ForDirection::Downto),
     }
@@ -7415,12 +7428,14 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                         .unwrap_or(arg),
                     _ => arg,
                 };
-                if let Lambda::Lprim(__prim200) = value && let PrimInfo {
-                    primitive:
-                        Primitive::Pmakeblock(_, crate::lambda::lam_primitive::Mutable::Immutable),
-                    args,
-                    ..
-                } = __prim200.as_ref() {
+                if let Lambda::Lprim(__prim200) = value
+                    && let PrimInfo {
+                        primitive:
+                            Primitive::Pmakeblock(_, crate::lambda::lam_primitive::Mutable::Immutable),
+                        args,
+                        ..
+                    } = __prim200.as_ref()
+                {
                     let submodule_arities = args
                         .iter()
                         .map(|lam| get_arity(&meta, lam))
@@ -7452,20 +7467,26 @@ fn collect_toplevel_export_bindings<'a>(
             collect_toplevel_export_bindings(body, bindings)
         }
         Lambda::Lsequence(_, right) => collect_toplevel_export_bindings(right, bindings),
-        Lambda::Lprim(__prim0) if matches!(__prim0.as_ref(), PrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
-            args,
-            ..
-        }) => {
+        Lambda::Lprim(__prim0)
+            if matches!(
+                __prim0.as_ref(),
+                PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
+                    args,
+                    ..
+                }
+            ) =>
+        {
             let PrimInfo {
-            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
-            args,
-            ..
-        } = __prim0.as_ref() else {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
+                args,
+                ..
+            } = __prim0.as_ref()
+            else {
                 unreachable!()
             };
             Some((exports, args))
-        },
+        }
         _ => None,
     }
 }
@@ -7863,7 +7884,11 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
 }
 
 impl LambdaCompiler {
-    pub(crate) fn return_case_needs_break_like_ocaml(&self, body: &Lambda, compiled_body: &Block) -> bool {
+    pub(crate) fn return_case_needs_break_like_ocaml(
+        &self,
+        body: &Lambda,
+        compiled_body: &Block,
+    ) -> bool {
         return_switch_case_needs_break_like_ocaml(
             body,
             compiled_body,
@@ -7887,7 +7912,6 @@ fn return_switch_case_needs_break_like_ocaml(
     }
     return_output_is_compound_like_ocaml(body, compiled_body, in_staticcatch, if_finished)
 }
-
 
 fn return_output_is_compound_like_ocaml(
     body: &Lambda,
@@ -7936,9 +7960,9 @@ fn return_output_finished_like_ocaml(
             return_output_finished_like_ocaml(body, in_staticcatch, if_finished)
         }
         // compile_ifthenelse: recorded by `compile_if_return_block`.
-        Lambda::LifThenElse(_, then_, _) => {
-            if_finished.get(&(then_.as_ref() as *const Lambda as usize)).copied()
-        }
+        Lambda::LifThenElse(_, then_, _) => if_finished
+            .get(&(then_.as_ref() as *const Lambda as usize))
+            .copied(),
         // compile_switch (lam_compile.ml:822) and compile_stringswitch return
         // `Js_output.make` without `~output_finished`, and so does the
         // `S.try_` built for `Ltrywith`.
@@ -8620,15 +8644,21 @@ mod indexed_consumer;
 /// heads are never compiled.
 fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
     match lam {
-        Lambda::Llet(kind, id, value, body) => {
-            Lambda::Llet(kind, id, value, Box::new(drop_toplevel_pure_sequence_heads(*body)))
-        }
+        Lambda::Llet(kind, id, value, body) => Lambda::Llet(
+            kind,
+            id,
+            value,
+            Box::new(drop_toplevel_pure_sequence_heads(*body)),
+        ),
         Lambda::Lletrec(bindings, body) => {
             Lambda::Lletrec(bindings, Box::new(drop_toplevel_pure_sequence_heads(*body)))
         }
         Lambda::Lsequence(first, second) => {
             let second = drop_toplevel_pure_sequence_heads(*second);
-            if matches!(*first, Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)) {
+            if matches!(
+                *first,
+                Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)
+            ) {
                 second
             } else {
                 Lambda::Lsequence(first, Box::new(second))
@@ -8637,8 +8667,6 @@ fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
         lam => lam,
     }
 }
-
-
 
 /// Whether `compile_prim` (compiler/core/lam_compile.ml:1635-1766) lowers this
 /// primitive through `compile_primitive_default`, the only branch that attaches

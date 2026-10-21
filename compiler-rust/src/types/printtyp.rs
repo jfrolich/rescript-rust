@@ -10,11 +10,11 @@
 #![allow(non_camel_case_types)]
 
 use crate::parser::doc::Doc;
+use crate::parser::longident::Longident;
+use crate::types::asttypes::ArgLabel;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::path::Path;
-use crate::parser::longident::Longident;
-use crate::types::asttypes::ArgLabel;
 use crate::types::type_expr::{GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef};
 
 // ============================================================================
@@ -230,7 +230,12 @@ impl<'a> Printtyp<'a> {
         if !(id.is_persistent() && matches!(id.name(), "Pervasives" | "Stdlib")) {
             return false;
         }
-        if let Some((_, found)) = self.signature_types.iter().rev().find(|(name, _)| name == s.as_str()) {
+        if let Some((_, found)) = self
+            .signature_types
+            .iter()
+            .rev()
+            .find(|(name, _)| name == s.as_str())
+        {
             return path.same(found);
         }
         match &self.printing_env_lookup_type {
@@ -276,7 +281,9 @@ impl<'a> Printtyp<'a> {
                     s.to_string(),
                 )
             }
-            Path::Pdot(p, s, _) => OutIdent::Oide_dot(Box::new(self.tree_of_path(p)), s.to_string()),
+            Path::Pdot(p, s, _) => {
+                OutIdent::Oide_dot(Box::new(self.tree_of_path(p)), s.to_string())
+            }
             Path::Papply(p1, p2) => OutIdent::Oide_apply(
                 Box::new(self.tree_of_path(p1)),
                 Box::new(self.tree_of_path(p2)),
@@ -426,8 +433,10 @@ impl<'a> Printtyp<'a> {
 
     fn namable_row(&self, row: &RowDesc) -> bool {
         row.row_name.is_some()
-            && row.row_fields.iter().all(|(_, f)| {
-                match btype::row_field_repr(self.ctx, f) {
+            && row
+                .row_fields
+                .iter()
+                .all(|(_, f)| match btype::row_field_repr(self.ctx, f) {
                     RowField::Reither {
                         constant, types, ..
                     } => {
@@ -439,8 +448,7 @@ impl<'a> Printtyp<'a> {
                             }
                     }
                     _ => true,
-                }
-            })
+                })
     }
 
     fn opened_object(&self, ty: TypeExprRef) -> bool {
@@ -641,10 +649,14 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_arrow(args, Box::new(this.tree_of_typexp(sch, *ret)))
                 }
                 TypeDesc::Ttuple(tyl) => OutType::Otyp_tuple(this.tree_of_typlist(sch, tyl)),
-                TypeDesc::Tconstr { path, .. } if this.find_inlined_type(&path.name()).is_some() => {
+                TypeDesc::Tconstr { path, .. }
+                    if this.find_inlined_type(&path.name()).is_some() =>
+                {
                     // Inlined records print as record structures (printtyp.ml:633-642).
-                    let crate::types::decl::TypeInlinedType::Record { labels, .. } =
-                        this.find_inlined_type(&path.name()).cloned().expect("inlined type");
+                    let crate::types::decl::TypeInlinedType::Record { labels, .. } = this
+                        .find_inlined_type(&path.name())
+                        .cloned()
+                        .expect("inlined type");
                     let labels = labels.iter().map(|l| this.tree_of_label(l)).collect();
                     OutType::Otyp_record(labels)
                 }
@@ -738,7 +750,12 @@ impl<'a> Printtyp<'a> {
                     .map(|(l, f)| self.tree_of_row_field(sch, l, f))
                     .collect();
                 let tags = if all_present { None } else { Some(present) };
-                OutType::Otyp_variant(non_gen, OutVariant::Ovar_fields(fields), row.row_closed, tags)
+                OutType::Otyp_variant(
+                    non_gen,
+                    OutVariant::Ovar_fields(fields),
+                    row.row_closed,
+                    tags,
+                )
             }
         }
     }
@@ -756,7 +773,9 @@ impl<'a> Printtyp<'a> {
                 ref types,
                 ..
             } if types.is_empty() => (l.to_string(), false, Vec::new()),
-            RowField::Rpresent(Some(ty)) => (l.to_string(), false, vec![self.tree_of_typexp(sch, ty)]),
+            RowField::Rpresent(Some(ty)) => {
+                (l.to_string(), false, vec![self.tree_of_typexp(sch, ty)])
+            }
             RowField::Reither {
                 constant, types, ..
             } => (l.to_string(), constant, self.tree_of_typlist(sch, &types)),
@@ -822,7 +841,9 @@ impl<'a> Printtyp<'a> {
         args: &crate::types::decl::ConstructorArguments,
     ) -> Vec<OutType> {
         match args {
-            crate::types::decl::ConstructorArguments::CstrTuple(l) => self.tree_of_typlist(false, l),
+            crate::types::decl::ConstructorArguments::CstrTuple(l) => {
+                self.tree_of_typlist(false, l)
+            }
             crate::types::decl::ConstructorArguments::CstrRecord(l) => {
                 // `Cstr_record l -> [Otyp_record (List.map tree_of_label l)]`
                 // drops the printing context.
@@ -862,9 +883,12 @@ impl<'a> Printtyp<'a> {
 
 impl<'a> Printtyp<'a> {
     fn find_inlined_type(&self, name: &str) -> Option<&crate::types::decl::TypeInlinedType> {
-        self.inlined_types.as_ref()?.iter().find(|inlined| match inlined {
-            crate::types::decl::TypeInlinedType::Record { type_name, .. } => type_name == name,
-        })
+        self.inlined_types
+            .as_ref()?
+            .iter()
+            .find(|inlined| match inlined {
+                crate::types::decl::TypeInlinedType::Record { type_name, .. } => type_name == name,
+            })
     }
 
     /// `filter_params` (printtyp.ml:573-582): repeated parameters become
@@ -928,7 +952,10 @@ impl<'a> Printtyp<'a> {
         vars
     }
 
-    fn mark_loops_constructor_arguments(&mut self, args: &crate::types::decl::ConstructorArguments) {
+    fn mark_loops_constructor_arguments(
+        &mut self,
+        args: &crate::types::decl::ConstructorArguments,
+    ) {
         match args {
             crate::types::decl::ConstructorArguments::CstrTuple(l) => {
                 for ty in l {
@@ -949,8 +976,8 @@ impl<'a> Printtyp<'a> {
         id: &crate::ident::Ident,
         decl: &crate::types::decl::TypeDeclaration,
     ) -> OutTypeDecl {
-        use crate::types::decl::TypeKind;
         use crate::types::PrivateFlag;
+        use crate::types::decl::TypeKind;
         self.reset();
         let saved_inlined = self.inlined_types.replace(decl.type_inlined_types.clone());
         let params = self.filter_params(&decl.type_params);
@@ -958,8 +985,7 @@ impl<'a> Printtyp<'a> {
         if let Some(ty) = decl.type_manifest {
             let vars = self.free_variables(ty);
             for param in &params {
-                let is_underscore =
-                    matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name)) if name == "_");
+                let is_underscore = matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name)) if name == "_");
                 if is_underscore && vars.contains(param) {
                     self.ctx.set_desc(*param, TypeDesc::Tvar(None));
                 }
@@ -984,9 +1010,13 @@ impl<'a> Printtyp<'a> {
                 TypeDesc::Tvariant(row) => {
                     let row = btype::row_repr(self.ctx, &row);
                     match &row.row_name {
-                        Some((Path::Pident(id2), _)) if id2.same(id) => self
-                            .ctx
-                            .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc { row_name: None, ..row }))),
+                        Some((Path::Pident(id2), _)) if id2.same(id) => {
+                            self.ctx
+                                .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
+                                    row_name: None,
+                                    ..row
+                                })))
+                        }
                         _ => ty,
                     }
                 }
@@ -1018,7 +1048,8 @@ impl<'a> Printtyp<'a> {
             }
             TypeKind::TypeRecord(..) => decl.type_private == PrivateFlag::Private,
             TypeKind::TypeVariant(cstrs, _) => {
-                decl.type_private == PrivateFlag::Private || cstrs.iter().any(|cd| cd.cd_res.is_some())
+                decl.type_private == PrivateFlag::Private
+                    || cstrs.iter().any(|cd| cd.cd_res.is_some())
             }
             TypeKind::TypeOpen => decl.type_manifest.is_none(),
         };
@@ -1049,7 +1080,9 @@ impl<'a> Printtyp<'a> {
         let constraints = self.tree_of_constraints(&params);
         let tree_of_manifest = |this: &mut Self, ty1: OutType| match ty_manifest {
             None => ty1,
-            Some(ty) => OutType::Otyp_manifest(Box::new(this.tree_of_typexp(false, ty)), Box::new(ty1)),
+            Some(ty) => {
+                OutType::Otyp_manifest(Box::new(this.tree_of_typexp(false, ty)), Box::new(ty1))
+            }
         };
         let boxed_unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed;
         let (typ, private, unboxed) = match &decl.type_kind {
@@ -1114,7 +1147,8 @@ impl<'a> Printtyp<'a> {
     ) -> OutConstructor {
         use crate::types::decl::ConstructorArguments;
         let name = cd.cd_id.name().to_string();
-        let nullary = matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty());
+        let nullary =
+            matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty());
         let repr = if !nullary {
             None
         } else {
@@ -1127,7 +1161,9 @@ impl<'a> Printtyp<'a> {
             });
             match tag_type {
                 Some(crate::types::VariantLiteralTag::Null) => Some("@as(null)".to_string()),
-                Some(crate::types::VariantLiteralTag::Undefined) => Some("@as(undefined)".to_string()),
+                Some(crate::types::VariantLiteralTag::Undefined) => {
+                    Some("@as(undefined)".to_string())
+                }
                 Some(crate::types::VariantLiteralTag::String(s)) => {
                     Some(format!("@as(\"{}\")", ocaml_string_escaped(&s)))
                 }
@@ -1252,7 +1288,9 @@ impl<'a> Printtyp<'a> {
                     name: p.prim_name.clone(),
                     spec: (**spec).clone(),
                 },
-                crate::types::decl::PrimKind::KindInlineConst(c) => OutPrim::InlineConst((**c).clone()),
+                crate::types::decl::PrimKind::KindInlineConst(c) => {
+                    OutPrim::InlineConst((**c).clone())
+                }
             }),
             crate::types::decl::ValueKind::ValReg => None,
         };
@@ -1373,14 +1411,19 @@ impl<'a> Printtyp<'a> {
         match item {
             SignatureItem::SigValue(id, decl) => Some(self.tree_of_value_description(id, decl)),
             SignatureItem::SigType(id, _, _) if btype::is_row_name(id.name()) => None,
-            SignatureItem::SigType(id, decl, rs) => Some(self.tree_of_type_declaration(id, decl, *rs)),
+            SignatureItem::SigType(id, decl, rs) => {
+                Some(self.tree_of_type_declaration(id, decl, *rs))
+            }
             SignatureItem::SigTypext(id, ext, es) => {
                 Some(self.tree_of_extension_constructor(id, ext, *es))
             }
             SignatureItem::SigModule(id, md, rs) => {
                 let ellipsis = md.md_attributes.iter().any(|attr| {
                     attr.attr_name.txt == "..."
-                        && matches!(attr.attr_payload, crate::types::decl::AttributePayload::Empty)
+                        && matches!(
+                            attr.attr_payload,
+                            crate::types::decl::AttributePayload::Empty
+                        )
                 });
                 Some(self.tree_of_module(id, &md.md_type, *rs, ellipsis))
             }
@@ -1489,9 +1532,11 @@ use crate::parser::printer::{print_ident_like, print_poly_var_ident};
 fn print_out_ident_doc(allow_uident: bool, ident: &OutIdent) -> Doc {
     match ident {
         OutIdent::Oide_ident(s) => print_ident_like(s, allow_uident, false),
-        OutIdent::Oide_dot(ident, s) => {
-            Doc::concat(vec![print_out_ident_doc(true, ident), Doc::dot(), Doc::text(s.clone())])
-        }
+        OutIdent::Oide_dot(ident, s) => Doc::concat(vec![
+            print_out_ident_doc(true, ident),
+            Doc::dot(),
+            Doc::text(s.clone()),
+        ]),
         OutIdent::Oide_apply(call, arg) => Doc::concat(vec![
             print_out_ident_doc(true, call),
             Doc::lparen(),
@@ -1556,7 +1601,10 @@ pub(crate) fn print_out_type_doc(out_type: &OutType) -> Doc {
                 Doc::soft_line(),
                 Doc::greater_than(),
             ]);
-            Doc::group(Doc::concat(vec![print_out_ident_doc(true, out_ident), args_doc]))
+            Doc::group(Doc::concat(vec![
+                print_out_ident_doc(true, out_ident),
+                args_doc,
+            ]))
         }
         OutType::Otyp_tuple(tuple_args) => Doc::group(Doc::concat(vec![
             Doc::lparen(),
@@ -1574,7 +1622,9 @@ pub(crate) fn print_out_type_doc(out_type: &OutType) -> Doc {
         OutType::Otyp_poly(vars, out_type) => Doc::group(Doc::concat(vec![
             Doc::join(
                 Doc::space(),
-                vars.iter().map(|var| Doc::text(format!("'{var}"))).collect(),
+                vars.iter()
+                    .map(|var| Doc::text(format!("'{var}")))
+                    .collect(),
             ),
             Doc::dot(),
             Doc::space(),
@@ -1735,7 +1785,11 @@ fn print_object_fields(fields: &[(String, bool, OutType)], rest: &Option<bool>) 
                     .iter()
                     .map(|(lbl, mutable, out_type)| {
                         Doc::group(Doc::concat(vec![
-                            if *mutable { Doc::text("@set ") } else { Doc::nil() },
+                            if *mutable {
+                                Doc::text("@set ")
+                            } else {
+                                Doc::nil()
+                            },
                             Doc::text(format!("\"{lbl}\": ")),
                             print_out_type_doc(out_type),
                         ]))
@@ -1835,7 +1889,12 @@ fn print_out_constructor_doc((name, args, gadt, repr): &OutConstructor) -> Doc {
             Doc::rparen(),
         ])),
     };
-    Doc::group(Doc::concat(vec![repr_doc, Doc::text(name.clone()), args_doc, gadt_doc]))
+    Doc::group(Doc::concat(vec![
+        repr_doc,
+        Doc::text(name.clone()),
+        args_doc,
+        gadt_doc,
+    ]))
 }
 
 /// `print_type_parameter_doc` (res_outcome_printer.ml:474-479).
@@ -1944,10 +2003,17 @@ fn print_external_module_doc(emn: &crate::types::external_ffi_types::ExternalMod
 fn print_scopes_doc(scopes: &[String]) -> Doc {
     match scopes {
         [] => Doc::nil(),
-        [s] => Doc::concat(vec![Doc::text("@scope("), print_string_literal_doc(s), Doc::text(") ")]),
+        [s] => Doc::concat(vec![
+            Doc::text("@scope("),
+            print_string_literal_doc(s),
+            Doc::text(") "),
+        ]),
         _ => Doc::concat(vec![
             Doc::text("@scope(("),
-            Doc::join(Doc::text(", "), scopes.iter().map(|s| print_string_literal_doc(s)).collect()),
+            Doc::join(
+                Doc::text(", "),
+                scopes.iter().map(|s| print_string_literal_doc(s)).collect(),
+            ),
             Doc::text(")) "),
         ]),
     }
@@ -1998,7 +2064,9 @@ fn print_decl_kind_doc(
     }
 }
 
-fn print_module_source_doc(module_: &Option<crate::types::external_ffi_types::ModuleSource>) -> Doc {
+fn print_module_source_doc(
+    module_: &Option<crate::types::external_ffi_types::ModuleSource>,
+) -> Doc {
     use crate::types::external_ffi_types::ModuleSource;
     match module_ {
         None => Doc::nil(),
@@ -2016,7 +2084,11 @@ fn print_external_decl_attrs_doc(
         print_decl_kind_doc(&decl.kind, &decl.module_, prim_name),
         print_module_source_doc(&decl.module_),
         print_scopes_doc(&decl.scopes),
-        if decl.variadic { Doc::text("@variadic ") } else { Doc::nil() },
+        if decl.variadic {
+            Doc::text("@variadic ")
+        } else {
+            Doc::nil()
+        },
         print_return_wrapper_doc(return_wrapper),
     ])
 }
@@ -2049,7 +2121,11 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
                     crate::types::external_ffi_types::ExternalFfi::FfiObjCreate(_) => {
                         (Doc::text("@obj "), "external ", Some(name.as_str()))
                     }
-                    crate::types::external_ffi_types::ExternalFfi::FfiBs(_, return_wrapper, decl) => (
+                    crate::types::external_ffi_types::ExternalFfi::FfiBs(
+                        _,
+                        return_wrapper,
+                        decl,
+                    ) => (
                         print_external_decl_attrs_doc(decl, *return_wrapper, name),
                         "external ",
                         Some(name.as_str()),
@@ -2075,7 +2151,9 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
             ]))
         }
         OutSigItem::Osig_typext(ext, _) => print_out_extension_constructor_doc(ext),
-        OutSigItem::Osig_modtype(name, OutModuleType::Omty_signature(items)) if items.is_empty() => {
+        OutSigItem::Osig_modtype(name, OutModuleType::Omty_signature(items))
+            if items.is_empty() =>
+        {
             Doc::concat(vec![Doc::text("module type "), Doc::text(name.clone())])
         }
         OutSigItem::Osig_modtype(name, mty) => Doc::group(Doc::concat(vec![
@@ -2115,8 +2193,10 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
                 OutRecStatus::Orec_first => "type rec ",
                 OutRecStatus::Orec_next => "and ",
             });
-            let type_params =
-                print_type_params_doc(decl.params.iter().map(print_type_parameter_doc).collect(), true);
+            let type_params = print_type_params_doc(
+                decl.params.iter().map(print_type_parameter_doc).collect(),
+                true,
+            );
             let private_doc = if decl.private {
                 Doc::text("private ")
             } else {
@@ -2226,7 +2306,10 @@ pub(crate) fn print_out_module_type_doc(mty: &OutModuleType) -> Doc {
         OutModuleType::Omty_signature(items) => Doc::breakable_group(
             Doc::concat(vec![
                 Doc::lbrace(),
-                Doc::indent(Doc::concat(vec![Doc::line(), print_out_signature_doc(items)])),
+                Doc::indent(Doc::concat(vec![
+                    Doc::line(),
+                    print_out_signature_doc(items),
+                ])),
                 Doc::soft_line(),
                 Doc::rbrace(),
             ]),
@@ -2244,8 +2327,12 @@ pub(crate) fn print_out_signature_doc(items: &[OutSigItem]) -> Doc {
         match &items[index] {
             OutSigItem::Osig_typext(ext, OutExtStatus::Oext_first) => {
                 // Gather together the extension constructors.
-                let mut constructors =
-                    vec![(ext.name.clone(), ext.args.clone(), ext.ret_type.clone(), ext.repr.clone())];
+                let mut constructors = vec![(
+                    ext.name.clone(),
+                    ext.args.clone(),
+                    ext.ret_type.clone(),
+                    ext.repr.clone(),
+                )];
                 index += 1;
                 while let Some(OutSigItem::Osig_typext(next, OutExtStatus::Oext_next)) =
                     items.get(index)
@@ -2282,7 +2369,13 @@ fn print_extension_type_params_doc(params: &[String]) -> Doc {
     print_type_params_doc(
         params
             .iter()
-            .map(|ty| Doc::text(if ty == "_" { ty.clone() } else { format!("'{ty}") }))
+            .map(|ty| {
+                Doc::text(if ty == "_" {
+                    ty.clone()
+                } else {
+                    format!("'{ty}")
+                })
+            })
             .collect(),
         false,
     )
@@ -2365,7 +2458,10 @@ pub(crate) type TracePair = (TypeExprRef, TypeExprRef);
 /// trace: every `(t1, t2)` level becomes `(t1, full_expand t1)` and
 /// `(t2, full_expand t2)`, using the expansions recorded when the
 /// unification failed.
-pub(crate) fn expand_trace(ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> Vec<TracePair> {
+pub(crate) fn expand_trace(
+    ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Vec<TracePair> {
     let mut out = Vec::with_capacity(trace.len() * 2);
     for &(t1, t2) in trace {
         for t in [t1, t2] {
@@ -2404,8 +2500,16 @@ impl<'a> Printtyp<'a> {
         }
         match (&*self.ctx.borrow_desc(t), &*self.ctx.borrow_desc(t2)) {
             (
-                TypeDesc::Tconstr { path: p1, args: tl1, .. },
-                TypeDesc::Tconstr { path: p2, args: tl2, .. },
+                TypeDesc::Tconstr {
+                    path: p1,
+                    args: tl1,
+                    ..
+                },
+                TypeDesc::Tconstr {
+                    path: p2,
+                    args: tl2,
+                    ..
+                },
             ) => {
                 p1.same(p2)
                     && tl1.len() == tl2.len()
@@ -2473,7 +2577,9 @@ impl<'a> Printtyp<'a> {
             return t;
         }
         let more_level = self.ctx.get_level(btype::row_more(self.ctx, &row));
-        let row_more = self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), more_level);
+        let row_more = self
+            .ctx
+            .alloc_type_at_level(TypeDesc::Tvar(None), more_level);
         let level = self.ctx.get_level(t);
         self.ctx.alloc_type_at_level(
             TypeDesc::Tvariant(Box::new(RowDesc {
@@ -2496,16 +2602,21 @@ impl<'a> Printtyp<'a> {
                 let row = btype::row_repr(self.ctx, &row);
                 let more = self.ctx.repr(row.row_more);
                 let more_desc = (*self.ctx.get_desc(more)).clone();
-                let row_more = self.ctx.alloc_type_at_level(more_desc, self.ctx.get_level(more));
-                self.ctx
-                    .alloc_type_at_level(TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })), level)
+                let row_more = self
+                    .ctx
+                    .alloc_type_at_level(more_desc, self.ctx.get_level(more));
+                self.ctx.alloc_type_at_level(
+                    TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })),
+                    level,
+                )
             }
             TypeDesc::Tobject { fields } => {
                 // `newty2 ty.level` reads the shadowed `ty`: the fields' level.
                 let fields = self.ctx.repr(fields);
                 let fields_level = self.ctx.get_level(fields);
                 let fields = self.unalias_object(fields);
-                self.ctx.alloc_type_at_level(TypeDesc::Tobject { fields }, fields_level)
+                self.ctx
+                    .alloc_type_at_level(TypeDesc::Tobject { fields }, fields_level)
             }
             desc => self.ctx.alloc_type_at_level(desc, level),
         }
@@ -2533,7 +2644,9 @@ impl<'a> Printtyp<'a> {
                     level,
                 )
             }
-            desc @ (TypeDesc::Tvar(_) | TypeDesc::Tnil) => self.ctx.alloc_type_at_level(desc, level),
+            desc @ (TypeDesc::Tvar(_) | TypeDesc::Tnil) => {
+                self.ctx.alloc_type_at_level(desc, level)
+            }
             TypeDesc::Tunivar(_) => ty,
             _ => self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), level),
         }
@@ -2591,8 +2704,12 @@ impl<'a> Printtyp<'a> {
             | (TypeDesc::Tvar(_), _)
             | (TypeDesc::Tvariant(_), TypeDesc::Tvariant(_)) => true,
             (
-                TypeDesc::Tfield { name: l, rest: r1, .. },
-                TypeDesc::Tfield { name: l2, rest: r2, .. },
+                TypeDesc::Tfield {
+                    name: l, rest: r1, ..
+                },
+                TypeDesc::Tfield {
+                    name: l2, rest: r2, ..
+                },
             ) => {
                 matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r1)), TypeDesc::Tnil)
                     && matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r2)), TypeDesc::Tnil)
@@ -2638,7 +2755,11 @@ impl<'a> Printtyp<'a> {
     }
 
     /// `type_expr ppf ty` into a Format stream.
-    pub(crate) fn pp_type_expr<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, ty: TypeExprRef) {
+    pub(crate) fn pp_type_expr<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        ty: TypeExprRef,
+    ) {
         let text = self.type_expr(ty);
         pp_type_text(ppf, &text);
     }
@@ -2681,7 +2802,12 @@ impl<'a> Printtyp<'a> {
     }
 
     /// `super_trace`.
-    fn super_trace<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, first: bool, tr: &[TracePair]) {
+    fn super_trace<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        first: bool,
+        tr: &[TracePair],
+    ) {
         if let [(t1, t1e), (t2, t2e), rem @ ..] = tr {
             ppf.cut();
             ppf.cut();
@@ -2744,15 +2870,24 @@ impl<'a> Printtyp<'a> {
             {
                 self.escape_scope(ppf, p);
             }
-            (TypeDesc::Tvar(_), TypeDesc::Tunivar(_)) | (TypeDesc::Tunivar(_), TypeDesc::Tvar(_)) => {
+            (TypeDesc::Tvar(_), TypeDesc::Tunivar(_))
+            | (TypeDesc::Tunivar(_), TypeDesc::Tvar(_)) => {
                 ppf.cut();
                 ppf.str("The universal variable ");
-                let u = if matches!(d3, TypeDesc::Tunivar(_)) { t3 } else { t4 };
+                let u = if matches!(d3, TypeDesc::Tunivar(_)) {
+                    t3
+                } else {
+                    t4
+                };
                 self.pp_type_expr(ppf, u);
                 ppf.str(" would escape its scope");
             }
             (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
-                let (t, t2) = if matches!(d3, TypeDesc::Tvar(_)) { (t3, t4) } else { (t4, t3) };
+                let (t, t2) = if matches!(d3, TypeDesc::Tvar(_)) {
+                    (t3, t4)
+                } else {
+                    (t4, t3)
+                };
                 let occurs = crate::types::ctype::occur_check(
                     self.ctx,
                     None,
@@ -2785,8 +2920,18 @@ impl<'a> Printtyp<'a> {
                 ppf.str("Self type cannot be unified with a closed object type");
             }
             (
-                TypeDesc::Tfield { name: l, typ: f1, rest: r1, .. },
-                TypeDesc::Tfield { name: l2, typ: f2, rest: r2, .. },
+                TypeDesc::Tfield {
+                    name: l,
+                    typ: f1,
+                    rest: r1,
+                    ..
+                },
+                TypeDesc::Tfield {
+                    name: l2,
+                    typ: f2,
+                    rest: r2,
+                    ..
+                },
             ) if l == l2
                 && matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r1)), TypeDesc::Tnil)
                 && matches!(&*self.ctx.borrow_desc(self.ctx.repr(*r2)), TypeDesc::Tnil) =>
@@ -2813,7 +2958,12 @@ impl<'a> Printtyp<'a> {
                 close_tag(ppf);
                 ppf.str(".");
             }
-            (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { name: l, typ: f1, .. }) => {
+            (
+                TypeDesc::Tnil | TypeDesc::Tconstr { .. },
+                TypeDesc::Tfield {
+                    name: l, typ: f1, ..
+                },
+            ) => {
                 ppf.cut();
                 ppf.cut();
                 ppf.open_box(BoxKind::Box, 0);
@@ -2828,7 +2978,12 @@ impl<'a> Printtyp<'a> {
                 ppf.str(", but it does not.");
                 ppf.close_box();
             }
-            (TypeDesc::Tfield { name: l, typ: f1, .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. }) => {
+            (
+                TypeDesc::Tfield {
+                    name: l, typ: f1, ..
+                },
+                TypeDesc::Tnil | TypeDesc::Tconstr { .. },
+            ) => {
                 ppf.cut();
                 ppf.cut();
                 ppf.open_box(BoxKind::Box, 0);
@@ -2843,23 +2998,39 @@ impl<'a> Printtyp<'a> {
                 ppf.str(", but it does not.");
                 ppf.close_box();
             }
-            (TypeDesc::Tnil, TypeDesc::Tconstr { .. }) | (TypeDesc::Tconstr { .. }, TypeDesc::Tnil) => {
+            (TypeDesc::Tnil, TypeDesc::Tconstr { .. })
+            | (TypeDesc::Tconstr { .. }, TypeDesc::Tnil) => {
                 ppf.cut();
                 ppf.open_box(BoxKind::Box, 0);
                 ppf.print(format_args!(
                     "The {} object type has an abstract row, it cannot be closed",
-                    if matches!(d4, TypeDesc::Tnil) { "first" } else { "second" }
+                    if matches!(d4, TypeDesc::Tnil) {
+                        "first"
+                    } else {
+                        "second"
+                    }
                 ));
                 ppf.close_box();
             }
             (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
                 let row1 = btype::row_repr(self.ctx, row1);
                 let row2 = btype::row_repr(self.ctx, row2);
-                let f1: Vec<(String, RowField)> =
-                    row1.row_fields.iter().map(|(l, f)| (l.to_string(), f.clone())).collect();
-                let f2: Vec<(String, RowField)> =
-                    row2.row_fields.iter().map(|(l, f)| (l.to_string(), f.clone())).collect();
-                match (f1.as_slice(), row1.row_closed, f2.as_slice(), row2.row_closed) {
+                let f1: Vec<(String, RowField)> = row1
+                    .row_fields
+                    .iter()
+                    .map(|(l, f)| (l.to_string(), f.clone()))
+                    .collect();
+                let f2: Vec<(String, RowField)> = row2
+                    .row_fields
+                    .iter()
+                    .map(|(l, f)| (l.to_string(), f.clone()))
+                    .collect();
+                match (
+                    f1.as_slice(),
+                    row1.row_closed,
+                    f2.as_slice(),
+                    row2.row_closed,
+                ) {
                     ([], true, [], true) => {
                         ppf.cut();
                         ppf.cut();
@@ -2914,14 +3085,20 @@ impl<'a> Printtyp<'a> {
         which: &str,
         fields: &[(String, RowField)],
     ) {
-        let constructors_txt = if fields.len() == 1 { "constructor" } else { "constructors" };
+        let constructors_txt = if fields.len() == 1 {
+            "constructor"
+        } else {
+            "constructors"
+        };
         ppf.cut();
         ppf.cut();
         ppf.print(format_args!("The {which} polymorphic variant is "));
         open_tag(ppf, TAG_INFO);
         ppf.str("closed");
         close_tag(ppf);
-        ppf.print(format_args!(" and doesn't include the {constructors_txt}: "));
+        ppf.print(format_args!(
+            " and doesn't include the {constructors_txt}: "
+        ));
         open_tag(ppf, TAG_ERROR);
         self.print_tags(ppf, fields);
         close_tag(ppf);
@@ -2929,9 +3106,7 @@ impl<'a> Printtyp<'a> {
         ppf.cut();
         ppf.cut();
         ppf.str("Possible solutions:\n");
-        ppf.print(format_args!(
-            "  - Either make the {which} variant "
-        ));
+        ppf.print(format_args!("  - Either make the {which} variant "));
         open_tag(ppf, TAG_INFO);
         ppf.str("open");
         close_tag(ppf);
@@ -2946,7 +3121,9 @@ impl<'a> Printtyp<'a> {
         ppf.str("[");
         close_tag(ppf);
         ppf.str("\n");
-        ppf.print(format_args!("  - Or add the missing {constructors_txt} to it."));
+        ppf.print(format_args!(
+            "  - Or add the missing {constructors_txt} to it."
+        ));
     }
 
     /// `Printtyp.path ppf p`.
@@ -2968,11 +3145,16 @@ impl<'a> Printtyp<'a> {
         tr: &[TracePair],
         txt1: &mut dyn FnMut(&mut Formatter<W>),
         txt2: &mut dyn FnMut(&mut Formatter<W>),
-        print_extra_info: Option<&mut dyn FnMut(&mut Formatter<W>, &mut Self, TypeExprRef, TypeExprRef)>,
+        print_extra_info: Option<
+            &mut dyn FnMut(&mut Formatter<W>, &mut Self, TypeExprRef, TypeExprRef),
+        >,
     ) {
         self.reset();
         self.trace_same_names(tr);
-        let tr: Vec<TracePair> = tr.iter().map(|&(t, t2)| (t, self.hide_variant_name(t2))).collect();
+        let tr: Vec<TracePair> = tr
+            .iter()
+            .map(|&(t, t2)| (t, self.hide_variant_name(t2)))
+            .collect();
         let mis = self.mismatch(&tr);
         let [first, second, rest @ ..] = tr.as_slice() else {
             return;
@@ -2981,7 +3163,10 @@ impl<'a> Printtyp<'a> {
         let compact = rest.is_empty();
         let (t1, t1e) = self.may_prepare_expansion(compact, *first);
         let (t2, t2e) = self.may_prepare_expansion(compact, *second);
-        let rest: Vec<TracePair> = rest.into_iter().map(|p| self.prepare_expansion(p)).collect();
+        let rest: Vec<TracePair> = rest
+            .into_iter()
+            .map(|p| self.prepare_expansion(p))
+            .collect();
         ppf.open_box(BoxKind::V, 0);
         ppf.open_box(BoxKind::HOV, 2);
         txt1(ppf);
@@ -3025,7 +3210,12 @@ fn path_binding_time(p: &Path) -> i32 {
 
 impl<'a> Printtyp<'a> {
     /// `type_expansion t ppf t'` (printtyp.ml:1235-1241).
-    fn type_expansion<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, t: TypeExprRef, t2: TypeExprRef) {
+    fn type_expansion<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        t: TypeExprRef,
+        t2: TypeExprRef,
+    ) {
         if self.same_path(t, t2) {
             let proxy = self.proxy(t);
             self.add_delayed(proxy);
@@ -3047,7 +3237,13 @@ impl<'a> Printtyp<'a> {
     }
 
     /// The inner `trace fst txt ppf` (printtyp.ml:1247-1252).
-    fn plain_trace<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, fst: bool, txt: &str, tr: &[TracePair]) {
+    fn plain_trace<W: std::io::Write>(
+        &mut self,
+        ppf: &mut Formatter<W>,
+        fst: bool,
+        txt: &str,
+        tr: &[TracePair],
+    ) {
         if let [(t1, t1e), (t2, t2e), rem @ ..] = tr {
             if !fst {
                 ppf.cut();
@@ -3107,7 +3303,13 @@ impl<'a> Printtyp<'a> {
             ppf.close_box();
         } else {
             let mis = self.mismatch(&tr2);
-            self.keep_last_trace(ppf, false, mis.is_none(), "is not compatible with type", &tr2);
+            self.keep_last_trace(
+                ppf,
+                false,
+                mis.is_none(),
+                "is not compatible with type",
+                &tr2,
+            );
             if let Some((t3, t4)) = mis {
                 self.explanation(ppf, true, t3, t4);
             }
@@ -3149,7 +3351,10 @@ fn as_payload_name(payload: crate::types::ctype::VariantConstructorAsPayload) ->
 }
 
 /// The `match ctx with Some ctx -> ...` part of `report_subtyping_error`.
-fn print_subtype_context<W: std::io::Write>(ppf: &mut Formatter<W>, context: &crate::types::SubtypeContext) {
+fn print_subtype_context<W: std::io::Write>(
+    ppf: &mut Formatter<W>,
+    context: &crate::types::SubtypeContext,
+) {
     use crate::types::SubtypeContext as C;
     use crate::types::ctype::SubtypeTypeKind as K;
     match context {
@@ -3202,7 +3407,10 @@ fn print_subtype_context<W: std::io::Write>(ppf: &mut Formatter<W>, context: &cr
             info(ppf, &format!("{capitalized}({primitive})"));
             ppf.str(".");
         }
-        C::VariantConstructorRuntimeRepresentationMismatch { variant_name, issues } => {
+        C::VariantConstructorRuntimeRepresentationMismatch {
+            variant_name,
+            issues,
+        } => {
             for issue in issues {
                 ppf.space();
                 print_variant_runtime_representation_issue(ppf, variant_name, issue);
@@ -3256,7 +3464,12 @@ fn print_subtype_context<W: std::io::Write>(ppf: &mut Formatter<W>, context: &cr
             for issue in issues {
                 ppf.space();
                 ppf.str("- ");
-                print_record_field_subtype_violation(ppf, issue, left_record_name, right_record_name);
+                print_record_field_subtype_violation(
+                    ppf,
+                    issue,
+                    left_record_name,
+                    right_record_name,
+                );
             }
         }
     }
@@ -3292,7 +3505,9 @@ fn print_variant_runtime_representation_issue<W: std::io::Write>(
             info(ppf, constructor_name);
             ppf.str(" of variant ");
             info(ppf, &variant);
-            ppf.str(" has an inline record as payload. Currently, inline records cannot be coerced.");
+            ppf.str(
+                " has an inline record as payload. Currently, inline records cannot be coerced.",
+            );
         }
         I::AsPayloadNotEligibleForCoercion {
             constructor_name,
@@ -3370,7 +3585,10 @@ fn print_variant_configuration_issue<W: std::io::Write>(
             ppf.str("The variants have different ");
             info(ppf, "@unboxed");
             ppf.str(" configurations.");
-            for (unboxed, name) in [(*left_unboxed, left_variant_name), (*right_unboxed, right_variant_name)] {
+            for (unboxed, name) in [
+                (*left_unboxed, left_variant_name),
+                (*right_unboxed, right_variant_name),
+            ] {
                 ppf.space();
                 ppf.str("- Variant ");
                 info(ppf, &name.name());
@@ -3384,12 +3602,18 @@ fn print_variant_configuration_issue<W: std::io::Write>(
             info(ppf, "@unboxed");
             ppf.str(" attribute.");
         }
-        I::TagNameNotMatching { left_tag, right_tag } => {
+        I::TagNameNotMatching {
+            left_tag,
+            right_tag,
+        } => {
             ppf.space();
             ppf.str("The variants have different ");
             info(ppf, "@tag");
             ppf.str(" configurations.");
-            for (tag, name) in [(left_tag, left_variant_name), (right_tag, right_variant_name)] {
+            for (tag, name) in [
+                (left_tag, left_variant_name),
+                (right_tag, right_variant_name),
+            ] {
                 ppf.space();
                 match tag {
                     Some(tag) => {
@@ -3420,7 +3644,10 @@ fn print_variant_configuration_issue<W: std::io::Write>(
             let not_printed = total - printed.len();
             ppf.space();
             info(ppf, &left_variant_name.name());
-            ppf.str(&format!(" has {total} constructor{} that ", if total == 1 { "" } else { "s" }));
+            ppf.str(&format!(
+                " has {total} constructor{} that ",
+                if total == 1 { "" } else { "s" }
+            ));
             info(ppf, &right_variant_name.name());
             ppf.str(" does not have: ");
             for (index, name) in printed.iter().enumerate() {
@@ -3475,7 +3702,11 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
                 _ => {}
             }
         }
-        V::FieldRuntimeNameMismatch { label, left_as, right_as } => {
+        V::FieldRuntimeNameMismatch {
+            label,
+            left_as,
+            right_as,
+        } => {
             ppf.str("Field ");
             info(ppf, label);
             ppf.str(" runtime representation");
@@ -3534,7 +3765,10 @@ impl<'a> Printtyp<'a> {
     ) {
         self.reset();
         self.trace_same_names(tr);
-        let tr: Vec<TracePair> = tr.iter().map(|&(t, t2)| (t, self.hide_variant_name(t2))).collect();
+        let tr: Vec<TracePair> = tr
+            .iter()
+            .map(|&(t, t2)| (t, self.hide_variant_name(t2)))
+            .collect();
         let mis = self.mismatch(&tr);
         let [first, second, rest @ ..] = tr.as_slice() else {
             return;
@@ -3543,7 +3777,10 @@ impl<'a> Printtyp<'a> {
         let compact = rest.is_empty();
         let (t1, t1e) = self.may_prepare_expansion(compact, *first);
         let (t2, t2e) = self.may_prepare_expansion(compact, *second);
-        let rest: Vec<TracePair> = rest.into_iter().map(|p| self.prepare_expansion(p)).collect();
+        let rest: Vec<TracePair> = rest
+            .into_iter()
+            .map(|p| self.prepare_expansion(p))
+            .collect();
         ppf.open_box(BoxKind::V, 0);
         ppf.open_box(BoxKind::Box, 0);
         ppf.str(txt1);
@@ -3564,7 +3801,12 @@ impl<'a> Printtyp<'a> {
 
 impl<'a> Printtyp<'a> {
     /// `type_path_expansion tp ppf tp'` (printtyp.ml:1243-1245).
-    fn type_path_expansion<W: std::io::Write>(&self, ppf: &mut Formatter<W>, tp: &Path, tp2: &Path) {
+    fn type_path_expansion<W: std::io::Write>(
+        &self,
+        ppf: &mut Formatter<W>,
+        tp: &Path,
+        tp2: &Path,
+    ) {
         if tp.same(tp2) {
             ppf.str(&self.path_text(tp));
         } else {

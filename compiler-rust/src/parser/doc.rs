@@ -691,6 +691,12 @@ fn text_width(txt: &str) -> i32 {
         return txt.len() as i32;
     }
     txt.chars()
-        .map(|c| if (c as u32) <= 0xFF { 1 } else { c.len_utf8() as i32 })
+        .map(|c| {
+            if (c as u32) <= 0xFF {
+                1
+            } else {
+                c.len_utf8() as i32
+            }
+        })
         .sum()
 }

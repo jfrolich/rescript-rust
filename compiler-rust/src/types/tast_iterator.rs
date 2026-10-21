@@ -144,7 +144,9 @@ pub trait TastIterator {
     }
     fn with_constraint(&mut self, wc: &WithConstraint) {
         match wc {
-            WithConstraint::Twith_type(td) | WithConstraint::Twith_typesubst(td) => self.type_declaration(td),
+            WithConstraint::Twith_type(td) | WithConstraint::Twith_typesubst(td) => {
+                self.type_declaration(td)
+            }
             WithConstraint::Twith_module(..) | WithConstraint::Twith_modsubst(..) => {}
         }
     }
@@ -207,7 +209,10 @@ pub fn walk_type_declaration<I: TastIterator + ?Sized>(sub: &mut I, td: &TypedTy
     }
 }
 
-pub fn walk_extension_constructor<I: TastIterator + ?Sized>(sub: &mut I, ext: &ExtensionConstructor) {
+pub fn walk_extension_constructor<I: TastIterator + ?Sized>(
+    sub: &mut I,
+    ext: &ExtensionConstructor,
+) {
     match &ext.ext_kind {
         ExtensionConstructorKind::Text_decl(args, res) => {
             walk_constructor_args(sub, args);
@@ -227,7 +232,9 @@ pub fn walk_pat<I: TastIterator + ?Sized>(sub: &mut I, p: &Pattern) {
     }
     match &p.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => {}
-        PatternDesc::Tpat_tuple(pats) | PatternDesc::Tpat_construct(_, _, pats) | PatternDesc::Tpat_array(pats) => {
+        PatternDesc::Tpat_tuple(pats)
+        | PatternDesc::Tpat_construct(_, _, pats)
+        | PatternDesc::Tpat_array(pats) => {
             for p in pats {
                 sub.pat(p);
             }
@@ -250,7 +257,11 @@ pub fn walk_pat<I: TastIterator + ?Sized>(sub: &mut I, p: &Pattern) {
     }
 }
 
-fn walk_record_fields<I: TastIterator + ?Sized>(sub: &mut I, fields: &[RecordField], extended: &Option<Box<Expression>>) {
+fn walk_record_fields<I: TastIterator + ?Sized>(
+    sub: &mut I,
+    fields: &[RecordField],
+    extended: &Option<Box<Expression>>,
+) {
     for (_, _, def, _) in fields {
         if let RecordLabelDefinition::Overridden(_, e) = def {
             sub.expr(e);
@@ -301,7 +312,9 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
             sub.expr(e);
             sub.cases(cases);
         }
-        ExpressionDesc::Texp_tuple(es) | ExpressionDesc::Texp_construct(_, _, es) | ExpressionDesc::Texp_array(es) => {
+        ExpressionDesc::Texp_tuple(es)
+        | ExpressionDesc::Texp_construct(_, _, es)
+        | ExpressionDesc::Texp_array(es) => {
             for e in es {
                 sub.expr(e);
             }
@@ -378,7 +391,9 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
 pub fn walk_signature_item<I: TastIterator + ?Sized>(sub: &mut I, item: &TypedSignatureItem) {
     match &item.sig_desc {
         TypedSignatureItemDesc::Tsig_value(vd) => sub.value_description(vd),
-        TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => sub.type_declarations(rec_flag, decls),
+        TypedSignatureItemDesc::Tsig_type(rec_flag, decls) => {
+            sub.type_declarations(rec_flag, decls)
+        }
         TypedSignatureItemDesc::Tsig_typext(te) => sub.type_extension(te),
         TypedSignatureItemDesc::Tsig_exception(ext) => sub.extension_constructor(ext),
         TypedSignatureItemDesc::Tsig_module(md) => sub.module_declaration(md),
@@ -395,7 +410,9 @@ pub fn walk_signature_item<I: TastIterator + ?Sized>(sub: &mut I, item: &TypedSi
 
 pub fn walk_module_type<I: TastIterator + ?Sized>(sub: &mut I, m: &ModuleType) {
     match &m.mty_desc {
-        ModuleTypeDesc::Tmty_ident(..) | ModuleTypeDesc::Tmty_alias(..) | ModuleTypeDesc::Tmty_placeholder => {}
+        ModuleTypeDesc::Tmty_ident(..)
+        | ModuleTypeDesc::Tmty_alias(..)
+        | ModuleTypeDesc::Tmty_placeholder => {}
         ModuleTypeDesc::Tmty_signature(sg) => sub.signature(sg),
         ModuleTypeDesc::Tmty_functor(_, _, arg, res) => {
             if let Some(arg) = arg {

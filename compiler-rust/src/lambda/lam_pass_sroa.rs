@@ -39,7 +39,9 @@ fn access_of<'a>(block: &Ident, lam: &'a Lambda) -> Option<Access<'a>> {
         return None;
     };
     match (&prim.primitive, prim.args.as_slice()) {
-        (Primitive::Pfield(index, _), [Lambda::Lvar(id)]) if id == block => Some(Access::Read(*index)),
+        (Primitive::Pfield(index, _), [Lambda::Lvar(id)]) if id == block => {
+            Some(Access::Read(*index))
+        }
         (Primitive::Psetfield(index, _), [Lambda::Lvar(id), value]) if id == block => {
             Some(Access::Write(*index, value))
         }
@@ -111,19 +113,30 @@ fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> M
     }
 }
 
-fn fields_for_block(id_gen: &IdGenerator, block: &Ident, info: &TagInfo, field_count: usize) -> Vec<Ident> {
+fn fields_for_block(
+    id_gen: &IdGenerator,
+    block: &Ident,
+    info: &TagInfo,
+    field_count: usize,
+) -> Vec<Ident> {
     let fallback = || {
         (0..field_count)
-            .map(|index| if index == 0 { block.clone() } else { block.rename(id_gen) })
+            .map(|index| {
+                if index == 0 {
+                    block.clone()
+                } else {
+                    block.rename(id_gen)
+                }
+            })
             .collect::<Vec<_>>()
     };
     if field_count == 1 {
         return vec![block.clone()];
     }
     let names: Option<Vec<String>> = match info {
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
-            (fields.len() == field_count).then(|| fields.iter().map(|(name, _)| name.clone()).collect())
-        }
+        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => (fields.len()
+            == field_count)
+            .then(|| fields.iter().map(|(name, _)| name.clone()).collect()),
         TagInfo::RecordExt { fields, .. } => (fields.len() == field_count).then(|| fields.clone()),
         TagInfo::Tuple
         | TagInfo::Constructor { .. }
@@ -195,7 +208,11 @@ fn simplify_inner(id_gen: &IdGenerator, lam: Lambda) -> Mapped {
                 let Lambda::Lprim(prim) = init else {
                     unreachable!()
                 };
-                let PrimInfo { primitive, args, loc } = *prim;
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = *prim;
                 let Primitive::Pmakeblock(info, mutable) = primitive else {
                     unreachable!()
                 };

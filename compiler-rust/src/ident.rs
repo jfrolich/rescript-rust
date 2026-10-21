@@ -28,8 +28,8 @@
 //! assert!(!id1.same(&id2));  // Different identifiers
 //! ```
 
-use serde::{Deserialize, Serialize};
 use crate::name::Name;
+use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
