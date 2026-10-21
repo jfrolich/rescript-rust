@@ -171,7 +171,7 @@ impl RawLambda {
             | RawLambda::Lcontinue => {}
             RawLambda::Lapply(apply) => {
                 f(&mut apply.ap_func);
-                apply.ap_args.iter_mut().for_each(|arg| f(arg));
+                apply.ap_args.iter_mut().for_each(&mut *f);
             }
             RawLambda::Lfunction(func) => f(&mut func.body),
             RawLambda::Llet(_, _, value, body) => {
@@ -182,7 +182,7 @@ impl RawLambda {
                 bindings.iter_mut().for_each(|(_, value)| f(value));
                 f(body);
             }
-            RawLambda::Lprim(info) => info.args.iter_mut().for_each(|arg| f(arg)),
+            RawLambda::Lprim(info) => info.args.iter_mut().for_each(&mut *f),
             RawLambda::Lswitch(arg, sw) => {
                 f(arg);
                 sw.sw_consts.iter_mut().for_each(|(_, act)| f(act));
@@ -198,7 +198,7 @@ impl RawLambda {
                     f(default);
                 }
             }
-            RawLambda::LstaticRaise(_, args) => args.iter_mut().for_each(|arg| f(arg)),
+            RawLambda::LstaticRaise(_, args) => args.iter_mut().for_each(&mut *f),
             RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
                 f(body);
                 f(handler);
@@ -301,7 +301,7 @@ impl RawLambda {
                     _ => unreachable!(),
                 })
                 .collect();
-            if let Lambda::Lconst(c) = Lambda::prim(primitive.clone(), consts, loc.clone()) {
+            if let Lambda::Lconst(c) = Lambda::prim(primitive.clone(), consts, loc) {
                 return RawLambda::Lconst(c);
             }
         }
@@ -636,7 +636,7 @@ fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
                     | Primitive::Pstringcomp(_)
             ) =>
         {
-            Some(info.loc.clone())
+            Some(info.loc)
         }
         _ => None,
     }

@@ -136,17 +136,12 @@ const ANSI_WARN: &str = "\x1b[1;33m";
 const ANSI_FILENAME: &str = "\x1b[36m";
 const ANSI_RESET: &str = "\x1b[0m";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum ColorMode {
+    #[default]
     Auto = 0,
     Always = 1,
     Never = 2,
-}
-
-impl Default for ColorMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 static COLOR_MODE: AtomicU8 = AtomicU8::new(ColorMode::Auto as u8);
@@ -589,7 +584,7 @@ pub fn format_error(
     if has_printable_range(start_pos, end_pos) {
         result.push_str(&print(src, start_pos, end_pos));
         // Extra blank line after code frame
-        result.push_str("\n");
+        result.push('\n');
     }
 
     // Message

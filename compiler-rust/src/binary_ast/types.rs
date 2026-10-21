@@ -9,7 +9,6 @@ use crate::location::{Located, Location, Position};
 use crate::parse_arena::{
     self, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ModExprIdx, ModTypeIdx, PatIdx, PosIdx, StrIdx,
 };
-use crate::parser::ast::{CoreType, Expression, ModuleExpr, ModuleType, Pattern};
 use crate::parser::longident::Longident;
 
 // ========== Position (Lexing.position) ==========

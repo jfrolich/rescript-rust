@@ -20,11 +20,11 @@ use crate::types::path::Path;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    FunctionParam, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
-    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure,
-    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
-    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
-    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
+    Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint, OpenDeclaration, Partial,
+    Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem,
+    StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
+    TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
+    ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -894,7 +894,7 @@ fn sexp_expression(
     dedup: &mut TypeDedupTable,
     e: &Expression,
 ) -> Sexp {
-    if let Some(raw_lines) = std::env::var("RUST_DEBUG_SEXP_EXPR_LINE").ok() {
+    if let Ok(raw_lines) = std::env::var("RUST_DEBUG_SEXP_EXPR_LINE") {
         let loc = arena.to_location(e.exp_loc);
         let line = loc.loc_start.line;
         let should_debug = raw_lines
@@ -1910,7 +1910,7 @@ fn sexp_constructor_decl(
     let mut items = vec![
         Sexp::atom("constructor_declaration"),
         sexp_ident(&cd.cd_id),
-        string(&cd.cd_id.name()),
+        string(cd.cd_id.name()),
     ];
     items.extend(loc_sexp);
     items.push(sexp_constructor_args(
@@ -1972,7 +1972,7 @@ fn sexp_label_decl(
     let mut items = vec![
         Sexp::atom("label_declaration"),
         sexp_ident(&ld.ld_id),
-        string(&ld.ld_id.name()),
+        string(ld.ld_id.name()),
     ];
     items.extend(loc_sexp);
     items.push(sexp_decl_mutable_flag(&ld.ld_mutable));
@@ -2444,7 +2444,7 @@ fn sexp_open_declaration(
     arena: &ParseArena,
     ctx: &TypeContext,
     with_locs: bool,
-    dedup: &mut TypeDedupTable,
+    _dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
 ) -> Sexp {
     let mut items = vec![
@@ -2812,7 +2812,7 @@ fn sexp_open_description(
     arena: &ParseArena,
     ctx: &TypeContext,
     with_locs: bool,
-    dedup: &mut TypeDedupTable,
+    _dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
 ) -> Sexp {
     let mut items = vec![

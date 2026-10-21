@@ -141,14 +141,14 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                 {
                     let PrimInfo {
                         primitive: Primitive::Pfield(index, _),
-                        args,
+                        args: _,
                         loc: _,
                     } = __prim2.as_ref()
                     else {
                         unreachable!()
                     };
 
-                    tuple_mapping.insert(*index, projected.clone());
+                    tuple_mapping.insert(*index, *projected);
                     can_eliminate_tuple(id, body, tuple_mapping)
                 }
                 _ => {
@@ -185,7 +185,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                 {
                     let PrimInfo {
                         primitive: Primitive::Pfield(index, _),
-                        args,
+                        args: _,
                         loc: _,
                     } = *__prim1
                     else {
@@ -295,7 +295,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                             let new_id = id.rename(id_gen);
                             let lowered = Lambda::Llet(
                                 kind,
-                                new_id.clone(),
+                                new_id,
                                 Box::new(arg),
                                 map_box(body, |inner| {
                                     Lambda::let_(
@@ -343,9 +343,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                             .into_iter()
                             .enumerate()
                             .map(|(index, arg)| match tuple_mapping.get(&(index as i32)) {
-                                Some(projected) => {
-                                    FlattenGroup::Single(kind, projected.clone(), arg)
-                                }
+                                Some(projected) => FlattenGroup::Single(kind, *projected, arg),
                                 None => FlattenGroup::Nop(arg),
                             })
                             .collect::<Vec<_>>();
@@ -459,7 +457,7 @@ mod tests {
     fn field(index: i32, id: &Ident) -> Lambda {
         Lambda::prim(
             Primitive::Pfield(index, FieldDbgInfo::Tuple),
-            vec![Lambda::var(id.clone())],
+            vec![Lambda::var(*id)],
             Location::none(),
         )
     }
@@ -541,17 +539,17 @@ mod tests {
         let x0 = ident("x0", 7);
 
         let result = tuple(vec![
-            Lambda::var(x1.clone()),
-            Lambda::var(y1.clone()),
-            Lambda::var(x0.clone()),
-            Lambda::var(y0.clone()),
+            Lambda::var(x1),
+            Lambda::var(y1),
+            Lambda::var(x0),
+            Lambda::var(y0),
         ]);
         let body = Lambda::let_(LetKind::Alias, x0, field(0, &left), result);
         let body = Lambda::let_(LetKind::Alias, y0, field(1, &left), body);
         let body = Lambda::let_(LetKind::Alias, left, field(0, &tuple_id), body);
         let body = Lambda::let_(LetKind::Alias, x1, field(0, &right), body);
         let body = Lambda::let_(LetKind::Alias, y1, field(1, &right), body);
-        let body = Lambda::let_(LetKind::Alias, right.clone(), field(1, &tuple_id), body);
+        let body = Lambda::let_(LetKind::Alias, right, field(1, &tuple_id), body);
 
         let lam = Lambda::let_(
             LetKind::Strict,
@@ -579,13 +577,13 @@ mod tests {
         let id_gen = IdGenerator::with_start_stamp(3000);
         let lam = Lambda::let_(
             LetKind::Strict,
-            wrapped.clone(),
+            wrapped,
             Lambda::prim(
                 Primitive::PnullUndefinedToOpt,
                 vec![Lambda::const_(Constant::JsNull)],
                 Location::none(),
             ),
-            Lambda::var(wrapped.clone()),
+            Lambda::var(wrapped),
         );
 
         let flattened = deep_flatten_owned_with_id_gen(lam, &id_gen);

@@ -400,7 +400,7 @@ fn parse_type_var_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
 /// Returns a `Ptyp_poly(Box::new((vars, body)))` where body has `Ptyp_constr` for the type vars
 /// (the caller is responsible for substituting to `Ptyp_var`).
 pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
-    let start_pos = p.start_pos.clone();
+    let start_pos = p.start_pos;
     p.expect(Token::Typ);
     let mut vars: Vec<StringLoc> = vec![];
 
@@ -919,8 +919,8 @@ fn parse_type_constr_with_start(
             .count();
         if count > 1 {
             p.err_at(
-                p.arena().get_position(start_pos_idx).clone(),
-                p.prev_end_pos.clone(),
+                *p.arena().get_position(start_pos_idx),
+                p.prev_end_pos,
                 DiagnosticCategory::Message(
                     "Only one inline record definition is allowed per record field. This defines more than one inline record.".to_string(),
                 ),
@@ -948,7 +948,7 @@ pub(super) fn parse_type_constructor_args(
     lid_idx: crate::parse_arena::LidentIdx,
     lid_loc: &LocIdx,
 ) -> Vec<CoreType> {
-    let lid_loc = lid_loc.clone();
+    let lid_loc = *lid_loc;
     if p.token == Token::LessThan || p.token == Token::Lparen {
         let opening = p.token.clone().into_owned();
         // Report before recovery to suppress cascading errors. The
@@ -979,7 +979,7 @@ pub(super) fn parse_type_constructor_args(
                 .collect();
             let typ = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                    with_loc(lid_idx, lid_loc.clone()),
+                    with_loc(lid_idx, lid_loc),
                     arg_idxs,
                 )))),
                 ptyp_loc: LocIdx::none(),
@@ -1146,7 +1146,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // here; later ones are read by `parse_attributes`.
         let mut doc_attrs = vec![];
         if let Token::DocComment { loc, content } = &p.token {
-            let loc = loc.clone();
+            let loc = *loc;
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
@@ -1343,7 +1343,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 let first_arg_start = p.loc_start(arg_typ.ptyp_loc);
                 // If first arg location starts exactly at post_doc_start, it's a direct arrow
                 // If it starts elsewhere (before due to inner `.` or after due to parens), don't extend
-                let post_doc_start = p.arena().get_position(post_doc_start_idx).clone();
+                let post_doc_start = *p.arena().get_position(post_doc_start_idx);
                 let is_direct_arrow = first_arg_start.cnum == post_doc_start.cnum;
                 if is_direct_arrow {
                     // Extend arrow location to include `.`
@@ -1573,7 +1573,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 }
             }
             Token::DocComment { loc, content } => {
-                let loc_cloned = loc.clone();
+                let loc_cloned = *loc;
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
@@ -1641,8 +1641,8 @@ fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) 
     // OCaml: A tuple needs at least two elements
     if types.len() == 1 {
         p.err_at(
-            p.arena().get_position(start_pos_idx).clone(),
-            p.prev_end_pos.clone(),
+            *p.arena().get_position(start_pos_idx),
+            p.prev_end_pos,
             DiagnosticCategory::Message("A tuple needs at least two elements".to_string()),
         );
     }
@@ -1707,7 +1707,7 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
                 0,
                 (
                     inline_type_idx,
-                    loc.clone(),
+                    loc,
                     TypeKind::Ptype_record(labels),
                     params.clone(),
                 ),
@@ -1720,7 +1720,7 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
         (
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                    with_loc(lid_idx, loc.clone()),
+                    with_loc(lid_idx, loc),
                     type_args,
                 )))),
                 ptyp_loc: loc,
@@ -1939,7 +1939,7 @@ fn parse_tag_names(p: &mut Parser<'_>) -> Vec<Label> {
 /// A leading doc comment becomes a `res.doc` attribute.
 fn parse_optional_doc_comment_attr(p: &mut Parser<'_>) -> Attributes {
     if let Token::DocComment { loc, content } = &p.token {
-        let loc = loc.clone();
+        let loc = *loc;
         let content = content.clone();
         p.next();
         let loc = p.from_location(&loc);

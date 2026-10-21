@@ -31,12 +31,12 @@ pub fn free_variables(lam: &Lambda) -> IdentSet {
 fn collect_free_variables(lam: &Lambda, fv: &mut IdentSet) {
     match lam {
         Lambda::Lvar(id) => {
-            fv.insert(id.clone());
+            fv.insert(*id);
         }
 
         Lambda::Lassign(id, e) => {
             collect_free_variables(e, fv);
-            fv.insert(id.clone());
+            fv.insert(*id);
         }
 
         Lambda::LstaticCatch(body, (_, vars), handler) => {
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn test_free_variable_simple() {
         let x = Ident::create_local("x");
-        let var = Lambda::var(x.clone());
+        let var = Lambda::var(x);
 
         let fv = free_variables(&var);
         assert!(fv.contains(&x));
@@ -213,12 +213,7 @@ mod tests {
 
         // let x = y in x
         // y is free, x is bound
-        let expr = Lambda::let_(
-            LetKind::Strict,
-            x.clone(),
-            Lambda::var(y.clone()),
-            Lambda::var(x.clone()),
-        );
+        let expr = Lambda::let_(LetKind::Strict, x, Lambda::var(y), Lambda::var(x));
 
         let fv = free_variables(&expr);
         assert!(fv.contains(&y));
@@ -235,8 +230,8 @@ mod tests {
         // y is free, x is bound
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(y.clone()),
+            vec![x],
+            Lambda::var(y),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -255,8 +250,8 @@ mod tests {
         // No free variables
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(x.clone()),
+            vec![x],
+            Lambda::var(x),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -275,13 +270,13 @@ mod tests {
         // y is free, f and x are bound
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(y.clone()),
+            vec![x],
+            Lambda::var(y),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
 
-        let letrec = Lambda::letrec(vec![(f.clone(), func)], Lambda::var(f.clone()));
+        let letrec = Lambda::letrec(vec![(f, func)], Lambda::var(f));
 
         let fv = free_variables(&letrec);
         assert!(fv.contains(&y));
@@ -299,11 +294,11 @@ mod tests {
         // for i = 0 to n do body_var
         // n and body_var are free, i is bound
         let for_loop = Lambda::for_(
-            i.clone(),
+            i,
             Lambda::const_(Constant::int(0)),
-            Lambda::var(n.clone()),
+            Lambda::var(n),
             crate::lambda::DirectionFlag::Upto,
-            Lambda::var(body_var.clone()),
+            Lambda::var(body_var),
         );
 
         let fv = free_variables(&for_loop);
@@ -321,7 +316,7 @@ mod tests {
 
         // try x with exn -> y
         // x and y are free, exn is bound
-        let try_expr = Lambda::try_(Lambda::var(x.clone()), exn.clone(), Lambda::var(y.clone()));
+        let try_expr = Lambda::try_(Lambda::var(x), exn, Lambda::var(y));
 
         let fv = free_variables(&try_expr);
         assert!(fv.contains(&x));
@@ -338,12 +333,7 @@ mod tests {
 
         // catch x with (1, p1) -> y
         // x and y are free, p1 is bound
-        let catch_expr = Lambda::static_catch(
-            Lambda::var(x.clone()),
-            1,
-            vec![p1.clone()],
-            Lambda::var(y.clone()),
-        );
+        let catch_expr = Lambda::static_catch(Lambda::var(x), 1, vec![p1], Lambda::var(y));
 
         let fv = free_variables(&catch_expr);
         assert!(fv.contains(&x));
@@ -359,7 +349,7 @@ mod tests {
 
         // x := y
         // Both x and y are free (x is being assigned, not bound)
-        let assign = Lambda::assign(x.clone(), Lambda::var(y.clone()));
+        let assign = Lambda::assign(x, Lambda::var(y));
 
         let fv = free_variables(&assign);
         assert!(fv.contains(&x));
@@ -374,15 +364,10 @@ mod tests {
         let z = Ident::create_local("z");
 
         // let x = y in x
-        let expr = Lambda::let_(
-            LetKind::Strict,
-            x.clone(),
-            Lambda::var(y.clone()),
-            Lambda::var(x.clone()),
-        );
+        let expr = Lambda::let_(LetKind::Strict, x, Lambda::var(y), Lambda::var(x));
 
         let mut check_set = IdentSet::new();
-        check_set.insert(y.clone());
+        check_set.insert(y);
         assert!(has_free_variables(&expr, &check_set));
 
         check_set.clear();
@@ -404,8 +389,8 @@ mod tests {
         // fun x -> x is closed
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(x.clone()),
+            vec![x],
+            Lambda::var(x),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -419,7 +404,7 @@ mod tests {
     fn test_global_module_not_free() {
         let m = Ident::create_local("M");
 
-        let global = Lambda::global_module(m.clone());
+        let global = Lambda::global_module(m);
         let fv = free_variables(&global);
 
         // Global modules should not be considered free variables

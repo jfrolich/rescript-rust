@@ -22,21 +22,21 @@ pub fn shallow_exists(lam: &Lambda, f: &mut impl FnMut(&Lambda) -> bool) -> bool
         | Lambda::Lconst(_)
         | Lambda::Lbreak
         | Lambda::Lcontinue => false,
-        Lambda::Lapply(ap) => f(&ap.ap_func) || ap.ap_args.iter().any(|arg| f(arg)),
+        Lambda::Lapply(ap) => f(&ap.ap_func) || ap.ap_args.iter().any(&mut *f),
         Lambda::Lfunction(func) => f(&func.body),
         Lambda::Llet(_, _, arg, body) => f(arg) || f(body),
         Lambda::Lletrec(decl, body) => f(body) || decl.iter().any(|(_, e)| f(e)),
-        Lambda::Lprim(prim) => prim.args.iter().any(|arg| f(arg)),
+        Lambda::Lprim(prim) => prim.args.iter().any(&mut *f),
         Lambda::Lswitch(arg, sw) => {
             f(arg)
                 || sw.sw_consts.iter().any(|(_, e)| f(e))
                 || sw.sw_blocks.iter().any(|(_, e)| f(e))
-                || sw.sw_failaction.as_deref().is_some_and(|e| f(e))
+                || sw.sw_failaction.as_deref().is_some_and(&mut *f)
         }
         Lambda::LstringSwitch(arg, cases, default) => {
-            f(arg) || cases.iter().any(|(_, e)| f(e)) || default.as_deref().is_some_and(|e| f(e))
+            f(arg) || cases.iter().any(|(_, e)| f(e)) || default.as_deref().is_some_and(&mut *f)
         }
-        Lambda::LstaticRaise(_, args) => args.iter().any(|arg| f(arg)),
+        Lambda::LstaticRaise(_, args) => args.iter().any(&mut *f),
         Lambda::LstaticCatch(e1, _, e2) | Lambda::LtryWith(e1, _, e2) => f(e1) || f(e2),
         Lambda::LifThenElse(e1, e2, e3) => f(e1) || f(e2) || f(e3),
         Lambda::Lsequence(e1, e2) | Lambda::Lwhile(e1, e2) => f(e1) || f(e2),

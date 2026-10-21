@@ -316,7 +316,7 @@ impl<'a> Simplifier<'a> {
                 match arg {
                     Lambda::Lvar(v) => {
                         let mut fallback_used = false;
-                        let fallback_v = v.clone();
+                        let fallback_v = v;
                         let result = field_flatten_get(
                             || {
                                 fallback_used = true;
@@ -361,7 +361,7 @@ impl<'a> Simplifier<'a> {
             {
                 let id = match cond.as_ref() {
                     Lambda::Lprim(prim) => match &prim.args[0] {
-                        Lambda::Lvar(id) => id.clone(),
+                        Lambda::Lvar(id) => *id,
                         _ => unreachable!(),
                     },
                     _ => unreachable!(),
@@ -466,7 +466,7 @@ impl<'a> Simplifier<'a> {
                 };
                 let (ap_args, args_changed) = self.simpl_list(ap_args);
                 let normal = |this: &mut Self, ap_args: Vec<Lambda>| {
-                    let (func, func_changed) = this.simpl_sharing(Lambda::Lvar(v.clone()));
+                    let (func, func_changed) = this.simpl_sharing(Lambda::Lvar(v));
                     if func_changed || args_changed {
                         (
                             Lambda::apply(func, ap_args, ap_info.clone(), ap_transformed_jsx),

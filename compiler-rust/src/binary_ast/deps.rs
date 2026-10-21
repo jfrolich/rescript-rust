@@ -129,7 +129,7 @@ impl<'a> DependencyCollector<'a> {
     fn add_pat_idx_inner(&mut self, idx: PatIdx, unpack_names: &mut HashSet<String>) {
         let arena = self.arena;
         let pat = arena.get_pat(idx);
-        self.add_pattern_inner(&pat, unpack_names);
+        self.add_pattern_inner(pat, unpack_names);
     }
 
     fn add_core_type_idx(&mut self, idx: CoreTypeIdx) {

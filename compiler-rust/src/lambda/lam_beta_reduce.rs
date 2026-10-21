@@ -54,7 +54,7 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
     let mut param_map: HashMap<Ident, ArgUsage> = HashMap::new();
     for (param, arg) in params.iter().zip(args.iter()) {
         param_map.insert(
-            param.clone(),
+            *param,
             ArgUsage {
                 lambda: arg.clone(),
                 used: false,
@@ -100,8 +100,7 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
 
             // lam_beta_reduce_util.ml:79-81 builds it through the folding
             // `Lambda.prim`.
-            let mut result =
-                Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc.clone());
+            let mut result = Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc);
 
             // Add sequences for unused arguments (preserve side effects)
             for (_param, usage) in param_map.iter() {
@@ -199,7 +198,7 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
     // Fall back to creating let bindings
     let mut result = body.clone();
     for (param, arg) in params.iter().zip(args.iter()) {
-        result = refine_let(LetKind::Strict, param.clone(), arg.clone(), result);
+        result = refine_let(LetKind::Strict, *param, arg.clone(), result);
     }
     result
 }
@@ -265,12 +264,12 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
     for (param, arg) in params.iter().zip(args.iter()) {
         match arg {
             Lambda::Lconst(_) | Lambda::Lvar(_) => {
-                substitution.insert(param.clone(), arg.clone());
+                substitution.insert(*param, arg.clone());
             }
             _ => {
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
-                substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
+                rest_bindings.push((new_param, bound_param_binding(arg)));
+                substitution.insert(*param, bound_param_substitution(new_param, arg));
             }
         }
     }
@@ -352,28 +351,28 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
         match arg {
             // Constants and variables can always be substituted
             Lambda::Lconst(_) | Lambda::Lvar(_) => {
-                substitution.insert(param.clone(), arg.clone());
+                substitution.insert(*param, arg.clone());
             }
             // Global modules need to be bound (for proper module loading)
             Lambda::LglobalModule(_) => {
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), arg.clone()));
-                substitution.insert(param.clone(), Lambda::var(new_param));
+                rest_bindings.push((new_param, arg.clone()));
+                substitution.insert(*param, Lambda::var(new_param));
             }
             _ => {
                 // Check if we can substitute based on usage stats
                 if no_side_effects(arg) {
                     if let Some(stat) = stats.get(param) {
                         if stat.top_and_used_zero_or_one() {
-                            substitution.insert(param.clone(), arg.clone());
+                            substitution.insert(*param, arg.clone());
                             continue;
                         }
                     }
                 }
                 // Bind to a new variable
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
-                substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
+                rest_bindings.push((new_param, bound_param_binding(arg)));
+                substitution.insert(*param, bound_param_substitution(new_param, arg));
             }
         }
     }
@@ -419,7 +418,7 @@ fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &La
                 unreachable!()
             };
 
-            ident_tbl.insert(param.clone(), kind_of_lambda_block(args));
+            ident_tbl.insert(*param, kind_of_lambda_block(args));
         }
         Lambda::Lprim(__prim0)
             if matches!(__prim0.as_ref(), PrimInfo {
@@ -437,7 +436,7 @@ fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &La
                 unreachable!()
             };
 
-            ident_tbl.insert(param.clone(), IdKind::NormalOptional(args[0].clone()));
+            ident_tbl.insert(*param, IdKind::NormalOptional(args[0].clone()));
         }
         _ => {}
     }
@@ -487,7 +486,7 @@ fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
 fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
     fn rebind(id: &Ident, substitution: &mut Subst, id_gen: &IdGenerator) -> Ident {
         let renamed = id.rename(id_gen);
-        substitution.insert(id.clone(), Lambda::var(renamed.clone()));
+        substitution.insert(*id, Lambda::var(renamed));
         renamed
     }
 
@@ -548,7 +547,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .iter()
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
                 .collect(),
-            prim_info.loc.clone(),
+            prim_info.loc,
         ),
         Lambda::LglobalModule(_) => lam.clone(),
         Lambda::Lswitch(arg, switch) => Lambda::switch(
@@ -669,7 +668,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
         Lambda::Lbreak => Lambda::break_(),
         Lambda::Lcontinue => Lambda::continue_(),
         Lambda::Lassign(id, value) => Lambda::Lassign(
-            id.clone(),
+            *id,
             Box::new(rewrite_bounded_vars(substitution, value, id_gen)),
         ),
     }
@@ -772,10 +771,10 @@ mod tests {
         let y = Ident::create_local("y");
 
         // (fun x y -> x + y) 1 2 => 1 + 2
-        let params = vec![x.clone(), y.clone()];
+        let params = vec![x, y];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::var(y.clone())],
+            vec![Lambda::var(x), Lambda::var(y)],
             Location::none(),
         );
         let args = vec![
@@ -802,8 +801,8 @@ mod tests {
 
         // (fun x y -> x) 1 (side_effect) => side_effect; 1
         // Note: y is unused, but we need to evaluate the argument
-        let params = vec![x.clone(), y.clone()];
-        let body = Lambda::var(x.clone()); // Only uses x
+        let params = vec![x, y];
+        let body = Lambda::var(x); // Only uses x
 
         // For simple_beta_reduce, complex unused args prevent optimization
         let args = vec![
@@ -821,10 +820,10 @@ mod tests {
         let x = Ident::create_local("x");
 
         // (fun x -> x + x) 1 => should NOT simple reduce (x used twice)
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::var(x.clone())],
+            vec![Lambda::var(x), Lambda::var(x)],
             Location::none(),
         );
         let args = vec![Lambda::const_(Constant::int(1))];
@@ -841,17 +840,17 @@ mod tests {
         // (fun x y -> x + x + y) (f) (g)
         // x is used twice, so simple_beta_reduce won't work
         // => let x = f in let y = g in x + x + y
-        let params = vec![x.clone(), y.clone()];
+        let params = vec![x, y];
         // Body uses x twice, which prevents simple_beta_reduce
         let body = Lambda::prim(
             Primitive::Paddint,
             vec![
                 Lambda::prim(
                     Primitive::Paddint,
-                    vec![Lambda::var(x.clone()), Lambda::var(x.clone())],
+                    vec![Lambda::var(x), Lambda::var(x)],
                     Location::none(),
                 ),
-                Lambda::var(y.clone()),
+                Lambda::var(y),
             ],
             Location::none(),
         );
@@ -875,7 +874,7 @@ mod tests {
         // A sequence is deliberately outside `simple_beta_reduce`'s
         // primitive/application fast path, so both effectful arguments become
         // explicit strict bindings whose nesting order is observable.
-        let body = Lambda::seq(Lambda::var(x.clone()), Lambda::var(y.clone()));
+        let body = Lambda::seq(Lambda::var(x), Lambda::var(y));
         let call = |name: &str| {
             Lambda::prim(
                 Primitive::PjsCall {
@@ -928,11 +927,11 @@ mod tests {
         let params = vec![outer];
         let body = Lambda::let_(
             LetKind::Strict,
-            helper.clone(),
+            helper,
             Lambda::const_(Constant::int(1)),
             Lambda::function_(
                 1,
-                vec![inner.clone()],
+                vec![inner],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
                 crate::location::Location::none(),
@@ -956,16 +955,16 @@ mod tests {
     #[test]
     fn test_propagate_beta_reduce_marks_boxed_nullable_bindings_with_identity() {
         let x = Ident::create_local("x");
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::if_(
             Lambda::prim(
                 Primitive::PisNotNone,
-                vec![Lambda::var(x.clone())],
+                vec![Lambda::var(x)],
                 Location::none(),
             ),
             Lambda::prim(
                 Primitive::PvalFromOption,
-                vec![Lambda::var(x.clone())],
+                vec![Lambda::var(x)],
                 Location::none(),
             ),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
@@ -1042,11 +1041,11 @@ mod tests {
     #[test]
     fn test_propagate_beta_reduce_renames_reused_returned_function_params() {
         let none = Ident::create_local("none");
-        let params = vec![none.clone()];
+        let params = vec![none];
         let body = Lambda::function_(
             1,
-            vec![none.clone()],
-            Lambda::var(none.clone()),
+            vec![none],
+            Lambda::var(none),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -1076,17 +1075,17 @@ mod tests {
         // (fun x -> x + 1) 5
         // With stats showing x is used once in top position
         // => 5 + 1 (direct substitution)
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(1))],
+            vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
             Location::none(),
         );
         let args = vec![Lambda::const_(Constant::int(5))];
 
         let mut stats = StatsMap::new();
         stats.insert(
-            x.clone(),
+            x,
             VarStats {
                 top: true,
                 times: 1,
@@ -1111,18 +1110,18 @@ mod tests {
         // (fun x -> x + 1) y where y is pure
         // With stats showing x is used once in top position
         // => y + 1 (substitute because pure and used once)
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(1))],
+            vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
             Location::none(),
         );
         // Lambda::var is pure
-        let args = vec![Lambda::var(y.clone())];
+        let args = vec![Lambda::var(y)];
 
         let mut stats = StatsMap::new();
         stats.insert(
-            x.clone(),
+            x,
             VarStats {
                 top: true,
                 times: 1,
@@ -1144,11 +1143,11 @@ mod tests {
     #[test]
     fn test_propagate_beta_reduce_with_map_renames_reused_returned_function_params() {
         let none = Ident::create_local("none");
-        let params = vec![none.clone()];
+        let params = vec![none];
         let body = Lambda::function_(
             1,
-            vec![none.clone()],
-            Lambda::var(none.clone()),
+            vec![none],
+            Lambda::var(none),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -1156,7 +1155,7 @@ mod tests {
 
         let mut stats = StatsMap::new();
         stats.insert(
-            none.clone(),
+            none,
             VarStats {
                 top: true,
                 times: 1,
@@ -1186,7 +1185,7 @@ mod tests {
         let reduced = propagate_beta_reduce(
             std::slice::from_ref(&x),
             &Lambda::Lswitch(
-                Box::new(Lambda::var(x.clone())),
+                Box::new(Lambda::var(x)),
                 Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
@@ -1217,7 +1216,7 @@ mod tests {
 
         // let x = v in x => v
         let value = Lambda::const_(Constant::int(42));
-        let body = Lambda::var(x.clone());
+        let body = Lambda::var(x);
 
         let result = refine_let(LetKind::Strict, x, value.clone(), body);
 

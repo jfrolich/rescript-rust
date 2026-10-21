@@ -411,7 +411,7 @@ pub fn print_deps_program_with_source_map(
     let mut output = printer.into_output();
     match mode {
         SourceMapMode::Linked => {
-            output.push_str(&linked_comment(&Path::new(&format!(
+            output.push_str(&linked_comment(Path::new(&format!(
                 "{}.map",
                 target_file.display()
             ))));
@@ -790,7 +790,7 @@ mod tests {
             &DepsProgram {
                 program: Program::new(
                     vec![Statement::variable(VariableDeclaration {
-                        ident: default_ident.clone(),
+                        ident: default_ident,
                         value: Some(Expression::string("xx")),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),

@@ -80,8 +80,8 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
         ident: &Ident,
     ) -> Option<Rc<std::cell::RefCell<UsedInfo>>> {
         let cell = Rc::new(std::cell::RefCell::new(dummy_info()));
-        occ.insert(ident.clone(), Rc::clone(&cell));
-        bv.insert(ident.clone(), cell)
+        occ.insert(*ident, Rc::clone(&cell));
+        bv.insert(*ident, cell)
     }
 
     fn restore_var(
@@ -91,7 +91,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     ) {
         match previous {
             Some(previous) => {
-                bv.insert(ident.clone(), previous);
+                bv.insert(*ident, previous);
             }
             None => {
                 bv.remove(ident);
@@ -184,7 +184,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             // `w`'s refcount via `inherit_use` (lam_pass_count.ml:126-130).
             Lambda::Llet(_, v, value, l2) if matches!(value.as_ref(), Lambda::Lvar(_)) => {
                 let w = match value.as_ref() {
-                    Lambda::Lvar(w) => w.clone(),
+                    Lambda::Lvar(w) => *w,
                     _ => unreachable!(),
                 };
                 let previous = bind_var(occ, bv, v);
@@ -363,16 +363,8 @@ mod tests {
     #[test]
     fn counts_two_uses_in_let_body() {
         let v = ident("v", 1);
-        let body = Lambda::Lsequence(
-            Box::new(Lambda::Lvar(v.clone())),
-            Box::new(Lambda::Lvar(v.clone())),
-        );
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            v.clone(),
-            Lambda::Lconst(Constant::int(1)),
-            body,
-        );
+        let body = Lambda::Lsequence(Box::new(Lambda::Lvar(v)), Box::new(Lambda::Lvar(v)));
+        let lam = Lambda::let_(LetKind::Strict, v, Lambda::Lconst(Constant::int(1)), body);
         let occ = collect_occurs(&lam);
         let info = lookup(&occ, &v);
         assert_eq!(info.times, 2);
@@ -388,7 +380,7 @@ mod tests {
         let func = Lambda::function_(
             1,
             vec![p],
-            Lambda::Lvar(v.clone()),
+            Lambda::Lvar(v),
             crate::lambda::FunctionAttribute {
                 inline: crate::lambda::InlineAttribute::Default,
                 is_a_functor: false,
@@ -399,12 +391,7 @@ mod tests {
             },
             crate::location::Location::none(),
         );
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            v.clone(),
-            Lambda::Lconst(Constant::int(1)),
-            func,
-        );
+        let lam = Lambda::let_(LetKind::Strict, v, Lambda::Lconst(Constant::int(1)), func);
         let occ = collect_occurs(&lam);
         let info = lookup(&occ, &v);
         assert!(info.captured);
@@ -418,18 +405,8 @@ mod tests {
         let w = ident("w", 4);
         let v = ident("v", 5);
         // First bind w so it has an occ entry; otherwise inherit_use does nothing.
-        let inner = Lambda::let_(
-            LetKind::Alias,
-            v.clone(),
-            Lambda::Lvar(w.clone()),
-            Lambda::Lvar(v.clone()),
-        );
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            w.clone(),
-            Lambda::Lconst(Constant::int(0)),
-            inner,
-        );
+        let inner = Lambda::let_(LetKind::Alias, v, Lambda::Lvar(w), Lambda::Lvar(v));
+        let lam = Lambda::let_(LetKind::Strict, w, Lambda::Lconst(Constant::int(0)), inner);
         let occ = collect_occurs(&lam);
         let w_info = lookup(&occ, &w);
         // v has 1 use; that use inherits to w. w itself appears 0 times in body

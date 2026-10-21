@@ -74,7 +74,7 @@ fn field_get(
 ) -> Option<NodeId> {
     match meta.ident_tbl.get(var) {
         Some(IndexedIdKind::Module(module)) => {
-            let base = store.append(NodeSnapshot::GlobalModule(module.clone()));
+            let base = store.append(NodeSnapshot::GlobalModule(*module));
             Some(append_rebuilt(
                 store,
                 NodeSnapshot::Prim(
@@ -224,7 +224,7 @@ impl Simplifier<'_> {
             NodeSnapshot::Prim(Primitive::Pfield(index, info), args, loc) if args.len() == 1 => {
                 let arg = self.simpl(args[0]);
                 if let NodeView::Var(id) = self.store.view(arg) {
-                    let id = id.clone();
+                    let id = *id;
                     if let Some(selected) = field_get(self.store, self.meta, &id, index, &info) {
                         return selected;
                     }
@@ -240,7 +240,7 @@ impl Simplifier<'_> {
                 loc,
             ) if args.len() == 1 && matches!(self.store.view(args[0]), NodeView::Var(_)) => {
                 let id = match self.store.view(args[0]) {
-                    NodeView::Var(id) => id.clone(),
+                    NodeView::Var(id) => *id,
                     _ => unreachable!(),
                 };
                 match self.meta.ident_tbl.get(&id) {
@@ -258,8 +258,8 @@ impl Simplifier<'_> {
                     self.store.view(condition)
                     && let NodeView::Var(id) = self.store.view(*arg)
                 {
-                    let id = id.clone();
-                    let loc = loc.clone();
+                    let id = *id;
+                    let loc = *loc;
                     match self.meta.ident_tbl.get(&id).cloned() {
                         Some(IndexedIdKind::Constant(c)) if const_some(&c) => {
                             return self.simpl(then_);
@@ -444,14 +444,14 @@ impl Simplifier<'_> {
             && let NodeView::GlobalModule(module) = self.store.view(*base)
         {
             fallback_jsx = false;
-            let (module, name) = (module.clone(), name.clone());
+            let (module, name) = (*module, name.clone());
             if let Some(lambda) = (self.external)(&module, &name) {
                 let imported = self.store.append_compat_lambda(lambda);
                 if let NodeSnapshot::Function(_,params,body,attr, _)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen,self.beta_hash_bucket_count,self.beta_diagnostics); return self.simpl(reduced); }
             }
         }
         if let NodeView::Var(id) = self.store.view(function) {
-            let id = id.clone();
+            let id = *id;
             let args: Vec<_> = args.into_iter().map(|n| self.simpl(n)).collect();
             let candidate = match self.meta.ident_tbl.get(&id).cloned() {
                 Some(IndexedIdKind::FunctionId {
@@ -641,9 +641,9 @@ mod tests {
             let binding = Lambda::const_(constant);
             let input = Lambda::let_(
                 LetKind::Strict,
-                value.clone(),
+                value,
                 binding.clone(),
-                Lambda::if_(Lambda::var(value.clone()), int(1), int(2)),
+                Lambda::if_(Lambda::var(value), int(1), int(2)),
             );
             let (actual, frontier, _) = run(input, 20);
             let expected = Lambda::let_(
@@ -664,9 +664,9 @@ mod tests {
         );
         let input = Lambda::let_(
             LetKind::Strict,
-            value.clone(),
+            value,
             binding.clone(),
-            Lambda::if_(Lambda::var(value.clone()), int(1), int(2)),
+            Lambda::if_(Lambda::var(value), int(1), int(2)),
         );
         let (actual, _, _) = run(input, 20);
         assert_exact(
@@ -675,7 +675,7 @@ mod tests {
         );
 
         let unknown = id("unknown", 3);
-        let input = Lambda::if_(Lambda::var(unknown.clone()), int(1), int(2));
+        let input = Lambda::if_(Lambda::var(unknown), int(1), int(2));
         let (actual, _, _) = run(input.clone(), 20);
         assert_exact(&actual, &input);
     }
@@ -693,7 +693,7 @@ mod tests {
             let input = Lambda::if_(
                 Lambda::prim(
                     Primitive::PisNotNone,
-                    vec![Lambda::var(boxed.clone())],
+                    vec![Lambda::var(boxed)],
                     condition_loc,
                 ),
                 int(1),
@@ -702,17 +702,17 @@ mod tests {
             let mut context = IndexedLambdaContext::from_lambda(input, []);
             let source_node = context
                 .store_mut()
-                .append_compat_lambda(Lambda::var(source.clone()));
-            context.metadata_mut().ident_tbl.insert(
-                boxed.clone(),
-                IndexedIdKind::OptionalBlock(source_node, mode),
-            );
+                .append_compat_lambda(Lambda::var(source));
+            context
+                .metadata_mut()
+                .ident_tbl
+                .insert(boxed, IndexedIdKind::OptionalBlock(source_node, mode));
             match context.metadata().ident_tbl.get(&boxed) {
                 Some(IndexedIdKind::OptionalBlock(node, actual_mode)) => {
                     assert_eq!(*actual_mode, mode);
                     assert_exact(
                         &context.store().materialize_node(*node),
-                        &Lambda::var(source.clone()),
+                        &Lambda::var(source),
                     );
                 }
                 other => panic!("unexpected metadata: {other:?}"),
@@ -757,12 +757,12 @@ mod tests {
             let value = id("shape", index as i32 + 1);
             let input = Lambda::let_(
                 LetKind::Strict,
-                value.clone(),
+                value,
                 binding.clone(),
                 Lambda::if_(
                     Lambda::prim(
                         Primitive::PisNotNone,
-                        vec![Lambda::var(value.clone())],
+                        vec![Lambda::var(value)],
                         Location::new_for_error("shape.res", 1, 2),
                     ),
                     int(7),
@@ -780,7 +780,7 @@ mod tests {
         let input = Lambda::if_(
             Lambda::prim(
                 Primitive::PisNotNone,
-                vec![Lambda::var(value.clone())],
+                vec![Lambda::var(value)],
                 Location::none(),
             ),
             int(7),
@@ -808,7 +808,7 @@ mod tests {
             let value = id("value", 1);
             let input = Lambda::prim(
                 Primitive::Pfield(index, info.clone()),
-                vec![Lambda::var(value.clone())],
+                vec![Lambda::var(value)],
                 loc,
             );
             let mut context = IndexedLambdaContext::from_lambda(input, []);
@@ -820,7 +820,7 @@ mod tests {
         }
         let module = id("Module", 9);
         let actual = simplify_field(
-            IndexedIdKind::Module(module.clone()),
+            IndexedIdKind::Module(module),
             FieldDbgInfo::Module {
                 name: "field".into(),
             },
@@ -845,12 +845,12 @@ mod tests {
         let loc = Location::new_for_error("field.res", 3, 4);
         let root = context.store_mut().append_compat_lambda(Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Tuple),
-            vec![Lambda::var(value.clone())],
-            loc.clone(),
+            vec![Lambda::var(value)],
+            loc,
         ));
         context.replace_root(root);
         context.metadata_mut().ident_tbl.insert(
-            value.clone(),
+            value,
             IndexedIdKind::ImmutableBlock(vec![IndexedElement::SimpleForm(simple)]),
         );
         let generator = IdGenerator::with_start_stamp(20);
@@ -860,8 +860,8 @@ mod tests {
 
         let fallback = Lambda::prim(
             Primitive::Pfield(1, FieldDbgInfo::Tuple),
-            vec![Lambda::var(value.clone())],
-            loc.clone(),
+            vec![Lambda::var(value)],
+            loc,
         );
         let actual = simplify_field(
             IndexedIdKind::ImmutableBlock(vec![IndexedElement::Na]),
@@ -902,7 +902,7 @@ mod tests {
     fn string_switch_and_jsx_preserve_use_exact_metadata_and_child_policy() {
         let value = id("value", 1);
         let switch = Lambda::string_switch(
-            Lambda::var(value.clone()),
+            Lambda::var(value),
             vec![("yes".into(), int(1))],
             Some(Box::new(int(2))),
         );
@@ -921,7 +921,7 @@ mod tests {
         let call_loc = Location::new_for_error("jsx.res", 3, 4);
         let first = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Tuple),
-            vec![Lambda::var(base.clone())],
+            vec![Lambda::var(base)],
             first_loc,
         );
         let input = Lambda::prim(
@@ -935,7 +935,7 @@ mod tests {
                 first.clone(),
                 Lambda::if_(Lambda::const_(Constant::JsTrue), int(3), int(4)),
             ],
-            call_loc.clone(),
+            call_loc,
         );
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         let simple = context.store_mut().append_compat_lambda(int(99));
@@ -967,7 +967,7 @@ mod tests {
             vec![Lambda::var(id("left", 3)), Lambda::var(id("right", 4))],
             Location::none(),
         );
-        let body = Lambda::if_(Lambda::var(param.clone()), then_.clone(), int(3));
+        let body = Lambda::if_(Lambda::var(param), then_.clone(), int(3));
         let mut store = IndexedLambda::from_lambda(body);
         let body = store.root();
         let unknown_truth = store.append_compat_lambda(Lambda::const_(Constant::Constructor(
@@ -987,7 +987,7 @@ mod tests {
         assert_eq!(store.node_count(), before + 1);
 
         let impure_body = store.append_compat_lambda(Lambda::if_(
-            Lambda::var(param.clone()),
+            Lambda::var(param),
             then_,
             Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
         ));
@@ -1016,16 +1016,12 @@ mod tests {
         rec_flag: crate::lambda::lam_compile_context::RecFlag,
         exported: bool,
     ) -> IndexedLambdaContext {
-        let input = apply(Lambda::var(function_id.clone()), vec![argument], false);
-        let exports = if exported {
-            vec![function_id.clone()]
-        } else {
-            vec![]
-        };
+        let input = apply(Lambda::var(function_id), vec![argument], false);
+        let exports = if exported { vec![function_id] } else { vec![] };
         let mut context = IndexedLambdaContext::from_lambda(input, exports);
         let function_node = context.store_mut().append_compat_lambda(function.clone());
         context.metadata_mut().ident_tbl.insert(
-            function_id.clone(),
+            function_id,
             IndexedIdKind::FunctionId {
                 arity: crate::lambda::lam_arity::Arity::info(vec![1], false),
                 lambda: Some((function_node, rec_flag)),
@@ -1054,12 +1050,8 @@ mod tests {
         let p = id("p", 2);
         let function = Lambda::function_(
             1,
-            vec![p.clone()],
-            Lambda::prim(
-                Primitive::Pidentity,
-                vec![Lambda::var(p.clone())],
-                Location::none(),
-            ),
+            vec![p],
+            Lambda::prim(Primitive::Pidentity, vec![Lambda::var(p)], Location::none()),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -1068,23 +1060,22 @@ mod tests {
             (crate::lambda::lam_compile_context::RecFlag::SelfRec, false),
             (crate::lambda::lam_compile_context::RecFlag::NonRec, true),
         ] {
-            let mut context =
-                context_with_function(f.clone(), function.clone(), int(4), flag, false);
+            let mut context = context_with_function(f, function.clone(), int(4), flag, false);
             let generator = IdGenerator::with_start_stamp(20);
             let mut external = |_: &Ident, _: &str| None;
             context.simplify_alias(&generator, false, &mut external);
             let expected = if should_inline {
                 Lambda::prim(Primitive::Pidentity, vec![int(4)], Location::none())
             } else {
-                apply(Lambda::var(f.clone()), vec![int(4)], false)
+                apply(Lambda::var(f), vec![int(4)], false)
             };
             assert_exact(&context.materialize(), &expected);
         }
 
         let mut context = context_with_function(
-            f.clone(),
+            f,
             function.clone(),
-            Lambda::var(f.clone()),
+            Lambda::var(f),
             crate::lambda::lam_compile_context::RecFlag::NonRec,
             false,
         );
@@ -1093,11 +1084,11 @@ mod tests {
         context.simplify_alias(&generator, false, &mut external);
         assert_exact(
             &context.materialize(),
-            &apply(Lambda::var(f.clone()), vec![Lambda::var(f.clone())], false),
+            &apply(Lambda::var(f), vec![Lambda::var(f)], false),
         );
 
         let mut closed = context_with_function(
-            f.clone(),
+            f,
             function,
             int(4),
             crate::lambda::lam_compile_context::RecFlag::NonRec,
@@ -1120,7 +1111,7 @@ mod tests {
             crate::location::Location::none(),
         );
         let mut open = context_with_function(
-            f.clone(),
+            f,
             open_function.clone(),
             int(4),
             crate::lambda::lam_compile_context::RecFlag::NonRec,
@@ -1156,8 +1147,8 @@ mod tests {
         for attr in variants {
             let function = Lambda::function_(
                 1,
-                vec![x.clone()],
-                Lambda::var(x.clone()),
+                vec![x],
+                Lambda::var(x),
                 attr,
                 crate::location::Location::none(),
             );
@@ -1173,7 +1164,7 @@ mod tests {
         }
         let function = Lambda::function_(
             2,
-            vec![x.clone(), id("y", 2)],
+            vec![x, id("y", 2)],
             Lambda::var(x),
             FunctionAttribute::default(),
             crate::location::Location::none(),
@@ -1194,7 +1185,7 @@ mod tests {
         let parameter = id("externalParam", 50);
         let target = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
-            vec![Lambda::global_module(module.clone())],
+            vec![Lambda::global_module(module)],
             Location::new_for_error("external.res", 1, 2),
         );
         let input = apply(target.clone(), vec![Lambda::const_(Constant::JsTrue)], true);
@@ -1204,7 +1195,7 @@ mod tests {
         let mut calls = Vec::new();
         let external_function = Lambda::function_(
             1,
-            vec![parameter.clone()],
+            vec![parameter],
             Lambda::if_(Lambda::var(parameter), int(7), int(8)),
             FunctionAttribute::default(),
             crate::location::Location::none(),
@@ -1219,7 +1210,7 @@ mod tests {
         assert_eq!(generator.current_stamp(), 100);
 
         let blocked = id("blocked", 60);
-        let input = apply(target, vec![Lambda::var(blocked.clone())], true);
+        let input = apply(target, vec![Lambda::var(blocked)], true);
         let mut context = IndexedLambdaContext::from_lambda(input.clone(), []);
         context
             .metadata_mut()
@@ -1248,16 +1239,8 @@ mod tests {
             let argument_loc = Location::new_for_error("nullable.res", 20, 21);
             let effect_loc = Location::new_for_error("nullable.res", 22, 23);
             let body = Lambda::if_(
-                Lambda::prim(
-                    Primitive::PisNotNone,
-                    vec![Lambda::var(x.clone())],
-                    predicate_loc.clone(),
-                ),
-                Lambda::prim(
-                    Primitive::PvalFromOption,
-                    vec![Lambda::var(x.clone())],
-                    unwrap_loc.clone(),
-                ),
+                Lambda::prim(Primitive::PisNotNone, vec![Lambda::var(x)], predicate_loc),
+                Lambda::prim(Primitive::PvalFromOption, vec![Lambda::var(x)], unwrap_loc),
                 Lambda::const_(Constant::JsUndefined { is_unit: false }),
             );
             let effect = Lambda::prim(
@@ -1268,13 +1251,9 @@ mod tests {
                     transformed_jsx: false,
                 },
                 vec![],
-                effect_loc.clone(),
+                effect_loc,
             );
-            let argument = Lambda::prim(
-                primitive.clone(),
-                vec![effect.clone()],
-                argument_loc.clone(),
-            );
+            let argument = Lambda::prim(primitive.clone(), vec![effect.clone()], argument_loc);
             let input = apply(
                 Lambda::function_(
                     1,
@@ -1290,12 +1269,12 @@ mod tests {
             let fresh = id("x", 201);
             let expected = Lambda::let_(
                 LetKind::Strict,
-                fresh.clone(),
+                fresh,
                 argument,
                 Lambda::if_(
                     Lambda::prim(
                         Primitive::PisNotNone,
-                        vec![Lambda::var(fresh.clone())],
+                        vec![Lambda::var(fresh)],
                         predicate_loc,
                     ),
                     Lambda::prim(
@@ -1320,12 +1299,8 @@ mod tests {
             Lambda::Lfunction(Box::new(LFunction {
                 loc: crate::location::Location::none(),
                 arity: 1,
-                params: vec![x.clone()],
-                body: Box::new(apply(
-                    Lambda::var(callee.clone()),
-                    vec![Lambda::var(x)],
-                    true,
-                )),
+                params: vec![x],
+                body: Box::new(apply(Lambda::var(callee), vec![Lambda::var(x)], true)),
                 attr: FunctionAttribute::default(),
             })),
             vec![int(4)],
@@ -1342,9 +1317,9 @@ mod tests {
         let local = id("local", 2);
         let body = Lambda::let_(
             LetKind::Strict,
-            local.clone(),
+            local,
             int(1),
-            Lambda::seq(Lambda::var(x.clone()), Lambda::var(local)),
+            Lambda::seq(Lambda::var(x), Lambda::var(local)),
         );
         let argument = Lambda::prim(
             Primitive::PjsCall {
@@ -1374,11 +1349,11 @@ mod tests {
         let fresh_local = id("local", 102);
         let expected = Lambda::let_(
             LetKind::Strict,
-            fresh_x.clone(),
+            fresh_x,
             argument,
             Lambda::let_(
                 LetKind::Strict,
-                fresh_local.clone(),
+                fresh_local,
                 int(1),
                 Lambda::seq(Lambda::var(fresh_x), Lambda::var(fresh_local)),
             ),
@@ -1393,49 +1368,11 @@ mod tests {
         let source = id("source", 3);
         let input = Lambda::let_(
             LetKind::Strict,
-            source.clone(),
+            source,
             int(8),
             Lambda::let_(
                 LetKind::Strict,
-                block.clone(),
-                Lambda::prim(
-                    Primitive::Pmakeblock(
-                        TagInfo::Tuple,
-                        crate::lambda::lam_primitive::Mutable::Immutable,
-                    ),
-                    vec![int(7)],
-                    Location::none(),
-                ),
-                Lambda::let_(
-                    LetKind::Strict,
-                    optional.clone(),
-                    Lambda::prim(
-                        Primitive::PnullToOpt,
-                        vec![Lambda::var(source.clone())],
-                        Location::none(),
-                    ),
-                    Lambda::seq(
-                        Lambda::prim(
-                            Primitive::Pfield(0, FieldDbgInfo::Tuple),
-                            vec![Lambda::var(block.clone())],
-                            Location::none(),
-                        ),
-                        Lambda::prim(
-                            Primitive::PvalFromOption,
-                            vec![Lambda::var(optional.clone())],
-                            Location::none(),
-                        ),
-                    ),
-                ),
-            ),
-        );
-        let expected = Lambda::let_(
-            LetKind::Strict,
-            source.clone(),
-            int(8),
-            Lambda::let_(
-                LetKind::Strict,
-                block.clone(),
+                block,
                 Lambda::prim(
                     Primitive::Pmakeblock(
                         TagInfo::Tuple,
@@ -1449,7 +1386,45 @@ mod tests {
                     optional,
                     Lambda::prim(
                         Primitive::PnullToOpt,
-                        vec![Lambda::var(source.clone())],
+                        vec![Lambda::var(source)],
+                        Location::none(),
+                    ),
+                    Lambda::seq(
+                        Lambda::prim(
+                            Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                            vec![Lambda::var(block)],
+                            Location::none(),
+                        ),
+                        Lambda::prim(
+                            Primitive::PvalFromOption,
+                            vec![Lambda::var(optional)],
+                            Location::none(),
+                        ),
+                    ),
+                ),
+            ),
+        );
+        let expected = Lambda::let_(
+            LetKind::Strict,
+            source,
+            int(8),
+            Lambda::let_(
+                LetKind::Strict,
+                block,
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        TagInfo::Tuple,
+                        crate::lambda::lam_primitive::Mutable::Immutable,
+                    ),
+                    vec![int(7)],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    optional,
+                    Lambda::prim(
+                        Primitive::PnullToOpt,
+                        vec![Lambda::var(source)],
                         Location::none(),
                     ),
                     Lambda::seq(int(7), Lambda::var(source)),
@@ -1466,7 +1441,7 @@ mod tests {
         let module = id("External", 1);
         let target = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
-            vec![Lambda::global_module(module.clone())],
+            vec![Lambda::global_module(module)],
             Location::none(),
         );
         let input = apply(target.clone(), vec![int(1)], true);
@@ -1490,12 +1465,8 @@ mod tests {
         let x = id("x", 2);
         let function = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::prim(
-                Primitive::Pidentity,
-                vec![Lambda::var(x.clone())],
-                Location::none(),
-            ),
+            vec![x],
+            Lambda::prim(Primitive::Pidentity, vec![Lambda::var(x)], Location::none()),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -1503,11 +1474,11 @@ mod tests {
         let caught = Lambda::static_catch(
             raised,
             7,
-            vec![x.clone()],
-            apply(Lambda::var(f.clone()), vec![Lambda::var(x)], false),
+            vec![x],
+            apply(Lambda::var(f), vec![Lambda::var(x)], false),
         );
         let expected_function = function.clone();
-        let expected_f = f.clone();
+        let expected_f = f;
         let input = Lambda::let_(LetKind::Strict, f, function, caught);
         let generator = IdGenerator::with_start_stamp(20);
         let mut context = IndexedLambdaContext::from_lambda(input, []);

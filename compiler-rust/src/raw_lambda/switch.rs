@@ -79,6 +79,12 @@ pub struct ActionStore {
     next: usize,
 }
 
+impl Default for ActionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActionStore {
     pub fn new() -> Self {
         ActionStore {
@@ -323,7 +329,7 @@ fn build_lswitch(
     tbl: &[usize],
     acts: Vec<RawLambda>,
     offset: i32,
-    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
+    _sw_dispatch: Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let cases_for_counts: Vec<(i32, i32, usize)> = tbl
         .iter()
@@ -818,7 +824,7 @@ impl SwitchCompiler {
             return actions[cases[0].2].take();
         }
 
-        let (w, cost) = self.opt_count(cases);
+        let (w, _cost) = self.opt_count(cases);
         match w {
             TRet::No => actions[cases[0].2].take(),
             TRet::Inter(i, j) => {
@@ -1083,13 +1089,10 @@ fn fix_switch_arg(lam: &mut RawLambda, real_arg: &RawLambda) {
     {
         *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
     }
-    match lam {
-        RawLambda::Lswitch(switch_arg, _) => {
-            if switch_arg.is_unit() {
-                *switch_arg = Box::new(real_arg.clone());
-            }
+    if let RawLambda::Lswitch(switch_arg, _) = lam {
+        if switch_arg.is_unit() {
+            **switch_arg = real_arg.clone();
         }
-        _ => {}
     }
 }
 

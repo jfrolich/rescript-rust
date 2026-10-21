@@ -591,9 +591,9 @@ mod tests {
         // Pure let binding
         let pure_let = Lambda::let_(
             LetKind::Strict,
-            x.clone(),
+            x,
             Lambda::const_(Constant::int(1)),
-            Lambda::var(x.clone()),
+            Lambda::var(x),
         );
         assert!(no_side_effects(&pure_let));
     }
@@ -603,7 +603,7 @@ mod tests {
         let x = Ident::create_local("x");
 
         // Assignment is impure
-        let assign = Lambda::assign(x.clone(), Lambda::const_(Constant::int(1)));
+        let assign = Lambda::assign(x, Lambda::const_(Constant::int(1)));
         assert!(!no_side_effects(&assign));
 
         // While loop is impure
@@ -706,7 +706,7 @@ mod tests {
         // let x = 1 in x has size 3 (1 for let + 1 for arg + 1 for body)
         let let_expr = Lambda::let_(
             LetKind::Strict,
-            x.clone(),
+            x,
             Lambda::const_(Constant::int(1)),
             Lambda::var(x),
         );
@@ -717,10 +717,7 @@ mod tests {
     fn test_size_big() {
         // Letrec is too big
         let x = Ident::create_local("x");
-        let letrec = Lambda::letrec(
-            vec![(x.clone(), Lambda::const_(Constant::int(1)))],
-            Lambda::var(x),
-        );
+        let letrec = Lambda::letrec(vec![(x, Lambda::const_(Constant::int(1)))], Lambda::var(x));
         assert_eq!(size(&letrec), TOO_BIG_TO_INLINE);
 
         // Switch is too big
@@ -852,14 +849,14 @@ mod tests {
         let branch = || {
             Lambda::prim(
                 Primitive::Pdebugger,
-                vec![Lambda::var(value.clone())],
+                vec![Lambda::var(value)],
                 crate::location::Location::none(),
             )
         };
         let func = LFunction {
             loc: crate::location::Location::none(),
             arity: 1,
-            params: vec![checked.clone()],
+            params: vec![checked],
             body: Box::new(Lambda::if_(Lambda::var(checked), branch(), branch())),
             attr: FunctionAttribute::default(),
         };
@@ -885,7 +882,7 @@ mod tests {
         let func = LFunction {
             loc: crate::location::Location::none(),
             arity: 1,
-            params: vec![x.clone()],
+            params: vec![x],
             body: Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(x)),
                 Box::new(LambdaSwitch {

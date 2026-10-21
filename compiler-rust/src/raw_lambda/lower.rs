@@ -152,7 +152,7 @@ impl<'a> LoweringContext<'a> {
         if kind == LetKind::Alias {
             if let RawLambda::Lvar(target) = value {
                 let target = self.alias_target(target);
-                self.alias_tbl.insert(id.clone(), target.clone());
+                self.alias_tbl.insert(id, target);
                 let lowered_body = self.lower_lambda(body);
                 if self.exported_idents.contains(&id) {
                     return Lambda::let_(kind, id, Lambda::var(target), lowered_body);
@@ -326,7 +326,7 @@ impl<'a> LoweringContext<'a> {
             let wrapped = Lambda::let_(
                 LetKind::StrictOpt,
                 id,
-                wrap_exn(Location::none(), Lambda::var(raw_id.clone())),
+                wrap_exn(Location::none(), Lambda::var(raw_id)),
                 lowered_handler,
             );
             Lambda::try_(lowered_body, raw_id, wrapped)
@@ -350,7 +350,7 @@ pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
         vec![Lambda::global_module(Ident::create_persistent(
             "Primitive_exceptions",
         ))],
-        loc.clone(),
+        loc,
     );
     Lambda::apply(
         internal_to_exception,
@@ -642,15 +642,15 @@ fn eta_reduce_function_apply(
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
             let wrap = function_primitive(function.body.as_ref())?;
-            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
-            Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
+            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc);
+            Some(Lambda::prim(wrap, vec![inner], ap_info.loc))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::prim(
                 inner_call.primitive.clone(),
                 eta_args,
-                ap_info.loc.clone(),
+                ap_info.loc,
             ))
         }
         Lambda::Lsequence(first, second) => {
@@ -662,7 +662,7 @@ fn eta_reduce_function_apply(
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::seq(
-                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()),
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc),
                 Lambda::Lconst(constant.clone()),
             ))
         }
@@ -1211,7 +1211,7 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::FunctionAttribute;
+
     use crate::lambda::InlineAttribute;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
@@ -1224,7 +1224,7 @@ mod tests {
         let lowered = lower_to_lambda_with_id_gen(
             RawLambda::LtryWith(
                 Box::new(RawLambda::unit()),
-                exception.clone(),
+                exception,
                 Box::new(RawLambda::var(exception)),
             ),
             generator.clone(),
@@ -1290,16 +1290,16 @@ mod tests {
         let raw = RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::function_(
                 2,
-                vec![prim0.clone(), prim1.clone()],
+                vec![prim0, prim1],
                 RawLambda::prim(
                     Primitive::Paddint,
-                    vec![RawLambda::var(prim0.clone()), RawLambda::var(prim1.clone())],
+                    vec![RawLambda::var(prim0), RawLambda::var(prim1)],
                     Location::none(),
                 ),
                 crate::lambda::FunctionAttribute::default(),
                 crate::location::Location::none(),
             )),
-            ap_args: vec![RawLambda::var(lhs.clone()), RawLambda::var(rhs.clone())],
+            ap_args: vec![RawLambda::var(lhs), RawLambda::var(rhs)],
             ap_info: ApInfo {
                 loc: Location::none(),
                 inlined: InlineAttribute::Default,
@@ -1326,7 +1326,7 @@ mod tests {
         let slot = Ident::create_local("slot");
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PextensionSlotEq,
-            vec![RawLambda::var(exn.clone()), RawLambda::var(slot.clone())],
+            vec![RawLambda::var(exn), RawLambda::var(slot)],
             Location::none(),
         ));
 
@@ -1424,8 +1424,8 @@ mod tests {
         let alias = Ident::create_local("alias");
         let raw = RawLambda::let_(
             LetKind::Alias,
-            alias.clone(),
-            RawLambda::var(source.clone()),
+            alias,
+            RawLambda::var(source),
             RawLambda::var(alias),
         );
 
@@ -1442,14 +1442,11 @@ mod tests {
         let alias = Ident::create_local("alias");
         let raw = RawLambda::let_(
             LetKind::Alias,
-            alias.clone(),
-            RawLambda::var(source.clone()),
+            alias,
+            RawLambda::var(source),
             RawLambda::prim(
-                Primitive::Pmakeblock(
-                    TagInfo::ModuleExport(vec![alias.clone()]),
-                    Mutable::Immutable,
-                ),
-                vec![RawLambda::var(alias.clone())],
+                Primitive::Pmakeblock(TagInfo::ModuleExport(vec![alias]), Mutable::Immutable),
+                vec![RawLambda::var(alias)],
                 Location::none(),
             ),
         );
@@ -1709,7 +1706,7 @@ mod tests {
     fn keeps_named_linear_switches_instead_of_collapsing_to_scrutinee() {
         let scrutinee = Ident::create_local("scrutinee");
         let lowered = lower_to_lambda(RawLambda::Lswitch(
-            Box::new(RawLambda::var(scrutinee.clone())),
+            Box::new(RawLambda::var(scrutinee)),
             Box::new(RawLambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![
@@ -1780,7 +1777,7 @@ mod tests {
                         name: "presentLight".to_string(),
                     },
                 ),
-                vec![RawLambda::var(module_id.clone())],
+                vec![RawLambda::var(module_id)],
                 Location::none(),
             )],
             Location::none(),

@@ -23,7 +23,6 @@
 
 use crate::ident::Ident;
 use serde::{Deserialize, Serialize};
-use smol_str::SmolStr;
 use std::fmt;
 use std::sync::Arc;
 
@@ -368,7 +367,7 @@ impl Path {
     /// Categorize this path for constructor handling.
     pub fn constructor_typath(&self) -> Typath {
         match self {
-            Path::Pident(id) if is_uident_str(id.name()) => Typath::LocalExt(id.clone()),
+            Path::Pident(id) if is_uident_str(id.name()) => Typath::LocalExt(*id),
             Path::Pdot(ty_path, s, _) if is_uident_str(s) => {
                 if is_uident_str(ty_path.last()) {
                     Typath::Ext((**ty_path).clone(), s.to_string())
@@ -418,7 +417,7 @@ mod tests {
     #[test]
     fn test_pident() {
         let id = Ident::create_persistent("String");
-        let path = Path::pident(id.clone());
+        let path = Path::pident(id);
 
         assert_eq!(path.name(), "String");
         assert_eq!(path.last(), "String");
@@ -428,7 +427,7 @@ mod tests {
     #[test]
     fn test_pdot() {
         let array_id = Ident::create_persistent("Array");
-        let path = Path::pdot(Path::pident(array_id.clone()), "t");
+        let path = Path::pdot(Path::pident(array_id), "t");
 
         assert_eq!(path.name(), "Array.t");
         assert_eq!(path.last(), "t");
@@ -463,7 +462,7 @@ mod tests {
     #[test]
     fn test_flatten() {
         let array_id = Ident::create_persistent("Array");
-        let path = Path::pdot(Path::pident(array_id.clone()), "t");
+        let path = Path::pdot(Path::pident(array_id), "t");
 
         let (id, components) = path.flatten().unwrap();
         assert!(id.same(&array_id));
@@ -511,7 +510,7 @@ mod tests {
     fn test_is_free() {
         let id = Ident::create_persistent("X");
         let other = Ident::create_persistent("Y");
-        let path = Path::pdot(Path::pident(id.clone()), "t");
+        let path = Path::pdot(Path::pident(id), "t");
 
         assert!(path.is_free(&id));
         assert!(!path.is_free(&other));

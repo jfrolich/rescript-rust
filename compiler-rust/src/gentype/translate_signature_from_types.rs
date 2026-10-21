@@ -51,7 +51,7 @@ pub fn translate_type_declaration_from_types(
         ctx,
         arena,
         config,
-        type_declaration.type_loc.clone(),
+        type_declaration.type_loc,
         output_file_relative,
         resolver,
         &type_declaration.type_attributes,

@@ -1,7 +1,6 @@
 //! Closed function and loop continuations for the mutable indexed owner.
 use super::*;
 use crate::lambda::DirectionFlag;
-use crate::lambda::js_exp_make::int32_add;
 use crate::lambda::lam_compile_input::{LambdaInput, LambdaInputView};
 use crate::lambda::lam_compile_main_indexed::has_free_variable;
 
@@ -100,7 +99,7 @@ impl IndexedJsConsumer<'_> {
     ) -> Compiled {
         let (id, start, mut finish, direction, body) = match self.context.store().view(node) {
             NodeView::For(id, start, finish, direction, body) => {
-                (id.clone(), start, finish, direction, body)
+                (*id, start, finish, direction, body)
             }
             _ => panic!("for lowering requires a for node"),
         };
@@ -143,7 +142,7 @@ impl IndexedJsConsumer<'_> {
             Some(start.expr)
         } else {
             prelude.push(Statement::variable(VariableDeclaration {
-                ident: id.clone(),
+                ident: id,
                 value: Some(start.expr),
                 property: LetKind::Variable,
                 ident_info: IdentInfo::default(),
@@ -172,8 +171,8 @@ impl IndexedJsConsumer<'_> {
         effect: &mut impl FnMut(&mut Self, NodeId) -> Block,
     ) -> Compiled {
         let (id, iterable, body, await_) = match self.context.store().view(node) {
-            NodeView::ForOf(id, iterable, body) => (id.clone(), iterable, body, false),
-            NodeView::ForAwaitOf(id, iterable, body) => (id.clone(), iterable, body, true),
+            NodeView::ForOf(id, iterable, body) => (*id, iterable, body, false),
+            NodeView::ForAwaitOf(id, iterable, body) => (*id, iterable, body, true),
             _ => panic!("for-of lowering requires a for-of node"),
         };
         // compiler/core/lam_compile.ml:1311-1316 / 1334-1339: allocate the
@@ -233,7 +232,7 @@ impl IndexedJsConsumer<'_> {
         value: &mut impl FnMut(&mut Self, NodeId) -> Compiled,
     ) -> Compiled {
         let (id, child) = match self.context.store().view(node) {
-            NodeView::Assign(id, child) => (id.clone(), child),
+            NodeView::Assign(id, child) => (*id, child),
             _ => panic!("assignment lowering requires an assign node"),
         };
         let compiled = value(self, child);

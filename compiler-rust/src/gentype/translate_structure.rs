@@ -637,7 +637,7 @@ fn scrape_direct_persistent_alias_for_gentype(
     if !id.is_persistent() {
         return None;
     }
-    let alias_path = crate::types::path::Path::pident(id.clone());
+    let alias_path = crate::types::path::Path::pident(*id);
     let module_type = ctx
         .get_gentype_raw_module_sig(id.name())
         .or_else(|| ctx.get_or_load_raw_module_sig(id.name()))
@@ -676,7 +676,7 @@ fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
     }
 }
 
-fn function_param_name(arena: &ParseArena, param: &FunctionParam) -> String {
+fn function_param_name(_arena: &ParseArena, param: &FunctionParam) -> String {
     // translate_structure.ml: an optional parameter with a default compiles
     // to a synthetic option carrier; show the label instead.
     match param.fp_lbl.label_name() {

@@ -916,7 +916,7 @@ impl Lambda {
                 if matches!(__prim8.as_ref(), PrimInfo {
                     primitive: _primitive @ Primitive::Pmakeblock(_, _),
                     args: _,
-                    loc,
+                    loc: _,
                 }) =>
             {
                 let PrimInfo {
@@ -1078,7 +1078,7 @@ impl Lambda {
                                                 Box::new(Lambda::Lprim(Box::new(PrimInfo {
                                                     primitive: Primitive::Pintcomp(Comparison::Eq),
                                                     args: pred_args.clone(),
-                                                    loc: loc.clone(),
+                                                    loc: *loc,
                                                 }))),
                                                 branch_false.clone(),
                                                 branch_true.clone(),
@@ -1115,7 +1115,7 @@ impl Lambda {
                                             return Lambda::Lprim(Box::new(PrimInfo {
                                                 primitive: Primitive::Pintcomp(Comparison::Neq),
                                                 args: pred_args.clone(),
-                                                loc: loc.clone(),
+                                                loc: *loc,
                                             }));
                                         }
                                     }
@@ -1155,7 +1155,7 @@ impl Lambda {
                                                 return Lambda::Lprim(Box::new(PrimInfo {
                                                     primitive: Primitive::Pintcomp(Comparison::Neq),
                                                     args: pred_args.clone(),
-                                                    loc: loc.clone(),
+                                                    loc: *loc,
                                                 }));
                                             }
                                         }
@@ -1301,15 +1301,15 @@ fn eta_reduce_function_apply(
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
             let wrap = function_primitive(function.body.as_ref())?;
-            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
-            Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
+            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc);
+            Some(Lambda::prim(wrap, vec![inner], ap_info.loc))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::prim(
                 inner_call.primitive.clone(),
                 eta_args,
-                ap_info.loc.clone(),
+                ap_info.loc,
             ))
         }
         Lambda::Lsequence(first, second) => {
@@ -1321,7 +1321,7 @@ fn eta_reduce_function_apply(
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::seq(
-                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()),
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc),
                 Lambda::Lconst(constant.clone()),
             ))
         }
@@ -1424,8 +1424,8 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
         return None;
     }
     let source_ident = match &first_args[0] {
-        Lambda::LglobalModule(v) => v.clone(),
-        Lambda::Lvar(v) => v.clone(),
+        Lambda::LglobalModule(v) => *v,
+        Lambda::Lvar(v) => *v,
         _ => return None,
     };
     let source_lam = first_args[0].clone();
@@ -1471,7 +1471,7 @@ fn lambda_not(loc: Location, lam: Lambda) -> Lambda {
                 PrimInfo {
                     primitive: Primitive::Pintcomp(Comparison::Neq),
                     args: _,
-                    loc,
+                    loc: _,
                 }
             ) =>
         {
@@ -1509,7 +1509,7 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
                         | Primitive::Pfloatcomp(_)
                         | Primitive::Pbigintcomp(_)
                         | Primitive::Pstringcomp(_),
-                    loc,
+                    loc: _,
                     ..
                 }
             ) =>
@@ -1532,7 +1532,7 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
             else {
                 unreachable!()
             };
-            Some(loc.clone())
+            Some(*loc)
         }
         _ => None,
     }
@@ -1609,7 +1609,7 @@ mod tests {
     #[test]
     fn test_lambda_creation() {
         let id = Ident::create_local("x");
-        let var = Lambda::var(id.clone());
+        let var = Lambda::var(id);
 
         match var {
             Lambda::Lvar(ref i) => assert_eq!(i.name(), "x"),
@@ -1624,12 +1624,12 @@ mod tests {
 
         let binding = Lambda::let_(
             LetKind::Strict,
-            x.clone(),
+            x,
             Lambda::const_(Constant::Int {
                 i: 42,
                 comment: None,
             }),
-            Lambda::var(x.clone()),
+            Lambda::var(x),
         );
 
         match binding {
@@ -1645,8 +1645,8 @@ mod tests {
         let x = Ident::create_local("x");
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(x.clone()),
+            vec![x],
+            Lambda::var(x),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -1710,7 +1710,7 @@ mod tests {
     #[test]
     fn test_if_then_else_assertfalse_sequences_then_branch() {
         let cond_id = Ident::create_local("cond");
-        let cond = Lambda::var(cond_id.clone());
+        let cond = Lambda::var(cond_id);
         let then_ = Lambda::const_(Constant::int(1));
         let assertfalse = Lambda::const_(Constant::Int {
             i: 0,
@@ -1733,7 +1733,7 @@ mod tests {
         let x = Ident::create_local("x");
         let cond = Lambda::prim(
             Primitive::Pintcomp(Comparison::Eq),
-            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(0))],
+            vec![Lambda::var(x), Lambda::const_(Constant::int(0))],
             Location::none(),
         );
 
@@ -1747,7 +1747,7 @@ mod tests {
         let if_expr = Lambda::if_(
             Lambda::prim(
                 Primitive::Pintcomp(Comparison::Neq),
-                vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(0))],
+                vec![Lambda::var(x), Lambda::const_(Constant::int(0))],
                 Location::none(),
             ),
             Lambda::false_(),
@@ -1782,7 +1782,7 @@ mod tests {
         let if_expr = Lambda::if_(
             Lambda::prim(
                 Primitive::Pintcomp(Comparison::Eq),
-                vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(0))],
+                vec![Lambda::var(x), Lambda::const_(Constant::int(0))],
                 Location::none(),
             ),
             Lambda::prim(
@@ -1826,7 +1826,7 @@ mod tests {
         let inner_if = Lambda::LifThenElse(
             Box::new(Lambda::prim(
                 Primitive::Pintcomp(Comparison::Eq),
-                vec![Lambda::var(value.clone()), Lambda::const_(Constant::int(0))],
+                vec![Lambda::var(value), Lambda::const_(Constant::int(0))],
                 Location::none(),
             )),
             Box::new(Lambda::const_(Constant::int(1))),

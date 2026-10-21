@@ -370,7 +370,7 @@ impl Attributes {
             (Some(v), None) => Attributes(Some(v)),
             (None, Some(v)) => Attributes(Some(v)),
             (Some(mut a), Some(b)) => {
-                a.extend(b.into_iter());
+                a.extend(*b);
                 Attributes(Some(a))
             }
         }

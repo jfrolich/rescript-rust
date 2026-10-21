@@ -325,10 +325,7 @@ pub fn add_type_declarations_from_module_equations(
                     code_item::TypeDeclaration {
                         export_from_type_declaration: code_item::ExportFromTypeDeclaration {
                             export_type: new_export_type,
-                            annotation: type_declaration
-                                .export_from_type_declaration
-                                .annotation
-                                .clone(),
+                            annotation: type_declaration.export_from_type_declaration.annotation,
                         },
                         import_types: vec![],
                     }

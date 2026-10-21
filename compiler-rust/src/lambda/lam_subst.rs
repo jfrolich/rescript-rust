@@ -79,7 +79,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
 
         Lambda::Llet(kind, id, arg, body) => Lambda::Llet(
             *kind,
-            id.clone(),
+            *id,
             Box::new(subst_aux(s, arg)),
             Box::new(subst_aux(s, body)),
         ),
@@ -87,7 +87,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
         Lambda::Lletrec(bindings, body) => {
             let new_bindings: Vec<_> = bindings
                 .iter()
-                .map(|(id, expr)| (id.clone(), subst_aux(s, expr)))
+                .map(|(id, expr)| (*id, subst_aux(s, expr)))
                 .collect();
             Lambda::Lletrec(new_bindings, Box::new(subst_aux(s, body)))
         }
@@ -95,7 +95,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
         Lambda::Lprim(prim_info) => Lambda::Lprim(Box::new(PrimInfo {
             primitive: prim_info.primitive.clone(),
             args: prim_info.args.iter().map(|arg| subst_aux(s, arg)).collect(),
-            loc: prim_info.loc.clone(),
+            loc: prim_info.loc,
         })),
 
         Lambda::LglobalModule(_) => lam.clone(),
@@ -144,7 +144,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
 
         Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
             Box::new(subst_aux(s, body)),
-            exn.clone(),
+            *exn,
             Box::new(subst_aux(s, handler)),
         ),
 
@@ -163,22 +163,22 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
         }
 
         Lambda::Lfor(v, e1, e2, dir, e3) => Lambda::Lfor(
-            v.clone(),
+            *v,
             Box::new(subst_aux(s, e1)),
             Box::new(subst_aux(s, e2)),
             *dir,
             Box::new(subst_aux(s, e3)),
         ),
 
-        Lambda::Lfor_of(v, e1, e2) => Lambda::for_of(v.clone(), subst_aux(s, e1), subst_aux(s, e2)),
+        Lambda::Lfor_of(v, e1, e2) => Lambda::for_of(*v, subst_aux(s, e1), subst_aux(s, e2)),
         Lambda::Lfor_await_of(v, e1, e2) => {
-            Lambda::for_await_of(v.clone(), subst_aux(s, e1), subst_aux(s, e2))
+            Lambda::for_await_of(*v, subst_aux(s, e1), subst_aux(s, e2))
         }
 
         Lambda::Lbreak => Lambda::break_(),
         Lambda::Lcontinue => Lambda::continue_(),
 
-        Lambda::Lassign(id, e) => Lambda::Lassign(id.clone(), Box::new(subst_aux(s, e))),
+        Lambda::Lassign(id, e) => Lambda::Lassign(*id, Box::new(subst_aux(s, e))),
     }
 }
 
@@ -202,7 +202,7 @@ pub fn extend(mut s: Subst, id: Ident, expr: Lambda) -> Subst {
 
 /// Apply a single substitution [id -> expr] to a Lambda.
 pub fn subst_single(id: &Ident, expr: &Lambda, lam: &Lambda) -> Lambda {
-    let s = singleton(id.clone(), expr.clone());
+    let s = singleton(*id, expr.clone());
     subst(&s, lam)
 }
 
@@ -217,7 +217,7 @@ mod tests {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
 
-        let var = Lambda::var(x.clone());
+        let var = Lambda::var(x);
         let replacement = Lambda::const_(Constant::int(42));
 
         let s = singleton(x, replacement.clone());
@@ -229,7 +229,7 @@ mod tests {
         ));
 
         // y should not be substituted
-        let var_y = Lambda::var(y.clone());
+        let var_y = Lambda::var(y);
         let result_y = subst(&s, &var_y);
         assert!(matches!(result_y, Lambda::Lvar(ref id) if id.name() == "y"));
     }
@@ -255,12 +255,7 @@ mod tests {
 
         // let y = x in z  [x -> 42]
         // should become: let y = 42 in z
-        let expr = Lambda::let_(
-            LetKind::Strict,
-            y.clone(),
-            Lambda::var(x.clone()),
-            Lambda::var(z.clone()),
-        );
+        let expr = Lambda::let_(LetKind::Strict, y, Lambda::var(x), Lambda::var(z));
 
         let s = singleton(x, Lambda::const_(Constant::int(42)));
         let result = subst(&s, &expr);
@@ -282,8 +277,8 @@ mod tests {
         // should become: fun x -> 42
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(y.clone()),
+            vec![x],
+            Lambda::var(y),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -310,7 +305,7 @@ mod tests {
         // should become: 5 + 5
         let prim = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::var(x.clone())],
+            vec![Lambda::var(x), Lambda::var(x)],
             Location::none(),
         );
 
@@ -338,11 +333,7 @@ mod tests {
         let x = Ident::create_local("x");
 
         // if x then x else x  [x -> true]
-        let expr = Lambda::if_(
-            Lambda::var(x.clone()),
-            Lambda::var(x.clone()),
-            Lambda::var(x.clone()),
-        );
+        let expr = Lambda::if_(Lambda::var(x), Lambda::var(x), Lambda::var(x));
 
         let s = singleton(x, Lambda::true_());
         let result = subst(&s, &expr);
@@ -360,7 +351,7 @@ mod tests {
     #[test]
     fn test_subst_empty() {
         let x = Ident::create_local("x");
-        let var = Lambda::var(x.clone());
+        let var = Lambda::var(x);
 
         // Empty substitution should return the same expression
         let s = Subst::new();
@@ -374,7 +365,7 @@ mod tests {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
 
-        let ids = vec![x.clone(), y.clone()];
+        let ids = vec![x, y];
         let exprs = vec![
             Lambda::const_(Constant::int(1)),
             Lambda::const_(Constant::int(2)),
@@ -390,7 +381,7 @@ mod tests {
     #[test]
     fn test_subst_single() {
         let x = Ident::create_local("x");
-        let var = Lambda::var(x.clone());
+        let var = Lambda::var(x);
         let replacement = Lambda::const_(Constant::int(42));
 
         let result = subst_single(&x, &replacement, &var);
@@ -410,12 +401,12 @@ mod tests {
         // let rec f = fun x -> y in f  [y -> 42]
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(y.clone()),
+            vec![x],
+            Lambda::var(y),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
-        let letrec = Lambda::letrec(vec![(f.clone(), func)], Lambda::var(f.clone()));
+        let letrec = Lambda::letrec(vec![(f, func)], Lambda::var(f));
 
         let s = singleton(y, Lambda::const_(Constant::int(42)));
         let result = subst(&s, &letrec);

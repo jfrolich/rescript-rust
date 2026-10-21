@@ -838,10 +838,10 @@ fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < flags.len() {
         if flags[i] == "-open" {
-            if let Some(dep) = flags.get(i + 1) {
-                if seen.insert(dep.clone()) {
-                    deps.push(dep.clone());
-                }
+            if let Some(dep) = flags.get(i + 1)
+                && seen.insert(dep.clone())
+            {
+                deps.push(dep.clone());
             }
             i += 1;
         }
@@ -1013,6 +1013,15 @@ fn filter_ppx_flags(
     })
 }
 
+/// Record a source file's parse warnings (keyed `Module:impl` or
+/// `Module:intf`) for the in-process manifest.
+fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_name: &str, warnings: &str) {
+    parse_warnings
+        .lock()
+        .unwrap()
+        .insert(key, (package_name.to_string(), warnings.to_string()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1137,13 +1146,4 @@ mod tests {
             OneOrMore::Single(command) if command == "unconditional-ppx"
         ));
     }
-}
-
-/// Record a source file's parse warnings (keyed `Module:impl` or
-/// `Module:intf`) for the in-process manifest.
-fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_name: &str, warnings: &str) {
-    parse_warnings
-        .lock()
-        .unwrap()
-        .insert(key, (package_name.to_string(), warnings.to_string()));
 }

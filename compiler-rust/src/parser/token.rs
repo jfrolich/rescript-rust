@@ -397,10 +397,7 @@ impl<'a> Token<'a> {
             "while" => Token::While,
             _ => {
                 // Check first byte to determine if Uident or Lident (ASCII check)
-                if s.as_bytes()
-                    .first()
-                    .map_or(false, |b| b.is_ascii_uppercase())
-                {
+                if s.as_bytes().first().is_some_and(|b| b.is_ascii_uppercase()) {
                     Token::Uident(Cow::Borrowed(s))
                 } else {
                     Token::Lident(Cow::Borrowed(s))

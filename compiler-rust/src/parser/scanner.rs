@@ -738,11 +738,7 @@ impl<'src> Scanner<'src> {
                 } else {
                     "unknown escape sequence"
                 };
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::message(message),
-                );
+                self.error(*start_pos, end_pos, DiagnosticCategory::message(message));
                 return -1;
             };
             self.next();
@@ -767,7 +763,7 @@ impl<'src> Scanner<'src> {
     fn invalid_unicode_code_point(&mut self, start_pos: &Position) {
         let end_pos = self.position();
         self.error(
-            start_pos.clone(),
+            *start_pos,
             end_pos,
             DiagnosticCategory::message("escape sequence is invalid unicode code point"),
         );
@@ -845,11 +841,7 @@ impl<'src> Scanner<'src> {
                 }
                 (c, _) if c == EOF_CHAR => {
                     let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos,
-                        DiagnosticCategory::unclosed_comment(),
-                    );
+                    self.error(start_pos, end_pos, DiagnosticCategory::unclosed_comment());
                     break;
                 }
                 _ => self.next(),
@@ -884,8 +876,8 @@ impl<'src> Scanner<'src> {
                 content
             } else {
                 self.error(
-                    loc.loc_start.clone(),
-                    loc.loc_end.clone(),
+                    loc.loc_start,
+                    loc.loc_end,
                     DiagnosticCategory::message("Invalid code point"),
                 );
                 Cow::Owned(crate::string_literal::replace_invalid_utf8(&content))
@@ -952,11 +944,7 @@ impl<'src> Scanner<'src> {
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos.clone(),
-                        DiagnosticCategory::unclosed_template(),
-                    );
+                    self.error(start_pos, end_pos, DiagnosticCategory::unclosed_template());
                     // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
                     let end_off = if self.offset > start_off {
                         // OCaml drops the last source byte, which is the last
@@ -1346,11 +1334,7 @@ impl<'src> Scanner<'src> {
                 // Unknown character
                 self.next();
                 let end_pos = self.position();
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::unknown_uchar(ch),
-                );
+                self.error(start_pos, end_pos, DiagnosticCategory::unknown_uchar(ch));
                 // Continue scanning - but preserve the original start_pos
                 // OCaml: let _, _, token = scan scanner in token
                 // (start_pos, end_pos, token) - uses outer start_pos, not recursive one
@@ -1406,7 +1390,7 @@ impl<'src> Scanner<'src> {
                 c if c == '\n' || c == EOF_CHAR => {
                     let end_pos = self.position();
                     self.error(
-                        start_pos.clone(),
+                        start_pos,
                         end_pos,
                         DiagnosticCategory::message("unterminated regex".to_string()),
                     );
@@ -1546,7 +1530,7 @@ impl<'src> Scanner<'src> {
                 '\n' | '\r' => {
                     let end_pos = self.position();
                     self.error(
-                        start_pos.clone(),
+                        start_pos,
                         end_pos,
                         DiagnosticCategory::message(
                             "A quoted identifier can't contain line breaks.",
@@ -1558,7 +1542,7 @@ impl<'src> Scanner<'src> {
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
                     self.error(
-                        start_pos.clone(),
+                        start_pos,
                         end_pos,
                         DiagnosticCategory::message("Did you forget a \" here?"),
                     );

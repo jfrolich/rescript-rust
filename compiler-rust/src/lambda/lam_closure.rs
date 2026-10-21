@@ -127,9 +127,7 @@ pub fn free_variables_with_stats(
         match lam {
             Lambda::Lvar(v) => {
                 if !local_set.contains(v) {
-                    fv.entry(v.clone())
-                        .or_insert_with(VarStats::fresh)
-                        .update(pos);
+                    fv.entry(*v).or_insert_with(VarStats::fresh).update(pos);
                 }
             }
 
@@ -153,20 +151,20 @@ pub fn free_variables_with_stats(
 
             Lambda::Lfunction(func) => {
                 for param in &func.params {
-                    local_set.insert(param.clone());
+                    local_set.insert(*param);
                 }
                 iter(&func.body, Position::Sink, fv, local_set);
             }
 
             Lambda::Llet(_, id, arg, body) => {
                 iter(arg, pos, fv, local_set);
-                local_set.insert(id.clone());
+                local_set.insert(*id);
                 iter(body, Position::Sink, fv, local_set);
             }
 
             Lambda::Lletrec(bindings, body) => {
                 for (id, _) in bindings {
-                    local_set.insert(id.clone());
+                    local_set.insert(*id);
                 }
                 for (_, expr) in bindings {
                     iter(expr, Position::Sink, fv, local_set);
@@ -217,7 +215,7 @@ pub fn free_variables_with_stats(
             Lambda::LstaticCatch(body, (_, vars), handler) => {
                 iter(body, Position::Sink, fv, local_set);
                 for v in vars {
-                    local_set.insert(v.clone());
+                    local_set.insert(*v);
                 }
                 iter(handler, Position::Sink, fv, local_set);
             }
@@ -245,14 +243,14 @@ pub fn free_variables_with_stats(
             }
 
             Lambda::Lfor(v, e1, e2, _, e3) => {
-                local_set.insert(v.clone());
+                local_set.insert(*v);
                 iter(e1, Position::Sink, fv, local_set);
                 iter(e2, Position::Sink, fv, local_set);
                 iter(e3, Position::Sink, fv, local_set);
             }
 
             Lambda::Lfor_of(v, e1, e2) | Lambda::Lfor_await_of(v, e1, e2) => {
-                local_set.insert(v.clone());
+                local_set.insert(*v);
                 iter(e1, Position::Sink, fv, local_set);
                 iter(e2, Position::Sink, fv, local_set);
             }
@@ -261,9 +259,7 @@ pub fn free_variables_with_stats(
 
             Lambda::Lassign(id, e) => {
                 if !local_set.contains(id) {
-                    fv.entry(id.clone())
-                        .or_insert_with(VarStats::fresh)
-                        .update(pos);
+                    fv.entry(*id).or_insert_with(VarStats::fresh).update(pos);
                 }
                 iter(e, pos, fv, local_set);
             }
@@ -298,10 +294,7 @@ pub fn is_closed_with_map(
     body: &Lambda,
 ) -> (bool, StatsMap) {
     // Create initial stats for each parameter
-    let param_map: StatsMap = params
-        .iter()
-        .map(|p| (p.clone(), VarStats::fresh()))
-        .collect();
+    let param_map: StatsMap = params.iter().map(|p| (*p, VarStats::fresh())).collect();
 
     let result_map = free_variables_with_stats(exports, param_map, body);
 
@@ -313,10 +306,7 @@ pub fn is_closed_with_map(
 
 /// Create a parameter statistics map from a list of identifiers.
 pub fn param_map_of_list(params: &[Ident]) -> StatsMap {
-    params
-        .iter()
-        .map(|p| (p.clone(), VarStats::fresh()))
-        .collect()
+    params.iter().map(|p| (*p, VarStats::fresh())).collect()
 }
 
 #[cfg(test)]
@@ -404,7 +394,7 @@ mod tests {
     #[test]
     fn test_free_variables_simple() {
         let x = Ident::create_local("x");
-        let var = Lambda::var(x.clone());
+        let var = Lambda::var(x);
 
         let fv = free_variables_with_stats(&HashSet::new(), HashMap::new(), &var);
         assert!(fv.contains_key(&x));
@@ -421,12 +411,7 @@ mod tests {
         let y = Ident::create_local("y");
 
         // let x = y in x
-        let expr = Lambda::let_(
-            LetKind::Strict,
-            x.clone(),
-            Lambda::var(y.clone()),
-            Lambda::var(x.clone()),
-        );
+        let expr = Lambda::let_(LetKind::Strict, x, Lambda::var(y), Lambda::var(x));
 
         let fv = free_variables_with_stats(&HashSet::new(), HashMap::new(), &expr);
 
@@ -443,8 +428,8 @@ mod tests {
         // fun x -> y (y is free)
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(y.clone()),
+            vec![x],
+            Lambda::var(y),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -464,7 +449,7 @@ mod tests {
         let x = Ident::create_local("x");
 
         // while true do x
-        let while_loop = Lambda::while_(Lambda::true_(), Lambda::var(x.clone()));
+        let while_loop = Lambda::while_(Lambda::true_(), Lambda::var(x));
 
         let fv = free_variables_with_stats(&HashSet::new(), HashMap::new(), &while_loop);
 
@@ -487,8 +472,8 @@ mod tests {
         let param = Ident::create_local("param");
         let func = Lambda::function_(
             1,
-            vec![param.clone()],
-            Lambda::var(param.clone()),
+            vec![param],
+            Lambda::var(param),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
@@ -501,13 +486,13 @@ mod tests {
         let y = Ident::create_local("y");
 
         // fun x -> x is closed
-        let body1 = Lambda::var(x.clone());
-        let (closed1, _) = is_closed_with_map(&HashSet::new(), &[x.clone()], &body1);
+        let body1 = Lambda::var(x);
+        let (closed1, _) = is_closed_with_map(&HashSet::new(), &[x], &body1);
         assert!(closed1);
 
         // fun x -> y is not closed (y is free)
-        let body2 = Lambda::var(y.clone());
-        let (closed2, _) = is_closed_with_map(&HashSet::new(), &[x.clone()], &body2);
+        let body2 = Lambda::var(y);
+        let (closed2, _) = is_closed_with_map(&HashSet::new(), &[x], &body2);
         assert!(!closed2);
     }
 
@@ -516,7 +501,7 @@ mod tests {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
 
-        let map = param_map_of_list(&[x.clone(), y.clone()]);
+        let map = param_map_of_list(&[x, y]);
 
         assert!(map.contains_key(&x));
         assert!(map.contains_key(&y));
@@ -532,10 +517,10 @@ mod tests {
         let exported = Ident::create_local("exported");
 
         // x + exported (but exported is in exports set)
-        let expr = Lambda::seq(Lambda::var(x.clone()), Lambda::var(exported.clone()));
+        let expr = Lambda::seq(Lambda::var(x), Lambda::var(exported));
 
         let mut exports = HashSet::new();
-        exports.insert(exported.clone());
+        exports.insert(exported);
 
         let fv = free_variables_with_stats(&exports, HashMap::new(), &expr);
 

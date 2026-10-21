@@ -495,7 +495,7 @@ fn transform_value_bindings(
             rec_flag,
             transformed_bindings,
         )))),
-        pstr_loc: loc.clone(),
+        pstr_loc: *loc,
     });
 
     if !new_bindings.is_empty() {
@@ -545,7 +545,7 @@ fn spelunk_for_fun_expression(
                         bindings.clone(),
                         inner_expr_idx,
                     )))),
-                    pexp_loc: expr.pexp_loc.clone(),
+                    pexp_loc: expr.pexp_loc,
                     pexp_attributes: expr.pexp_attributes.clone(),
                 },
             )
@@ -574,7 +574,7 @@ fn spelunk_for_fun_expression(
                         wrapper_expr_idx,
                         inner_expr_idx,
                     )),
-                    pexp_loc: expr.pexp_loc.clone(),
+                    pexp_loc: expr.pexp_loc,
                     pexp_attributes: expr.pexp_attributes.clone(),
                 },
             )
@@ -602,7 +602,7 @@ fn transform_react_component_binding(
     let binding_pat = arena.get_pat(binding.pvb_pat).clone();
     let fn_name = get_fn_name(arena, config, &binding_pat, config.empty_loc);
     let fn_name_loc = get_fn_name_loc(&binding_pat);
-    let original_binding_loc = binding.pvb_loc.clone();
+    let original_binding_loc = binding.pvb_loc;
 
     // jsx_v4.ml:586-592: `modified_binding` (props must be labelled), then
     // `recursively_transform_named_args_for_make (modified_binding_old binding)`.
@@ -906,7 +906,7 @@ fn transform_react_component_binding(
                 txt: binding_lid_idx,
                 loc: config.empty_loc,
             })),
-            pexp_loc: pstr_loc.clone(),
+            pexp_loc: *pstr_loc,
             pexp_attributes: Attributes::new(),
         });
         Expression {
@@ -1520,7 +1520,7 @@ fn make_props_wrapper_expr_with_ref(
             default: None,
             lhs: arena.push_pat(final_pattern),
             rhs: inner_expr_idx,
-            arity: arena.push_arity(Some(total_arity as i32)),
+            arity: arena.push_arity(Some(total_arity)),
             is_async: false,
         }))),
         pexp_loc: empty_loc(),
@@ -1650,7 +1650,7 @@ fn build_props_pattern_and_body(
             Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                     txt: prefixed_str_idx,
-                    loc: base_pat.ppat_loc.clone(),
+                    loc: base_pat.ppat_loc,
                 })),
                 // OCaml compiler/syntax/src/jsx_v4.ml:693-700 calls Pat.var
                 // without an outer ~loc, so Ast_helper.Pat.var uses
@@ -1787,7 +1787,7 @@ fn add_default_value_matches(
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                         txt: resolved_str_idx,
-                        loc: arg.loc.clone(),
+                        loc: arg.loc,
                     })),
                     ppat_loc: empty_loc(),
                     ppat_attributes: Attributes::new(),
@@ -2033,7 +2033,7 @@ fn transform_react_component_sig(
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: arena.push_longident(Longident::Lident(props_str_idx)),
-                loc: loc.clone(),
+                loc: *loc,
             }, // longident uses psig_loc
             props_type_params,
         )))),
@@ -2053,7 +2053,7 @@ fn transform_react_component_sig(
                     Box::new(Longident::Lident(react_str_idx)),
                     component_str_idx,
                 )),
-                loc: loc.clone(), // OCaml: {loc = psig_loc; txt = ...}
+                loc: *loc, // OCaml: {loc = psig_loc; txt = ...}
             },
             vec![props_type_ref_idx],
         )))),
@@ -2073,7 +2073,7 @@ fn transform_react_component_sig(
         props_type,
         SignatureItem {
             psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(new_vd))),
-            psig_loc: loc.clone(),
+            psig_loc: *loc,
         },
     ]
 }
@@ -2174,11 +2174,11 @@ fn transform_react_component_external(
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: arena.push_longident(Longident::Lident(props_str_idx)),
-                loc: loc.clone(),
+                loc: *loc,
             },
             props_type_params,
         )))),
-        ptyp_loc: loc.clone(),
+        ptyp_loc: *loc,
         ptyp_attributes: Attributes::new(),
     };
 
@@ -2190,7 +2190,7 @@ fn transform_react_component_external(
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: module_access_name_with_idx(arena, config, component_str_idx),
-                loc: loc.clone(),
+                loc: *loc,
             },
             vec![props_type_ref_idx],
         )))),
@@ -2210,7 +2210,7 @@ fn transform_react_component_external(
         props_type,
         StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(new_vd))),
-            pstr_loc: loc.clone(),
+            pstr_loc: *loc,
         },
     ]
 }
@@ -2248,14 +2248,14 @@ fn make_props_record_type_with_live(
             let typ_idx = arena.push_core_type(type_var);
             crate::ast_helper_type::field(
                 arena,
-                nt.loc.clone(),
+                nt.loc,
                 nt.attrs.clone(),
                 MutableFlag::Immutable,
                 is_optional,
                 None,
                 Loc {
                     txt: label_idx,
-                    loc: nt.loc.clone(),
+                    loc: nt.loc,
                 },
                 typ_idx,
             )
@@ -2271,7 +2271,7 @@ fn make_props_record_type_with_live(
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
                     safe_type_from_value(&nt.label),
                 )))),
-                ptyp_loc: nt.loc.clone(),
+                ptyp_loc: nt.loc,
                 ptyp_attributes: Attributes::new(),
             };
             (arena.push_core_type(var), Variance::Invariant)
@@ -2286,14 +2286,14 @@ fn make_props_record_type_with_live(
             txt: jsx_props_idx,
             loc: empty_loc(),
         },
-        Payload::PStr(Box::new(vec![])),
+        Payload::PStr(Box::default()),
     );
     let live_attr = (
         Loc {
             txt: live_idx,
             loc: empty_loc(),
         },
-        Payload::PStr(Box::new(vec![])),
+        Payload::PStr(Box::default()),
     );
 
     // OCaml uses ghost location for the generated props type structure_item
@@ -2304,7 +2304,7 @@ fn make_props_record_type_with_live(
             vec![TypeDeclaration {
                 ptype_name: Loc {
                     txt: name_idx,
-                    loc: loc.clone(),
+                    loc: *loc,
                 },
                 ptype_params: type_params,
                 ptype_cstrs: vec![],
@@ -2313,7 +2313,7 @@ fn make_props_record_type_with_live(
                 ptype_manifest: None,
                 ptype_origin: TypeDeclarationOrigin::Declared,
                 ptype_attributes: Attributes::from_vec(vec![jsx_props_attr, live_attr]),
-                ptype_loc: loc.clone(),
+                ptype_loc: *loc,
             }],
         )))),
         pstr_loc: empty_loc(),
@@ -2723,11 +2723,11 @@ fn get_fn_name(
 /// This matches OCaml's jsx_v4.ml: `let binding_pat_loc = binding.pvb_pat.ppat_loc`
 fn get_fn_name_loc(pat: &Pattern) -> Location {
     match &*pat.ppat_desc {
-        PatternDesc::Ppat_var(loc) => loc.loc.clone(),
+        PatternDesc::Ppat_var(loc) => loc.loc,
         // For constrained patterns, use the constraint's location (the full span including type annotation)
         // OCaml uses binding.pvb_pat.ppat_loc which is the outer Ppat_constraint's location
-        PatternDesc::Ppat_constraint(_) => pat.ppat_loc.clone(),
-        _ => pat.ppat_loc.clone(),
+        PatternDesc::Ppat_constraint(_) => pat.ppat_loc,
+        _ => pat.ppat_loc,
     }
 }
 
@@ -2799,7 +2799,7 @@ fn make_props_type_param(
         match &*nt.interior_type.ptyp_desc {
             CoreTypeDesc::Ptyp_any => Some(CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
-                ptyp_loc: nt.loc.clone(),
+                ptyp_loc: nt.loc,
                 ptyp_attributes: Attributes::new(),
             }),
             _ if strip_explicit_nullable_of_ref => strip_js_nullable(arena, &nt.interior_type),
@@ -2845,11 +2845,11 @@ fn jsx_element_type(arena: &mut ParseArena, config: &JsxConfig, loc: &Location) 
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: module_access_name_with_idx(arena, config, element_str_idx),
-                loc: loc.clone(),
+                loc: *loc,
             },
             vec![],
         )))),
-        ptyp_loc: loc.clone(),
+        ptyp_loc: *loc,
         ptyp_attributes: Attributes::new(),
     }
 }
@@ -2894,14 +2894,14 @@ fn constrain_jsx_return(
             let constrained_rhs_idx = arena.push_expr(constrained_rhs);
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                    arg_label: arg_label.clone(),
-                    default: default.clone(),
-                    lhs: lhs.clone(),
+                    arg_label: *arg_label,
+                    default: *default,
+                    lhs: *lhs,
                     rhs: constrained_rhs_idx,
                     arity: *arity,
                     is_async: *is_async,
                 }))),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
@@ -2912,10 +2912,10 @@ fn constrain_jsx_return(
             let constrained_idx = arena.push_expr(constrained);
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((
-                    param.clone(),
+                    *param,
                     constrained_idx,
                 )))),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
@@ -2930,7 +2930,7 @@ fn constrain_jsx_return(
                     constrained_idx,
                     element_type_idx,
                 )))),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
@@ -2945,7 +2945,7 @@ fn constrain_jsx_return(
                     bindings.clone(),
                     constrained_body_idx,
                 )))),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
@@ -2958,7 +2958,7 @@ fn constrain_jsx_return(
                     *first,
                     constrained_second_idx,
                 )),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
@@ -3060,7 +3060,7 @@ fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLa
         match prop {
             JsxProp::Punning { optional, name } if arena.get_string(name.txt) == "key" => {
                 let key_str_idx = arena.intern_string("key");
-                let label_loc = Located::new(key_str_idx, name.loc.clone());
+                let label_loc = Located::new(key_str_idx, name.loc);
                 let arg_label = if *optional {
                     ArgLabel::Optional(label_loc)
                 } else {
@@ -3070,7 +3070,7 @@ fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLa
                 let expr = Expression {
                     pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                         txt: arena.push_longident(Longident::Lident(key_str_idx)),
-                        loc: name.loc.clone(),
+                        loc: name.loc,
                     })),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
@@ -3083,7 +3083,7 @@ fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLa
                 value,
             } if arena.get_string(name.txt) == "key" => {
                 let key_str_idx = name.txt;
-                let label_loc = Located::new(key_str_idx, name.loc.clone());
+                let label_loc = Located::new(key_str_idx, name.loc);
                 let arg_label = if *optional {
                     ArgLabel::Optional(label_loc)
                 } else {
@@ -3104,11 +3104,11 @@ fn unit_expr(arena: &mut ParseArena, loc: &Location) -> Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
             Loc {
                 txt: arena.push_longident(Longident::Lident(unit_str_idx)),
-                loc: loc.clone(),
+                loc: *loc,
             },
-            ctor_args(Vec::new(), loc.clone()),
+            ctor_args(Vec::new(), *loc),
         )),
-        pexp_loc: loc.clone(),
+        pexp_loc: *loc,
         pexp_attributes: Attributes::new(),
     }
 }
@@ -3232,7 +3232,7 @@ fn extract_args_rec(
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
-            newtypes.push((name.clone(), Attributes::new()));
+            newtypes.push((*name, Attributes::new()));
             let body: &Expression = arena.get_expr(*body_idx);
             extract_args_rec(arena, body, args, newtypes, warnings, error);
         }
@@ -3345,7 +3345,7 @@ fn arg_to_type(arena: &ParseArena, arg: &ExtractedArg) -> Option<NamedType> {
     let has_explicit_type = arg.type_.is_some();
     let interior_type = arg.type_.clone().unwrap_or_else(|| CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
-        ptyp_loc: arg.loc.clone(),
+        ptyp_loc: arg.loc,
         ptyp_attributes: Attributes::new(),
     });
 
@@ -3353,7 +3353,7 @@ fn arg_to_type(arena: &ParseArena, arg: &ExtractedArg) -> Option<NamedType> {
         is_optional: is_optional(&arg.label),
         label,
         attrs: arg.pattern.ppat_attributes.clone(),
-        loc: arg.loc.clone(),
+        loc: arg.loc,
         interior_type,
         has_explicit_type,
     })
@@ -3415,14 +3415,14 @@ fn make_props_record_type(
             let typ_idx = arena.push_core_type(type_var);
             crate::ast_helper_type::field(
                 arena,
-                nt.loc.clone(),
+                nt.loc,
                 nt.attrs.clone(),
                 MutableFlag::Immutable,
                 is_optional,
                 None,
                 Loc {
                     txt: label_str_idx,
-                    loc: nt.loc.clone(),
+                    loc: nt.loc,
                 },
                 typ_idx,
             )
@@ -3438,7 +3438,7 @@ fn make_props_record_type(
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
                         safe_type_from_value(&nt.label),
                     )))),
-                    ptyp_loc: nt.loc.clone(),
+                    ptyp_loc: nt.loc,
                     ptyp_attributes: Attributes::new(),
                 }),
                 Variance::Invariant,
@@ -3451,7 +3451,7 @@ fn make_props_record_type(
     let type_decl = TypeDeclaration {
         ptype_name: Loc {
             txt: name_str_idx,
-            loc: loc.clone(),
+            loc: *loc,
         },
         ptype_params: type_params,
         ptype_cstrs: vec![],
@@ -3464,9 +3464,9 @@ fn make_props_record_type(
                 txt: jsx_props_attr_idx,
                 loc: empty_loc(),
             },
-            Payload::PStr(Box::new(vec![])),
+            Payload::PStr(Box::default()),
         )]),
-        ptype_loc: loc.clone(),
+        ptype_loc: *loc,
     };
 
     StructureItem {
@@ -3512,14 +3512,14 @@ fn make_props_record_type_sig(
             let typ_idx = arena.push_core_type(type_var);
             crate::ast_helper_type::field(
                 arena,
-                nt.loc.clone(),
+                nt.loc,
                 nt.attrs.clone(),
                 MutableFlag::Immutable,
                 is_optional,
                 None,
                 Loc {
                     txt: label_str_idx,
-                    loc: nt.loc.clone(),
+                    loc: nt.loc,
                 },
                 typ_idx,
             )
@@ -3535,7 +3535,7 @@ fn make_props_record_type_sig(
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
                         safe_type_from_value(&nt.label),
                     )))),
-                    ptyp_loc: nt.loc.clone(),
+                    ptyp_loc: nt.loc,
                     ptyp_attributes: Attributes::new(),
                 }),
                 Variance::Invariant,
@@ -3548,7 +3548,7 @@ fn make_props_record_type_sig(
     let type_decl = TypeDeclaration {
         ptype_name: Loc {
             txt: name_str_idx,
-            loc: loc.clone(),
+            loc: *loc,
         },
         ptype_params: type_params,
         ptype_cstrs: vec![],
@@ -3561,9 +3561,9 @@ fn make_props_record_type_sig(
                 txt: jsx_props_attr_idx,
                 loc: empty_loc(),
             },
-            Payload::PStr(Box::new(vec![])),
+            Payload::PStr(Box::default()),
         )]),
-        ptype_loc: loc.clone(),
+        ptype_loc: *loc,
     };
 
     SignatureItem {
@@ -3594,7 +3594,7 @@ fn make_props_abstract_type(
     let type_decl = TypeDeclaration {
         ptype_name: Loc {
             txt: name_str_idx,
-            loc: loc.clone(),
+            loc: *loc,
         },
         ptype_params: type_params,
         ptype_cstrs: vec![],
@@ -3603,7 +3603,7 @@ fn make_props_abstract_type(
         ptype_manifest: Some(arena.push_core_type(manifest.clone())),
         ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: Attributes::new(),
-        ptype_loc: loc.clone(),
+        ptype_loc: *loc,
     };
 
     StructureItem {
@@ -3633,7 +3633,7 @@ fn make_props_abstract_type_sig(
     let type_decl = TypeDeclaration {
         ptype_name: Loc {
             txt: name_str_idx,
-            loc: loc.clone(),
+            loc: *loc,
         },
         ptype_params: type_params,
         ptype_cstrs: vec![],
@@ -3642,7 +3642,7 @@ fn make_props_abstract_type_sig(
         ptype_manifest: Some(arena.push_core_type(manifest.clone())),
         ptype_origin: TypeDeclarationOrigin::Declared,
         ptype_attributes: Attributes::new(),
-        ptype_loc: loc.clone(),
+        ptype_loc: *loc,
     };
 
     SignatureItem {
@@ -4658,7 +4658,7 @@ fn append_children_prop(
         let array_fn = Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                 txt: module_access_name(arena, config, "array"),
-                loc: loc.clone(), // OCaml uses the children loc for the longident
+                loc, // OCaml uses the children loc for the longident
             })),
             pexp_loc: empty_loc(), // Ghost location for the ident expression itself
             pexp_attributes: Attributes::new(),
@@ -4688,7 +4688,7 @@ fn append_children_prop(
                 partial: false,
                 transformed_jsx: false,
             }))),
-            pexp_loc: loc.clone(),
+            pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         };
 
@@ -4777,14 +4777,14 @@ fn mk_record_from_props(
                     Some(ExpressionRecordField {
                         lid: Loc {
                             txt: name_lid,
-                            loc: name.loc.clone(),
+                            loc: name.loc,
                         },
                         expr: arena.push_expr(Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                                 txt: name_lid,
-                                loc: name.loc.clone(),
+                                loc: name.loc,
                             })),
-                            pexp_loc: name.loc.clone(),
+                            pexp_loc: name.loc,
                             pexp_attributes: Attributes::new(),
                         }),
                         opt: *optional,
@@ -4800,7 +4800,7 @@ fn mk_record_from_props(
                     Some(ExpressionRecordField {
                         lid: Loc {
                             txt: arena.push_longident(Longident::Lident(name_str_idx)),
-                            loc: name.loc.clone(),
+                            loc: name.loc,
                         },
                         expr: {
                             let value = arena.get_expr(*value).clone();
@@ -4852,9 +4852,9 @@ fn transform_jsx_fragment(
     let fragment_expr = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
             txt: module_access_name(arena, config, "jsxFragment"),
-            loc: loc.clone(),
+            loc: *loc,
         })),
-        pexp_loc: loc.clone(),
+        pexp_loc: *loc,
         pexp_attributes: Attributes::new(),
     };
 
@@ -4886,7 +4886,7 @@ fn transform_jsx_unary(
                 pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
                     name,
                 )))),
-                pexp_loc: tag_loc.clone(),
+                pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
             mk_react_jsx(
@@ -4909,9 +4909,9 @@ fn transform_jsx_unary(
                         Box::new(arena.get_longident(*path).clone()),
                         make_str_idx,
                     )),
-                    loc: tag_loc.clone(),
+                    loc: *tag_loc,
                 })),
-                pexp_loc: tag_loc.clone(),
+                pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
             mk_react_jsx(
@@ -4927,16 +4927,16 @@ fn transform_jsx_unary(
         }
         JsxTagName::QualifiedLower { path, name } => {
             // Qualified lowercase like <MyModule.lowercase /> -> MyModule.lowercase
-            let name_str_idx = arena.push_interned_string(&name);
+            let name_str_idx = arena.push_interned_string(name);
             let make_id = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Ldot(
                         Box::new(arena.get_longident(*path).clone()),
                         name_str_idx,
                     )),
-                    loc: tag_loc.clone(),
+                    loc: *tag_loc,
                 })),
-                pexp_loc: tag_loc.clone(),
+                pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
             mk_react_jsx(
@@ -4979,7 +4979,7 @@ fn transform_jsx_container(
                 pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
                     name,
                 )))),
-                pexp_loc: tag_loc.clone(),
+                pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
             mk_react_jsx(
@@ -5002,9 +5002,9 @@ fn transform_jsx_container(
                         Box::new(arena.get_longident(*path).clone()),
                         make_str_idx,
                     )),
-                    loc: tag_loc.clone(),
+                    loc: *tag_loc,
                 })),
-                pexp_loc: tag_loc.clone(),
+                pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
             mk_react_jsx(
@@ -5020,16 +5020,16 @@ fn transform_jsx_container(
         }
         JsxTagName::QualifiedLower { path, name } => {
             // Qualified lowercase like <MyModule.lowercase>...</MyModule.lowercase>
-            let name_str_idx = arena.push_interned_string(&name);
+            let name_str_idx = arena.push_interned_string(name);
             let make_id = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Ldot(
                         Box::new(arena.get_longident(*path).clone()),
                         name_str_idx,
                     )),
-                    loc: tag_loc.clone(),
+                    loc: *tag_loc,
                 })),
-                pexp_loc: tag_loc.clone(),
+                pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
             mk_react_jsx(
@@ -5055,6 +5055,111 @@ fn transform_jsx_container(
             ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Container(container)))
         }
     }
+}
+
+/// Whether `transform_expression` may rewrite `expr` or its subtree: it
+/// contains a JSX element, a module expression (whose structure items get the
+/// component transform), or a construct this check does not inspect.
+fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
+    let child = |idx: ExprIdx, memo: &mut Vec<u8>| subtree_may_change(idx, arena, memo);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(_)
+        | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue => false,
+        ExpressionDesc::Pexp_let(inner) => {
+            inner.1.iter().any(|binding| child(binding.pvb_expr, memo)) || child(inner.2, memo)
+        }
+        ExpressionDesc::Pexp_fun(inner) => {
+            inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
+        }
+        ExpressionDesc::Pexp_apply(inner) => {
+            child(inner.funct, memo) || inner.args.iter().any(|(_, arg)| child(*arg, memo))
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            child(inner.0, memo)
+                || inner.1.iter().any(|case| {
+                    case.pc_guard.is_some_and(|guard| child(guard, memo))
+                        || child(case.pc_rhs, memo)
+                })
+        }
+        ExpressionDesc::Pexp_template(template) => {
+            template.values.iter().any(|item| child(*item, memo))
+        }
+        ExpressionDesc::Pexp_tagged_template(template) => {
+            child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            items.iter().any(|item| child(*item, memo))
+        }
+        ExpressionDesc::Pexp_construct(_, args) => args.txt.iter().any(|arg| child(*arg, memo)),
+        ExpressionDesc::Pexp_variant(inner) => inner.1.txt.iter().any(|arg| child(*arg, memo)),
+        ExpressionDesc::Pexp_record(inner) => {
+            inner.0.iter().any(|field| child(field.expr, memo))
+                || inner.1.is_some_and(|spread| child(spread, memo))
+        }
+        ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
+        ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_object_get(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_object_set(inner) => child(inner.0, memo) || child(inner.2, memo),
+        ExpressionDesc::Pexp_object_literal(fields) => fields.iter().any(|(_, e)| child(*e, memo)),
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            child(inner.0, memo)
+                || child(inner.1, memo)
+                || inner.2.is_some_and(|else_| child(else_, memo))
+        }
+        ExpressionDesc::Pexp_ternary(inner) => {
+            child(inner.0, memo) || child(inner.1, memo) || child(inner.2, memo)
+        }
+        ExpressionDesc::Pexp_braces(braces) => child(braces.expr, memo),
+        ExpressionDesc::Pexp_regexp(_) => false,
+        ExpressionDesc::Pexp_sequence(first, second)
+        | ExpressionDesc::Pexp_while(first, second) => child(*first, memo) || child(*second, memo),
+        ExpressionDesc::Pexp_for(inner) => {
+            child(inner.1, memo) || child(inner.2, memo) || child(inner.4, memo)
+        }
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
+            child(inner.1, memo) || child(inner.2, memo)
+        }
+        ExpressionDesc::Pexp_constraint(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_coerce(inner) => child(inner.0, memo),
+        ExpressionDesc::Pexp_letexception(inner) => child(inner.1, memo),
+        ExpressionDesc::Pexp_assert(inner) | ExpressionDesc::Pexp_await(inner) => {
+            child(*inner, memo)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => child(inner.1, memo),
+        ExpressionDesc::Pexp_open(inner) => child(inner.2, memo),
+        ExpressionDesc::Pexp_jsx_element(_)
+        | ExpressionDesc::Pexp_letmodule(_)
+        | ExpressionDesc::Pexp_pack(_)
+        | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_inline_for(_)
+        | ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_field(_)
+        | ExpressionDesc::Pexp_comptime_compile_error(_)
+        | ExpressionDesc::Pexp_comptime_typename(_)
+        | ExpressionDesc::Pexp_comptime_record(_)
+        | ExpressionDesc::Pexp_comptime_variant(_)
+        | ExpressionDesc::Pexp_comptime_build_variant(_)
+        | ExpressionDesc::Pexp_comptime_variant_case(_)
+        | ExpressionDesc::Pexp_comptime_build_record(_)
+        | ExpressionDesc::Pexp_comptime_record_field(_) => true,
+    }
+}
+
+fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
+    let slot = idx.0 as usize;
+    if let Some(&known) = memo.get(slot)
+        && known != 0
+    {
+        return known == 2;
+    }
+    let may_change = expression_may_change(arena.get_expr(idx), arena, memo);
+    if slot >= memo.len() {
+        memo.resize(slot + 1, 0);
+    }
+    memo[slot] = if may_change { 2 } else { 1 };
+    may_change
 }
 
 #[cfg(test)]
@@ -5187,109 +5292,4 @@ module MakePreset = (Preset: { let value: int }) => {
             after
         );
     }
-}
-
-/// Whether `transform_expression` may rewrite `expr` or its subtree: it
-/// contains a JSX element, a module expression (whose structure items get the
-/// component transform), or a construct this check does not inspect.
-fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
-    let child = |idx: ExprIdx, memo: &mut Vec<u8>| subtree_may_change(idx, arena, memo);
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue => false,
-        ExpressionDesc::Pexp_let(inner) => {
-            inner.1.iter().any(|binding| child(binding.pvb_expr, memo)) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            child(inner.funct, memo) || inner.args.iter().any(|(_, arg)| child(*arg, memo))
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            child(inner.0, memo)
-                || inner.1.iter().any(|case| {
-                    case.pc_guard.is_some_and(|guard| child(guard, memo))
-                        || child(case.pc_rhs, memo)
-                })
-        }
-        ExpressionDesc::Pexp_template(template) => {
-            template.values.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_tagged_template(template) => {
-            child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            items.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_construct(_, args) => args.txt.iter().any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_variant(inner) => inner.1.txt.iter().any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_record(inner) => {
-            inner.0.iter().any(|field| child(field.expr, memo))
-                || inner.1.is_some_and(|spread| child(spread, memo))
-        }
-        ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
-        ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
-        ExpressionDesc::Pexp_object_get(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_object_set(inner) => child(inner.0, memo) || child(inner.2, memo),
-        ExpressionDesc::Pexp_object_literal(fields) => fields.iter().any(|(_, e)| child(*e, memo)),
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            child(inner.0, memo)
-                || child(inner.1, memo)
-                || inner.2.is_some_and(|else_| child(else_, memo))
-        }
-        ExpressionDesc::Pexp_ternary(inner) => {
-            child(inner.0, memo) || child(inner.1, memo) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_braces(braces) => child(braces.expr, memo),
-        ExpressionDesc::Pexp_regexp(_) => false,
-        ExpressionDesc::Pexp_sequence(first, second)
-        | ExpressionDesc::Pexp_while(first, second) => child(*first, memo) || child(*second, memo),
-        ExpressionDesc::Pexp_for(inner) => {
-            child(inner.1, memo) || child(inner.2, memo) || child(inner.4, memo)
-        }
-        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
-            child(inner.1, memo) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_coerce(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_letexception(inner) => child(inner.1, memo),
-        ExpressionDesc::Pexp_assert(inner) | ExpressionDesc::Pexp_await(inner) => {
-            child(*inner, memo)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => child(inner.1, memo),
-        ExpressionDesc::Pexp_open(inner) => child(inner.2, memo),
-        ExpressionDesc::Pexp_jsx_element(_)
-        | ExpressionDesc::Pexp_letmodule(_)
-        | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_extension(_)
-        | ExpressionDesc::Pexp_inline_for(_)
-        | ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_field(_)
-        | ExpressionDesc::Pexp_comptime_compile_error(_)
-        | ExpressionDesc::Pexp_comptime_typename(_)
-        | ExpressionDesc::Pexp_comptime_record(_)
-        | ExpressionDesc::Pexp_comptime_variant(_)
-        | ExpressionDesc::Pexp_comptime_build_variant(_)
-        | ExpressionDesc::Pexp_comptime_variant_case(_)
-        | ExpressionDesc::Pexp_comptime_build_record(_)
-        | ExpressionDesc::Pexp_comptime_record_field(_) => true,
-    }
-}
-
-fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
-    let slot = idx.0 as usize;
-    if let Some(&known) = memo.get(slot)
-        && known != 0
-    {
-        return known == 2;
-    }
-    let may_change = expression_may_change(arena.get_expr(idx), arena, memo);
-    if slot >= memo.len() {
-        memo.resize(slot + 1, 0);
-    }
-    memo[slot] = if may_change { 2 } else { 1 };
-    may_change
 }

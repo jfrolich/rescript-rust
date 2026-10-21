@@ -26,7 +26,7 @@ use crate::lambda::js_pass_flatten_and_mark_dead::{
 use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass;
 use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
 use crate::lambda::js_shake::{
-    TailMoveInitializerKind, apply_js_shake_pass, keeps_declared_same_name_reusable_export_binding,
+    apply_js_shake_pass, keeps_declared_same_name_reusable_export_binding,
     move_reused_same_name_export_binding_to_export_tail,
     move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
@@ -48,16 +48,15 @@ use crate::lambda::lam_pass_collect::get_arity;
 use crate::lambda::lam_primitive::{Cst, Primitive};
 use crate::lambda::lam_subst;
 use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
-    LambdaSwitch, PrimInfo, SwitchCaseTag, SwitchKey, TagInfo,
+    ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo, SwitchCaseTag,
+    SwitchKey, TagInfo,
 };
 use crate::location::Location;
 use tracing::info_span;
 
 use super::js_exp_make::{
-    block_with_return_expr_iife, direct_projection_from_pure_literal, int_expr, int_literal,
-    is_optional_block, is_zero_int, js_expr_no_side_effects, js_seq, remove_pure_subexpression,
-    to_int32,
+    block_with_return_expr_iife, int_expr, int_literal, js_expr_no_side_effects, js_seq,
+    remove_pure_subexpression, to_int32,
 };
 use super::js_stmt_make::{block_finishes_output, block_terminates, strict_single_return_expr};
 use super::lam_coercion::{
@@ -427,9 +426,7 @@ impl LambdaCompiler {
     {
         let filtered: Vec<_> = cases
             .iter()
-            .filter(|(_, lam)| {
-                default.map_or(true, |default| !super::lambda_eq_approx(lam, default))
-            })
+            .filter(|(_, lam)| default.is_none_or(|default| !super::lambda_eq_approx(lam, default)))
             .map(|(tag, lam)| (tag.clone(), lam))
             .collect();
 
@@ -443,9 +440,7 @@ impl LambdaCompiler {
     ) -> Vec<(T, &'a Lambda)> {
         cases
             .iter()
-            .filter(|(_, lam)| {
-                default.map_or(true, |default| !super::lambda_eq_approx(lam, default))
-            })
+            .filter(|(_, lam)| default.is_none_or(|default| !super::lambda_eq_approx(lam, default)))
             .map(|(tag, lam)| (tag.clone(), *lam))
             .collect()
     }
@@ -728,14 +723,14 @@ impl LambdaCompiler {
                 let declared: AHashSet<Ident> = block
                     .iter()
                     .filter_map(|stmt| match &stmt.desc {
-                        StatementDesc::Variable(decl) => Some(decl.ident.clone()),
+                        StatementDesc::Variable(decl) => Some(decl.ident),
                         _ => None,
                     })
                     .collect();
                 for id in &exports {
                     if !declared.contains(id) {
                         block.push(Statement::variable(VariableDeclaration {
-                            ident: id.clone(),
+                            ident: *id,
                             value: None,
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -876,7 +871,7 @@ impl LambdaCompiler {
     pub(crate) fn report_diagnostic(&mut self, loc: &Location, message: &str) {
         if self.diagnostic.is_none() {
             self.diagnostic = Some(LambdaDiagnostic {
-                loc: loc.clone(),
+                loc: *loc,
                 message: message.to_string(),
             });
         }
@@ -941,9 +936,9 @@ impl LambdaCompiler {
                 if let Some((late_value, property)) =
                     move_same_name_export_alias_to_export_tail(block, export, value)
                 {
-                    exports.push(export.clone());
+                    exports.push(*export);
                     rebound_exports.push(Statement::variable(VariableDeclaration {
-                        ident: export.clone(),
+                        ident: *export,
                         value: Some(late_value),
                         property,
                         ident_info: IdentInfo::default(),
@@ -956,13 +951,13 @@ impl LambdaCompiler {
                     if declared.contains(export) {
                         let selected =
                             if keeps_declared_same_name_function_export_alias(block, export) {
-                                export.clone()
+                                *export
                             } else {
                                 resolve_declared_same_name_self_alias_target(block, export)
-                                    .unwrap_or_else(|| export.clone())
+                                    .unwrap_or(*export)
                             };
                         if !selected.same(export) {
-                            name_reservations.push(export.clone());
+                            name_reservations.push(*export);
                         }
                         exports.push(selected);
                         continue;
@@ -970,16 +965,16 @@ impl LambdaCompiler {
                     if declared.contains(target) {
                         let resolved = resolve_tail_move_replacement_expression(
                             block,
-                            &Expression::var(target.clone()),
+                            &Expression::var(*target),
                             target,
                             false,
                         );
                         let selected = match resolved.desc {
                             ExpressionDesc::Var(VIdent::Id(resolved_target)) => resolved_target,
-                            _ => target.clone(),
+                            _ => *target,
                         };
                         if !selected.same(export) {
-                            name_reservations.push(export.clone());
+                            name_reservations.push(*export);
                         }
                         exports.push(selected);
                         continue;
@@ -991,7 +986,7 @@ impl LambdaCompiler {
                     && can_reuse_existing_undefined_export_binding(block, export))
                     || block_ended)
             {
-                exports.push(export.clone());
+                exports.push(*export);
                 continue;
             }
             if reusable_export_value_candidate(value) {
@@ -1001,9 +996,9 @@ impl LambdaCompiler {
                 if let Some((late_value, property)) =
                     move_reused_same_name_export_binding_to_export_tail(block, export, value)
                 {
-                    exports.push(export.clone());
+                    exports.push(*export);
                     rebound_exports.push(Statement::variable(VariableDeclaration {
-                        ident: export.clone(),
+                        ident: *export,
                         value: Some(late_value),
                         property,
                         ident_info: IdentInfo::default(),
@@ -1011,7 +1006,7 @@ impl LambdaCompiler {
                     continue;
                 }
                 if keeps_declared_same_name_reusable_export_binding(block, export, value) {
-                    exports.push(export.clone());
+                    exports.push(*export);
                     continue;
                 }
                 if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
@@ -1030,13 +1025,13 @@ impl LambdaCompiler {
             }
 
             let rebound = self.id_gen.create(export.name());
-            name_reservations.push(export.clone());
+            name_reservations.push(*export);
             let property = if matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
                 LetKind::Alias
             } else {
                 LetKind::Strict
             };
-            exports.push(rebound.clone());
+            exports.push(rebound);
             rebound_exports.push(Statement::variable(VariableDeclaration {
                 ident: rebound,
                 value: Some(value.clone()),
@@ -1188,7 +1183,7 @@ impl LambdaCompiler {
         };
         Some((
             ModuleId {
-                id: id.clone(),
+                id: *id,
                 kind: Kind::Ml,
                 dynamic_import: false,
             },
@@ -1325,7 +1320,7 @@ impl LambdaCompiler {
                 let reduced =
                     crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                         &mut ident_tbl,
-                        &*self.id_gen,
+                        &self.id_gen,
                         &param_map,
                         &func.params,
                         &func.body,
@@ -1436,11 +1431,11 @@ impl LambdaCompiler {
             }
         }
 
-        aux(&*self.id_gen, func, arity.extract_arity(), args)
+        aux(&self.id_gen, func, arity.extract_arity(), args)
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
-        Statement::new(StatementDesc::Try(body, Some((exn.clone(), handler)), None))
+        Statement::new(StatementDesc::Try(body, Some((*exn, handler)), None))
     }
 
     fn collect_record_spread_overrides<'a>(
@@ -1537,11 +1532,11 @@ impl LambdaCompiler {
         match lam {
             Lambda::Lvar(id) => Compiled {
                 prelude: vec![],
-                expr: Expression::var(id.clone()),
+                expr: Expression::var(*id),
             },
             Lambda::LglobalModule(id) => {
                 let module = ModuleId {
-                    id: id.clone(),
+                    id: *id,
                     kind: Kind::Ml,
                     dynamic_import: false,
                 };
@@ -1731,7 +1726,7 @@ impl LambdaCompiler {
                     // for the result (compiler/core/lam_compile.ml:1027-1034).
                     let result = self.fresh_tmp_ident();
                     let mut prelude = vec![Statement::variable(VariableDeclaration {
-                        ident: result.clone(),
+                        ident: result,
                         value: None,
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -1752,7 +1747,7 @@ impl LambdaCompiler {
             Lambda::LtryWith(body, exn, handler) => {
                 let result = self.fresh_tmp_ident();
                 let mut prelude = vec![Statement::variable(VariableDeclaration {
-                    ident: result.clone(),
+                    ident: result,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),
@@ -1784,7 +1779,7 @@ impl LambdaCompiler {
                     let then_block = self.compile_assign_to_target_block(&tmp, then_);
                     let else_block = self.compile_assign_to_target_block(&tmp, else_);
                     prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
+                        ident: tmp,
                         value: None,
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -1901,7 +1896,7 @@ impl LambdaCompiler {
                 if !block_terminates(&prelude) {
                     prelude.push(Statement::exp(Expression::bin(
                         BinOp::Eq,
-                        Expression::var(id.clone()),
+                        Expression::var(*id),
                         compiled.expr,
                     )));
                 }
@@ -2040,7 +2035,7 @@ impl LambdaCompiler {
                 loop_label.clone(),
                 init,
                 finish,
-                var.clone(),
+                *var,
                 direction,
                 body_block.clone(),
             ));
@@ -2067,7 +2062,7 @@ impl LambdaCompiler {
             );
         } else {
             prelude.push(Statement::variable(VariableDeclaration {
-                ident: var.clone(),
+                ident: *var,
                 value: Some(start_compiled.expr),
                 property: LetKind::Variable,
                 ident_info: IdentInfo::default(),
@@ -2115,7 +2110,7 @@ impl LambdaCompiler {
         // body, emit a fresh placeholder so the source name doesn't leak.
         let body_fvs = crate::lambda::lam_free_variables::free_variables(body);
         let emitted_id = if body_fvs.contains(var) {
-            var.clone()
+            *var
         } else if await_kw {
             self.fresh_ident("_for_await_of")
         } else {
@@ -2209,7 +2204,7 @@ impl LambdaCompiler {
             return (
                 vec![],
                 vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: Some(self.compile_recursive_function_expr(id, &func, tail_targets)),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
@@ -2225,7 +2220,7 @@ impl LambdaCompiler {
                 return (
                     vec![],
                     vec![Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
+                        ident: *id,
                         value: Some(Expression::var(target)),
                         property: LetKind::Alias,
                         ident_info: IdentInfo::default(),
@@ -2254,7 +2249,7 @@ impl LambdaCompiler {
                 let mut effects = compiled.prelude;
                 if !block_terminates(&effects) {
                     effects.push(Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
+                        ident: *id,
                         value: Some(compiled.expr),
                         property: LetKind::Alias,
                         ident_info: IdentInfo::default(),
@@ -2279,12 +2274,12 @@ impl LambdaCompiler {
                     effects.push(Statement::exp(self.runtime_call_expr(
                         "Primitive_object",
                         "updateDummy",
-                        vec![Expression::var(id.clone()), compiled.expr],
+                        vec![Expression::var(*id), compiled.expr],
                     )));
                 }
                 (
                     vec![Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
+                        ident: *id,
                         value: Some(Self::recursive_dummy_object_expr(tag_info)),
                         property: LetKind::Variable,
                         ident_info: IdentInfo::default(),
@@ -2298,7 +2293,7 @@ impl LambdaCompiler {
                 if block_terminates(&effects) {
                     return (
                         vec![Statement::variable(VariableDeclaration {
-                            ident: id.clone(),
+                            ident: *id,
                             value: None,
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
@@ -2311,7 +2306,7 @@ impl LambdaCompiler {
                 // value's prelude therefore precedes a normal declaration; it
                 // does not introduce a placeholder plus a later assignment.
                 effects.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: Some(compiled.expr),
                     property: LetKind::Alias,
                     ident_info: IdentInfo::default(),
@@ -2381,7 +2376,7 @@ impl LambdaCompiler {
         }
 
         let mut block = vec![Statement::variable(VariableDeclaration {
-            ident: id.clone(),
+            ident: *id,
             value: Some(Self::recursive_dummy_object_expr(tag_info)),
             property: LetKind::Variable,
             ident_info: IdentInfo::default(),
@@ -2390,14 +2385,14 @@ impl LambdaCompiler {
         for (index, arg) in info.args.iter().enumerate() {
             let field_info = Self::recursive_self_binding_field_info(tag_info, index)?;
             let value = match arg {
-                Lambda::Lvar(binding) => Expression::var(binding.clone()),
+                Lambda::Lvar(binding) => Expression::var(*binding),
                 Lambda::Lconst(constant) => Self::compile_constant(constant),
                 _ => return None,
             };
             block.push(Statement::exp(self.compile_set_field(
                 index as i32,
                 &field_info,
-                &Expression::var(id.clone()),
+                &Expression::var(*id),
                 &value,
             )));
         }
@@ -2469,7 +2464,7 @@ impl LambdaCompiler {
                 // `with_static_handler` inline shortcut is a Rust-only
                 // optimization with no OCaml analog for `Declare`.
                 let mut block = vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: None,
                     property: kind,
                     ident_info: IdentInfo::default(),
@@ -2498,7 +2493,7 @@ impl LambdaCompiler {
                 let handler_block = self.compile_assign_to_target_block(id, handler);
                 vec![
                     Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
+                        ident: *id,
                         value: None,
                         property: kind,
                         ident_info: IdentInfo::default(),
@@ -2538,7 +2533,7 @@ impl LambdaCompiler {
                     return block;
                 }
                 block.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: Some(value_compiled.expr),
                     property: kind,
                     ident_info: IdentInfo::default(),
@@ -2552,7 +2547,7 @@ impl LambdaCompiler {
                     return block;
                 }
                 block.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: Some(value_compiled.expr),
                     property: kind,
                     ident_info: IdentInfo::default(),
@@ -2694,7 +2689,7 @@ impl LambdaCompiler {
         if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
             block.push(Statement::variable(VariableDeclaration {
-                ident: id.clone(),
+                ident: *id,
                 value: Some(Expression::cond(
                     cond_compiled.expr,
                     then_compiled.expr,
@@ -2732,7 +2727,7 @@ impl LambdaCompiler {
         // body in `Assign id` context. No `declaration` is threaded through,
         // so the switch never folds back into `let id = cond ? a : b`.
         let mut declared = vec![Statement::variable(VariableDeclaration {
-            ident: id.clone(),
+            ident: *id,
             value: None,
             property: kind,
             ident_info: IdentInfo::default(),
@@ -2793,7 +2788,7 @@ impl LambdaCompiler {
 
         let tmp = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
-            ident: tmp.clone(),
+            ident: tmp,
             value: Some(op.default_expr()),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
@@ -2803,7 +2798,7 @@ impl LambdaCompiler {
         if !block_terminates(&then_block) {
             then_block.push(Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(tmp.clone()),
+                Expression::var(tmp),
                 rhs_compiled.expr,
             )));
         }
@@ -2839,7 +2834,7 @@ impl LambdaCompiler {
                 }
             };
             block.push(Statement::variable(VariableDeclaration {
-                ident: id.clone(),
+                ident: *id,
                 value: Some(expr),
                 property: kind,
                 ident_info: IdentInfo::default(),
@@ -2848,7 +2843,7 @@ impl LambdaCompiler {
         }
 
         block.push(Statement::variable(VariableDeclaration {
-            ident: id.clone(),
+            ident: *id,
             value: Some(op.default_expr()),
             property: kind,
             ident_info: IdentInfo::default(),
@@ -3306,7 +3301,7 @@ impl LambdaCompiler {
             .iter()
             .map(|binding| {
                 Statement::variable(VariableDeclaration {
-                    ident: binding.clone(),
+                    ident: *binding,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),
@@ -3335,7 +3330,7 @@ impl LambdaCompiler {
             .iter()
             .map(|binding| {
                 Statement::variable(VariableDeclaration {
-                    ident: binding.clone(),
+                    ident: *binding,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),
@@ -3568,9 +3563,9 @@ impl LambdaCompiler {
         clauses
     }
 
-    pub(crate) fn grouped_return_string_clauses<'a, T: Clone>(
+    pub(crate) fn grouped_return_string_clauses<T: Clone>(
         &mut self,
-        grouped_cases: Vec<(T, &'a Lambda, bool)>,
+        grouped_cases: Vec<(T, &Lambda, bool)>,
         mut to_tag: impl FnMut(T) -> SwitchCaseTag,
     ) -> Vec<StringClause> {
         let mut clauses = Vec::with_capacity(grouped_cases.len());
@@ -3712,13 +3707,7 @@ impl LambdaCompiler {
 
         let lowered_params = params
             .iter()
-            .map(|param| {
-                tail_loop
-                    .new_params
-                    .get(param)
-                    .cloned()
-                    .unwrap_or_else(|| param.clone())
-            })
+            .map(|param| tail_loop.new_params.get(param).cloned().unwrap_or(*param))
             .collect();
 
         // OCaml reference: compiler/core/lam_compile.ml:379-381 folds
@@ -3733,8 +3722,8 @@ impl LambdaCompiler {
         let mut loop_body = Vec::new();
         for (param, new_param) in lowered_param_defs {
             loop_body.push(Statement::variable(VariableDeclaration {
-                ident: param.clone(),
-                value: Some(Expression::var(new_param.clone())),
+                ident: *param,
+                value: Some(Expression::var(*new_param)),
                 property: LetKind::Alias,
                 ident_info: IdentInfo::default(),
             }));
@@ -4213,11 +4202,10 @@ impl LambdaCompiler {
                 continue;
             }
 
-            let target = tail_loop
+            let target = *tail_loop
                 .new_params
-                .entry(param.clone())
-                .or_insert_with(|| self.fresh_ident(&format!("_{}", param.name())))
-                .clone();
+                .entry(*param)
+                .or_insert_with(|| self.fresh_ident(&format!("_{}", param.name())));
             assignments.push(Statement::exp(Expression::bin(
                 BinOp::Eq,
                 Expression::var(target),
@@ -4509,7 +4497,7 @@ impl LambdaCompiler {
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
                 vec![Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: Some(Expression::cond(cond, then_expr, else_expr)),
                     property: kind,
                     ident_info: IdentInfo::default(),
@@ -4527,7 +4515,7 @@ impl LambdaCompiler {
 
                 vec![
                     Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
+                        ident: *id,
                         value: None,
                         property: kind,
                         ident_info: IdentInfo::default(),
@@ -4576,11 +4564,7 @@ impl LambdaCompiler {
     }
 
     fn result_assignment(&self, id: &Ident, expr: Expression) -> Statement {
-        Statement::exp(Expression::bin(
-            BinOp::Eq,
-            Expression::var(id.clone()),
-            expr,
-        ))
+        Statement::exp(Expression::bin(BinOp::Eq, Expression::var(*id), expr))
     }
 
     /// Statement-valued forms make OCaml's preliminary `NeedValue` pass return
@@ -4662,7 +4646,7 @@ impl LambdaCompiler {
                         let rhs_expr = rhs.as_ref().clone();
                         body.pop();
                         body.push(Statement::variable(VariableDeclaration {
-                            ident: id.clone(),
+                            ident: *id,
                             value: Some(rhs_expr),
                             property: kind,
                             ident_info: IdentInfo::default(),
@@ -4674,7 +4658,7 @@ impl LambdaCompiler {
         }
         let mut result = Vec::with_capacity(body.len() + 1);
         result.push(Statement::variable(VariableDeclaration {
-            ident: id.clone(),
+            ident: *id,
             value: None,
             property: kind,
             ident_info: IdentInfo::default(),
@@ -4959,7 +4943,7 @@ impl LambdaCompiler {
                     let mut block = compiled.prelude;
                     block.push(Statement::exp(Expression::bin(
                         BinOp::Eq,
-                        Expression::var(result.clone()),
+                        Expression::var(*result),
                         compiled.expr,
                     )));
                     return block;
@@ -4974,7 +4958,7 @@ impl LambdaCompiler {
                 let mut block = compiled.prelude;
                 block.push(Statement::exp(Expression::bin(
                     BinOp::Eq,
-                    Expression::var(result.clone()),
+                    Expression::var(*result),
                     compiled.expr,
                 )));
                 block
@@ -5021,11 +5005,7 @@ impl LambdaCompiler {
                 let lhs_compiled = self.compile_expr(lhs);
                 let rhs_compiled = self.compile_expr(rhs);
                 let assign = |value: Expression| {
-                    Statement::exp(Expression::bin(
-                        BinOp::Eq,
-                        Expression::var(result.clone()),
-                        value,
-                    ))
+                    Statement::exp(Expression::bin(BinOp::Eq, Expression::var(*result), value))
                 };
                 let mut block = lhs_compiled.prelude;
                 if rhs_compiled.prelude.is_empty() {
@@ -5072,7 +5052,7 @@ impl LambdaCompiler {
                 if !block_terminates(&block) {
                     block.push(Statement::exp(Expression::bin(
                         BinOp::Eq,
-                        Expression::var(result.clone()),
+                        Expression::var(*result),
                         compiled.expr,
                     )));
                 }
@@ -5117,7 +5097,7 @@ impl LambdaCompiler {
                 if !block_terminates(&block) {
                     block.push(Statement::exp(Expression::bin(
                         BinOp::Eq,
-                        Expression::var(result.clone()),
+                        Expression::var(*result),
                         compiled.expr,
                     )));
                 }
@@ -5738,7 +5718,7 @@ impl LambdaCompiler {
         let exit_code = self.next_static_jump_exit_code();
         self.static_jump_handlers.push(StaticJumpHandler {
             label,
-            exit_id: exit_id.clone(),
+            exit_id: *exit_id,
             exit_code,
             bindings: bindings.to_vec(),
         });
@@ -6147,14 +6127,14 @@ impl LambdaCompiler {
 
     fn staticcatch_declarations(&self, exit_id: &Ident, bindings: &[Ident]) -> Block {
         let mut declarations = vec![Statement::variable(VariableDeclaration {
-            ident: exit_id.clone(),
+            ident: *exit_id,
             value: Some(Expression::number(Number::int(0))),
             property: LetKind::Variable,
             ident_info: IdentInfo::default(),
         })];
         declarations.extend(bindings.iter().map(|binding| {
             Statement::variable(VariableDeclaration {
-                ident: binding.clone(),
+                ident: *binding,
                 value: None,
                 property: LetKind::Variable,
                 ident_info: IdentInfo::default(),
@@ -6166,7 +6146,7 @@ impl LambdaCompiler {
     fn staticcatch_exit_test(&self, exit_id: &Ident, exit_code: i32) -> Expression {
         Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(exit_id.clone()),
+            Expression::var(*exit_id),
             Expression::number(Number::int(exit_code)),
         )
     }
@@ -6193,14 +6173,12 @@ impl LambdaCompiler {
                 (body_block, handler_block)
             });
         block.extend(body_block);
-        if !block_terminates(&block) {
-            if !handler_block.is_empty() {
-                block.push(Statement::if_(
-                    self.staticcatch_exit_test(&exit_id, exit_code),
-                    handler_block,
-                    vec![],
-                ));
-            }
+        if !block_terminates(&block) && !handler_block.is_empty() {
+            block.push(Statement::if_(
+                self.staticcatch_exit_test(&exit_id, exit_code),
+                handler_block,
+                vec![],
+            ));
         }
         block
     }
@@ -6226,14 +6204,12 @@ impl LambdaCompiler {
                 (body_block, handler_block)
             });
         block.extend(body_block);
-        if !block_terminates(&block) {
-            if !handler_block.is_empty() {
-                block.push(Statement::if_(
-                    self.staticcatch_exit_test(&exit_id, exit_code),
-                    handler_block,
-                    vec![],
-                ));
-            }
+        if !block_terminates(&block) && !handler_block.is_empty() {
+            block.push(Statement::if_(
+                self.staticcatch_exit_test(&exit_id, exit_code),
+                handler_block,
+                vec![],
+            ));
         }
         block
     }
@@ -6259,14 +6235,12 @@ impl LambdaCompiler {
                 (body_block, handler_block)
             });
         block.extend(body_block);
-        if !block_terminates(&block) {
-            if !handler_block.is_empty() {
-                block.push(Statement::if_(
-                    self.staticcatch_exit_test(&exit_id, exit_code),
-                    handler_block,
-                    vec![],
-                ));
-            }
+        if !block_terminates(&block) && !handler_block.is_empty() {
+            block.push(Statement::if_(
+                self.staticcatch_exit_test(&exit_id, exit_code),
+                handler_block,
+                vec![],
+            ));
         }
         block
     }
@@ -6293,14 +6267,12 @@ impl LambdaCompiler {
                 (body_block, handler_block)
             });
         block.extend(body_block);
-        if !block_terminates(&block) {
-            if !handler_block.is_empty() {
-                block.push(Statement::if_(
-                    self.staticcatch_exit_test(&exit_id, exit_code),
-                    handler_block,
-                    vec![],
-                ));
-            }
+        if !block_terminates(&block) && !handler_block.is_empty() {
+            block.push(Statement::if_(
+                self.staticcatch_exit_test(&exit_id, exit_code),
+                handler_block,
+                vec![],
+            ));
         }
         block
     }
@@ -6316,7 +6288,7 @@ impl LambdaCompiler {
         // for the result (compiler/core/lam_compile.ml:1027-1034).
         let result = self.fresh_tmp_ident();
         let mut prelude = vec![Statement::variable(VariableDeclaration {
-            ident: result.clone(),
+            ident: result,
             value: None,
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
@@ -6347,7 +6319,7 @@ impl LambdaCompiler {
         let exit_id = self.fresh_ident("exit");
         let first_code = self.next_static_jump_exit_code();
         let mut block = vec![Statement::variable(VariableDeclaration {
-            ident: exit_id.clone(),
+            ident: exit_id,
             value: Some(Expression::number(Number::int(0))),
             property: LetKind::Variable,
             ident_info: IdentInfo::default(),
@@ -6359,7 +6331,7 @@ impl LambdaCompiler {
         for handler in handlers {
             for binding in &handler.bindings {
                 block.push(Statement::variable(VariableDeclaration {
-                    ident: binding.clone(),
+                    ident: *binding,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),
@@ -6370,7 +6342,7 @@ impl LambdaCompiler {
             let exit_code = first_code + i32::try_from(i).expect("exit handler index fits in i32");
             self.static_jump_handlers.push(StaticJumpHandler {
                 label: handler.label,
-                exit_id: exit_id.clone(),
+                exit_id,
                 exit_code,
                 bindings: handler.bindings.clone(),
             });
@@ -6463,7 +6435,7 @@ impl LambdaCompiler {
             })
             .collect();
         Some(Statement::new(StatementDesc::IntSwitch(
-            Expression::var(exit_id.clone()),
+            Expression::var(*exit_id),
             clauses,
             None,
         )))
@@ -6654,7 +6626,7 @@ fn recursive_binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize
     let index_by_id = bindings
         .iter()
         .enumerate()
-        .map(|(index, (id, _))| (id.clone(), index))
+        .map(|(index, (id, _))| (*id, index))
         .collect::<HashMap<_, _>>();
 
     // OCaml's `Lam_scc.preprocess_deps` builds `node_vec` with
@@ -6781,9 +6753,7 @@ fn recursive_binding_groups(
 fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
     bindings
         .iter()
-        .filter_map(|(id, expr)| {
-            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
-        })
+        .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (*id, func)))
         .collect()
 }
 
@@ -6795,7 +6765,7 @@ fn recursive_function_bindings_in_group(
         .iter()
         .filter_map(|&index| {
             let (id, expr) = &bindings[index];
-            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
+            recursive_function_binding_value(expr).map(|func| (*id, func))
         })
         .collect()
 }
@@ -6811,7 +6781,7 @@ fn recursive_function_binding_alias_target(
     };
 
     match expr {
-        Lambda::Lvar(target) => lookup(target).map(|(function_id, _)| function_id.clone()),
+        Lambda::Lvar(target) => lookup(target).map(|(function_id, _)| *function_id),
         _ => None,
     }
 }
@@ -6826,7 +6796,7 @@ fn lower_ocaml_for_range_direction<'a>(
                 __prim3.as_ref(),
                 crate::lambda::PrimInfo {
                     primitive: Primitive::Psubint,
-                    args,
+                    args: _,
                     ..
                 }
             ) =>
@@ -6993,7 +6963,7 @@ fn direct_recursive_function_tail_targets_with_group(
         .keys()
         .cloned()
         .map(|id| {
-            let targets = vec![id.clone()];
+            let targets = vec![id];
             (id, targets)
         })
         .collect();
@@ -7004,10 +6974,7 @@ fn direct_recursive_function_tail_targets_with_group(
         else {
             continue;
         };
-        tail_targets
-            .entry(function_id)
-            .or_default()
-            .push(id.clone());
+        tail_targets.entry(function_id).or_default().push(*id);
     }
 
     tail_targets
@@ -7021,7 +6988,7 @@ fn direct_recursive_function_tail_targets_with_bindings(
         .keys()
         .cloned()
         .map(|id| {
-            let targets = vec![id.clone()];
+            let targets = vec![id];
             (id, targets)
         })
         .collect();
@@ -7031,10 +6998,7 @@ fn direct_recursive_function_tail_targets_with_bindings(
         else {
             continue;
         };
-        tail_targets
-            .entry(function_id)
-            .or_default()
-            .push(id.clone());
+        tail_targets.entry(function_id).or_default().push(*id);
     }
 
     tail_targets
@@ -7411,7 +7375,7 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                     .iter()
                     .map(|item| match item {
                         Element::Na => Arity::na(),
-                        Element::SimpleForm(lam) => get_arity(&meta, lam),
+                        Element::SimpleForm(lam) => get_arity(meta, lam),
                     })
                     .collect::<Vec<_>>();
                 arities.insert(
@@ -7438,7 +7402,7 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                 {
                     let submodule_arities = args
                         .iter()
-                        .map(|lam| get_arity(&meta, lam))
+                        .map(|lam| get_arity(meta, lam))
                         .collect::<Vec<_>>();
                     arities.insert(
                         export.name().to_string(),
@@ -7471,8 +7435,8 @@ fn collect_toplevel_export_bindings<'a>(
             if matches!(
                 __prim0.as_ref(),
                 PrimInfo {
-                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
-                    args,
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_exports), _),
+                    args: _,
                     ..
                 }
             ) =>
@@ -7516,7 +7480,7 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
         Lambda::Lvar(_) | Lambda::Lconst(_) => {}
         Lambda::LglobalModule(id) => {
             seen.insert(ModuleId {
-                id: id.clone(),
+                id: *id,
                 kind: Kind::Ml,
                 dynamic_import: false,
             });
@@ -7719,7 +7683,7 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
     if block.len() == 1 {
         let stmt = block.pop().expect("single-item block");
         let Statement {
-            source_loc,
+            source_loc: _,
             desc,
             comment,
         } = stmt;

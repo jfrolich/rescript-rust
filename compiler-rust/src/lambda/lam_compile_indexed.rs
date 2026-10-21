@@ -190,13 +190,13 @@ impl<'a> IndexedJsConsumer<'a> {
                     if matches!(&arg.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(param)) {
                         continue;
                     }
-                    let key = MapIdent(param.clone());
+                    let key = MapIdent(*param);
                     let new_param = match ret.new_params.get(&key) {
-                        Some(id) => id.clone(),
+                        Some(id) => *id,
                         None => {
                             ret.immutable_mask[i] = false;
                             let id = self.compiler.fresh_ident(&format!("_{}", param.name()));
-                            new_params.insert(key, id.clone());
+                            new_params.insert(key, id);
                             id
                         }
                     };
@@ -305,7 +305,7 @@ impl<'a> IndexedJsConsumer<'a> {
         assign: &mut impl FnMut(&mut Self, &Ident, NodeId) -> Block,
     ) -> Compiled {
         let (body, exception, handler) = match self.context.store().view(node) {
-            NodeView::TryWith(body, exception, handler) => (body, exception.clone(), handler),
+            NodeView::TryWith(body, exception, handler) => (body, *exception, handler),
             _ => panic!("try_with lowering requires a try node"),
         };
         let result = self.compiler.fresh_tmp_ident();
@@ -314,7 +314,7 @@ impl<'a> IndexedJsConsumer<'a> {
         Compiled {
             prelude: vec![
                 Statement::variable(VariableDeclaration {
-                    ident: result.clone(),
+                    ident: result,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),

@@ -411,7 +411,7 @@ impl CompileContext {
             self.jmp_table.insert(
                 h.label,
                 JmpValue {
-                    exit_id: exit_id.clone(),
+                    exit_id,
                     bindings: h.bindings,
                     order_id,
                 },
@@ -456,7 +456,7 @@ mod tests {
     fn test_lam_stats_creation() {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
-        let stats = LamStats::new(vec![x.clone(), y.clone()]);
+        let stats = LamStats::new(vec![x, y]);
 
         assert!(stats.is_export(&x));
         assert!(stats.is_export(&y));
@@ -468,11 +468,11 @@ mod tests {
         let x = Ident::create_local("x");
         let mut stats = LamStats::new(vec![]);
 
-        stats.set_kind(x.clone(), IdKind::Parameter);
+        stats.set_kind(x, IdKind::Parameter);
         assert!(matches!(stats.get_kind(&x), Some(IdKind::Parameter)));
 
         stats.set_kind(
-            x.clone(),
+            x,
             IdKind::FunctionId {
                 arity: Arity::info(vec![2], false),
                 lambda: None,
@@ -528,7 +528,7 @@ mod tests {
             Handler {
                 label: 1,
                 handler: Lambda::unit(),
-                bindings: vec![x.clone()],
+                bindings: vec![x],
             },
             Handler {
                 label: 2,
@@ -537,7 +537,7 @@ mod tests {
             },
         ];
 
-        let result = ctx.add_handlers(exit_id.clone(), handlers);
+        let result = ctx.add_handlers(exit_id, handlers);
 
         assert_eq!(result.len(), 2);
         assert_eq!(ctx.jmp_table.len(), 2);
@@ -564,7 +564,7 @@ mod tests {
         let params = vec![Ident::create_local("a"), Ident::create_local("b")];
         let mask = vec![true, false];
 
-        let mut label = ReturnLabel::new(id.clone(), params.clone(), mask.clone());
+        let mut label = ReturnLabel::new(id, params.clone(), mask.clone());
 
         assert_eq!(label.id, id);
         assert_eq!(label.params.len(), 2);

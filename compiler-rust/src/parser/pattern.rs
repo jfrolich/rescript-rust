@@ -33,7 +33,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 }
             }
             Token::DocComment { loc, content } => {
-                let loc_cloned = loc.clone();
+                let loc_cloned = *loc;
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
@@ -80,7 +80,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrI
 /// OCaml `make_pat_variant_spread_attr` (res_core.ml:278-279).
 fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
     let name = p.arena_mut().intern("res.patVariantSpread");
-    (mknoloc(name), Payload::PStr(Box::new(vec![])))
+    (mknoloc(name), Payload::PStr(Box::default()))
 }
 
 fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
@@ -214,7 +214,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             }
         }
         Token::Backtick => {
-            let start_pos = p.arena().get_position(start_pos_idx).clone();
+            let start_pos = *p.arena().get_position(start_pos_idx);
             let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             pat(
@@ -264,7 +264,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
             p.next();
             if p.token == Token::Backtick {
-                let start_pos = p.arena().get_position(start_pos_idx).clone();
+                let start_pos = *p.arena().get_position(start_pos_idx);
                 let constant = parse_template_constant(p, start_pos, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 pat(
@@ -558,7 +558,7 @@ fn parse_module_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
         p.expect(Token::Rparen);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let unpack = pat(
-            PatternDesc::Ppat_unpack(uident.clone()),
+            PatternDesc::Ppat_unpack(uident),
             uident.loc,
             Attributes::new(),
         );
@@ -716,8 +716,8 @@ fn parse_record_pattern_row_field(p: &mut Parser<'_>, attrs: Attributes) -> Patt
         }
         Token::Equal => {
             p.err_at(
-                p.start_pos.clone(),
-                p.end_pos.clone(),
+                p.start_pos,
+                p.end_pos,
                 DiagnosticCategory::message(
                     "Record patterns use `:` when matching fields. Example: `{field: value}`",
                 ),
@@ -889,7 +889,7 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
                 if has_spread {
                     p.err_at(
                         p.loc_start(p.arena().get_pat(field.pat).ppat_loc),
-                        p.end_pos.clone(),
+                        p.end_pos,
                         DiagnosticCategory::Message(
                             super::core::error_messages::RECORD_PATTERN_SPREAD.to_string(),
                         ),
@@ -903,7 +903,7 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
                 } else {
                     p.err_at(
                         p.loc_start(rest_pat.rest_loc),
-                        p.end_pos.clone(),
+                        p.end_pos,
                         DiagnosticCategory::Message(
                             super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
                         ),
@@ -963,7 +963,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(
             mknoloc(dict_idx),
-            Payload::PStr(Box::new(vec![])),
+            Payload::PStr(Box::default()),
         )])
         .concat(attrs),
     }

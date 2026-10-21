@@ -15,9 +15,7 @@ use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use tracing::info_span;
 
-use crate::binary_ast::{
-    ppx, write_external_ppx_signature_input, write_external_ppx_structure_input,
-};
+use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
@@ -1758,11 +1756,11 @@ fn ppx_context_attribute(
     let none = arena.to_location(arena.none_loc());
     let mk = |desc: pt0::ExpressionDesc| pt0::Expression {
         pexp_desc: desc,
-        pexp_loc: none.clone(),
+        pexp_loc: none,
         pexp_attributes: vec![],
     };
-    let mut lid = |arena: &mut ParseArena, name: &str| {
-        OldLocated::new(Longident::Lident(arena.intern(name)), none.clone())
+    let lid = |arena: &mut ParseArena, name: &str| {
+        OldLocated::new(Longident::Lident(arena.intern(name)), none)
     };
     let string = |s: &str| {
         mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(
@@ -1817,7 +1815,7 @@ fn ppx_context_attribute(
     ];
     let record = mk(pt0::ExpressionDesc::Record(fields, None));
     (
-        OldLocated::new("ocaml.ppx.context".to_string(), none.clone()),
+        OldLocated::new("ocaml.ppx.context".to_string(), none),
         pt0::Payload::PStr(vec![pt0::StructureItem {
             pstr_desc: pt0::StructureItemDesc::Eval(record, vec![]),
             pstr_loc: none,
@@ -2222,7 +2220,7 @@ fn format_parser_warnings(
             loc,
             warning: crate::diagnostics::Warning::Deprecated {
                 message,
-                def_loc: location.clone(),
+                def_loc: location,
                 use_loc: location,
                 can_be_automigrated: false,
             },
@@ -11754,7 +11752,7 @@ pub fn run_implementation_frontend(
     let parser_warnings_have_errors =
         format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
-        return Err(parser_error_to_anyhow(&parser, source, filename));
+        return Err(parser_error_to_anyhow(parser, source, filename));
     }
     let structure =
         apply_external_structure_ppxs(options, filename, parser.arena_mut(), structure)?;
@@ -12383,7 +12381,7 @@ fn compile_source_to_js_with_options_inner(
         &possible_required_modules,
     );
     #[cfg(test)]
-    if let Some(trace) = discriminator_trace.as_deref_mut() {
+    if let Some(trace) = discriminator_trace {
         trace.js_program = format!("{program:#?}");
     }
     if let Some(diagnostic) = compiler.take_diagnostic() {
@@ -12596,8 +12594,8 @@ fn build_name_based_coercion(
                             ModuleCoercion::Tcoerce_primitive(PrimitiveCoercion {
                                 pc_desc: prim.clone(),
                                 pc_type: sig_desc.val_type,
-                                pc_loc: impl_desc.val_loc.clone(),
-                                pc_id: impl_id.clone(),
+                                pc_loc: impl_desc.val_loc,
+                                pc_id: *impl_id,
                             })
                         }
                         ValueKind::ValReg => ModuleCoercion::Tcoerce_none,
@@ -12916,7 +12914,7 @@ pub fn run_interface_frontend(
     let parser_warnings_have_errors =
         format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
-        return Err(parser_error_to_anyhow(&parser, source, filename));
+        return Err(parser_error_to_anyhow(parser, source, filename));
     }
     let signature =
         apply_external_signature_ppxs(options, filename, parser.arena_mut(), signature)?;
@@ -13366,10 +13364,10 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 /// that module name is skipped to prevent circular self-loading (matching
 /// OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from
 /// `open_modules`).
-pub fn load_pervasives<'a>(
+pub fn load_pervasives(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     open_modules: &[String],
     nopervasives: bool,
     compiling_module: Option<&str>,
@@ -13852,10 +13850,7 @@ fn apply_moregen_constraints(
                     && impl_id.stamp() != 0
                     && iface_id.stamp() != impl_id.stamp()
                 {
-                    stamp_remap.insert(
-                        iface_id.stamp(),
-                        crate::types::Path::pident(impl_id.clone()),
-                    );
+                    stamp_remap.insert(iface_id.stamp(), crate::types::Path::pident(*impl_id));
                 }
             }
         }
@@ -15690,8 +15685,8 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
     has_interface: bool,
-    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
-    mut before_js: Option<&mut InProcessBeforeJsHook<'_>>,
+    signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    before_js: Option<&mut InProcessBeforeJsHook<'_>>,
 ) -> Result<InProcessCompileResult> {
     let pre_js = compile_preprocessed_structure_in_process_until_js(
         arena,
@@ -15702,10 +15697,10 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         registry,
         has_interface,
         false,
-        signature_ready.as_deref_mut(),
+        signature_ready,
     )?;
 
-    let refreshed_registry = if let Some(hook) = before_js.as_deref_mut() {
+    let refreshed_registry = if let Some(hook) = before_js {
         hook(&pre_js.possible_required_modules)?
     } else {
         None
@@ -15897,7 +15892,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     registry: &ModuleRegistry,
     has_interface: bool,
     gentype_ignore_interface: bool,
-    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
 ) -> Result<InProcessPreJsCompileResult> {
     let _span = info_span!(
         "compiler.in_process_compile",
@@ -16183,7 +16178,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         }
         (pers_struct, new_alias_rewrites, internal_env)
     };
-    if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
+    if !has_interface && let Some(hook) = signature_ready {
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
@@ -16413,7 +16408,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     mut pre_js: InProcessPreJsCompileResult,
     options: &CompilerOptions,
     registry: &ModuleRegistry,
-    mut metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
+    metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
 ) -> Result<InProcessCompileResult> {
     let _span = info_span!(
         "compiler.in_process_js_finish",
@@ -16493,7 +16488,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         )?;
     }
     let is_pure = program.side_effect.is_none();
-    if let Some(hook) = metadata_ready.as_deref_mut() {
+    if let Some(hook) = metadata_ready {
         hook(InProcessJsMetadataReady {
             is_pure,
             cmj_export_constants: std::mem::take(&mut cmj_export_constants),

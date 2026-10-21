@@ -1062,7 +1062,7 @@ fn mcomp_enter_poly(
     {
         return mcomp_fail();
     }
-    let mut new_slot = |state: &mut McompState| {
+    let new_slot = |state: &mut McompState| {
         state.univar_slots.push(None);
         state.univar_slots.len() - 1
     };
@@ -1179,7 +1179,7 @@ fn unify_enter_poly(
         return Err(TypeError::Unify(Vec::new()));
     }
     let saved_slots = state.univar_slots.len();
-    let mut new_slot = |state: &mut UnifyState| {
+    let new_slot = |state: &mut UnifyState| {
         state.univar_slots.push(None);
         state.univar_slots.len() - 1
     };
@@ -1641,7 +1641,7 @@ fn create_reified_constr(
     let name = ctx.next_reified_abstract_name(&prefix);
     let ident = ctx.create_ident(&name);
     let decl = reified_type_decl(newtype_level);
-    env.add_type(ident.clone(), decl.clone());
+    env.add_type(ident, decl.clone());
     ctx.register_type_decl_by_stamp(ident.stamp(), decl);
     let path = Path::Pident(ident);
     let abbrev = ctx.alloc_abbrev(AbbrevMemo::Mnil);
@@ -2353,7 +2353,7 @@ pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
 /// is above the target, expand the abbreviation and link the original type
 /// to its expansion. This normalizes module-alias paths (e.g.,
 /// `Pdot(Pident("U"), "t")` → `Pident("list")`).
-pub fn update_level_expand<'a>(ctx: &'a TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
+pub fn update_level_expand(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
     // Callers of this form ignore an escaping constructor, like the memoized
     // expansion in OCaml `expand_abbrev` (ctype.ml:1153-1160).
     let _ = update_level_checked(ctx, env, level, ty, &mut None, &mut None);
@@ -2434,8 +2434,8 @@ fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
 
 /// OCaml `update_level env level expand` (ctype.ml:561-613). Returns the type
 /// whose constructor would escape its scope.
-fn update_level_expand_with_lookup_capture<'a>(
-    ctx: &'a TypeContext,
+fn update_level_expand_with_lookup_capture(
+    ctx: &TypeContext,
     env: &Env,
     level: i32,
     expand: bool,
@@ -2617,7 +2617,7 @@ fn update_level_children(
 /// Returns the stamp of the root identifier.
 fn path_binding_time(path: &Path) -> i32 {
     match path {
-        Path::Pident(id) => id.stamp() as i32,
+        Path::Pident(id) => id.stamp(),
         Path::Pdot(parent, _, _) => path_binding_time(parent),
         Path::Papply(p1, p2) => std::cmp::max(path_binding_time(p1), path_binding_time(p2)),
     }
@@ -2704,8 +2704,8 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
     None
 }
 
-pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn resolve_module_signature_through_cmi_shared(
+    ctx: &TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -2794,8 +2794,8 @@ pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
     result
 }
 
-pub(crate) fn resolve_module_signature_through_cmi<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn resolve_module_signature_through_cmi(
+    ctx: &TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -2804,8 +2804,8 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
         .map(|sig| sig.as_ref().clone())
 }
 
-fn resolve_module_signature_through_persistent_env_shared<'a>(
-    ctx: &'a TypeContext,
+fn resolve_module_signature_through_persistent_env_shared(
+    ctx: &TypeContext,
     module_path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<Arc<super::decl::Signature>> {
@@ -2871,8 +2871,8 @@ fn resolve_module_signature_through_persistent_env_shared<'a>(
     result
 }
 
-fn normalize_module_path_through_components<'a>(
-    ctx: &'a TypeContext,
+fn normalize_module_path_through_components(
+    ctx: &TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -2888,7 +2888,7 @@ fn normalize_module_path_through_components<'a>(
             let parent =
                 normalize_module_path_through_components(ctx, load_paths, parent, visiting)
                     .unwrap_or_else(|| (**parent).clone());
-            Path::Pdot(std::sync::Arc::new(parent), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(parent), *name, *pos)
         }
         Path::Papply(functor, arg) => {
             let functor =
@@ -2935,8 +2935,8 @@ fn normalize_module_path_through_components<'a>(
     }
 }
 
-pub(crate) fn resolve_type_item_through_modules<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn resolve_type_item_through_modules(
+    ctx: &TypeContext,
     path: &Path,
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use crate::types::decl::SignatureItem;
@@ -3018,8 +3018,8 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
                 let path_name = path_name.clone().unwrap_or_else(|| path.name());
                 ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
                 ctx.register_type_decl_by_exact_path(path.clone(), qualified_decl.clone());
-                ctx.register_type_item_by_path(&path_name, id.clone(), qualified_decl.clone());
-                result = Some((id.clone(), qualified_decl));
+                ctx.register_type_item_by_path(&path_name, *id, qualified_decl.clone());
+                result = Some((*id, qualified_decl));
             }
         }
     }
@@ -3039,8 +3039,8 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     result
 }
 
-pub fn resolve_type_through_modules<'a>(
-    ctx: &'a TypeContext,
+pub fn resolve_type_through_modules(
+    ctx: &TypeContext,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
     if path_root_is_persistent(path) {
@@ -3056,8 +3056,8 @@ pub fn resolve_type_through_modules<'a>(
 /// Try to expand a type alias (type abbreviation).
 ///
 /// If the type is `Tconstr(path, args)` and the type declaration for `path`
-fn resolve_module_type_through_env_path<'a>(
-    ctx: &'a TypeContext,
+fn resolve_module_type_through_env_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     path: &Path,
     visiting: &mut HashSet<Path>,
@@ -3069,7 +3069,7 @@ fn resolve_module_type_through_env_path<'a>(
         return None;
     }
 
-    let result = match path {
+    match path {
         Path::Pident(id) => {
             let name = id.name();
             if id.is_persistent() {
@@ -3172,7 +3172,7 @@ fn resolve_module_type_through_env_path<'a>(
                         let parent_is_opened_component =
                             env.path_starts_with_opened_component(parent);
                         let preferred_child_path = (!parent_is_opened_component)
-                            .then(|| parent_alias_target.as_ref())
+                            .then_some(parent_alias_target.as_ref())
                             .flatten()
                             .map(|target_parent_path| {
                                 Path::pdot(target_parent_path.clone(), name.to_string())
@@ -3236,13 +3236,11 @@ fn resolve_module_type_through_env_path<'a>(
             }
         }
         Path::Papply(_, _) => None,
-    };
-
-    result
+    }
 }
 
-pub fn resolve_module_type_through_env<'a>(
-    ctx: &'a TypeContext,
+pub fn resolve_module_type_through_env(
+    ctx: &TypeContext,
     env: &super::env::Env,
     path: &Path,
 ) -> Option<super::decl::ModuleType> {
@@ -3250,8 +3248,8 @@ pub fn resolve_module_type_through_env<'a>(
     resolve_module_type_through_env_path(ctx, env, path, &mut visiting)
 }
 
-fn resolve_signature_through_env_module_type<'a>(
-    ctx: &'a TypeContext,
+fn resolve_signature_through_env_module_type(
+    ctx: &TypeContext,
     env: &super::env::Env,
     mty: &super::decl::ModuleType,
     visiting: &mut HashSet<Path>,
@@ -3280,8 +3278,8 @@ fn resolve_signature_through_env_module_type<'a>(
     }
 }
 
-fn strengthen_type_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_type_decl_for_module_access_path(
+    ctx: &TypeContext,
     module_access_path: &Path,
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
@@ -3336,8 +3334,8 @@ fn qualify_type_decl_for_module_access_path(
     qualified
 }
 
-fn strengthen_module_type_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_module_type_for_module_access_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -3392,13 +3390,13 @@ fn strengthen_module_type_for_module_access_path<'a>(
             param_type,
             result,
         } if param.name() != "*" => ModuleType::MtyFunctor {
-            param: param.clone(),
+            param: *param,
             param_type: param_type.clone(),
             result: Box::new(strengthen_module_type_for_module_access_path(
                 ctx,
                 env,
                 false,
-                &Path::papply(module_access_path.clone(), Path::pident(param.clone())),
+                &Path::papply(module_access_path.clone(), Path::pident(*param)),
                 result,
             )),
         },
@@ -3406,8 +3404,8 @@ fn strengthen_module_type_for_module_access_path<'a>(
     }
 }
 
-pub fn strengthen_module_type_for_inclusion_path<'a>(
-    ctx: &'a TypeContext,
+pub fn strengthen_module_type_for_inclusion_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
@@ -3415,8 +3413,8 @@ pub fn strengthen_module_type_for_inclusion_path<'a>(
     strengthen_module_type_for_module_access_path(ctx, env, true, module_access_path, mty)
 }
 
-pub fn strengthen_module_type_for_non_aliasable_path<'a>(
-    ctx: &'a TypeContext,
+pub fn strengthen_module_type_for_non_aliasable_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
@@ -3424,8 +3422,8 @@ pub fn strengthen_module_type_for_non_aliasable_path<'a>(
     strengthen_module_type_for_module_access_path(ctx, env, false, module_access_path, mty)
 }
 
-fn strengthen_module_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_module_decl_for_module_access_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -3450,8 +3448,8 @@ fn strengthen_module_decl_for_module_access_path<'a>(
     strengthened
 }
 
-fn strengthen_signature_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_signature_for_module_access_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -3479,10 +3477,10 @@ fn strengthen_signature_for_module_access_path<'a>(
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                     pos += 1;
                 }
-                SignatureItem::SigValue(id.clone(), desc.clone())
+                SignatureItem::SigValue(*id, desc.clone())
             }
             SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
-                id.clone(),
+                *id,
                 std::sync::Arc::new(strengthen_type_decl_for_module_access_path(
                     ctx,
                     module_access_path,
@@ -3493,7 +3491,7 @@ fn strengthen_signature_for_module_access_path<'a>(
             ),
             SignatureItem::SigTypext(id, ext, ext_status) => {
                 pos += 1;
-                SignatureItem::SigTypext(id.clone(), ext.clone(), *ext_status)
+                SignatureItem::SigTypext(*id, ext.clone(), *ext_status)
             }
             SignatureItem::SigModule(id, md, rec_status) => {
                 let child_path = Path::pdot_pos(module_access_path.clone(), id.name(), pos);
@@ -3505,8 +3503,8 @@ fn strengthen_signature_for_module_access_path<'a>(
                     &child_path,
                     md,
                 );
-                let new_item = SignatureItem::SigModule(id.clone(), strengthened_md, *rec_status);
-                env.add_module(id.clone(), md.clone());
+                let new_item = SignatureItem::SigModule(*id, strengthened_md, *rec_status);
+                env.add_module(*id, md.clone());
                 new_item
             }
             SignatureItem::SigModtype(id, mtd) => {
@@ -3516,8 +3514,8 @@ fn strengthen_signature_for_module_access_path<'a>(
                     strengthened_mtd.mtd_type =
                         Some(super::decl::ModuleType::MtyIdent(modtype_path));
                 }
-                let new_item = SignatureItem::SigModtype(id.clone(), strengthened_mtd);
-                env.add_modtype(id.clone(), mtd.clone());
+                let new_item = SignatureItem::SigModtype(*id, strengthened_mtd);
+                env.add_modtype(*id, mtd.clone());
                 new_item
             }
             SignatureItem::SigClass => SignatureItem::SigClass,
@@ -3532,8 +3530,8 @@ fn strengthen_signature_for_module_access_path<'a>(
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
-fn lookup_component_module_sig_type<'a>(
-    ctx: &'a TypeContext,
+fn lookup_component_module_sig_type(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
@@ -3558,7 +3556,7 @@ fn lookup_component_module_sig_type<'a>(
             |components| {
                 components
                     .lookup_type(type_name)
-                    .map(|(id, decl)| (id.clone(), decl.clone()))
+                    .map(|(id, decl)| (*id, decl.clone()))
             },
         )
         .flatten();
@@ -3585,15 +3583,13 @@ fn lookup_component_module_sig_type<'a>(
         Path::Pdot(..) | Path::Papply(..) => None,
     }?;
     raw_sig.iter().find_map(|item| match item {
-        SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-            Some((id.clone(), decl.clone()))
-        }
+        SignatureItem::SigType(id, decl, _) if id.name() == type_name => Some((*id, decl.clone())),
         _ => None,
     })
 }
 
-fn lookup_raw_module_sig_type<'a>(
-    ctx: &'a TypeContext,
+fn lookup_raw_module_sig_type(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
@@ -3626,7 +3622,7 @@ fn lookup_raw_module_sig_type<'a>(
             .with_raw_module_sig(id.name(), |raw_sig| {
                 raw_sig.iter().find_map(|item| match item {
                     SignatureItem::SigType(raw_id, raw_decl, _) if raw_id.name() == type_name => {
-                        Some((raw_id.clone(), raw_decl.clone()))
+                        Some((*raw_id, raw_decl.clone()))
                     }
                     _ => None,
                 })
@@ -3640,9 +3636,7 @@ fn lookup_raw_module_sig_type<'a>(
             resolve_signature_through_env_module_type(ctx, env, &resolved, &mut visiting)
         })?;
     raw_sig.iter().find_map(|item| match item {
-        SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-            Some((id.clone(), decl.clone()))
-        }
+        SignatureItem::SigType(id, decl, _) if id.name() == type_name => Some((*id, decl.clone())),
         _ => None,
     })
 }
@@ -3672,13 +3666,7 @@ fn resolve_type_item_through_env<'a>(
         super::decl::TypeDeclarationRef::Shared(decl) => decl,
         super::decl::TypeDeclarationRef::Owned(decl) => Arc::new(*decl),
     };
-    ctx.register_resolved_type_item(
-        scope_id,
-        path,
-        strengthen_alias_types,
-        id.clone(),
-        decl.clone(),
-    );
+    ctx.register_resolved_type_item(scope_id, path, strengthen_alias_types, id, decl.clone());
     Some((id, super::decl::TypeDeclarationRef::Shared(decl)))
 }
 
@@ -3758,10 +3746,7 @@ fn resolve_type_item_through_env_uncached<'a>(
                 ) {
                     target_decl.type_private = PrivateFlag::Public;
                 }
-                return Some((
-                    id.clone(),
-                    super::decl::TypeDeclarationRef::owned(target_decl),
-                ));
+                return Some((id, super::decl::TypeDeclarationRef::owned(target_decl)));
             }
             let raw_module_path = alias_target_for_strengthening
                 .as_ref()
@@ -3774,7 +3759,7 @@ fn resolve_type_item_through_env_uncached<'a>(
         }
         if let Some(target_path) = alias_target_for_strengthening.as_ref() {
             return Some((
-                id.clone(),
+                id,
                 super::decl::TypeDeclarationRef::owned(
                     strengthen_type_decl_for_module_access_path(
                         ctx,
@@ -3815,7 +3800,7 @@ fn resolve_type_through_env<'a>(
 /// 1. Recursively normalizes the prefix `p`
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
-pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
+pub(crate) fn normalize_path_full(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
     // Normalization only reads module-level bindings (see `Env::scope_id`).
     let env_id = env.scope_id();
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
@@ -3827,8 +3812,8 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     normalized
 }
 
-pub(crate) fn normalize_path_full_strict<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn normalize_path_full_strict(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Result<Path, Path> {
@@ -3843,11 +3828,7 @@ pub(crate) fn normalize_path_full_strict<'a>(
     }
 }
 
-fn module_path_exists_for_strict_normalize<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    path: &Path,
-) -> bool {
+fn module_path_exists_for_strict_normalize(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
     match path {
         Path::Pident(id) => {
             if env.find_module_same(id).is_ok() {
@@ -3889,8 +3870,8 @@ fn module_path_exists_for_strict_normalize<'a>(
         .is_some()
 }
 
-pub(crate) fn force_normalize_path_full_side_effects<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn force_normalize_path_full_side_effects(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Path {
@@ -3912,7 +3893,7 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     normalized
 }
 
-fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
+fn normalize_path_forward_only(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
     // Like `normalize_path_full`, this only reads module-level bindings, so
     // memoize it per `Env::scope_id`; unification asks for the same abstract
     // type heads many times per scope.
@@ -3926,8 +3907,8 @@ fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path)
     normalized
 }
 
-fn normalize_path_full_inner<'a>(
-    ctx: &'a TypeContext,
+fn normalize_path_full_inner(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
     depth: usize,
@@ -3995,7 +3976,7 @@ fn normalize_path_full_inner<'a>(
             if p_norm == **p {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
             }
         }
         Path::Papply(p1, p2) => {
@@ -4209,11 +4190,7 @@ fn pdot_expansion(
                 )
                 .filter(|target_module_path| !target_module_path.same(parent))
                 .map(|target_module_path| {
-                    Path::Pdot(
-                        std::sync::Arc::new(target_module_path),
-                        type_name.clone(),
-                        *pos,
-                    )
+                    Path::Pdot(std::sync::Arc::new(target_module_path), *type_name, *pos)
                 });
                 if let Some(target) = target {
                     return PdotExpansion::Rewrite(target);
@@ -4245,8 +4222,8 @@ enum ExpandHeadMode {
     Optimize,
 }
 
-fn try_expand_head_with_mode<'a>(
-    ctx: &'a TypeContext,
+fn try_expand_head_with_mode(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
@@ -4568,7 +4545,7 @@ fn try_expand_head_with_mode<'a>(
                                 .map(|target_module_path| {
                                     Path::Pdot(
                                         std::sync::Arc::new(target_module_path),
-                                        type_name.clone(),
+                                        *type_name,
                                         *pos,
                                     )
                                 })
@@ -4712,31 +4689,23 @@ fn try_expand_head_with_mode<'a>(
     }
 }
 
-fn try_expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
+fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
-fn try_expand_head_unif<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<TypeExprRef> {
+fn try_expand_head_unif(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
 }
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-pub fn expand_head_once<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<TypeExprRef> {
+pub fn expand_head_once(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
     try_expand_head(ctx, env, ty).map(|expanded| ctx.repr(expanded))
 }
 
-pub(crate) fn expand_abbrev_opt_once<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn expand_abbrev_opt_once(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -4762,12 +4731,12 @@ pub(crate) fn instance_declaration(
             labels
                 .iter()
                 .map(|label| crate::types::decl::LabelDeclaration {
-                    ld_id: label.ld_id.clone(),
+                    ld_id: label.ld_id,
                     ld_runtime_name: label.ld_runtime_name.clone(),
                     ld_mutable: label.ld_mutable,
                     ld_optional: label.ld_optional,
                     ld_type: copy(label.ld_type),
-                    ld_loc: label.ld_loc.clone(),
+                    ld_loc: label.ld_loc,
                     ld_attributes: label.ld_attributes.clone(),
                 })
                 .collect(),
@@ -4859,19 +4828,15 @@ pub fn same_constr(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRe
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-pub fn expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+pub fn expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
-pub(crate) fn expand_head_unif<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> TypeExprRef {
+pub(crate) fn expand_head_unif(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
 }
 
-pub(crate) fn expand_head_opt<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+pub(crate) fn expand_head_opt(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
 }
 
@@ -6131,7 +6096,7 @@ fn subtype_rec(
                 push_subtype_cstr(cstrs, trace, t1, t2, None);
                 return Ok(());
             }
-            let mut new_slot = |cstrs: &mut SubtypeAcc| {
+            let new_slot = |cstrs: &mut SubtypeAcc| {
                 cstrs.univar_slots.push(None);
                 cstrs.univar_slots.len() - 1
             };
@@ -6654,8 +6619,8 @@ fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
     label.ld_runtime_name.clone()
 }
 
-fn expand_head_with_mode<'a>(
-    ctx: &'a TypeContext,
+fn expand_head_with_mode(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
@@ -7221,8 +7186,8 @@ fn package_longident_same_label(
 /// # Errors
 ///
 /// Returns `TypeError::Unify` if the types cannot be unified.
-pub fn unify<'a>(
-    ctx: &'a TypeContext,
+pub fn unify(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -7453,8 +7418,8 @@ pub(crate) fn record_trace_expansions(
 /// OCaml compiler/ml/ctype.ml:2820-2837 links a left-hand `Tvar` directly
 /// after the occurs check and level update, falling back to full `unify` for
 /// constructor self-occurrences and non-variable left sides.
-pub fn unify_var<'a>(
-    ctx: &'a TypeContext,
+pub fn unify_var(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -7522,8 +7487,8 @@ pub fn unify_var<'a>(
 // and unify3 links t1' -> t2 for expression-mode unification.
 // We mirror that branch choice so alias identity is preserved for both
 // one-sided and two-sided expansion cases.
-fn unify_after_expansion<'a>(
-    ctx: &'a TypeContext,
+fn unify_after_expansion(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t1_expanded: TypeExprRef,
@@ -7721,8 +7686,8 @@ fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef)
 }
 
 /// Internal unification logic.
-fn unify_types<'a>(
-    ctx: &'a TypeContext,
+fn unify_types(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -8700,16 +8665,16 @@ fn unify_rows<'a>(
     let row1 = row1.as_ref();
     let row2 = row2.as_ref();
 
-    let rm1 = row_more(ctx, &row1);
-    let rm2 = row_more(ctx, &row2);
+    let rm1 = row_more(ctx, row1);
+    let rm2 = row_more(ctx, row2);
     if rm1 == rm2 {
         return Ok(());
     }
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
-    let fixed1 = row_fixed(ctx, &row1);
-    let fixed2 = row_fixed(ctx, &row2);
+    let fixed1 = row_fixed(ctx, row1);
+    let fixed2 = row_fixed(ctx, row2);
     let more = if fixed1 {
         rm1
     } else if fixed2 {
@@ -8845,8 +8810,8 @@ fn unify_rows<'a>(
         (*desc).clone()
     };
     let result = (|| -> TypeResult<()> {
-        set_more(ctx, state, &row2, false, &r1)?;
-        set_more(ctx, state, &row1, true, &r2)?;
+        set_more(ctx, state, row2, false, &r1)?;
+        set_more(ctx, state, row1, true, &r2)?;
         for (label, f1, f2) in &pairs {
             // ctype.ml:2485-2491 prefixes the single-field variants.
             if let Err(err) = unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2) {
@@ -8863,8 +8828,8 @@ fn unify_rows<'a>(
                 });
             }
         }
-        if super::btype::static_row(ctx, &row1) {
-            let rm = row_more(ctx, &row1);
+        if super::btype::static_row(ctx, row1) {
+            let rm = row_more(ctx, row1);
             if super::btype::is_tvar(ctx, rm) {
                 let nil = ctx.new_type(TypeDesc::Tnil);
                 ctx.set_level(nil, ctx.get_level(rm));
@@ -8896,8 +8861,8 @@ fn mkvariant(ctx: &TypeContext, fields: Vec<(Label, RowField)>, closed: bool) ->
 
 /// Unify two row fields.
 /// Matches OCaml's `unify_row_field` behavior, including Reither link updates.
-fn unify_row_field<'a>(
-    ctx: &'a TypeContext,
+fn unify_row_field(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     fixed1: bool,
     fixed2: bool,
@@ -9201,8 +9166,8 @@ fn build_fields(
 
 /// Unify two object field chains using OCaml's field-order-independent algorithm.
 /// Matches OCaml `unify_fields` in ctype.ml.
-fn unify_object_fields<'a>(
-    ctx: &'a TypeContext,
+fn unify_object_fields(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     fields1: TypeExprRef,
     fields2: TypeExprRef,
@@ -9256,8 +9221,8 @@ fn unify_object_fields<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unify_object_field_pairs<'a>(
-    ctx: &'a TypeContext,
+fn unify_object_field_pairs(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     pairs: &[(FieldInfo, FieldInfo)],
     miss1: &[FieldInfo],
@@ -11390,14 +11355,14 @@ fn compute_variance_rec(
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
-pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, Vec<Path>) {
+pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, Vec<Path>) {
     let mut seen = Vec::new();
     let mut current = ty;
     let mut pending_type_lookup_paths = Vec::new();
     let mut pending_type_expansion_paths = Vec::new();
     loop {
         let expanded = expand_head(ctx, env, current);
-        if seen.iter().any(|&s| s == expanded) {
+        if seen.contains(&expanded) {
             return (pending_type_lookup_paths, pending_type_expansion_paths);
         }
         let arrow = {
@@ -11908,7 +11873,7 @@ fn copy_sep_inner(
             let fixed_prime = fixed && super::btype::is_tvar(ctx, ctx.repr(more_copy));
             TypeDesc::Tvariant(Box::new(copy_sep_row(
                 ctx,
-                &row,
+                row,
                 fixed_prime,
                 keep,
                 more_copy,
@@ -12228,7 +12193,7 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
-    let summarize = |ty: TypeExprRef| -> String {
+    let _summarize = |ty: TypeExprRef| -> String {
         let ty = ctx.repr(ty);
         let desc = ctx.get_desc(ty);
         match &*desc {
@@ -12324,13 +12289,10 @@ pub fn check_univars(ctx: &TypeContext, vars: &[TypeExprRef]) {
     for &v in vars {
         let v = ctx.repr(v);
         let desc = ctx.get_desc(v);
-        match &*desc {
-            super::TypeDesc::Tvar(name) => {
-                let name = name.clone();
-                drop(desc);
-                ctx.set_desc(v, super::TypeDesc::Tunivar(name));
-            }
-            _ => {}
+        if let super::TypeDesc::Tvar(name) = &*desc {
+            let name = name.clone();
+            drop(desc);
+            ctx.set_desc(v, super::TypeDesc::Tunivar(name));
         }
     }
 }
@@ -13189,14 +13151,14 @@ fn subst_identity_copy_rec(
                                     .collect(),
                             )
                         });
-                        let row_copy = TypeDesc::Tvariant(Box::new(RowDesc {
+
+                        TypeDesc::Tvariant(Box::new(RowDesc {
                             row_fields: fields_copy.into(),
                             row_more: more_copy,
                             row_closed: row.row_closed,
                             row_fixed: row.row_fixed,
                             row_name: name_copy,
-                        }));
-                        row_copy
+                        }))
                     }
                 }
                 TypeDesc::Tpackage { path, lids, args } => {
@@ -14024,8 +13986,8 @@ fn normalize_type_rec(
 /// Copy a type while eliminating dependencies on module ident `mid`.
 /// Any `Tconstr(p, tl, _)` where `p.is_free(mid)` is expanded via `env`.
 /// Returns `None` if the dependency cannot be removed.
-pub fn nondep_type<'a>(
-    ctx: &'a TypeContext,
+pub fn nondep_type(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     ty: TypeExprRef,
@@ -14035,8 +13997,8 @@ pub fn nondep_type<'a>(
     ctx.with_copy_session(|| nondep_type_rec(ctx, env, mid, ty, &mut cache))
 }
 
-fn nondep_type_rec<'a>(
-    ctx: &'a TypeContext,
+fn nondep_type_rec(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     ty: TypeExprRef,
@@ -14300,8 +14262,8 @@ fn nondep_type_rec<'a>(
 
 /// Eliminate dependencies on functor parameter `mid` from a type declaration.
 /// OCaml: Ctype.nondep_type_decl
-fn unroll_abbrev<'a>(
-    ctx: &'a TypeContext,
+fn unroll_abbrev(
+    ctx: &TypeContext,
     id: &Ident,
     params: &[TypeExprRef],
     ty: TypeExprRef,
@@ -14323,7 +14285,7 @@ fn unroll_abbrev<'a>(
     ctx.set_level(unrolled, level);
 
     let constr = ctx.new_type(TypeDesc::Tconstr {
-        path: Path::pident(id.clone()),
+        path: Path::pident(*id),
         args: params.to_vec().into(),
         abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
     });
@@ -14332,8 +14294,8 @@ fn unroll_abbrev<'a>(
     unrolled
 }
 
-pub fn nondep_type_decl<'a>(
-    ctx: &'a TypeContext,
+pub fn nondep_type_decl(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     _id: &Ident,
@@ -14379,8 +14341,8 @@ pub fn nondep_type_decl<'a>(
     })
 }
 
-fn nondep_type_kind<'a>(
-    ctx: &'a TypeContext,
+fn nondep_type_kind(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     kind: &super::decl::TypeKind,
@@ -14760,16 +14722,13 @@ mod tests {
 
         let module_id = Ident::create_local("M");
         let type_id = Ident::create_local("t");
-        let module_path = Path::pident(module_id.clone());
+        let module_path = Path::pident(module_id);
         let type_path = Path::pdot(module_path, "t".to_string());
 
         let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
         env.add_module(
-            module_id.clone(),
-            module_with_t(
-                type_id.clone(),
-                manifest_decl(int_ty, Some(type_path.clone())),
-            ),
+            module_id,
+            module_with_t(type_id, manifest_decl(int_ty, Some(type_path.clone()))),
         );
 
         let first = ctx.new_constr(type_path.clone(), vec![]);
@@ -14824,9 +14783,7 @@ mod tests {
             type_arity: 0,
             type_kind: TypeKind::TypeAbstract,
             type_private: PrivateFlag::Public,
-            type_manifest: Some(
-                ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![]),
-            ),
+            type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id), vec![])),
             type_variance: vec![],
             type_newtype_level: None,
             type_loc: crate::location::Location::none(),
@@ -14838,11 +14795,11 @@ mod tests {
         };
 
         env.add_module(
-            module_id.clone(),
+            module_id,
             ModuleDeclaration {
                 md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![
                     SignatureItem::SigType(
-                        sibling_id.clone(),
+                        sibling_id,
                         std::sync::Arc::new(sibling_decl),
                         RecStatus::TrecNot,
                     ),

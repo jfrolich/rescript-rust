@@ -923,19 +923,19 @@ impl<'a> Checker<'a> {
                         message: payload_semantic_string(payload, self.arena),
                     },
                 });
-                return Ok(());
+                Ok(())
             }
             // `Ast_payload.raw_as_string_exp_exn` warns about the Flow parse
             // errors of a string payload before `handle_ffi` rejects one that
             // is not a function.
             "ffi" => {
                 push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
-                return validate_expression_extension_payload_error(extension, self.arena);
+                validate_expression_extension_payload_error(extension, self.arena)
             }
             "raw" => {
                 validate_expression_extension_payload_error(extension, self.arena)?;
                 push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
-                return Ok(());
+                Ok(())
             }
             _ => validate_expression_extension_payload_error(extension, self.arena),
         }

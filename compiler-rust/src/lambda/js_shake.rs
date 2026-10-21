@@ -235,7 +235,7 @@ pub(crate) fn move_reused_same_name_export_binding_to_export_tail(
         (
             clone_flattened_block_refs(&flattened_refs),
             index,
-            reused.clone(),
+            *reused,
             replacement,
             property,
         )
@@ -304,11 +304,11 @@ pub(crate) fn resolve_tail_move_replacement_expression(
         return initializer.clone();
     };
 
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return initializer.clone();
         }
 
@@ -351,7 +351,7 @@ pub(crate) fn resolve_tail_move_replacement_expression(
                 };
             }
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
+                current = *next;
             }
             ExpressionDesc::Number(_)
             | ExpressionDesc::Str(_)
@@ -382,11 +382,11 @@ fn resolve_tail_move_replacement_expression_ref(
         return initializer.clone();
     };
 
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return initializer.clone();
         }
 
@@ -425,7 +425,7 @@ fn resolve_tail_move_replacement_expression_ref(
                 };
             }
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
+                current = *next;
             }
             ExpressionDesc::Number(_)
             | ExpressionDesc::Str(_)
@@ -451,11 +451,11 @@ fn tail_move_materialized_root_ident_ref(
         return None;
     };
 
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return None;
         }
 
@@ -475,7 +475,7 @@ fn tail_move_materialized_root_ident_ref(
 
         match &value.desc {
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
+                current = *next;
             }
             _ => return Some(current),
         }
@@ -486,11 +486,11 @@ pub(crate) fn resolve_tail_move_initializer_kind(
     block: &Block,
     start: &Ident,
 ) -> Option<TailMoveInitializerKind> {
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return None;
         }
 
@@ -518,7 +518,7 @@ pub(crate) fn resolve_tail_move_initializer_kind(
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
-            ExpressionDesc::Var(VIdent::Id(next)) => current = next.clone(),
+            ExpressionDesc::Var(VIdent::Id(next)) => current = *next,
             _ => return None,
         }
     }
@@ -528,11 +528,11 @@ fn resolve_tail_move_initializer_kind_ref(
     block: &[&Statement],
     start: &Ident,
 ) -> Option<TailMoveInitializerKind> {
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return None;
         }
 
@@ -560,7 +560,7 @@ fn resolve_tail_move_initializer_kind_ref(
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
-            ExpressionDesc::Var(VIdent::Id(next)) => current = next.clone(),
+            ExpressionDesc::Var(VIdent::Id(next)) => current = *next,
             _ => return None,
         }
     }
@@ -1601,7 +1601,7 @@ fn required_idents(
                     }
                 } else if let Some(value) = value {
                     if !js_expr_no_side_effects(value) {
-                        required.insert(ident.clone());
+                        required.insert(*ident);
                         required.extend(free_variables_of_expression(value));
                     }
                 }
@@ -1636,12 +1636,12 @@ impl JsIdentStats {
 
     fn add_used_ident(&mut self, ident: &Ident) {
         if !self.defined_idents.contains(ident) {
-            self.used_idents.insert(ident.clone());
+            self.used_idents.insert(*ident);
         }
     }
 
     fn add_defined_ident(&mut self, ident: &Ident) {
-        self.defined_idents.insert(ident.clone());
+        self.defined_idents.insert(*ident);
     }
 
     fn extend_free_idents(&mut self, other: HashSet<Ident>) {
@@ -1710,7 +1710,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(finish, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::ForOf(_, loop_ident, iterable, body)
@@ -1718,7 +1718,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(iterable, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
@@ -1744,7 +1744,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             if let Some((catch_ident, catch_block)) = catch {
                 stats.extend_free_idents(free_variables_of_block_with_defined(
                     catch_block,
-                    std::iter::once(catch_ident.clone()),
+                    std::iter::once(*catch_ident),
                 ));
             }
             if let Some(finally) = finally {

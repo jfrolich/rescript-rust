@@ -557,12 +557,12 @@ pub fn signature_runtime_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usiz
         match item {
             SignatureItem::SigValue(id, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                    bound.push((id.clone(), runtime_pos));
+                    bound.push((*id, runtime_pos));
                     runtime_pos += 1;
                 }
             }
             SignatureItem::SigTypext(id, _, _) | SignatureItem::SigModule(id, _, _) => {
-                bound.push((id.clone(), runtime_pos));
+                bound.push((*id, runtime_pos));
                 runtime_pos += 1;
             }
             SignatureItem::SigClass => {

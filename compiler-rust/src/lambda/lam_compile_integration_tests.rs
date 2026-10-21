@@ -617,8 +617,8 @@ fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
     );
     assert!(
         output.contains("export {\n  tToJs,\n  tFromJs,\n  v,\n  u,\n}")
-            && output.find("Mocha.describe(\"Gpr_3142_test\"").is_some()
-            && output.find("let v = tToJs;").is_some()
+            && output.contains("Mocha.describe(\"Gpr_3142_test\"")
+            && output.contains("let v = tToJs;")
             && output.find("Mocha.describe(\"Gpr_3142_test\"").unwrap()
                 < output.find("let v = tToJs;").unwrap()
             && !output.contains("v$1 as v")
@@ -640,8 +640,8 @@ fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() 
         output.contains("let empty = Set_gen.empty;")
             && output.contains("let singleton = Set_gen.singleton;")
             && output.contains("let of_sorted_list = Set_gen.of_sorted_list;")
-            && output.find("function invariant(t)").is_some()
-            && output.find("let empty = Set_gen.empty;").is_some()
+            && output.contains("function invariant(t)")
+            && output.contains("let empty = Set_gen.empty;")
             && output.find("function invariant(t)").unwrap()
                 < output.find("let empty = Set_gen.empty;").unwrap(),
         "expected string_set to keep those alias bindings only in the later export section, got:\n{output}"
@@ -663,8 +663,8 @@ fn string_bound_get_test_keeps_direct_literal_export_binding_before_internal_use
     assert!(
         output.contains("let v = \"ghos\";\n\nlet u_a = v[0];")
             && output.contains("function u_b() {\n  return v[-1];\n}")
-            && output.find("let v = \"ghos\";").is_some()
-            && output.find("let u_a = v[0];").is_some()
+            && output.contains("let v = \"ghos\";")
+            && output.contains("let u_a = v[0];")
             && output.find("let v = \"ghos\";").unwrap() < output.find("let u_a = v[0];").unwrap(),
         "expected string_bound_get_test to keep the direct literal export binding ahead of later internal uses like OCaml, got:\n{output}"
     );
@@ -684,8 +684,8 @@ fn external_shadow_keeps_new_wrapper_after_new_module_binding_like_snapshot() {
         "expected ExternalShadow to keep the @new wrapper after the New module binding and before Global, got:\n{output}"
     );
     assert!(
-        output.find("let X = {};").is_some()
-            && output.find("function url(prim) {").is_some()
+        output.contains("let X = {};")
+            && output.contains("function url(prim) {")
             && output.find("let X = {};").unwrap() < output.find("function url(prim) {").unwrap(),
         "expected ExternalShadow to keep earlier module/value bindings ahead of the @new wrapper, got:\n{output}"
     );

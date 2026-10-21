@@ -536,7 +536,7 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
     };
 
     let empty_sig = ModuleType {
-        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
+        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::default())),
         pmty_loc: loc,
         pmty_attributes: Attributes::new(),
     };

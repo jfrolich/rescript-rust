@@ -125,7 +125,7 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             }
 
             if let Lambda::Lconst(Constant::String(s)) = l1.as_ref() {
-                state.string_table.insert(v.clone(), s.clone());
+                state.string_table.insert(v, s.clone());
                 let (simplified_body, _) = simplif(state, *l2);
                 return (Lambda::let_(LetKind::Alias, v, *l1, simplified_body), true);
             }
@@ -143,7 +143,7 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             }
             let (new_l1, c1) = simplif(state, *l1);
             if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
-                state.string_table.insert(v.clone(), s.clone());
+                state.string_table.insert(v, s.clone());
                 let (simplified_body, _) = simplif(state, *lbody);
                 return (
                     Lambda::let_(LetKind::Alias, v, new_l1, simplified_body),
@@ -170,7 +170,7 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             let (new_l1, c1) = simplif(state, *l1);
             if matches!(kind, LetKind::Strict) {
                 if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
-                    state.string_table.insert(v.clone(), s.clone());
+                    state.string_table.insert(v, s.clone());
                     let (simplified_body, _) = simplif(state, *l2);
                     return (
                         Lambda::let_(LetKind::Alias, v, new_l1, simplified_body),
@@ -264,7 +264,7 @@ mod tests {
         let x = ident("x", 100);
         let lam = Lambda::let_(
             LetKind::Alias,
-            x.clone(),
+            x,
             Lambda::Lconst(Constant::int(1)),
             Lambda::Lvar(x),
         );
@@ -282,7 +282,7 @@ mod tests {
             LetKind::Alias,
             x,
             Lambda::Lconst(Constant::int(1)),
-            Lambda::Lvar(other.clone()),
+            Lambda::Lvar(other),
         );
         let result = simplify_lets(&lam);
         match result {
@@ -301,7 +301,7 @@ mod tests {
             LetKind::Strict,
             x,
             Lambda::Lconst(Constant::int(7)),
-            Lambda::Lvar(other.clone()),
+            Lambda::Lvar(other),
         );
         let result = simplify_lets(&lam);
         match result {
@@ -318,7 +318,7 @@ mod tests {
         let y = ident("y", 106);
         let concat = Lambda::prim(
             Primitive::Pstringadd,
-            vec![Lambda::Lvar(x.clone()), Lambda::Lvar(y.clone())],
+            vec![Lambda::Lvar(x), Lambda::Lvar(y)],
             crate::location::Location::none(),
         );
         let inner = Lambda::let_(

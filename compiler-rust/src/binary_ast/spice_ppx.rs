@@ -571,7 +571,7 @@ fn pat_var_idx(arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
     }
 }
 
-fn pat_var_idx_with_loc(arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
+fn pat_var_idx_with_loc(_arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_var(Located::new(idx, loc))),
         ppat_loc: loc,
@@ -1031,11 +1031,11 @@ fn build_ifthenelse_with_prefix(
     cases: Vec<(Expression, Expression)>,
     prefix: StrIdx,
 ) -> Expression {
-    let mut iter = cases.into_iter().rev();
+    let iter = cases.into_iter().rev();
     let v_expr = expr_ident_path(arena, &["v"]);
     let not_matched = expr_constant_literal(arena, "Not matched");
     let mut acc = expr_spice_error_with_prefix(arena, prefix, not_matched, v_expr, None);
-    while let Some((if_expr, then_expr)) = iter.next() {
+    for (if_expr, then_expr) in iter {
         acc = expr_ifthenelse(if_expr, then_expr, Some(acc), arena);
     }
     acc
@@ -1162,14 +1162,13 @@ fn tuple_generate_encoder(
     }
     let deconstructor = pat_tuple(pat_vars, arena);
 
-    let fun_expr = expr_fun(
+    expr_fun(
         ArgLabel::Nolabel,
         deconstructor,
         constrained,
         Some(1),
         arena,
-    );
-    fun_expr
+    )
 }
 
 fn tuple_generate_decode_success_case(num_args: usize, arena: &mut ParseArena) -> Case {
@@ -1979,7 +1978,7 @@ fn records_generate_flat_decoder_expr(
                     arena,
                 );
 
-                let default_expr = if field.is_optional {
+                if field.is_optional {
                     match &field.default {
                         Some(d) => expr_apply(
                             expr_ident_path(arena, &["Option", "getOr"]),
@@ -2101,9 +2100,7 @@ fn records_generate_flat_decoder_expr(
                         arena.dummy_loc(),
                         arena,
                     )
-                };
-
-                default_expr
+                }
             }
             None => {
                 let missing = expr_constant(Constant::string(" missing"), arena);
@@ -3989,11 +3986,7 @@ fn map_type_decl_structure(
         _ => false,
     };
 
-    let generator_settings =
-        match get_generator_settings_from_attributes(&decl.ptype_attributes, arena) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
+    let generator_settings = get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?;
 
     let settings = match generator_settings {
         None => return Ok(vec![]),
@@ -4319,8 +4312,8 @@ impl<'a> LocCloner<'a> {
             return;
         }
 
-        let mut start = *self.arena.get_position(opening);
-        let mut end = *self.arena.get_position(closing);
+        let start = *self.arena.get_position(opening);
+        let end = *self.arena.get_position(closing);
         if start.cnum < start.bol || end.cnum < end.bol {
             return;
         }
@@ -4421,7 +4414,7 @@ impl<'a> LocCloner<'a> {
                 if args.len() > 1 {
                     self.arena.set_nary_arrow_args(arity, args.clone());
                 }
-                *arg = Box::new(args.remove(0));
+                **arg = args.remove(0);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
                 for typ in types.iter_mut() {
@@ -5415,10 +5408,7 @@ fn map_signature_item_spice(
             let mut generated = Vec::new();
             for decl in decls {
                 let settings =
-                    match get_generator_settings_from_attributes(&decl.ptype_attributes, arena) {
-                        Ok(v) => v,
-                        Err(e) => return Err(e),
-                    };
+                    get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?;
                 if let Some(settings) = settings {
                     let param_names = get_param_names(&decl.ptype_params, arena)?;
                     let type_name = arena.get_string(decl.ptype_name.txt).to_string();

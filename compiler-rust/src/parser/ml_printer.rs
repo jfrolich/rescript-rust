@@ -10,9 +10,7 @@ use super::ast::*;
 use super::formatter::{BoxKind, Formatter};
 use super::longident::Longident;
 use super::parsetree_viewer;
-use crate::parse_arena::{
-    CoreTypeIdx, ExprIdx, LidentIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx, StrIdx,
-};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ParseArena, PatIdx, StrIdx};
 
 // ============================================================================
 // Print context (matching OCaml's pprintast ctxt)
@@ -825,12 +823,12 @@ fn print_value_binding<W: Write>(
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ref arity,
-                ref is_async,
+                arg_label: _,
+                default: _,
+                lhs: _,
+                rhs: _,
+                arity: _,
+                is_async: _,
             } = **inner;
             // OCaml `binding`: pp f "%a@ %a" (simple_pattern ctxt) p pp_print_pexp_function x
             // (pprintast.ml:1063-1089).
@@ -1429,7 +1427,7 @@ fn print_expression_inner<W: Write>(
             if is_negative {
                 f.string("(");
             }
-            print_constant(f, &**c);
+            print_constant(f, c);
             if is_negative {
                 f.string(")");
             }
@@ -2851,7 +2849,7 @@ fn print_core_type1<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &Co
 
 fn print_core_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ: &CoreType) {
     // Types with attributes are wrapped: ((type)[@attr ])
-    let has_attrs = printable_attributes(arena, &typ.ptyp_attributes).len() > 0;
+    let has_attrs = !printable_attributes(arena, &typ.ptyp_attributes).is_empty();
     if has_attrs {
         f.string("((");
     }
@@ -3700,7 +3698,7 @@ fn print_extension_constructor<W: Write>(
 
 fn print_module_expr<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mexpr: &ModuleExpr) {
     // Print attributes on module expressions: ((mexpr)[@attr ])
-    let has_attrs = printable_attributes(arena, &mexpr.pmod_attributes).len() > 0;
+    let has_attrs = !printable_attributes(arena, &mexpr.pmod_attributes).is_empty();
     if has_attrs {
         f.string("((");
     }
@@ -3802,7 +3800,7 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
 
 fn print_module_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mtype: &ModuleType) {
     // Print attributes on module types: ((mtype)[@attr ])
-    let has_attrs = printable_attributes(arena, &mtype.pmty_attributes).len() > 0;
+    let has_attrs = !printable_attributes(arena, &mtype.pmty_attributes).is_empty();
     if has_attrs {
         f.string("((");
     }

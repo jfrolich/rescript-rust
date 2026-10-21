@@ -3,7 +3,7 @@
 //! This module provides helper functions for analyzing and inspecting the AST.
 //! It's a port of OCaml's `res_parsetree_viewer.ml`.
 
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ParseArena, PatIdx};
+use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 
@@ -483,7 +483,7 @@ fn is_multiline_text(txt: &str) -> bool {
 }
 
 /// Check if an expression is "huggable" as a RHS (simpler than is_huggable_expression).
-pub fn is_huggable_rhs(arena: &ParseArena, expr: &Expression) -> bool {
+pub fn is_huggable_rhs(_arena: &ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
@@ -1298,9 +1298,7 @@ fn same_precedence_sub_expression(
     match &*sub_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2 => {
             let PexpApply {
-                ref funct,
-                ref args,
-                ..
+                ref funct, args: _, ..
             } = **apply_inner;
             let funct_expr = arena.get_expr(*funct);
             if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {

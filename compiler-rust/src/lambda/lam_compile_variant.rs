@@ -3,25 +3,19 @@
 //! Port of `js_of_lam_variant.ml` + variant/switch compilation logic.
 //! Extracted from `lam_compile.rs` for organization.
 
-use super::js_exp_make::{
-    is_type_number_expr, is_type_object_expr, ocaml_typeof_expr, raw_typeof_comparison,
-    string_switch_iife,
-};
+use super::js_exp_make::{ocaml_typeof_expr, raw_typeof_comparison};
 use super::js_stmt_make::{block_terminates, strict_single_return_expr};
 use super::lam_coercion::push_s_exp;
 use super::lam_compile::{
-    Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, compiled_from_effect_block,
-    pointer_info_comment_text, trailing_return_expression,
+    Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, trailing_return_expression,
 };
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Number, UsedStats};
+use crate::js_ir::op::{IdentInfo, Number};
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
-    StringClause, VIdent, VariableDeclaration, expression_has_no_side_effects, ocaml_eq_expression,
+    StringClause, VariableDeclaration, expression_has_no_side_effects, ocaml_eq_expression,
 };
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_exit_code::has_exit_code;
 use crate::lambda::{Lambda, LambdaSwitch, SwitchCaseTag, SwitchDispatch, SwitchKey};
 use crate::types::VariantBlockType;
 
@@ -132,7 +126,7 @@ impl LambdaCompiler {
         let tmp = self.fresh_tmp_ident();
         let tmp_declaration = || {
             Statement::variable(VariableDeclaration {
-                ident: tmp.clone(),
+                ident: tmp,
                 value: None,
                 property: LetKind::Strict,
                 ident_info: IdentInfo::default(),
@@ -273,14 +267,14 @@ impl LambdaCompiler {
             // instead of `let tmp; tmp = ...`.
             match self.take_single_result_assignment(&tmp, small) {
                 Ok(expr) => prelude.push(Statement::variable(VariableDeclaration {
-                    ident: tmp.clone(),
+                    ident: tmp,
                     value: Some(expr),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
                 })),
                 Err(block) => {
                     prelude.push(Statement::variable(VariableDeclaration {
-                        ident: tmp.clone(),
+                        ident: tmp,
                         value: None,
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
@@ -295,7 +289,7 @@ impl LambdaCompiler {
         }
 
         prelude.push(Statement::variable(VariableDeclaration {
-            ident: tmp.clone(),
+            ident: tmp,
             value: None,
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
@@ -582,7 +576,7 @@ impl LambdaCompiler {
             .iter()
             .map(|(key, body)| match key {
                 SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
-                    Some((Self::switch_tag_value(&block.tag()), body))
+                    Some((Self::switch_tag_value(block.tag()), body))
                 }
                 SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
             })
@@ -1694,7 +1688,7 @@ impl LambdaCompiler {
 
         let ident = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
-            ident: ident.clone(),
+            ident,
             value: Some(expr),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
@@ -2270,9 +2264,9 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn grouped_tail_loop_return_string_clauses<'a, T: Clone>(
+    pub(crate) fn grouped_tail_loop_return_string_clauses<T: Clone>(
         &mut self,
-        grouped_cases: Vec<(T, &'a Lambda, bool)>,
+        grouped_cases: Vec<(T, &Lambda, bool)>,
         mut to_tag: impl FnMut(T) -> SwitchCaseTag,
         tail_loop: &mut TailLoopState,
     ) -> Vec<StringClause> {

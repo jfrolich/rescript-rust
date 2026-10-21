@@ -89,7 +89,7 @@ fn discard_value(value: Lambda, body: Lambda) -> Lambda {
 
 fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> Mapped {
     match access_of(block, &lam) {
-        Some(Access::Read(index)) => (Lambda::var(fields[index as usize].clone()), true),
+        Some(Access::Read(index)) => (Lambda::var(fields[index as usize]), true),
         Some(Access::Write(index, _)) => {
             let Lambda::Lprim(prim) = lam else {
                 unreachable!()
@@ -101,7 +101,7 @@ fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> M
             if !uses[index].read {
                 (discard_value(value, Lambda::unit()), true)
             } else {
-                (Lambda::assign(fields[index].clone(), value), true)
+                (Lambda::assign(fields[index], value), true)
             }
         }
         None => match &lam {
@@ -123,7 +123,7 @@ fn fields_for_block(
         (0..field_count)
             .map(|index| {
                 if index == 0 {
-                    block.clone()
+                    *block
                 } else {
                     block.rename(id_gen)
                 }
@@ -131,7 +131,7 @@ fn fields_for_block(
             .collect::<Vec<_>>()
     };
     if field_count == 1 {
-        return vec![block.clone()];
+        return vec![*block];
     }
     let names: Option<Vec<String>> = match info {
         TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => (fields.len()
@@ -187,9 +187,9 @@ fn replace(
         body = if !use_.read {
             discard_value(init, body)
         } else if !use_.written {
-            refine_let(LetKind::Strict, fields[index].clone(), init, body)
+            refine_let(LetKind::Strict, fields[index], init, body)
         } else {
-            Lambda::let_(LetKind::Variable, fields[index].clone(), init, body)
+            Lambda::let_(LetKind::Variable, fields[index], init, body)
         };
     }
     Ok(body)

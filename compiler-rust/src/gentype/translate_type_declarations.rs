@@ -295,7 +295,7 @@ fn traslate_declaration_kind_with_attribute_info(
         |translation: crate::gentype::translate_type_expr_from_types::Translation| {
             let export_from_type_declaration = create_export_type_from_type_declaration(
                 annotation,
-                loc.clone(),
+                loc,
                 name_as.clone(),
                 opaque,
                 translation.type_,

@@ -709,16 +709,11 @@ pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_expr_idx, ref typ) = **inner;
             let inner_expr = arena.get_expr(*inner_expr_idx);
-            if matches!(&*inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
+            !(matches!(&*inner_expr.pexp_desc, ExpressionDesc::Pexp_pack(_))
                 && matches!(
                     &*arena.get_core_type(*typ).ptyp_desc,
                     CoreTypeDesc::Ptyp_package(_)
-                )
-            {
-                false
-            } else {
-                true
-            }
+                ))
         }
         _ => false,
     }
@@ -766,16 +761,11 @@ pub fn pattern_record_row_rhs(arena: &ParseArena, pattern: &Pattern) -> bool {
         PatternDesc::Ppat_constraint(inner) => {
             let (ref inner_pat_idx, ref typ) = **inner;
             let inner_pat = arena.get_pat(*inner_pat_idx);
-            if matches!(&*inner_pat.ppat_desc, PatternDesc::Ppat_unpack(_))
+            !(matches!(&*inner_pat.ppat_desc, PatternDesc::Ppat_unpack(_))
                 && matches!(
                     &*arena.get_core_type(*typ).ptyp_desc,
                     CoreTypeDesc::Ptyp_package(_)
-                )
-            {
-                false
-            } else {
-                true
-            }
+                ))
         }
         _ => false,
     }

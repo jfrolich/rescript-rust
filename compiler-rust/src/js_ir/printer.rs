@@ -7,7 +7,7 @@ use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
     Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc, ForDirection,
     JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
-    VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
+    VariableDeclaration,
 };
 use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
@@ -365,7 +365,7 @@ impl JsPrinter {
         *next += 1;
         self.current_name_scope_mut()
             .ident_names
-            .insert(id.clone(), printed.clone());
+            .insert(*id, printed.clone());
         printed
     }
 
@@ -435,7 +435,7 @@ impl JsPrinter {
         }
 
         // js_dump.ml:1321-1324.
-        self.mark_source_loc(stmt.source_loc.as_ref().map(|v| &**v));
+        self.mark_source_loc(stmt.source_loc.as_deref());
         self.print_statement_desc(&stmt.desc, top_level);
     }
 
@@ -921,7 +921,7 @@ impl JsPrinter {
                     ..
                 } = &value.desc
                 {
-                    self.mark_source_loc(value.source_loc.as_ref().map(|v| &**v));
+                    self.mark_source_loc(value.source_loc.as_deref());
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -1676,7 +1676,7 @@ impl JsPrinter {
         }
 
         if mark {
-            self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
+            self.mark_source_loc(expr.source_loc.as_deref());
         }
         self.print_expression_desc(&expr.desc, level);
     }
@@ -2309,11 +2309,7 @@ impl JsPrinter {
                                             .enumerate()
                                             .map(|(i, elem)| (Some(i), Some(elem))),
                                     )
-                                    .chain(
-                                        include_debug_name
-                                            .then_some((Some(usize::MAX), None))
-                                            .into_iter(),
-                                    ),
+                                    .chain(include_debug_name.then_some((Some(usize::MAX), None))),
                                     |this, prop| match prop {
                                         (None, None) => {
                                             this.print_literal_property_name(tag_name);
@@ -3304,12 +3300,12 @@ impl JsIdentStats {
     }
 
     fn add_defined_ident(&mut self, ident: &Ident) {
-        self.defined_idents.insert(ident.clone());
+        self.defined_idents.insert(*ident);
     }
 
     fn add_used_ident(&mut self, ident: &Ident) {
         if !self.defined_idents.contains(ident) {
-            self.used_idents.insert(ident.clone());
+            self.used_idents.insert(*ident);
         }
     }
 
@@ -3343,7 +3339,7 @@ fn function_reserved_idents(
             .into_iter()
             .collect();
     if let Some(function_ident) = function_ident {
-        reserved_idents.push(function_ident.clone());
+        reserved_idents.push(*function_ident);
     }
     reserved_idents.sort();
     reserved_idents.dedup();
@@ -3391,7 +3387,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(finish, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::ForOf(_, loop_ident, iterable, body)
@@ -3399,7 +3395,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(iterable, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
@@ -3425,7 +3421,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             if let Some((catch_ident, catch_block)) = catch {
                 stats.extend_free_idents(free_variables_of_block_with_defined(
                     catch_block,
-                    std::iter::once(catch_ident.clone()),
+                    std::iter::once(*catch_ident),
                 ));
             }
             if let Some(finally) = finally {
@@ -3479,7 +3475,7 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(arg, stats);
             }
         }
-        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+        ExpressionDesc::TaggedTemplate(_tag, _, values) => {
             for value in values {
                 collect_expression_idents(value, stats);
             }
@@ -3759,12 +3755,9 @@ pub fn print_block(block: &Block) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::js_ir::op::{
-        IdentInfo, ImportAttributes, LengthObject, MutableFlag, PropertyName, UsedStats,
-    };
-    use crate::js_ir::{CallInfo, Expression, ModuleId, ModulePathResolver, Statement};
+    use crate::js_ir::op::{IdentInfo, LengthObject, MutableFlag, PropertyName, UsedStats};
+    use crate::js_ir::{CallInfo, Expression, ModuleId, Statement};
     use crate::lambda::TagInfo;
-    use std::path::Path;
 
     #[test]
     fn function_body_preserves_nested_guards_and_inner_returns() {
@@ -4103,7 +4096,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::Typeof(Box::new(Expression::new(
             ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![value.clone()],
+                params: vec![value],
                 body: vec![Statement::return_(Expression::var(value))],
                 env: Default::default(),
                 return_unit: false,
@@ -4478,13 +4471,13 @@ mod tests {
                     Box::new(Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(spread.clone())),
+                            Box::new(Expression::var(spread)),
                             "type".to_string(),
                             None,
                         )),
                         Expression::string("text"),
                     )),
-                    Box::new(Expression::var(spread.clone())),
+                    Box::new(Expression::var(spread)),
                 )),
                 Expression::string("barry-key"),
             ],
@@ -4628,9 +4621,7 @@ mod tests {
             Statement::new(StatementDesc::If(
                 Expression::bin(
                     BinOp::NotEqEq,
-                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                        state.clone(),
-                    )))),
+                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(state)))),
                     Expression::string("object".to_string()),
                 ),
                 vec![Statement::return_(Expression::number(Number::int(0)))],
@@ -4668,14 +4659,14 @@ mod tests {
             Statement::new(StatementDesc::If(
                 Expression::bin(
                     BinOp::EqEqEq,
-                    Expression::var(match_id.clone()),
+                    Expression::var(match_id),
                     Expression::undefined(false),
                 ),
                 vec![Statement::return_(Expression::string("no"))],
                 vec![],
             )),
             Statement::variable(VariableDeclaration {
-                ident: tmp.clone(),
+                ident: tmp,
                 value: Some(Expression::var(match_id)),
                 property: crate::lambda::LetKind::Strict,
                 ident_info: IdentInfo::default(),
@@ -4842,7 +4833,7 @@ mod tests {
             ident_info: Default::default(),
         });
         let stmt_fun = Statement::variable(VariableDeclaration {
-            ident: url.clone(),
+            ident: url,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![Ident::create_local("prim")],
@@ -4883,7 +4874,7 @@ mod tests {
                 params: vec![param],
                 body: vec![
                     Statement::variable(VariableDeclaration {
-                        ident: inner.clone(),
+                        ident: inner,
                         value: Some(Expression::number(Number::int(1))),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
@@ -4920,7 +4911,7 @@ mod tests {
                 ident: foo,
                 value: Some(Expression::new(ExpressionDesc::Fun {
                     is_method: false,
-                    params: vec![param.clone()],
+                    params: vec![param],
                     body: vec![Statement::return_(Expression::var(param))],
                     env: Default::default(),
                     return_unit: false,
@@ -4945,7 +4936,7 @@ mod tests {
         let param = Ident::create_local("arg");
         let rendered = print_block(&vec![
             Statement::variable(VariableDeclaration {
-                ident: outer.clone(),
+                ident: outer,
                 value: Some(Expression::number(Number::int(1))),
                 property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
@@ -4954,7 +4945,7 @@ mod tests {
                 ident: foo,
                 value: Some(Expression::new(ExpressionDesc::Fun {
                     is_method: false,
-                    params: vec![param.clone()],
+                    params: vec![param],
                     body: vec![Statement::return_(Expression::bin(
                         BinOp::Plus,
                         Expression::var(outer),
@@ -4984,7 +4975,7 @@ mod tests {
 
         let rendered = print_block(&vec![
             Statement::variable(VariableDeclaration {
-                ident: outer_start.clone(),
+                ident: outer_start,
                 value: Some(Expression::number(Number::int(1))),
                 property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
@@ -5002,7 +4993,7 @@ mod tests {
                     params: vec![param],
                     body: vec![
                         Statement::variable(VariableDeclaration {
-                            ident: inner_match.clone(),
+                            ident: inner_match,
                             value: Some(Expression::number(Number::int(3))),
                             property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
@@ -5037,7 +5028,7 @@ mod tests {
             ident: foo,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![param.clone()],
+                params: vec![param],
                 body: vec![Statement::return_(Expression::call(
                     Expression::qualified(
                         ModuleId {
@@ -5180,7 +5171,7 @@ mod tests {
         let value = Ident::create_local("value");
         let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
             is_method: false,
-            params: vec![value.clone()],
+            params: vec![value],
             body: vec![Statement::return_(Expression::bin(
                 BinOp::Lsl,
                 Expression::var(value),
@@ -5240,7 +5231,7 @@ mod tests {
         let q = Ident::create_local("q");
         let do_action = Ident::create_local("doAction");
         let q_length = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(q.clone())),
+            Box::new(Expression::var(q)),
             "length".to_string(),
             None,
         ));
@@ -5284,12 +5275,12 @@ mod tests {
             ident: handle,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![len.clone()],
+                params: vec![len],
                 body: vec![
                     Statement::new(StatementDesc::If(
                         Expression::bin(
                             BinOp::EqEqEq,
-                            Expression::var(len.clone()),
+                            Expression::var(len),
                             Expression::number(Number::int(0)),
                         ),
                         vec![Statement::return_(Expression::undefined(true))],
@@ -5331,14 +5322,12 @@ mod tests {
             ident: handle,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![obj.clone()],
+                params: vec![obj],
                 body: vec![
                     Statement::new(StatementDesc::If(
                         Expression::bin(
                             BinOp::EqEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                obj.clone(),
-                            )))),
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(obj)))),
                             Expression::string("function"),
                         ),
                         vec![Statement::return_(Expression::undefined(true))],
@@ -5925,7 +5914,7 @@ mod tests {
 
         let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
             is_method: true,
-            params: vec![this_param.clone(), amount],
+            params: vec![this_param, amount],
             body: vec![Statement::return_(Expression::var(this_param))],
             env: Default::default(),
             return_unit: false,
@@ -5948,7 +5937,7 @@ mod tests {
             ident: Ident::create_local("methodWithThis"),
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: true,
-                params: vec![this_param.clone(), value.clone()],
+                params: vec![this_param, value],
                 body: vec![Statement::return_(Expression::var(this_param))],
                 env: Default::default(),
                 return_unit: false,

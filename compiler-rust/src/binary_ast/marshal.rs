@@ -768,16 +768,16 @@ impl<'a> MarshalWriter<'a> {
     /// - -2^30 to 2^30-1: CODE_INT32 + 4 bytes
     /// - larger: CODE_INT64 + 8 bytes
     pub fn write_int(&mut self, n: i64) {
-        if n >= 0 && n < 0x40 {
+        if (0..0x40).contains(&n) {
             // Small int: single byte 0x40 | n
             self.write_u8(PREFIX_SMALL_INT + (n as u8));
-        } else if n >= -128 && n < 128 {
+        } else if (-128..128).contains(&n) {
             self.write_u8(CODE_INT8);
             self.write_i8(n as i8);
-        } else if n >= -32768 && n < 32768 {
+        } else if (-32768..32768).contains(&n) {
             self.write_u8(CODE_INT16);
             self.write_i16_be(n as i16);
-        } else if n >= -(1 << 30) && n < (1 << 30) {
+        } else if (-(1 << 30)..(1 << 30)).contains(&n) {
             self.write_u8(CODE_INT32);
             self.write_i32_be(n as i32);
         } else {

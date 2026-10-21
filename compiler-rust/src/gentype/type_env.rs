@@ -87,7 +87,7 @@ pub fn strip_current_module_prefix(path: &Path, type_env: &T) -> Option<Path> {
             )))
         }
         Path::Pdot(prefix, segment, pos) => strip_current_module_prefix(prefix, type_env)
-            .map(|stripped_prefix| Path::pdot_pos(stripped_prefix, segment.clone(), *pos)),
+            .map(|stripped_prefix| Path::pdot_pos(stripped_prefix, *segment, *pos)),
         Path::Pident(_) | Path::Papply(_, _) => None,
     }
 }

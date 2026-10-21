@@ -336,10 +336,8 @@ fn should_share_empty_pstr(
     let name_str = arena.get_string(name.txt);
     if name_str == "res.braces" {
         true
-    } else if name_str == "res.taggedTemplate" {
-        false
     } else {
-        true
+        name_str != "res.taggedTemplate"
     }
 }
 

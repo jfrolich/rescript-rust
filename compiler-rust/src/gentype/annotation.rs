@@ -527,10 +527,10 @@ fn decl_attribute_payload_as_int(payload: &crate::types::decl::AttributePayload)
     }
 }
 
-pub fn get_decl_attribute_payload<'a>(
+pub fn get_decl_attribute_payload(
     check_text: impl Fn(&str) -> bool + Copy,
-    attributes: &'a [crate::types::decl::Attribute],
-) -> Option<&'a crate::types::decl::AttributePayload> {
+    attributes: &[crate::types::decl::Attribute],
+) -> Option<&crate::types::decl::AttributePayload> {
     // Mirrors compiler/gentype/Annotation.ml:69-95 for Types.signature
     // attributes. Rust stores these payloads in decl::Attribute instead of
     // parser::Payload after typemod conversion.

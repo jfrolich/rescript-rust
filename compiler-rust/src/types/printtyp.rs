@@ -260,7 +260,7 @@ impl<'a> Printtyp<'a> {
     fn add_unique(&mut self, id: &crate::ident::Ident) {
         if !self.unique_names.iter().any(|(i, _)| i.same(id)) {
             let unique = format!("{}/{}", id.name(), id.stamp());
-            self.unique_names.push((id.clone(), unique));
+            self.unique_names.push((*id, unique));
         }
     }
 
@@ -1398,7 +1398,7 @@ impl<'a> Printtyp<'a> {
                 trees.push(tree);
             }
             if let SignatureItem::SigType(id, _, _) = item {
-                env_types.push((id.name().to_string(), Path::Pident(id.clone())));
+                env_types.push((id.name().to_string(), Path::Pident(*id)));
             }
         }
         self.signature_types = saved;

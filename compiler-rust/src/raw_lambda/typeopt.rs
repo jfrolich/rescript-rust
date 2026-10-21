@@ -247,7 +247,7 @@ fn get_unboxed_repr_rec(
         return None; // Recursive type
     }
     match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, args, .. } => {
+        TypeDesc::Tconstr { path, args: _, .. } => {
             let decl = find_type_decl(ctx, env, path)?;
             if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
                 return Some(ty);
@@ -489,6 +489,39 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
     }
 }
 
+fn is_option_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
+    matches!(
+        cdecls,
+        [
+            crate::types::decl::ConstructorDeclaration {
+                cd_id,
+                cd_args: ConstructorArguments::CstrTuple(args1),
+                ..
+            },
+            crate::types::decl::ConstructorDeclaration {
+                cd_id: cd_id2,
+                cd_args: ConstructorArguments::CstrTuple(args2),
+                ..
+            }
+        ] if (
+            cd_id.name() == "None" && args1.is_empty() && cd_id2.name() == "Some" && args2.len() == 1
+        ) || (
+            cd_id.name() == "Some" && args1.len() == 1 && cd_id2.name() == "None" && args2.is_empty()
+        )
+    )
+}
+
+fn is_unit_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
+    matches!(
+        cdecls,
+        [crate::types::decl::ConstructorDeclaration {
+            cd_id,
+            cd_args: ConstructorArguments::CstrTuple(args),
+            ..
+        }] if cd_id.name() == "()" && args.is_empty()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,7 +577,7 @@ mod tests {
         let mut env = crate::types::env::initial_env(&ctx);
         let alias_id = Ident::create_local("private_string_alias");
         env.add_type(
-            alias_id.clone(),
+            alias_id,
             TypeDeclaration {
                 type_params: vec![],
                 type_arity: 0,
@@ -566,37 +599,4 @@ mod tests {
 
         assert!(is_base_type(&ctx, &env, alias_ty, "string"));
     }
-}
-
-fn is_option_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
-    matches!(
-        cdecls,
-        [
-            crate::types::decl::ConstructorDeclaration {
-                cd_id,
-                cd_args: ConstructorArguments::CstrTuple(args1),
-                ..
-            },
-            crate::types::decl::ConstructorDeclaration {
-                cd_id: cd_id2,
-                cd_args: ConstructorArguments::CstrTuple(args2),
-                ..
-            }
-        ] if (
-            cd_id.name() == "None" && args1.is_empty() && cd_id2.name() == "Some" && args2.len() == 1
-        ) || (
-            cd_id.name() == "Some" && args1.len() == 1 && cd_id2.name() == "None" && args2.is_empty()
-        )
-    )
-}
-
-fn is_unit_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
-    matches!(
-        cdecls,
-        [crate::types::decl::ConstructorDeclaration {
-            cd_id,
-            cd_args: ConstructorArguments::CstrTuple(args),
-            ..
-        }] if cd_id.name() == "()" && args.is_empty()
-    )
 }

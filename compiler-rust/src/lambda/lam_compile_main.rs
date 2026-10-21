@@ -44,7 +44,7 @@ pub fn add_hoisted_function_aliases(
     fn collect_groups(lam: &Lambda, groups: &mut HashMap<Ident, Lambda>) {
         match lam {
             Lambda::Llet(_, id, value, body) => {
-                groups.insert(id.clone(), (**value).clone());
+                groups.insert(*id, (**value).clone());
                 collect_groups(body, groups);
             }
             Lambda::Lletrec(bindings, body) => {
@@ -87,15 +87,15 @@ pub fn add_hoisted_function_aliases(
     ) -> (Lambda, Option<Ident>) {
         match lam {
             Lambda::Lvar(id) => {
-                if !seen.insert(id.clone()) {
-                    return (lam.clone(), Some(id.clone()));
+                if !seen.insert(*id) {
+                    return (lam.clone(), Some(*id));
                 }
                 match groups.get(id) {
                     Some(alias @ (Lambda::Lvar(_) | Lambda::Lprim(_))) => {
                         resolve_binding(alias, groups, seen)
                     }
-                    Some(resolved) => (resolved.clone(), Some(id.clone())),
-                    None => (lam.clone(), Some(id.clone())),
+                    Some(resolved) => (resolved.clone(), Some(*id)),
+                    None => (lam.clone(), Some(*id)),
                 }
             }
             Lambda::Lprim(__prim3)
@@ -185,15 +185,15 @@ pub fn add_hoisted_function_aliases(
                     unreachable!()
                 };
 
-                ids.extend(aliases.iter().map(|(id, _)| id.clone()));
-                args.extend(aliases.iter().map(|(id, _)| Lambda::var(id.clone())));
+                ids.extend(aliases.iter().map(|(id, _)| *id));
+                args.extend(aliases.iter().map(|(id, _)| Lambda::var(*id)));
                 let mut result = Lambda::prim(
                     Primitive::Pmakeblock(TagInfo::ModuleExport(ids), mutable_),
                     args,
                     loc,
                 );
                 for (id, value) in aliases.iter().rev() {
-                    result = Lambda::let_(LetKind::Alias, id.clone(), value.clone(), result);
+                    result = Lambda::let_(LetKind::Alias, *id, value.clone(), result);
                 }
                 result
             }
@@ -241,18 +241,18 @@ pub fn add_hoisted_function_aliases(
             .collect::<Vec<_>>()
             .join("$");
         let id = simplified.meta.id_gen.create(&export_name);
-        let mut access = Lambda::var(top_id.clone());
+        let mut access = Lambda::var(*top_id);
         for (pos, name) in positions {
             access = Lambda::prim(
                 Primitive::Pfield(pos, crate::lambda::FieldDbgInfo::Module { name }),
                 vec![access],
-                item.loc.clone(),
+                item.loc,
             );
         }
         aliases.insert(0, (id, access));
     }
     simplified.lambda = append_aliases(simplified.lambda, &aliases);
-    let alias_ids = aliases.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let alias_ids = aliases.iter().map(|(id, _)| *id).collect::<Vec<_>>();
     simplified.meta.exports.extend(alias_ids.iter().cloned());
     simplified.meta.export_idents.extend(alias_ids);
     simplified
@@ -495,8 +495,8 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
                 __prim1.as_ref(),
                 PrimInfo {
                     primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_export_ids), _),
-                    args,
-                    loc,
+                    args: _,
+                    loc: _,
                 }
             ) =>
         {
@@ -524,7 +524,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
                 match &arg {
                     // lam_coercion.ml:100-111 — Lvar with matching name.
                     Lambda::Lvar(id) if id.name() == orig_export_id.name() => {
-                        new_export_ids.push(id.clone());
+                        new_export_ids.push(*id);
                         new_args.push(arg);
                     }
                     // lam_coercion.ml:112-121 — Lvar with mismatched name:
@@ -532,10 +532,10 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
                     Lambda::Lvar(id) => {
                         let newid = orig_export_id.rename(&meta.id_gen);
                         if let Some(info) = meta.ident_tbl.get(id).cloned() {
-                            meta.ident_tbl.insert(newid.clone(), info);
+                            meta.ident_tbl.insert(newid, info);
                         }
-                        new_export_ids.push(newid.clone());
-                        new_args.push(Lambda::Lvar(newid.clone()));
+                        new_export_ids.push(newid);
+                        new_args.push(Lambda::Lvar(newid));
                         hoisted.push((newid, arg, LetKind::Alias));
                     }
                     // lam_coercion.ml:122-157 — non-Lvar arg: rename the
@@ -549,10 +549,10 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
                                 _ => None,
                             };
                             meta.ident_tbl
-                                .insert(newid.clone(), IdKind::FunctionId { arity, lambda });
+                                .insert(newid, IdKind::FunctionId { arity, lambda });
                         }
-                        new_export_ids.push(newid.clone());
-                        new_args.push(Lambda::Lvar(newid.clone()));
+                        new_export_ids.push(newid);
+                        new_args.push(Lambda::Lvar(newid));
                         hoisted.push((newid, arg, LetKind::Strict));
                     }
                 }
@@ -598,7 +598,7 @@ fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
             if matches!(
                 __prim0.as_ref(),
                 PrimInfo {
-                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_ids), _),
                     ..
                 }
             ) =>

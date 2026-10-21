@@ -7,17 +7,17 @@
 use ahash::{AHashMap, AHashSet};
 
 use crate::ident::Ident;
+#[cfg(test)]
+use crate::lambda::Lambda;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::{
-    BoxedNullable, ExternalArityFieldTable, ExternalArityInfo, ExternalArityTable, RecFlag,
+    BoxedNullable, ExternalArityInfo, ExternalArityTable, RecFlag,
 };
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-#[cfg(test)]
-use crate::lambda::{InlineAttribute, Lambda};
 
 #[derive(Debug, Clone)]
 pub(crate) enum IndexedElement {
@@ -468,56 +468,47 @@ fn collect_bind(
     match arena.view(node) {
         NodeView::Const(value) => {
             meta.ident_tbl
-                .insert(id.clone(), IndexedIdKind::Constant(value.clone()));
+                .insert(*id, IndexedIdKind::Constant(value.clone()));
         }
         NodeView::Prim(Primitive::Pmakeblock(_, Mutable::Immutable), args, _) => {
-            meta.ident_tbl
-                .insert(id.clone(), kind_of_block(arena, args));
+            meta.ident_tbl.insert(*id, kind_of_block(arena, args));
             for arg in args {
                 collect(arena, meta, *arg, resolver);
             }
         }
         NodeView::Prim(Primitive::Psome | Primitive::PsomeNotNest, [arg], _) => {
             meta.ident_tbl
-                .insert(id.clone(), IndexedIdKind::NormalOptional(*arg));
+                .insert(*id, IndexedIdKind::NormalOptional(*arg));
             collect(arena, meta, *arg, resolver);
         }
         NodeView::Prim(Primitive::PnullToOpt, [arg], _)
             if matches!(arena.view(*arg), NodeView::Var(_)) =>
         {
-            meta.ident_tbl.insert(
-                id.clone(),
-                IndexedIdKind::OptionalBlock(*arg, BoxedNullable::Null),
-            );
+            meta.ident_tbl
+                .insert(*id, IndexedIdKind::OptionalBlock(*arg, BoxedNullable::Null));
         }
         NodeView::Prim(Primitive::PnullUndefinedToOpt, [arg], _)
             if matches!(arena.view(*arg), NodeView::Var(_)) =>
         {
             meta.ident_tbl.insert(
-                id.clone(),
+                *id,
                 IndexedIdKind::OptionalBlock(*arg, BoxedNullable::NullUndefined),
             );
         }
         NodeView::GlobalModule(source) => {
-            alias_ident_or_global(
-                meta,
-                id.clone(),
-                source,
-                IndexedIdKind::Module(source.clone()),
-            );
+            alias_ident_or_global(meta, *id, source, IndexedIdKind::Module(*source));
         }
-        NodeView::Var(source) => alias_ident_or_global(meta, id.clone(), source, IndexedIdKind::Na),
+        NodeView::Var(source) => alias_ident_or_global(meta, *id, source, IndexedIdKind::Na),
         NodeView::Function(_, params, body, _, _) => {
             let params = params.to_vec();
             for param in &params {
-                meta.ident_tbl
-                    .insert(param.clone(), IndexedIdKind::Parameter);
+                meta.ident_tbl.insert(*param, IndexedIdKind::Parameter);
             }
             let arity = match resolver.as_deref_mut() {
                 Some(resolver) => get_arity_external(arena, meta, node, resolver),
                 None => get_arity(arena, meta, node),
             };
-            annotate(meta, rec_flag, id.clone(), arity, Some(node));
+            annotate(meta, rec_flag, *id, arity, Some(node));
             collect(arena, meta, body, resolver);
         }
         _ => {
@@ -529,7 +520,7 @@ fn collect_bind(
                 };
                 // Like the tree collect: the payload is only read for
                 // function nodes (remove-alias inlining), and this is not one.
-                annotate(meta, rec_flag, id.clone(), arity, None);
+                annotate(meta, rec_flag, *id, arity, None);
             }
         }
     }
@@ -563,7 +554,7 @@ fn collect(
             collect(arena, meta, body, resolver);
         }
         NodeView::Let(_, id, value, body) => {
-            let id = id.clone();
+            let id = *id;
             collect_bind(arena, meta, RecFlag::NonRec, &id, value, resolver);
             collect(arena, meta, body, resolver);
         }
@@ -780,7 +771,7 @@ mod tests {
                 {
                     let crate::lambda::PrimInfo {
                         primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
-                        args,
+                        args: _,
                         ..
                     } = __prim0.as_ref()
                     else {
@@ -874,44 +865,44 @@ mod tests {
         let optional = id("optional", 4);
         let function = Lambda::function_(
             1,
-            vec![x.clone()],
+            vec![x],
             Lambda::Lvar(x),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );
         let makeblock = Lambda::prim(
             Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable),
-            vec![Lambda::Lconst(Constant::int(1)), Lambda::Lvar(f.clone())],
+            vec![Lambda::Lconst(Constant::int(1)), Lambda::Lvar(f)],
             Location::none(),
         );
         let some = Lambda::prim(
             Primitive::Psome,
-            vec![Lambda::Lvar(block.clone())],
+            vec![Lambda::Lvar(block)],
             Location::none(),
         );
         let tail = Lambda::Lswitch(
-            Box::new(Lambda::Lvar(optional.clone())),
+            Box::new(Lambda::Lvar(optional)),
             Box::new(LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
-                    (SwitchKey::Int(2), Lambda::Lvar(f.clone())),
+                    (SwitchKey::Int(2), Lambda::Lvar(f)),
                     (SwitchKey::Int(1), Lambda::Lconst(Constant::int(0))),
                 ],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
-                sw_failaction: Some(Box::new(Lambda::Lvar(block.clone()))),
+                sw_failaction: Some(Box::new(Lambda::Lvar(block))),
                 sw_dispatch: SwitchDispatch::Direct,
             }),
         );
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
-            f.clone(),
+            f,
             function,
             Lambda::let_(
                 crate::lambda::LetKind::Strict,
-                block.clone(),
+                block,
                 makeblock,
-                Lambda::let_(crate::lambda::LetKind::Strict, optional.clone(), some, tail),
+                Lambda::let_(crate::lambda::LetKind::Strict, optional, some, tail),
             ),
         );
         let exports = vec![optional];
@@ -1051,61 +1042,61 @@ mod tests {
             });
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
-            always.clone(),
+            always,
             function(long_body, crate::lambda::InlineAttribute::Always),
             Lambda::let_(
                 crate::lambda::LetKind::Strict,
-                never.clone(),
+                never,
                 function(
                     Lambda::Lconst(Constant::int(0)),
                     crate::lambda::InlineAttribute::Never,
                 ),
                 Lambda::letrec(
                     vec![(
-                        single_rec.clone(),
+                        single_rec,
                         function(
-                            Lambda::Lvar(single_rec.clone()),
+                            Lambda::Lvar(single_rec),
                             crate::lambda::InlineAttribute::Default,
                         ),
                     )],
                     Lambda::letrec(
                         vec![
                             (
-                                mutual_a.clone(),
+                                mutual_a,
                                 function(
-                                    Lambda::Lvar(mutual_b.clone()),
+                                    Lambda::Lvar(mutual_b),
                                     crate::lambda::InlineAttribute::Default,
                                 ),
                             ),
                             (
-                                mutual_b.clone(),
+                                mutual_b,
                                 function(
-                                    Lambda::Lvar(mutual_a.clone()),
+                                    Lambda::Lvar(mutual_a),
                                     crate::lambda::InlineAttribute::Default,
                                 ),
                             ),
                         ],
                         Lambda::let_(
                             crate::lambda::LetKind::Alias,
-                            source.clone(),
+                            source,
                             Lambda::Lconst(Constant::int(1)),
                             Lambda::let_(
                                 crate::lambda::LetKind::Strict,
-                                null_opt.clone(),
+                                null_opt,
                                 Lambda::prim(
                                     Primitive::PnullToOpt,
-                                    vec![Lambda::Lvar(source.clone())],
+                                    vec![Lambda::Lvar(source)],
                                     Location::none(),
                                 ),
                                 Lambda::let_(
                                     crate::lambda::LetKind::Strict,
-                                    null_undefined_opt.clone(),
+                                    null_undefined_opt,
                                     Lambda::prim(
                                         Primitive::PnullUndefinedToOpt,
                                         vec![Lambda::Lvar(source)],
                                         Location::none(),
                                     ),
-                                    Lambda::Lvar(null_undefined_opt.clone()),
+                                    Lambda::Lvar(null_undefined_opt),
                                 ),
                             ),
                         ),
@@ -1163,7 +1154,7 @@ mod tests {
         }
         let param = id("param", 60);
         let parameter_switch = Lambda::Lswitch(
-            Box::new(Lambda::Lvar(param.clone())),
+            Box::new(Lambda::Lvar(param)),
             Box::new(LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![(SwitchKey::Int(0), Lambda::Lconst(Constant::int(0)))],
@@ -1270,7 +1261,7 @@ mod tests {
             |body, (ident, function, _)| {
                 Lambda::Llet(
                     crate::lambda::LetKind::Strict,
-                    ident.clone(),
+                    *ident,
                     Box::new(function.clone()),
                     Box::new(body),
                 )
@@ -1295,7 +1286,7 @@ mod tests {
                 ));
                 Lambda::Llet(
                     crate::lambda::LetKind::Strict,
-                    ident.clone(),
+                    *ident,
                     Box::new(Lambda::Lfunction(Box::new(function))),
                     Box::new(body),
                 )
@@ -1351,7 +1342,7 @@ mod tests {
         let binding = |ident: Ident, value: i32| {
             Lambda::Llet(
                 crate::lambda::LetKind::Strict,
-                ident.clone(),
+                ident,
                 Box::new(Lambda::Lconst(Constant::int(value))),
                 Box::new(Lambda::Lvar(ident)),
             )
@@ -1359,26 +1350,26 @@ mod tests {
         let lambda = Lambda::Lsequence(
             Box::new(Lambda::Lassign(
                 id("target", 45),
-                Box::new(binding(assigned.clone(), 1)),
+                Box::new(binding(assigned, 1)),
             )),
             Box::new(Lambda::Lsequence(
                 Box::new(Lambda::Lfor(
-                    loop_id.clone(),
+                    loop_id,
                     Box::new(Lambda::Lconst(Constant::int(0))),
                     Box::new(Lambda::Lconst(Constant::int(1))),
                     crate::lambda::DirectionFlag::Upto,
-                    Box::new(binding(for_bound.clone(), 2)),
+                    Box::new(binding(for_bound, 2)),
                 )),
                 Box::new(Lambda::Lsequence(
                     Box::new(Lambda::Lfor_of(
-                        loop_id.clone(),
-                        Box::new(Lambda::Lvar(loop_id.clone())),
-                        Box::new(binding(for_of_bound.clone(), 3)),
+                        loop_id,
+                        Box::new(Lambda::Lvar(loop_id)),
+                        Box::new(binding(for_of_bound, 3)),
                     )),
                     Box::new(Lambda::Lfor_await_of(
-                        loop_id.clone(),
+                        loop_id,
                         Box::new(Lambda::Lvar(loop_id)),
-                        Box::new(binding(for_await_bound.clone(), 4)),
+                        Box::new(binding(for_await_bound, 4)),
                     )),
                 )),
             )),
@@ -1407,17 +1398,17 @@ mod tests {
         );
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
-            exported.clone(),
+            exported,
             value,
-            Lambda::Lvar(exported.clone()),
+            Lambda::Lvar(exported),
         );
-        let mut tree_meta = LamStats::new(vec![exported.clone()]);
+        let mut tree_meta = LamStats::new(vec![exported]);
         let mut tree_resolver =
             |_: &Ident, _: &str| Some(ExternalArityInfo::Single(Arity::info(vec![2], false)));
         tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
 
         let indexed = IndexedLambda::from_lambda(lambda);
-        let mut indexed_meta = IndexedLamStats::new([exported.clone()]);
+        let mut indexed_meta = IndexedLamStats::new([exported]);
         let mut indexed_resolver =
             |_: &Ident, _: &str| Some(ExternalArityInfo::Single(Arity::info(vec![2], false)));
         collect_info_with_external_arity(
@@ -1452,17 +1443,17 @@ mod tests {
         let module = id("Dependency", 53);
         let lambda = Lambda::Llet(
             crate::lambda::LetKind::Strict,
-            static_one.clone(),
-            Box::new(field(module.clone())),
+            static_one,
+            Box::new(field(module)),
             Box::new(Lambda::Llet(
                 crate::lambda::LetKind::Strict,
-                static_two.clone(),
-                Box::new(field(module.clone())),
+                static_two,
+                Box::new(field(module)),
                 Box::new(Lambda::Llet(
                     crate::lambda::LetKind::Strict,
-                    third.clone(),
+                    third,
                     Box::new(field(module)),
-                    Box::new(Lambda::Lvar(third.clone())),
+                    Box::new(Lambda::Lvar(third)),
                 )),
             )),
         );
@@ -1522,29 +1513,25 @@ mod tests {
         };
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
-            static_export.clone(),
+            static_export,
             static_value(),
             Lambda::let_(
                 crate::lambda::LetKind::Strict,
-                static_export_again.clone(),
+                static_export_again,
                 static_value(),
                 Lambda::let_(
                     crate::lambda::LetKind::Strict,
-                    dynamic_export.clone(),
+                    dynamic_export,
                     nested(
                         id("DynamicDependency", 2),
                         FieldDbgInfo::Tuple,
                         "DynamicSubmodule",
                     ),
-                    Lambda::Lvar(dynamic_export.clone()),
+                    Lambda::Lvar(dynamic_export),
                 ),
             ),
         );
-        let exports = vec![
-            static_export.clone(),
-            static_export_again.clone(),
-            dynamic_export.clone(),
-        ];
+        let exports = vec![static_export, static_export_again, dynamic_export];
 
         let mut tree_calls = vec![];
         let mut tree_resolver = |module: &Ident, field: &str| {

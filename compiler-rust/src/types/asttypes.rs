@@ -27,18 +27,13 @@ pub enum Constant {
 }
 
 /// Recursive flag for let bindings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum RecFlag {
     /// Non-recursive binding
+    #[default]
     Nonrecursive,
     /// Recursive binding
     Recursive,
-}
-
-impl Default for RecFlag {
-    fn default() -> Self {
-        RecFlag::Nonrecursive
-    }
 }
 
 /// Direction flag for for loops.
@@ -51,33 +46,25 @@ pub enum DirectionFlag {
 }
 
 /// Private/public flag for type definitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum PrivateFlag {
     /// Private type (cannot be constructed outside the module)
     Private,
     /// Public type
+    #[default]
     Public,
 }
 
-impl Default for PrivateFlag {
-    fn default() -> Self {
-        PrivateFlag::Public
-    }
-}
-
 /// Mutable/immutable flag for record fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MutableFlag {
     /// Immutable field
+    #[default]
     Immutable,
     /// Mutable field
     Mutable,
-}
-
-impl Default for MutableFlag {
-    fn default() -> Self {
-        MutableFlag::Immutable
-    }
 }
 
 /// Virtual/concrete flag for class methods.
@@ -125,9 +112,10 @@ pub enum VarianceAnnotation {
 }
 
 /// Argument label for function parameters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ArgLabel {
     /// No label: `x => ...`
+    #[default]
     Nolabel,
     /// Labeled argument: `~label => ...`
     Labelled(Located<String>),
@@ -191,8 +179,8 @@ impl ArgLabel {
     pub fn loc(&self) -> Location {
         match self {
             ArgLabel::Nolabel => Location::none(),
-            ArgLabel::Labelled(l) => l.loc.clone(),
-            ArgLabel::Optional(l) => l.loc.clone(),
+            ArgLabel::Labelled(l) => l.loc,
+            ArgLabel::Optional(l) => l.loc,
         }
     }
 
@@ -204,12 +192,6 @@ impl ArgLabel {
             (ArgLabel::Optional(l1), ArgLabel::Optional(l2)) => l1.txt == l2.txt,
             _ => false,
         }
-    }
-}
-
-impl Default for ArgLabel {
-    fn default() -> Self {
-        ArgLabel::Nolabel
     }
 }
 
@@ -248,7 +230,7 @@ impl<T> Located<T> {
     pub fn as_ref(&self) -> Located<&T> {
         Located {
             txt: &self.txt,
-            loc: self.loc.clone(),
+            loc: self.loc,
         }
     }
 }

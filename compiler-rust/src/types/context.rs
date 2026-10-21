@@ -1882,7 +1882,7 @@ impl TypeContext {
 
         let mut sources = Vec::new();
         for split in 1..=components.len() {
-            let mut qualified_prefix = Path::pident(head.clone());
+            let mut qualified_prefix = Path::pident(*head);
             for component in &components[..split] {
                 qualified_prefix = Path::pdot(qualified_prefix, *component);
             }
@@ -2150,7 +2150,7 @@ impl TypeContext {
             self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
                 parent_path.clone(),
                 child_name.into(),
-                id.clone(),
+                id,
                 md.clone(),
             ));
         }
@@ -2975,7 +2975,7 @@ impl TypeContext {
         self.report_warning_config
             .borrow()
             .clone()
-            .unwrap_or_else(crate::diagnostics::WarningConfig::new)
+            .unwrap_or_default()
     }
 
     /// `Cmt_format.record_value_dependency` (cmt_format_common.ml:180-183).
@@ -4674,7 +4674,7 @@ impl TypeContext {
                     self.register_component_alias_source(component.clone(), source.clone())
                 }
                 StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
-                    self.register_qualified_module_decl(parent, name, id.clone(), md.clone())
+                    self.register_qualified_module_decl(parent, name, *id, md.clone())
                 }
             }
         }

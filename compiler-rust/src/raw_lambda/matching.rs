@@ -23,21 +23,16 @@ use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
 use crate::raw_lambda::typeopt::{
-    constructor_has_optional_shape, find_type_decl_pub, has_untagged,
-    type_cannot_contain_undefined, type_cannot_contain_undefined_no_env, type_is_builtin_object,
+    constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
+    type_cannot_contain_undefined_no_env,
 };
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
 use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
-use crate::types::decl::{
-    ConstructorArguments, ConstructorDescription, ConstructorKind, LabelDescription,
-    RecordRepresentation, TypeKind,
-};
-use crate::types::env::Env;
-use crate::types::path::Path;
+use crate::types::decl::{ConstructorDescription, LabelDescription, RecordRepresentation};
 use crate::types::type_expr::TypeExprRef;
-use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
+use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::typedtree::Partial;
 use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 
@@ -175,7 +170,7 @@ impl MatchAction {
                 action,
             } => RawLambda::Llet(
                 *kind,
-                id.clone(),
+                *id,
                 Box::new(arg.clone()),
                 Box::new(action.body_with(fail)),
             ),
@@ -479,7 +474,7 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
         (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
             let omega = omega();
-            let (ps, qs) = records_args_for_le_pats(l1, l2, &omega);
+            let (ps, qs) = records_args_for_le_pats(l1, l2, omega);
             ps.iter().zip(&qs).all(|(p, q)| le_pat(p, q))
         }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
@@ -566,7 +561,7 @@ fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty
         {
             let rs = lubs_owned(ps1, ps2)?;
             Ok(Cow::Owned(make_pat(
-                PatternDesc::Tpat_construct(lid.clone(), c1.clone(), rs),
+                PatternDesc::Tpat_construct(*lid, c1.clone(), rs),
                 p.pat_type,
                 p.pat_env,
             )))
@@ -651,17 +646,17 @@ fn record_lubs(
             }
             (Some((lid1, lbl1, p1, o1)), Some((lid2, lbl2, p2, o2))) => {
                 if lbl1.lbl_pos < lbl2.lbl_pos {
-                    out.push((lid1.clone(), lbl1.clone(), p1.clone(), *o1));
+                    out.push((*lid1, lbl1.clone(), p1.clone(), *o1));
                     i += 1;
                 } else if lbl2.lbl_pos < lbl1.lbl_pos {
-                    out.push((lid2.clone(), lbl2.clone(), p2.clone(), *o2));
+                    out.push((*lid2, lbl2.clone(), p2.clone(), *o2));
                     j += 1;
                 } else {
                     if o1 != o2 {
                         return Err(Empty);
                     }
                     let p = lub_cow(p1, p2)?.into_owned();
-                    out.push((lid1.clone(), lbl1.clone(), p, *o1));
+                    out.push((*lid1, lbl1.clone(), p, *o1));
                     i += 1;
                     j += 1;
                 }
@@ -708,7 +703,7 @@ fn normalize_pat_owned(q: &Pattern) -> Pattern {
             q.pat_env,
         ),
         PatternDesc::Tpat_construct(lid, c, args) => make_pat(
-            PatternDesc::Tpat_construct(lid.clone(), c.clone(), omega_list(args)),
+            PatternDesc::Tpat_construct(*lid, c.clone(), omega_list(args)),
             q.pat_type,
             q.pat_env,
         ),
@@ -730,7 +725,7 @@ fn normalize_pat_owned(q: &Pattern) -> Pattern {
             PatternDesc::Tpat_record(
                 largs
                     .iter()
-                    .map(|(lid, lbl, _, opt)| (lid.clone(), lbl.clone(), omega_owned(), *opt))
+                    .map(|(lid, lbl, _, opt)| (*lid, lbl.clone(), omega_owned(), *opt))
                     .collect(),
                 *closed,
                 None,
@@ -775,9 +770,9 @@ fn do_set_args<'p>(
                 .zip(args.iter())
                 .map(|((lid, lbl, _, opt), arg)| {
                     if erase_mutable && matches!(lbl.lbl_mut, MutableFlag::Mutable) {
-                        (lid.clone(), lbl.clone(), omega_owned(), *opt)
+                        (*lid, lbl.clone(), omega_owned(), *opt)
                     } else {
-                        (lid.clone(), lbl.clone(), (*arg).clone(), *opt)
+                        (*lid, lbl.clone(), (*arg).clone(), *opt)
                     }
                 })
                 .collect();
@@ -794,7 +789,7 @@ fn do_set_args<'p>(
             let (args, rest) = read_args(pats.len(), r);
             (
                 make_pat(
-                    PatternDesc::Tpat_construct(lid.clone(), c.clone(), owned_pats(args)),
+                    PatternDesc::Tpat_construct(*lid, c.clone(), owned_pats(args)),
                     q.pat_type,
                     q.pat_env,
                 ),
@@ -952,7 +947,8 @@ fn record_all_labels(
     // OCaml expands through the typed label's own `lbl_all` array, not by
     // guessing another record declaration with compatible positions. See
     // compiler/ml/matching.ml:218-224 and 540-563.
-    let all_labels = ctx_ref.and_then(|ctx| {
+
+    ctx_ref.and_then(|ctx| {
         resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
             .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
             .or_else(|| {
@@ -993,9 +989,7 @@ fn record_all_labels(
                         .collect(),
                 )
             })
-    });
-
-    all_labels
+    })
 }
 
 fn all_record_args(
@@ -1019,7 +1013,7 @@ fn all_record_args(
                 .iter()
                 .map(|lbl| {
                     (
-                        dummy_loc.clone(),
+                        dummy_loc,
                         std::sync::Arc::new(lbl.clone()),
                         omega_owned(),
                         first_opt,
@@ -1030,8 +1024,7 @@ fn all_record_args(
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
                     let rewritten_pat = strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
-                    result[lbl.lbl_pos as usize] =
-                        (id.clone(), lbl.clone(), rewritten_pat.clone(), *opt);
+                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), rewritten_pat.clone(), *opt);
                 }
             }
             result
@@ -1696,7 +1689,7 @@ pub fn jumps_singleton<'p>(i: i32, ctx: Vec<Ctx<'p>>) -> Jumps<'p> {
 /// Add contexts for exit number i to the jump table.
 /// Maintains descending sort order and merges with get_mins when
 /// the exit number already exists.
-pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, mut jumps: Jumps<'p>) -> Jumps<'p> {
+pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, jumps: Jumps<'p>) -> Jumps<'p> {
     if pss.is_empty() {
         return jumps;
     }
@@ -1705,7 +1698,7 @@ pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, mut jumps: Jumps<'p>) -> Jumps<'
             None => vec![(i, pss)],
             Some(((j, qss), rem)) => {
                 if *j > i {
-                    let mut result = vec![(j.clone(), qss.clone())];
+                    let mut result = vec![(*j, qss.clone())];
                     result.extend(add(i, pss, rem));
                     result
                 } else if *j < i {
@@ -1931,7 +1924,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             RawLambda::Llet(LetKind::Alias, x, ex, body) => {
                 // Ignore aliases -> substitute
                 let ex = tr_rec(env, ex, count, next_id)?;
-                env.push((x.clone(), ex));
+                env.push((*x, ex));
                 let result = tr_rec(env, body, count, next_id);
                 env.pop();
                 result
@@ -1950,7 +1943,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 let ex_norm = tr_rec(env, ex, count, next_id)?;
                 let y = Ident::new(x.name(), *next_id, IdentFlags::NONE);
                 *next_id += 1;
-                env.push((x.clone(), RawLambda::Lvar(y.clone())));
+                env.push((*x, RawLambda::Lvar(y)));
                 let body_norm = tr_rec(env, body, count, next_id)?;
                 env.pop();
                 Some(RawLambda::Llet(
@@ -2005,7 +1998,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 let e2_norm = tr_rec(env, e2, count, next_id)?;
                 Some(RawLambda::LtryWith(
                     Box::new(e1_norm),
-                    x.clone(),
+                    *x,
                     Box::new(e2_norm),
                 ))
             }
@@ -2026,7 +2019,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             }
             RawLambda::Lassign(x, e) => {
                 let e_norm = tr_rec(env, e, count, next_id)?;
-                Some(RawLambda::Lassign(x.clone(), Box::new(e_norm)))
+                Some(RawLambda::Lassign(*x, Box::new(e_norm)))
             }
             // OCaml `Lambda.make_key` after #8348:
             // `Lbreak -> Lbreak | Lcontinue -> Lcontinue`.
@@ -2348,7 +2341,7 @@ impl MakeKeyWriter {
     ) -> Option<()> {
         if kind == LetKind::Alias {
             let ex_key = self.raw_to_string(ex)?;
-            self.env.push((x.clone(), ex_key));
+            self.env.push((*x, ex_key));
             let result = self.write_body(body, out);
             self.env.pop();
             return result;
@@ -2370,7 +2363,7 @@ impl MakeKeyWriter {
         replacement.push_str("Lvar(");
         write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
         replacement.push(')');
-        self.env.push((x.clone(), replacement));
+        self.env.push((*x, replacement));
         let result = self.write_body(body, out);
         self.env.pop();
         result?;
@@ -2834,7 +2827,7 @@ fn simplify_or<'p>(ctx_ref: Option<&TypeContext>, pa: &'p PatArena, p: &'p Patte
                 let alias = |q: Cow<'x, Pattern>| {
                     Cow::Owned(with_desc(
                         p,
-                        PatternDesc::Tpat_alias(Box::new(q.into_owned()), id.clone(), s.clone()),
+                        PatternDesc::Tpat_alias(Box::new(q.into_owned()), *id, s.clone()),
                     ))
                 };
                 match simpl_rec(ctx_ref, q) {
@@ -2884,7 +2877,7 @@ fn simplify_or<'p>(ctx_ref: Option<&TypeContext>, pa: &'p PatArena, p: &'p Patte
 fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLambda {
     match arg.peel() {
         RawLambda::Lvar(v) if v.same(id) => action,
-        _ => RawLambda::Llet(kind, id.clone(), Box::new(arg.clone()), Box::new(action)),
+        _ => RawLambda::Llet(kind, *id, Box::new(arg.clone()), Box::new(action)),
     }
 }
 
@@ -2923,7 +2916,7 @@ pub fn simplify_cases<'p>(
 
             match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => {
-                    let new_action = action.bind(LetKind::Alias, id.clone(), arg.clone());
+                    let new_action = action.bind(LetKind::Alias, *id, arg.clone());
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, new_action));
@@ -2932,7 +2925,7 @@ pub fn simplify_cases<'p>(
                     result.push((pats, action));
                 }
                 PatternDesc::Tpat_alias(p, id, _) => {
-                    let new_action = action.bind(LetKind::Alias, id.clone(), arg.clone());
+                    let new_action = action.bind(LetKind::Alias, *id, arg.clone());
                     let mut new_pats = vec![&**p];
                     new_pats.extend(patl.iter().cloned());
                     // OCaml `compiler/ml/matching.ml:565-566` immediately
@@ -2945,7 +2938,7 @@ pub fn simplify_cases<'p>(
                     let action = match rest {
                         Some(rest) => action.bind(
                             LetKind::Strict,
-                            rest.rest_ident.clone(),
+                            rest.rest_ident,
                             RawLambda::prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
                                 vec![arg.clone()],
@@ -2963,7 +2956,7 @@ pub fn simplify_cases<'p>(
                     let action = match rest {
                         Some(rest) => action.bind(
                             LetKind::Strict,
-                            rest.rest_ident.clone(),
+                            rest.rest_ident,
                             RawLambda::prim(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
                                 vec![arg.clone()],
@@ -3104,28 +3097,28 @@ type IdentSet = BTreeSet<Ident>;
 
 /// Recursively extract all variables bound in a pattern.
 /// Equivalent to OCaml's `extract_vars`.
-pub fn extract_vars<'p>(r: IdentSet, p: &'p Pattern) -> IdentSet {
+pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
     match &p.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
             let mut r = r;
-            r.insert(id.clone());
+            r.insert(*id);
             r
         }
         PatternDesc::Tpat_alias(p, id, _) => {
             let mut r = r;
-            r.insert(id.clone());
+            r.insert(*id);
             extract_vars(r, p)
         }
-        PatternDesc::Tpat_tuple(pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
+        PatternDesc::Tpat_tuple(pats) => pats.iter().fold(r, extract_vars),
         PatternDesc::Tpat_record(lpats, _, rest) => {
             let mut r = r;
             if let Some(rest) = rest {
-                r.insert(rest.rest_ident.clone());
+                r.insert(rest.rest_ident);
             }
             lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
         }
-        PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
-        PatternDesc::Tpat_array(pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
+        PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, extract_vars),
+        PatternDesc::Tpat_array(pats) => pats.iter().fold(r, extract_vars),
         PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(r, p),
         PatternDesc::Tpat_or(p, _, _) => extract_vars(r, p),
         PatternDesc::Tpat_constant(_)
@@ -3176,7 +3169,7 @@ pub fn mk_alpha_env(
         .map(|id| {
             let new_id = if aliases.contains(id) {
                 match arg {
-                    Some(v) => v.clone(),
+                    Some(v) => *v,
                     None => return Err(CannotFlatten),
                 }
             } else {
@@ -3184,7 +3177,7 @@ pub fn mk_alpha_env(
                     .map(|ctx_ref| ctx_ref.create_ident(id.name()))
                     .unwrap_or_else(|| Ident::create_local(id.name()))
             };
-            Ok((id.clone(), new_id))
+            Ok((*id, new_id))
         })
         .collect()
 }
@@ -3205,7 +3198,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
             let pat_desc = alpha_pat_id(env, id)
-                .map(|new_id| PatternDesc::Tpat_var(new_id.clone(), name.clone()))
+                .map(|new_id| PatternDesc::Tpat_var(*new_id, name.clone()))
                 .unwrap_or(PatternDesc::Tpat_any);
             with_desc(pat, pat_desc)
         }
@@ -3214,7 +3207,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
             if let Some(new_id) = alpha_pat_id(env, id) {
                 with_desc(
                     pat,
-                    PatternDesc::Tpat_alias(Box::new(new_inner), new_id.clone(), name.clone()),
+                    PatternDesc::Tpat_alias(Box::new(new_inner), *new_id, name.clone()),
                 )
             } else {
                 new_inner
@@ -3227,7 +3220,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
         PatternDesc::Tpat_construct(lid, cstr, args) => with_desc(
             pat,
             PatternDesc::Tpat_construct(
-                lid.clone(),
+                *lid,
                 cstr.clone(),
                 args.iter().map(|arg| alpha_pat(env, arg)).collect(),
             ),
@@ -3246,14 +3239,14 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
                 fields
                     .iter()
                     .map(|(lid, lbl, field_pat, opt)| {
-                        (lid.clone(), lbl.clone(), alpha_pat(env, field_pat), *opt)
+                        (*lid, lbl.clone(), alpha_pat(env, field_pat), *opt)
                     })
                     .collect(),
                 *closed,
                 rest.as_ref().map(|rest| {
                     let mut rest = rest.clone();
                     if let Some(new_id) = alpha_pat_id(env, &rest.rest_ident) {
-                        rest.rest_ident = new_id.clone();
+                        rest.rest_ident = *new_id;
                     }
                     rest
                 }),
@@ -3306,7 +3299,7 @@ where
             explode_or_pat(ctx_ref, pa, arg, patl, mk_action, rem, vars, aliases, p1)
         }
         PatternDesc::Tpat_alias(p, id, _) => {
-            let mut new_aliases = vec![id.clone()];
+            let mut new_aliases = vec![*id];
             new_aliases.extend_from_slice(aliases);
             explode_or_pat(
                 ctx_ref,
@@ -3321,10 +3314,10 @@ where
             )
         }
         PatternDesc::Tpat_var(x, _) => {
-            let mut x_aliases = vec![x.clone()];
+            let mut x_aliases = vec![*x];
             x_aliases.extend_from_slice(aliases);
             let env = mk_alpha_env(ctx_ref, arg, &x_aliases, vars)?;
-            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| id.clone()).collect();
+            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
             let mut row = vec![omega()];
             row.extend_from_slice(patl);
             let mut result = vec![(row, MatchAction::new(mk_action(&new_ids)))];
@@ -3333,7 +3326,7 @@ where
         }
         _ => {
             let env = mk_alpha_env(ctx_ref, arg, aliases, vars)?;
-            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| id.clone()).collect();
+            let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
             let mut row: Vec<&'p Pattern> = vec![pa.alloc(alpha_pat(&env, pat))];
             row.extend_from_slice(patl);
             let mut result = vec![(row, MatchAction::new(mk_action(&new_ids)))];
@@ -3366,7 +3359,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
         match lam {
             RawLambda::Lshared(inner) => collect(inner, fv),
             RawLambda::Lvar(id) => {
-                fv.insert(id.clone());
+                fv.insert(*id);
             }
             RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
             RawLambda::Lapply(apply) => {
@@ -3464,7 +3457,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
                 fv.remove(id);
             }
             RawLambda::Lassign(id, expr) => {
-                fv.insert(id.clone());
+                fv.insert(*id);
                 collect(expr, fv);
             }
             RawLambda::Lbreak | RawLambda::Lcontinue => {}
@@ -3490,7 +3483,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
 
 /// Extract the constructor description from a construct pattern.
 /// Equivalent to OCaml's `pat_as_constr`.
-fn pat_as_constr<'p>(p: &'p Pattern) -> &crate::types::ConstructorDescription {
+fn pat_as_constr(p: &Pattern) -> &crate::types::ConstructorDescription {
     match &p.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, _) => cstr,
         _ => crate::misc::fatal_error("Matching.pat_as_constr"),
@@ -4130,7 +4123,7 @@ fn split_constr<'p>(
             split_naive(pa, arena, cls, args, def, k, next_raise)
         }
         _ => {
-            let group = get_group(&ex_pat);
+            let group = get_group(ex_pat);
             match cls.split_first() {
                 Some((cl, rem)) => match cl.0.first() {
                     Some(p) if group(p) => split_ex(
@@ -4397,7 +4390,7 @@ fn precompile_var<'p>(
                             None,
                             pa,
                             arena, // TypeContext not available in do_split_or
-                            &Some(v.clone()),
+                            &Some(*v),
                             var_cls,
                             &arg_tail,
                             var_def,
@@ -4562,7 +4555,7 @@ fn do_cases_or_deque<'p>(
                     let mk_new_action = |vs: &[Ident]| -> RawLambda {
                         RawLambda::LstaticRaise(
                             or_num,
-                            vs.iter().map(|v| RawLambda::Lvar(v.clone())).collect(),
+                            vs.iter().map(|v| RawLambda::Lvar(*v)).collect(),
                         )
                     };
 
@@ -4784,7 +4777,7 @@ fn matcher_const<'p>(
 
 /// Get the key (constant) from a constant pattern.
 /// Equivalent to OCaml's `get_key_constant`.
-fn get_key_constant<'p>(caller: &str, p: &'p Pattern) -> Constant {
+fn get_key_constant(caller: &str, p: &Pattern) -> Constant {
     match &p.pat_desc {
         PatternDesc::Tpat_constant(cst) => cst.clone(),
         _ => {
@@ -4865,7 +4858,7 @@ fn make_field_args(
             RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Pfield(pos, fld_info.clone()),
                 args: vec![arg.clone()],
-                loc: loc.clone(),
+                loc,
             })),
             binding_kind,
         ));
@@ -4876,7 +4869,7 @@ fn make_field_args(
 
 /// Get the declared constructor from a constructor pattern.
 /// Equivalent to OCaml's `get_key_constr`.
-fn get_key_constr<'p>(p: &'p Pattern) -> std::sync::Arc<ConstructorDescription> {
+fn get_key_constr(p: &Pattern) -> std::sync::Arc<ConstructorDescription> {
     match &p.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, _) => cstr.clone(),
         _ => panic!("get_key_constr: not a construct pattern"),
@@ -5486,7 +5479,7 @@ fn make_tuple_matching<'p>(
                     RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pfield(pos as i32, FieldDbgInfo::Tuple),
                         args: vec![arg.clone()],
-                        loc: loc.clone(),
+                        loc,
                     })),
                     LetKind::Alias,
                 ));
@@ -5641,14 +5634,14 @@ fn make_record_matching<'p>(
                         RawLambda::Lprim(Box::new(RawPrimInfo {
                             primitive: Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),
                             args: vec![arg.clone()],
-                            loc: loc.clone(),
+                            loc,
                         }))
                     }
                     RecordRepresentation::RecordInlined { .. } => {
                         RawLambda::Lprim(Box::new(RawPrimInfo {
                             primitive: Primitive::Pfield(lbl.lbl_pos, fld_record_inline(lbl)),
                             args: vec![arg.clone()],
-                            loc: loc.clone(),
+                            loc,
                         }))
                     }
                     RecordRepresentation::RecordUnboxed(_) => arg.clone(),
@@ -5659,7 +5652,7 @@ fn make_record_matching<'p>(
                                 fld_record_extension(lbl),
                             ),
                             args: vec![arg.clone()],
-                            loc: loc.clone(),
+                            loc,
                         }))
                     }
                 };
@@ -5707,7 +5700,7 @@ fn divide_record<'p>(
 
 /// Get the key (length) from an array pattern.
 /// Equivalent to OCaml's `get_key_array`.
-fn get_key_array<'p>(p: &'p Pattern) -> usize {
+fn get_key_array(p: &Pattern) -> usize {
     match &p.pat_desc {
         PatternDesc::Tpat_array(patl) => patl.len(),
         _ => panic!("get_key_array: not an array pattern"),
@@ -5831,7 +5824,7 @@ fn bind_sw(
         RawLambda::Lvar(_) => k(arg),
         _ => {
             let id = ctx_ref.create_ident("switch");
-            let var = RawLambda::Lvar(id.clone());
+            let var = RawLambda::Lvar(id);
             let body = k(var);
             RawLambda::Llet(LetKind::Strict, id, Box::new(arg), Box::new(body))
         }
@@ -5867,7 +5860,7 @@ fn make_string_test_sequence(
                         arg.clone(),
                         RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
                     ],
-                    loc: loc.clone(),
+                    loc,
                 }))),
                 Box::new(result),
                 Box::new(lam),
@@ -5914,7 +5907,7 @@ fn tree_way_test(
         Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pintcomp(Comparison::Lt),
             args: vec![arg.clone(), zero_lam()],
-            loc: loc.clone(),
+            loc,
         }))),
         Box::new(lt),
         Box::new(RawLambda::LifThenElse(
@@ -5952,29 +5945,15 @@ fn do_make_string_test_tree(
                     arg.clone(),
                     RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
                 ],
-                loc: loc.clone(),
+                loc,
             })),
             |r| {
                 tree_way_test(
-                    loc.clone(),
+                    loc,
                     r,
-                    do_make_string_test_tree(
-                        ctx_ref,
-                        loc.clone(),
-                        arg.clone(),
-                        lt,
-                        delta,
-                        d.clone(),
-                    ),
+                    do_make_string_test_tree(ctx_ref, loc, arg.clone(), lt, delta, d.clone()),
                     act,
-                    do_make_string_test_tree(
-                        ctx_ref,
-                        loc.clone(),
-                        arg.clone(),
-                        gt,
-                        delta,
-                        d.clone(),
-                    ),
+                    do_make_string_test_tree(ctx_ref, loc, arg.clone(), gt, delta, d.clone()),
                 )
             },
         )
@@ -6181,7 +6160,7 @@ fn do_tests_fail(
         Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: tst.clone(),
             args: vec![arg.clone(), typed_const_to_lambda_const(c)],
-            loc: loc.clone(),
+            loc,
         }))),
         Box::new(do_tests_fail(loc, fail, tst, arg, rest)),
         Box::new(act.clone()),
@@ -6205,7 +6184,7 @@ fn do_tests_fail_owned(
             Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: tst.clone(),
                 args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
-                loc: loc.clone(),
+                loc,
             }))),
             Box::new(acc),
             Box::new(act),
@@ -6231,7 +6210,7 @@ fn do_tests_nofail(
         Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: tst.clone(),
             args: vec![arg.clone(), typed_const_to_lambda_const(c)],
-            loc: loc.clone(),
+            loc,
         }))),
         Box::new(do_tests_nofail(loc, tst, arg, rest)),
         Box::new(act.clone()),
@@ -6255,7 +6234,7 @@ fn do_tests_nofail_owned(
             Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: tst.clone(),
                 args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
-                loc: loc.clone(),
+                loc,
             }))),
             Box::new(acc),
             Box::new(act),
@@ -6307,9 +6286,9 @@ fn make_test_sequence(
             split_sequence(loc, fail, tst, lt_tst, arg, const_lambda_list)
         } else {
             match fail {
-                None => do_tests_nofail(loc.clone(), tst.clone(), arg.clone(), const_lambda_list),
+                None => do_tests_nofail(*loc, tst.clone(), arg.clone(), const_lambda_list),
                 Some(fail) => do_tests_fail(
-                    loc.clone(),
+                    *loc,
                     fail.clone(),
                     tst.clone(),
                     arg.clone(),
@@ -6335,7 +6314,7 @@ fn make_test_sequence(
                 Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: lt_tst.clone(),
                     args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
-                    loc: loc.clone(),
+                    loc: *loc,
                 }))),
                 Box::new(make_test_seq_inner_owned(
                     loc,
@@ -6351,16 +6330,10 @@ fn make_test_sequence(
             )
         } else {
             match fail {
-                None => {
-                    do_tests_nofail_owned(loc.clone(), tst.clone(), arg.clone(), const_lambda_list)
+                None => do_tests_nofail_owned(*loc, tst.clone(), arg.clone(), const_lambda_list),
+                Some(fail) => {
+                    do_tests_fail_owned(*loc, fail, tst.clone(), arg.clone(), const_lambda_list)
                 }
-                Some(fail) => do_tests_fail_owned(
-                    loc.clone(),
-                    fail,
-                    tst.clone(),
-                    arg.clone(),
-                    const_lambda_list,
-                ),
             }
         }
     }
@@ -6380,7 +6353,7 @@ fn make_test_sequence(
             Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: lt_tst.clone(),
                 args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
-                loc: loc.clone(),
+                loc: *loc,
             }))),
             Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list1)),
             Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list2)),
@@ -6970,7 +6943,7 @@ fn get_variant_constructors_from_env(
         if let Some(decl) = env_decl {
             match &decl.type_kind {
                 TypeKind::TypeVariant(cds, _) => {
-                    return build_descriptions(&decl, cds, result_type);
+                    return build_descriptions(decl, cds, result_type);
                 }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
@@ -7187,10 +7160,7 @@ fn share_actions_tree_string(
         })
         .collect();
 
-    let d = match d_idx {
-        None => None,
-        Some(idx) => Some(resolved_acts[idx].clone()),
-    };
+    let d = d_idx.map(|idx| resolved_acts[idx].clone());
     let sw: Vec<(String, RawLambda)> = sw_indices
         .into_iter()
         .map(|(s, j)| (s, resolved_acts[j].clone()))
@@ -7243,7 +7213,7 @@ fn combine_constant<'p>(
             let int_lambda_list: Vec<(i32, RawLambda)> = const_lambda_list
                 .into_iter()
                 .map(|(c, l)| match c {
-                    Constant::Char(ch) => (ch as i32, l),
+                    Constant::Char(ch) => (ch, l),
                     _ => panic!("combine_constant: expected Const_char"),
                 })
                 .collect();
@@ -7365,9 +7335,9 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
     match path {
         Path::Pident(id) => {
             if id.is_global() {
-                RawLambda::global_module(id.clone())
+                RawLambda::global_module(*id)
             } else {
-                RawLambda::Lvar(id.clone())
+                RawLambda::Lvar(*id)
             }
         }
         Path::Pdot(p, s, pos) => RawLambda::Lprim(Box::new(RawPrimInfo {
@@ -7420,7 +7390,7 @@ fn normalize_path_via_ctx(
             if norm_prefix == **prefix {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(norm_prefix), name.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(norm_prefix), *name, *pos)
             }
         }
         _ => path.clone(),
@@ -7442,7 +7412,7 @@ fn normalize_module_path_via_ctx(
             if norm_prefix == **prefix {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(norm_prefix), name.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(norm_prefix), *name, *pos)
             }
         }
         _ => path.clone(),
@@ -7548,8 +7518,8 @@ fn combine_constructor<'p>(
                         RawLambda::LifThenElse(
                             Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                                 primitive: Primitive::PextensionSlotEq,
-                                args: vec![RawLambda::Lvar(tag.clone()), ext],
-                                loc: loc.clone(),
+                                args: vec![RawLambda::Lvar(tag), ext],
+                                loc,
                             }))),
                             Box::new(act),
                             Box::new(rem),
@@ -7616,13 +7586,13 @@ fn combine_constructor<'p>(
                     RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::PisNotNone,
                         args: vec![arg],
-                        loc: loc.clone(),
+                        loc,
                     }))
                 } else {
                     RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pjscomp(Comparison::Neq),
                         args: vec![arg, RawLambda::Lconst(crate::lambda::Constant::int(0))],
-                        loc: loc.clone(),
+                        loc,
                     }))
                 };
                 RawLambda::LifThenElse(Box::new(test_arg), Box::new(act2), Box::new(act1))
@@ -7790,7 +7760,7 @@ fn polyvar_if_chain(
                     )
                 })
         }
-        (_, &Some(ref fail_act)) => {
+        (_, Some(fail_act)) => {
             // With fail: fail is default, all entries are if-then-else
             converted
                 .iter()
@@ -7846,11 +7816,11 @@ fn call_switcher_variant_constr(
     let v = ctx_ref.create_ident("variant");
     RawLambda::Llet(
         LetKind::Alias,
-        v.clone(),
+        v,
         Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pfield(0, FieldDbgInfo::PolyVarTag),
             args: vec![arg],
-            loc: loc.clone(),
+            loc,
         }))),
         Box::new(call_switcher_variant_constant(
             loc,
@@ -7905,7 +7875,7 @@ fn combine_variant<'p>(
             Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::PisPolyVarBlock,
                 args: vec![arg],
-                loc: loc.clone(),
+                loc,
             }))),
             Box::new(if_block),
             Box::new(if_int),
@@ -7942,7 +7912,7 @@ fn combine_variant<'p>(
             ([], _) => {
                 let lam = call_switcher_variant_constr(
                     ctx_ref,
-                    loc.clone(),
+                    loc,
                     fail.clone(),
                     arg.clone(),
                     &nonconsts,
@@ -7957,7 +7927,7 @@ fn combine_variant<'p>(
             }
             _ => {
                 let lam_const = call_switcher_variant_constant(
-                    loc.clone(),
+                    loc,
                     fail.clone(),
                     arg.clone(),
                     &consts,
@@ -7966,7 +7936,7 @@ fn combine_variant<'p>(
                 );
                 let lam_nonconst = call_switcher_variant_constr(
                     ctx_ref,
-                    loc.clone(),
+                    loc,
                     fail,
                     arg.clone(),
                     &nonconsts,
@@ -8003,7 +7973,7 @@ fn combine_array<'p>(
             .collect();
         let switch_result = call_switcher(
             fail,
-            RawLambda::Lvar(newvar.clone()),
+            RawLambda::Lvar(newvar),
             0,
             i32::MAX,
             int_lambda_list,
@@ -8052,19 +8022,16 @@ fn compile_list<'p, K: Clone>(
         if cell.ctx.is_empty() {
             continue;
         }
-        match compile_fun(&cell.ctx, &cell.pm) {
-            Ok((lambda1, total1)) => {
-                // OCaml `compiler/ml/matching.ml:2358-2364` recurses on the
-                // tail with `jumps_map ctx_combine total1 :: totals`, then
-                // conses `(key, lambda1)` and `cell.pat` onto the returned
-                // lists. Rust vectors need the result lists in forward order
-                // and the jump totals in reverse-success order, so push
-                // results linearly and reverse only the totals once.
-                compiled.push((key, lambda1));
-                totals.push(jumps_map(|c| ctx_combine(pa, &c), &total1));
-                new_pats.push(cell.pat);
-            }
-            Err(Unused) => {}
+        if let Ok((lambda1, total1)) = compile_fun(&cell.ctx, &cell.pm) {
+            // OCaml `compiler/ml/matching.ml:2358-2364` recurses on the
+            // tail with `jumps_map ctx_combine total1 :: totals`, then
+            // conses `(key, lambda1)` and `cell.pat` onto the returned
+            // lists. Rust vectors need the result lists in forward order
+            // and the jump totals in reverse-success order, so push
+            // results linearly and reverse only the totals once.
+            compiled.push((key, lambda1));
+            totals.push(jumps_map(|c| ctx_combine(pa, &c), &total1));
+            new_pats.push(cell.pat);
         }
     }
 
@@ -8369,7 +8336,7 @@ fn c_rec<'p>(
                 c_rec(comp_fun, partial, ctx, arg, body, total_body, rem)
             } else {
                 let this_partial = if rem.is_empty() {
-                    partial.clone()
+                    *partial
                 } else {
                     Partial::Partial
                 };
@@ -8417,10 +8384,10 @@ fn name_pattern<'p>(ctx_ref: &TypeContext, default: &str, cases: &[Clause<'p>]) 
 
 /// Extract an identifier from a pattern (for naming purposes).
 /// Equivalent to OCaml's `Typecore.id_of_pattern`.
-fn id_of_pattern<'p>(ctx_ref: &TypeContext, pat: &'p Pattern) -> Option<Ident> {
+fn id_of_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<Ident> {
     match &pat.pat_desc {
-        PatternDesc::Tpat_var(id, _) => Some(id.clone()),
-        PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
+        PatternDesc::Tpat_var(id, _) => Some(*id),
+        PatternDesc::Tpat_alias(_, id, _) => Some(*id),
         PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
             PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
                 Some(ctx_ref.rename_ident(id))
@@ -8439,10 +8406,10 @@ fn arg_to_var<'p>(
     cls: &[Clause<'p>],
 ) -> (Ident, RawLambda) {
     match arg {
-        RawLambda::Lvar(v) => (v.clone(), arg.clone()),
+        RawLambda::Lvar(v) => (*v, arg.clone()),
         _ => {
             let v = name_pattern(ctx_ref, "match", cls);
-            (v.clone(), RawLambda::Lvar(v))
+            (v, RawLambda::Lvar(v))
         }
     }
 }
@@ -8509,7 +8476,7 @@ fn compile_match<'p>(
                 Some(ctx_ref),
                 pa,
                 arena,
-                &Some(v.clone()),
+                &Some(v),
                 m.cases.clone(),
                 &MatchArgs::new(new_args),
                 m.default.clone(),
@@ -8572,12 +8539,12 @@ fn do_compile_matching<'p>(
                 ),
                 PatternDesc::Tpat_tuple(patl) => {
                     let arity = patl.len();
-                    let norm_pat = normalize_pat(pa, &pat);
+                    let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         ctx_ref,
                         pa,
                         arena,
-                        &move |ctx, pm| divide_tuple(pa, arena, arity, &norm_pat, ctx, pm),
+                        &move |ctx, pm| divide_tuple(pa, arena, arity, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
                         ctx,
@@ -8586,14 +8553,14 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => {
-                    let all_labels = resolve_all_record_labels(ctx_ref, &pat, fields);
-                    let norm_pat = normalize_pat(pa, &pat);
+                    let all_labels = resolve_all_record_labels(ctx_ref, pat, fields);
+                    let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         ctx_ref,
                         pa,
                         arena,
                         &move |ctx, pm| {
-                            divide_record(ctx_ref, pa, arena, &all_labels, &norm_pat, ctx, pm)
+                            divide_record(ctx_ref, pa, arena, &all_labels, norm_pat, ctx, pm)
                         },
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
@@ -8616,7 +8583,7 @@ fn do_compile_matching<'p>(
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
                                 names.clone(),
-                                loc.clone(),
+                                loc,
                                 arg_clone.clone(),
                                 &cst_clone,
                                 partial,
@@ -8646,7 +8613,7 @@ fn do_compile_matching<'p>(
                             combine_constructor(
                                 ctx_ref,
                                 pa,
-                                loc.clone(),
+                                loc,
                                 arg_clone.clone(),
                                 ex_pat,
                                 &cstr_clone,
@@ -8676,7 +8643,7 @@ fn do_compile_matching<'p>(
                             combine_array(
                                 ctx_ref,
                                 names.clone(),
-                                loc.clone(),
+                                loc,
                                 arg_clone.clone(),
                                 partial,
                                 ctx,
@@ -8707,7 +8674,7 @@ fn do_compile_matching<'p>(
                             combine_variant(
                                 ctx_ref,
                                 names.clone(),
-                                loc.clone(),
+                                loc,
                                 &row_desc2,
                                 arg_clone.clone(),
                                 partial,
@@ -8870,9 +8837,9 @@ fn get_all_labels_from_record_fields(
 /// Resolve ALL record labels from the record type, not just those mentioned in the pattern.
 /// This is the equivalent of OCaml's `lbl.lbl_all` which points to all labels of the record type.
 /// We look up the type declaration via the TypeContext to get all labels.
-fn resolve_all_record_labels<'p>(
+fn resolve_all_record_labels(
     ctx_ref: &TypeContext,
-    pat: &'p Pattern,
+    pat: &Pattern,
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
         std::sync::Arc<LabelDescription>,
@@ -9052,7 +9019,7 @@ fn resolve_labels_from_type(
     // Extension/exception inline records use the constructor path itself
     // (for example `A0`) rather than a parent-type `Pdot`, so reconstruct
     // their full label set from the constructor's synthetic inline record.
-    for cstr in env.find_all_constructors(&path.last()).iter().rev() {
+    for cstr in env.find_all_constructors(path.last()).iter().rev() {
         let matches_inline_record_path = match &cstr.cstr_kind {
             crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(&path),
             crate::types::ConstructorKind::Ordinary(_) => false,
@@ -9082,7 +9049,7 @@ fn resolve_labels_from_type(
             })
             .or_else(|| {
                 ctx_ref
-                    .find_type_decl(&parent_path.last())
+                    .find_type_decl(parent_path.last())
                     .map(|d| d.clone())
             })
             .or_else(|| {
@@ -9148,7 +9115,7 @@ fn build_label_descriptions(
                 lbl_all: crate::types::decl::LabelArrayRef(0),
                 lbl_repres: repr.clone(),
                 lbl_private: private,
-                lbl_loc: ld.ld_loc.clone(),
+                lbl_loc: ld.ld_loc,
                 lbl_attributes: ld.ld_attributes.clone(),
             }
         })
@@ -9290,10 +9257,7 @@ fn is_mutable(p: &Pattern) -> bool {
 
 /// Downgrade Total to Partial when needed.
 /// Equivalent to OCaml's `check_partial` (single pattern version).
-fn check_partial_single<'p>(
-    pat_act_list: &[(&'p Pattern, CaseAction)],
-    partial: Partial,
-) -> Partial {
+fn check_partial_single(pat_act_list: &[(&Pattern, CaseAction)], partial: Partial) -> Partial {
     match partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
@@ -9371,12 +9335,12 @@ pub(crate) fn resolve_shared_actions(lam: &mut RawLambda) {
     lam.for_each_child_mut(&mut resolve_shared_actions);
 }
 
-pub fn compile_matching<'p>(
+pub fn compile_matching(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
+    pat_act_list: Vec<(&Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9490,7 +9454,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
         args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
             args: vec![exn, payload],
-            loc: loc.clone(),
+            loc,
         }))],
         loc,
     }))
@@ -9498,16 +9462,16 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
 
 /// Compile a match for a function body.
 /// Equivalent to OCaml's `for_function`.
-pub fn for_function<'p>(
+pub fn for_function(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     param: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
+    pat_act_list: Vec<(&Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let loc_clone = loc.clone();
+    let loc_clone = loc;
     compile_matching(
         ctx_ref,
         arena,
@@ -9521,11 +9485,11 @@ pub fn for_function<'p>(
 
 /// Compile a match for a try-with handler.
 /// Equivalent to OCaml's `for_trywith`.
-pub fn for_trywith<'p>(
+pub fn for_trywith(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     param: RawLambda,
-    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
+    pat_act_list: Vec<(&Pattern, CaseAction)>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let param_clone = param.clone();
@@ -9557,7 +9521,7 @@ pub fn simple_for_let(
     body: RawLambda,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let loc_clone = loc.clone();
+    let loc_clone = loc;
     compile_matching(
         ctx_ref,
         arena,
@@ -9571,12 +9535,12 @@ pub fn simple_for_let(
 
 /// Compile a let binding match (with optimization for simple cases).
 /// Equivalent to OCaml's `for_let`.
-pub fn for_let<'p>(
+pub fn for_let(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     param: RawLambda,
-    pat: &'p Pattern,
+    pat: &Pattern,
     body: RawLambda,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9587,7 +9551,7 @@ pub fn for_let<'p>(
         }
         PatternDesc::Tpat_var(id, _) => {
             // Fast path
-            RawLambda::Llet(LetKind::Strict, id.clone(), Box::new(param), Box::new(body))
+            RawLambda::Llet(LetKind::Strict, *id, Box::new(param), Box::new(body))
         }
         _ => simple_for_let(ctx_ref, arena, loc, param, pat, body, next_raise_count),
     }
@@ -9595,12 +9559,12 @@ pub fn for_let<'p>(
 
 /// Compile a tupled function match.
 /// Equivalent to OCaml's `for_tupled_function`.
-pub fn for_tupled_function<'p>(
+pub fn for_tupled_function(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     paraml: &[Ident],
-    pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
+    pats_act_list: Vec<(Vec<&Pattern>, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -9641,7 +9605,7 @@ fn for_tupled_function_unresolved<'p>(
         args: MatchArgs::new(
             paraml
                 .iter()
-                .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Strict))
+                .map(|id| (RawLambda::Lvar(*id), LetKind::Strict))
                 .collect(),
         ),
         default: vec![(omegas_row, raise_num)],
@@ -9657,7 +9621,7 @@ fn for_tupled_function_unresolved<'p>(
         next_raise_count,
     ) {
         Ok((lambda, total)) => {
-            let loc_clone = loc.clone();
+            let loc_clone = loc;
             check_total(&total, lambda, raise_num, || {
                 partial_function(ctx_ref, loc_clone)
             })
@@ -9671,7 +9635,7 @@ struct CannotFlattenExn;
 
 /// Flatten a pattern into its tuple components.
 /// Equivalent to OCaml's `flatten_pattern`.
-fn flatten_pattern<'p>(size: usize, p: &'p Pattern) -> Result<Vec<&'p Pattern>, CannotFlattenExn> {
+fn flatten_pattern(size: usize, p: &Pattern) -> Result<Vec<&Pattern>, CannotFlattenExn> {
     match &p.pat_desc {
         PatternDesc::Tpat_tuple(args) => Ok(args.iter().collect()),
         PatternDesc::Tpat_any => Ok(omegas(size)),
@@ -9857,7 +9821,7 @@ pub fn do_for_multiple_match<'p>(
     let tuple_arg = RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
         args: paraml.clone(),
-        loc: loc.clone(),
+        loc,
     }));
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
@@ -9895,7 +9859,7 @@ pub fn do_for_multiple_match<'p>(
             .collect();
         let args = MatchArgs::new(
             idl.iter()
-                .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Alias))
+                .map(|id| (RawLambda::Lvar(*id), LetKind::Alias))
                 .collect(),
         );
 
@@ -9930,7 +9894,7 @@ pub fn do_for_multiple_match<'p>(
         let result = idl.iter().zip(paraml.iter()).rev().fold(
             match &partial {
                 Partial::Partial => {
-                    let loc_clone = loc.clone();
+                    let loc_clone = loc;
                     check_total(&total, lam, raise_num, || {
                         partial_function(ctx_ref, loc_clone)
                     })
@@ -9961,7 +9925,7 @@ pub fn do_for_multiple_match<'p>(
             ) {
                 Ok((lambda, total)) => match &partial {
                     Partial::Partial => {
-                        let loc_clone = loc.clone();
+                        let loc_clone = loc;
                         check_total(&total, lambda, raise_num, || {
                             partial_function(ctx_ref, loc_clone)
                         })
@@ -9981,7 +9945,7 @@ pub fn do_for_multiple_match<'p>(
 /// Equivalent to OCaml's `param_to_var`.
 fn param_to_var(ctx_ref: &TypeContext, param: &RawLambda) -> (Ident, Option<RawLambda>) {
     match param {
-        RawLambda::Lvar(v) => (v.clone(), None),
+        RawLambda::Lvar(v) => (*v, None),
         _ => (ctx_ref.create_ident("match"), Some(param.clone())),
     }
 }
@@ -9997,12 +9961,12 @@ fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
 
 /// Compile a multiple match expression.
 /// Equivalent to OCaml's `for_multiple_match`.
-pub fn for_multiple_match<'p>(
+pub fn for_multiple_match(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
-    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
+    pat_act_list: Vec<(&Pattern, CaseAction)>,
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
@@ -10010,10 +9974,7 @@ pub fn for_multiple_match<'p>(
         .iter()
         .map(|param| param_to_var(ctx_ref, param))
         .collect();
-    let new_paraml: Vec<RawLambda> = v_paraml
-        .iter()
-        .map(|(v, _)| RawLambda::Lvar(v.clone()))
-        .collect();
+    let new_paraml: Vec<RawLambda> = v_paraml.iter().map(|(v, _)| RawLambda::Lvar(*v)).collect();
     let pa = PatArena::new();
     let mut inner = do_for_multiple_match(
         ctx_ref,
@@ -10074,8 +10035,11 @@ mod tests {
 
     use super::*;
     use crate::context::IdGenerator;
+    use crate::raw_lambda::typeopt::find_type_decl_pub;
+    use crate::types::decl::TypeKind;
     use crate::types::env::initial_env;
     use crate::types::predef;
+    use crate::types::type_expr::TypeDesc;
 
     #[test]
     fn constructor_cases_use_pattern_env_layout() {

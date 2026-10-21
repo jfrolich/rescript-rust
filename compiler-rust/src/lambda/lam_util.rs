@@ -47,8 +47,8 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
             && matches!(args[0], Lambda::LglobalModule(_) | Lambda::Lvar(_))) =>
         {
             let PrimInfo {
-                primitive: Primitive::Pfield(_, dbg_info),
-                args,
+                primitive: Primitive::Pfield(_, _dbg_info),
+                args: _,
                 ..
             } = __prim2.as_ref()
             else {
@@ -130,11 +130,11 @@ fn refine_let_parts(
         {
             let PrimInfo {
                 primitive,
-                args,
+                args: _,
                 loc,
             } = __prim0.as_ref();
 
-            Lambda::prim(primitive.clone(), vec![arg], loc.clone())
+            Lambda::prim(primitive.clone(), vec![arg], *loc)
         }
 
         // (Call) `let[k] x = e in fn(x)` -> `fn(e)`, when fn does not capture
@@ -195,7 +195,7 @@ pub fn field_flatten_get(
         // `Lam.global_module g`.
         Some(IdKind::Module(g)) => Lambda::prim(
             Primitive::Pfield(i, info.clone()),
-            vec![Lambda::global_module(g.clone())],
+            vec![Lambda::global_module(*g)],
             Location::none(),
         ),
         // lam_util.ml:208-213 — ImmutableBlock: lift element if `SimpleForm`,
@@ -264,7 +264,7 @@ mod tests {
     fn return_clause_drops_let() {
         let x = ident("x", 10);
         let e = Lambda::Lconst(Constant::int(7));
-        let result = refine_let(LetKind::Strict, x.clone(), e, Lambda::Lvar(x));
+        let result = refine_let(LetKind::Strict, x, e, Lambda::Lvar(x));
         assert!(matches!(result, Lambda::Lconst(_)));
     }
 
@@ -276,7 +276,7 @@ mod tests {
         let e = Lambda::Lconst(Constant::int(3));
         let body = Lambda::prim(
             Primitive::Pidentity,
-            vec![Lambda::Lvar(x.clone())],
+            vec![Lambda::Lvar(x)],
             Location::none(),
         );
         let result = refine_let(LetKind::Strict, x, e, body);
@@ -323,7 +323,7 @@ mod tests {
         );
         let body = Lambda::prim(
             Primitive::Pidentity,
-            vec![Lambda::Lvar(x.clone())],
+            vec![Lambda::Lvar(x)],
             Location::none(),
         );
         let result = refine_let(LetKind::Strict, x, mk, body);
@@ -345,7 +345,7 @@ mod tests {
         let e = Lambda::Lconst(Constant::int(9));
         let apply = Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(Lambda::Lvar(f)),
-            ap_args: vec![Lambda::Lvar(x.clone())],
+            ap_args: vec![Lambda::Lvar(x)],
             ap_info: crate::lambda::ApInfo {
                 loc: Location::none(),
                 inlined: crate::lambda::InlineAttribute::Default,

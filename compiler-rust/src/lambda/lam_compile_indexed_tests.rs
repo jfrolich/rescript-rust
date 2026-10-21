@@ -2,6 +2,7 @@ use super::*;
 use crate::ident::IdentFlags;
 use crate::js_ir::printer::{print_block, print_expression};
 use crate::lambda::FieldDbgInfo;
+use crate::lambda::{FunctionAttribute, InlineAttribute};
 
 // A closed test continuation for the families moved so far. There is no
 // production catch-all or compatibility fallback. Every recursive edge in
@@ -14,13 +15,13 @@ fn expression(owner: &mut IndexedJsConsumer<'_>, node: NodeId) -> Compiled {
         },
         NodeView::Var(id) => Compiled {
             prelude: vec![],
-            expr: Expression::var(id.clone()),
+            expr: Expression::var(*id),
         },
         NodeView::GlobalModule(id) => Compiled {
             prelude: vec![],
             expr: Expression::qualified(
                 ModuleId {
-                    id: id.clone(),
+                    id: *id,
                     kind: Kind::Ml,
                     dynamic_import: false,
                 },
@@ -48,7 +49,7 @@ fn assign(owner: &mut IndexedJsConsumer<'_>, id: &Ident, node: NodeId) -> Block 
     if !block_terminates(&block) {
         block.push(Statement::exp(Expression::bin(
             BinOp::Eq,
-            Expression::var(id.clone()),
+            Expression::var(*id),
             compiled.expr,
         )));
     }
@@ -91,7 +92,7 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
             "run".into(),
             Lambda::function_(
                 1,
-                vec![param.clone()],
+                vec![param],
                 Lambda::var(param),
                 FunctionAttribute::default(),
                 crate::location::Location::none(),
@@ -148,10 +149,10 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
             "run".into(),
             Lambda::function_(
                 1,
-                vec![param.clone()],
+                vec![param],
                 Lambda::LtryWith(
                     Box::new(Lambda::var(param)),
-                    exception.clone(),
+                    exception,
                     Box::new(Lambda::unit()),
                 ),
                 FunctionAttribute::default(),
@@ -333,9 +334,9 @@ fn indexed_for_of_uses_full_flag_membership_and_allocates_before_iterable() {
                 Box::new(Lambda::unit()),
             ));
             let lambda = if await_ {
-                Lambda::Lfor_await_of(id.clone(), iterable, Box::new(Lambda::var(use_id)))
+                Lambda::Lfor_await_of(id, iterable, Box::new(Lambda::var(use_id)))
             } else {
-                Lambda::Lfor_of(id.clone(), iterable, Box::new(Lambda::var(use_id)))
+                Lambda::Lfor_of(id, iterable, Box::new(Lambda::var(use_id)))
             };
             let mut context = IndexedLambdaContext::from_lambda(lambda, []);
             let root = context.current_root();
@@ -487,8 +488,8 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
     let mut context = IndexedLambdaContext::from_lambda(
         Lambda::function_(
             1,
-            vec![id.clone()],
-            Lambda::var(id.clone()),
+            vec![id],
+            Lambda::var(id),
             FunctionAttribute {
                 async_: true,
                 directive: Some("use server".into()),
@@ -578,8 +579,8 @@ fn indexed_short_circuit_preserves_distinct_native_nonreturn_continuations() {
             let continuation = match mode {
                 0 => Continuation::NeedValue(TailType::NotTail),
                 1 => Continuation::EffectCall(TailType::NotTail),
-                2 => Continuation::Declare(LetKind::Alias, target.clone()),
-                _ => Continuation::Assign(target.clone()),
+                2 => Continuation::Declare(LetKind::Alias, target),
+                _ => Continuation::Assign(target),
             };
             let mut owner = IndexedJsConsumer::new(&mut compiler, &mut context);
             let output = owner.short_circuit_nonreturn(root, &continuation, &mut expression);

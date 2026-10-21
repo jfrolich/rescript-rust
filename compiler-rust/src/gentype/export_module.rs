@@ -268,9 +268,7 @@ pub fn extend_export_module_items(
         [] => panic!("assert false"),
         [_value_name] => {}
         [module_name, rest @ ..] => {
-            let export_module_item = export_module_items
-                .entry(module_name.clone())
-                .or_insert_with(IndexMap::new);
+            let export_module_item = export_module_items.entry(module_name.clone()).or_default();
             extend_export_module_item(rest, doc_string, export_module_item, type_, value_name);
         }
     }

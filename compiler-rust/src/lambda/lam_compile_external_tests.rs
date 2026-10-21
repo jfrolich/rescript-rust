@@ -136,7 +136,7 @@ fn lowers_module_external_calls_to_namespace_imports() {
                 kind: DeclKind::DeclVal {
                     name: "describe".to_string(),
                 },
-                module_: (Some(external_module("mocha"))).map(ModuleSource::ModuleNamed),
+                module_: Some(ModuleSource::ModuleNamed(external_module("mocha"))),
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
@@ -213,7 +213,7 @@ fn lowers_pjs_object_get_to_method_calls() {
     let lam = Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
             Primitive::PjsObjectGet("say".to_string()),
-            vec![Lambda::var(john.clone())],
+            vec![Lambda::var(john)],
             Location::none(),
         )),
         ap_args: vec![
@@ -262,7 +262,7 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                 kind: DeclKind::DeclVal {
                     name: "join".to_string(),
                 },
-                module_: (Some(external_module("path"))).map(ModuleSource::ModuleNamed),
+                module_: Some(ModuleSource::ModuleNamed(external_module("path"))),
                 scopes: vec![],
                 variadic: true,
                 effective_arity: 1,
@@ -320,7 +320,7 @@ fn lowers_js_new_to_new_expression() {
             }),
             transformed_jsx: false,
         },
-        vec![Lambda::var(arg.clone())],
+        vec![Lambda::var(arg)],
         Location::none(),
     );
 
@@ -375,7 +375,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                 kind: DeclKind::DeclVal {
                     name: "formatDate".to_string(),
                 },
-                module_: (Some(external_module("SomeModule"))).map(ModuleSource::ModuleNamed),
+                module_: Some(ModuleSource::ModuleNamed(external_module("SomeModule"))),
                 scopes: vec![],
                 variadic: false,
                 effective_arity: 1,
@@ -383,7 +383,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
             transformed_jsx: false,
         },
         vec![
-            Lambda::var(date.clone()),
+            Lambda::var(date),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         ],
@@ -677,7 +677,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
             },
         ]),
         vec![
-            Lambda::var(name_ident.clone()),
+            Lambda::var(name_ident),
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
         ],
         Location::none(),
@@ -888,7 +888,7 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
                 for_sure_no_nested_option: false,
             },
         }]),
-        vec![Lambda::var(opt.clone())],
+        vec![Lambda::var(opt)],
         Location::none(),
     ));
 
@@ -1041,7 +1041,7 @@ fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_l
             assert_eq!(code, "computeOption()");
             assert_eq!(*property, LetKind::Strict);
             assert!(!ident.same(obj));
-            ident.clone()
+            *ident
         }
         other => panic!("expected the prepared optional-value temp, got {other:?}"),
     };
@@ -1295,14 +1295,11 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
     );
     let lam = Lambda::let_(
         LetKind::Strict,
-        dict_ident.clone(),
+        dict_ident,
         dict_value,
         Lambda::prim(
-            Primitive::Pmakeblock(
-                TagInfo::ModuleExport(vec![dict_ident.clone()]),
-                Mutable::Immutable,
-            ),
-            vec![Lambda::var(dict_ident.clone())],
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![dict_ident]), Mutable::Immutable),
+            vec![Lambda::var(dict_ident)],
             Location::none(),
         ),
     );
@@ -1345,10 +1342,7 @@ fn compile_dict_has_primitive_emits_in_operator_like_ocaml() {
     let dict = Ident::create_local("dict");
     let compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PdictHas,
-        vec![
-            Lambda::var(dict.clone()),
-            Lambda::const_(Constant::string("key1")),
-        ],
+        vec![Lambda::var(dict), Lambda::const_(Constant::string("key1"))],
         Location::none(),
     ));
 
@@ -1366,24 +1360,24 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
                 program: Program::new(
                     vec![
                         Statement::variable(VariableDeclaration {
-                            ident: dict.clone(),
+                            ident: dict,
                             value: Some(Expression::new(ExpressionDesc::Object(None, vec![]))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
                         }),
                         Statement::variable(VariableDeclaration {
-                            ident: result.clone(),
+                            ident: result,
                             value: Some(Expression::new(ExpressionDesc::Typeof(Box::new(
                                 Expression::new(ExpressionDesc::In(
                                     Box::new(Expression::string("key1")),
-                                    Box::new(Expression::var(dict.clone())),
+                                    Box::new(Expression::var(dict)),
                                 )),
                             )))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
                         }),
                     ],
-                    vec![result.clone()],
+                    vec![result],
                 ),
                 modules: vec![],
                 side_effect: None,
@@ -1674,7 +1668,7 @@ fn preserves_impure_side_effect_only_ml_dependencies_from_lambda() {
     let deps = compiler.compile_deps_program(&Lambda::let_(
         LetKind::Alias,
         include_binding,
-        Lambda::global_module(side_effect.clone()),
+        Lambda::global_module(side_effect),
         Lambda::unit(),
     ));
 
@@ -1711,7 +1705,7 @@ fn module_side_effect_reason_uses_first_impure_group_in_final_order_like_ocaml()
         Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
         Lambda::let_(
             LetKind::Strict,
-            second.clone(),
+            second,
             Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
             Lambda::unit(),
         ),
@@ -1726,7 +1720,7 @@ fn module_side_effect_reason_uses_binding_name_for_impure_group_bodies() {
     let lam = Lambda::seq(
         Lambda::let_(
             LetKind::Strict,
-            match_id.clone(),
+            match_id,
             Lambda::prim(Primitive::Pdebugger, vec![], Location::none()),
             Lambda::unit(),
         ),
@@ -1873,17 +1867,17 @@ fn lowers_nullable_predicates_to_js_null_checks() {
 
     let null_compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisNull,
-        vec![Lambda::var(value.clone())],
+        vec![Lambda::var(value)],
         Location::none(),
     ));
     let undefined_compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisUndefined,
-        vec![Lambda::var(value.clone())],
+        vec![Lambda::var(value)],
         Location::none(),
     ));
     let nullable_compiled = compiler.compile_expr(&Lambda::prim(
         Primitive::PisNullUndefined,
-        vec![Lambda::var(value.clone())],
+        vec![Lambda::var(value)],
         Location::none(),
     ));
 

@@ -414,12 +414,12 @@ impl<'src> Parser<'src> {
 
     /// Get the start position of a location (cloned).
     pub fn loc_start(&self, loc: LocIdx) -> Position {
-        self.arena.loc_start(loc).clone()
+        *self.arena.loc_start(loc)
     }
 
     /// Get the end position of a location (cloned).
     pub fn loc_end(&self, loc: LocIdx) -> Position {
-        self.arena.loc_end(loc).clone()
+        *self.arena.loc_end(loc)
     }
 
     /// Get the start position index of a location.
@@ -526,7 +526,7 @@ impl<'src> Parser<'src> {
     /// Errors are only recorded if the current region has `Report` status.
     /// After recording, the region is set to `Silent` to avoid duplicates.
     pub fn err(&mut self, category: DiagnosticCategory) {
-        self.err_at(self.start_pos.clone(), self.end_pos.clone(), category);
+        self.err_at(self.start_pos, self.end_pos, category);
     }
 
     /// Record a diagnostic error at specific positions.
@@ -607,7 +607,7 @@ impl<'src> Parser<'src> {
         let context: Vec<(Grammar, Position)> = self.breadcrumbs.clone();
         self.err_at(
             start_pos,
-            self.end_pos.clone(),
+            self.end_pos,
             DiagnosticCategory::Unexpected {
                 token: self.token.clone().into_owned(),
                 context,
@@ -647,7 +647,7 @@ impl<'src> Parser<'src> {
         // We replicate this by reusing the end_pos_idx.
         let (prev_end, reuse_end_pos_idx) = match prev_end_pos {
             Some(pos) => (pos, false),
-            None => (self.end_pos.clone(), true),
+            None => (self.end_pos, true),
         };
         let old_end_pos_idx = self.end_pos_idx;
 
@@ -668,11 +668,11 @@ impl<'src> Parser<'src> {
                 Token::Comment(ref c) => {
                     // Collect comment and continue scanning.
                     let mut comment = c.clone();
-                    comment.set_prev_tok_end_pos(self.end_pos.clone());
+                    comment.set_prev_tok_end_pos(self.end_pos);
                     comment.set_prev_tok_is_question(preceding_is_question);
                     preceding_is_question = false;
                     self.comments.push(comment);
-                    self.prev_end_pos = self.end_pos.clone();
+                    self.prev_end_pos = self.end_pos;
                     self.prev_end_pos_idx = self.end_pos_idx;
                     self.end_pos = result.end_pos;
                     if !in_lookahead {
@@ -719,7 +719,7 @@ impl<'src> Parser<'src> {
         self.diagnostics.extend(scanner_diagnostics);
 
         self.token = result.token;
-        self.prev_end_pos = self.end_pos.clone();
+        self.prev_end_pos = self.end_pos;
         self.prev_end_pos_idx = self.end_pos_idx;
         self.start_pos = result.start_pos;
         self.end_pos = result.end_pos;
@@ -740,9 +740,7 @@ impl<'src> Parser<'src> {
             Token::ForwardslashDot => 2,
             _ => unreachable!("next_regex_token on a non-slash token"),
         };
-        let result = self
-            .scanner
-            .scan_regex(self.start_pos.clone(), prefix_length);
+        let result = self.scanner.scan_regex(self.start_pos, prefix_length);
 
         // Propagate scanner diagnostics to parser
         let scanner_diagnostics = self.scanner.take_diagnostics();
@@ -788,18 +786,18 @@ impl<'src> Parser<'src> {
         } else {
             let category = DiagnosticCategory::Expected {
                 context: grammar,
-                pos: self.prev_end_pos.clone(),
+                pos: self.prev_end_pos,
                 token,
             };
             // OCaml uses prev_end_pos for start and end_pos (current token's end) for end.
             // This creates a span from where we expected the token to the current position.
-            self.err_at(self.prev_end_pos.clone(), self.end_pos.clone(), category);
+            self.err_at(self.prev_end_pos, self.end_pos, category);
         }
     }
 
     /// Push a breadcrumb for error recovery.
     pub fn leave_breadcrumb(&mut self, grammar: Grammar) {
-        self.breadcrumbs.push((grammar, self.start_pos.clone()));
+        self.breadcrumbs.push((grammar, self.start_pos));
     }
 
     /// Pop the most recent breadcrumb.
@@ -831,9 +829,9 @@ impl<'src> Parser<'src> {
 
         // Save parser state (including position indices for identity-based sharing)
         let token = self.token.clone();
-        let start_pos = self.start_pos.clone();
-        let end_pos = self.end_pos.clone();
-        let prev_end_pos = self.prev_end_pos.clone();
+        let start_pos = self.start_pos;
+        let end_pos = self.end_pos;
+        let prev_end_pos = self.prev_end_pos;
         let start_pos_idx = self.start_pos_idx;
         let end_pos_idx = self.end_pos_idx;
         let prev_end_pos_idx = self.prev_end_pos_idx;
@@ -908,9 +906,9 @@ impl<'src> Parser<'src> {
         ParserSnapshot {
             scanner_snapshot: self.scanner.snapshot(),
             token: self.token.clone(),
-            start_pos: self.start_pos.clone(),
-            end_pos: self.end_pos.clone(),
-            prev_end_pos: self.prev_end_pos.clone(),
+            start_pos: self.start_pos,
+            end_pos: self.end_pos,
+            prev_end_pos: self.prev_end_pos,
             start_pos_idx: self.start_pos_idx,
             end_pos_idx: self.end_pos_idx,
             prev_end_pos_idx: self.prev_end_pos_idx,
@@ -1039,7 +1037,7 @@ impl<'src> Parser<'src> {
                 self.token = operator;
                 self.end_pos = self.scanner.position();
                 if self.lookahead_depth == 0 {
-                    self.end_pos_idx = self.arena.push_position(self.end_pos.clone());
+                    self.end_pos_idx = self.arena.push_position(self.end_pos);
                 }
             }
         }

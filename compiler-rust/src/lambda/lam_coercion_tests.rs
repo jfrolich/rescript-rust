@@ -7,13 +7,13 @@ fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
     let other = Ident::create_local("y");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: alias.clone(),
+            ident: alias,
             value: Some(Expression::undefined(false)),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: other.clone(),
+            ident: other,
             value: Some(Expression::number(Number::int(13))),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
@@ -23,12 +23,12 @@ fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![alias.clone(), other.clone()],
-            values: vec![Expression::undefined(false), Expression::var(other.clone())],
+            exports: vec![alias, other],
+            values: vec![Expression::undefined(false), Expression::var(other)],
         },
     );
 
-    assert_eq!(exports, vec![alias.clone(), other.clone()]);
+    assert_eq!(exports, vec![alias, other]);
     let [first, second] = block.as_slice() else {
         panic!("expected the existing bindings to be reused without rebound placeholders");
     };
@@ -53,7 +53,7 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
     let callback = Ident::create_persistent("callback");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: alias.clone(),
+            ident: alias,
             value: Some(Expression::undefined(false)),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
@@ -68,7 +68,7 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![alias.clone()],
+            exports: vec![alias],
             values: vec![Expression::undefined(false)],
         },
     );
@@ -90,7 +90,7 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
                 "expected a rebound export placeholder at the tail"
             );
             assert_eq!(ident.name(), alias.name());
-            assert_eq!(exports, vec![ident.clone()]);
+            assert_eq!(exports, vec![*ident]);
         }
         other => panic!("expected the trailing rebound export placeholder, got {other:?}"),
     }
@@ -105,12 +105,12 @@ fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw()
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
+            exports: vec![exported],
             values: vec![Expression::undefined(false)],
         },
     );
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [stmt] = block.as_slice() else {
         panic!("expected the terminating effect to stay alone in the block");
     };
@@ -131,14 +131,14 @@ fn coerce_and_resolve_keep_declared_same_name_export_aliases() {
     let exported = Ident::create_local("broken");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: target.clone(),
+            ident: target,
             value: Some(Expression::number(Number::int(1))),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(target.clone())),
+            ident: exported,
+            value: Some(Expression::var(target)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -147,13 +147,13 @@ fn coerce_and_resolve_keep_declared_same_name_export_aliases() {
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(target.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(target)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
 
     let [first, second] = block.as_slice() else {
         panic!("expected the original target and alias bindings to remain");
@@ -183,13 +183,13 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
     let param = Ident::create_local("param");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: source_level_broken.clone(),
-            value: Some(Expression::var(do_something_async.clone())),
+            ident: source_level_broken,
+            value: Some(Expression::var(do_something_async)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: target.clone(),
+            ident: target,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![param],
@@ -203,8 +203,8 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(target.clone())),
+            ident: exported,
+            value: Some(Expression::var(target)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -213,13 +213,13 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(target.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(target)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second, third] = block.as_slice() else {
         panic!(
             "expected the earlier same-name binding, async target, and alias bindings to remain"
@@ -283,8 +283,8 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
     let declared_alias = Ident::create_local("v");
     let exported = Ident::create_local("v");
     let mut block = vec![Statement::variable(VariableDeclaration {
-        ident: declared_alias.clone(),
-        value: Some(Expression::var(target.clone())),
+        ident: declared_alias,
+        value: Some(Expression::var(target)),
         property: LetKind::Alias,
         ident_info: IdentInfo::default(),
     })];
@@ -298,7 +298,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![declared_alias.clone()]);
+    assert_eq!(exports, vec![declared_alias]);
     let [stmt] = block.as_slice() else {
         panic!("expected the existing same-name alias binding to be reused");
     };
@@ -322,7 +322,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
     let declared_alias = Ident::create_local("empty");
     let exported = Ident::create_local("empty");
     let mut block = vec![Statement::variable(VariableDeclaration {
-        ident: declared_alias.clone(),
+        ident: declared_alias,
         value: Some(Expression::qualified(
             set_gen.clone(),
             Some("empty".to_string()),
@@ -340,7 +340,7 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![declared_alias.clone()]);
+    assert_eq!(exports, vec![declared_alias]);
     let [stmt] = block.as_slice() else {
         panic!("expected the existing same-name module field alias to be reused");
     };
@@ -363,7 +363,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
     let param = Ident::create_local("param");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: target.clone(),
+            ident: target,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![param],
@@ -377,13 +377,13 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: declared_alias.clone(),
-            value: Some(Expression::var(target.clone())),
+            ident: declared_alias,
+            value: Some(Expression::var(target)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(declared_alias.clone()),
+            Expression::var(declared_alias),
             vec![Expression::string("a")],
             CallInfo::default(),
         )),
@@ -392,13 +392,13 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(declared_alias.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(declared_alias)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![declared_alias.clone()]);
+    assert_eq!(exports, vec![declared_alias]);
     let [first, second, third] = block.as_slice() else {
         panic!("expected the function binding, preserved alias, and later top-level effect");
     };
@@ -469,7 +469,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
     let param = Ident::create_local("param");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: target.clone(),
+            ident: target,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![param],
@@ -483,19 +483,19 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: renamed_same_name.clone(),
-            value: Some(Expression::var(target.clone())),
+            ident: renamed_same_name,
+            value: Some(Expression::var(target)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: declared_alias.clone(),
+            ident: declared_alias,
             value: Some(Expression::var(renamed_same_name)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(declared_alias.clone()),
+            Expression::var(declared_alias),
             vec![Expression::string("a")],
             CallInfo::default(),
         )),
@@ -504,13 +504,13 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(declared_alias.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(declared_alias)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![declared_alias.clone()]);
+    assert_eq!(exports, vec![declared_alias]);
     let [first, second, third, fourth] = block.as_slice() else {
         panic!(
             "expected the original function, renamed alias chain, preserved same-name alias, and later top-level effect"
@@ -597,12 +597,12 @@ fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_with
     let sink = Ident::create_persistent("sink");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: fib.clone(),
+            ident: fib,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![n.clone()],
+                params: vec![n],
                 body: vec![Statement::return_(Expression::call(
-                    Expression::var(fib.clone()),
+                    Expression::var(fib),
                     vec![Expression::var(n)],
                     CallInfo::default(),
                 ))],
@@ -615,13 +615,13 @@ fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_with
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(fib.clone())),
+            ident: exported,
+            value: Some(Expression::var(fib)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(sink.clone()),
+            Expression::var(sink),
             vec![],
             CallInfo::default(),
         )),
@@ -630,8 +630,8 @@ fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_with
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(fib.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(fib)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
@@ -692,7 +692,7 @@ fn resolve_export_aliases_prefers_underlying_declared_same_name_target_over_self
     let param = Ident::create_local("param");
     let block = vec![
         Statement::variable(VariableDeclaration {
-            ident: target.clone(),
+            ident: target,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![param],
@@ -706,8 +706,8 @@ fn resolve_export_aliases_prefers_underlying_declared_same_name_target_over_self
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(target.clone())),
+            ident: exported,
+            value: Some(Expression::var(target)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -729,7 +729,7 @@ fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to
     let exported = Ident::create_local("empty");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: declared_alias.clone(),
+            ident: declared_alias,
             value: Some(Expression::qualified(
                 set_gen.clone(),
                 Some("empty".to_string()),
@@ -738,7 +738,7 @@ fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(declared_alias.clone()),
+            Expression::var(declared_alias),
             vec![],
             CallInfo::default(),
         )),
@@ -747,13 +747,13 @@ fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
+            exports: vec![exported],
             values: vec![Expression::var(declared_alias)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the internal use plus the late export binding");
     };
@@ -806,16 +806,16 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused()
     let accessor = Ident::create_local("accessor");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: declared.clone(),
+            ident: declared,
             value: Some(Expression::string("NoParam")),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: compose.clone(),
+            ident: compose,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![a.clone(), accessor.clone()],
+                params: vec![a, accessor],
                 body: vec![Statement::return_(Expression::call(
                     Expression::var(accessor),
                     vec![Expression::var(a)],
@@ -834,8 +834,8 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused()
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(declared.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(declared)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
@@ -883,17 +883,17 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
     let concat = Ident::create_local("concat");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(Expression::string("")),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: concat.clone(),
+            ident: concat,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![],
-                body: vec![Statement::return_(Expression::var(exported.clone()))],
+                body: vec![Statement::return_(Expression::var(exported))],
                 env: Default::default(),
                 return_unit: false,
                 async_: false,
@@ -907,13 +907,13 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the literal export plus the later function binding");
     };
@@ -973,26 +973,26 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
     let ff = Ident::create_local("ff");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(Expression::string("hello world")),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: derived.clone(),
+            ident: derived,
             value: Some(Expression::new(ExpressionDesc::StringAppend(
-                Box::new(Expression::var(exported.clone())),
+                Box::new(Expression::var(exported)),
                 Box::new(Expression::string("not")),
             ))),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: ff.clone(),
+            ident: ff,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![],
-                body: vec![Statement::return_(Expression::var(derived.clone()))],
+                body: vec![Statement::return_(Expression::var(derived))],
                 env: Default::default(),
                 return_unit: false,
                 async_: false,
@@ -1006,13 +1006,13 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second, third] = block.as_slice() else {
         panic!("expected the rewritten initializer, function binding, and late export");
     };
@@ -1080,32 +1080,32 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
     let ff = Ident::create_local("ff");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: root.clone(),
+            ident: root,
             value: Some(Expression::string("hello world")),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(root.clone())),
+            ident: exported,
+            value: Some(Expression::var(root)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: derived.clone(),
+            ident: derived,
             value: Some(Expression::new(ExpressionDesc::StringAppend(
-                Box::new(Expression::var(exported.clone())),
+                Box::new(Expression::var(exported)),
                 Box::new(Expression::string("not")),
             ))),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: ff.clone(),
+            ident: ff,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![],
-                body: vec![Statement::return_(Expression::var(derived.clone()))],
+                body: vec![Statement::return_(Expression::var(derived))],
                 env: Default::default(),
                 return_unit: false,
                 async_: false,
@@ -1119,13 +1119,13 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second, third, fourth] = block.as_slice() else {
         panic!(
             "expected the root binding, rewritten initializer, function binding, and late export"
@@ -1216,16 +1216,16 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function
     let n = Ident::create_local("n");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(Expression::qualified(stdlib_lazy, Some("get".to_string()))),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: fib.clone(),
+            ident: fib,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![n.clone()],
+                params: vec![n],
                 body: vec![Statement::return_(Expression::var(n))],
                 env: Default::default(),
                 return_unit: false,
@@ -1240,13 +1240,13 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the qualified alias plus the later function binding");
     };
@@ -1295,13 +1295,13 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
     let effect = Ident::create_local("effect");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: declared.clone(),
+            ident: declared,
             value: Some(Expression::qualified(set_gen, Some("empty".to_string()))),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(effect.clone()),
+            Expression::var(effect),
             vec![],
             CallInfo::default(),
         )),
@@ -1310,8 +1310,8 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(declared.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(declared)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
@@ -1366,7 +1366,7 @@ fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unu
     let effect = Ident::create_local("effect");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(Expression::qualified(
                 belt_mutable_set_int.clone(),
                 Some("fromArray".to_string()),
@@ -1375,7 +1375,7 @@ fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unu
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(effect.clone()),
+            Expression::var(effect),
             vec![],
             CallInfo::default(),
         )),
@@ -1384,13 +1384,13 @@ fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unu
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the runtime alias binding to remain ahead of the later effect");
     };
@@ -1444,14 +1444,14 @@ fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
     let exported = Ident::create_local("bar");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: foo.clone(),
+            ident: foo,
             value: Some(Expression::qualified(file_js, Some("foo".to_string()))),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: bar.clone(),
-            value: Some(Expression::var(foo.clone())),
+            ident: bar,
+            value: Some(Expression::var(foo)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -1460,13 +1460,13 @@ fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
+            exports: vec![exported],
             values: vec![Expression::var(bar)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the imported alias plus the late export alias");
     };
@@ -1523,19 +1523,16 @@ fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_to
     let y = Ident::create_local("Y");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: int_hash.clone(),
+            ident: int_hash,
             value: Some(Expression::qualified(hash_utils, Some("hash".to_string()))),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: y.clone(),
+            ident: y,
             value: Some(Expression::call(
                 Expression::qualified(belt_id, Some("hashable".to_string())),
-                vec![
-                    Expression::var(int_hash.clone()),
-                    Expression::var(int_eq.clone()),
-                ],
+                vec![Expression::var(int_hash), Expression::var(int_eq)],
                 CallInfo::default(),
             )),
             property: LetKind::Strict,
@@ -1546,16 +1543,13 @@ fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_to
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![int_hash.clone(), y.clone()],
-            values: vec![
-                Expression::var(int_hash.clone()),
-                Expression::var(y.clone()),
-            ],
+            exports: vec![int_hash, y],
+            values: vec![Expression::var(int_hash), Expression::var(y)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![int_hash.clone(), y.clone()]);
+    assert_eq!(exports, vec![int_hash, y]);
     let [first, second] = block.as_slice() else {
         panic!("expected the alias binding plus the dependent top-level initializer");
     };
@@ -1602,14 +1596,14 @@ fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level
     let exported = Ident::create_local("myJson");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(imported.clone())),
+            ident: exported,
+            value: Some(Expression::var(imported)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
             Expression::var(sink),
-            vec![Expression::var(exported.clone())],
+            vec![Expression::var(exported)],
             CallInfo::default(),
         )),
     ];
@@ -1617,13 +1611,13 @@ fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the alias binding to stay ahead of the top-level effect");
     };
@@ -1672,10 +1666,10 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
     let arg = Ident::create_local("arg");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: converter.clone(),
+            ident: converter,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![param.clone()],
+                params: vec![param],
                 body: vec![Statement::return_(Expression::var(param))],
                 env: Default::default(),
                 return_unit: false,
@@ -1686,8 +1680,8 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(converter.clone())),
+            ident: exported,
+            value: Some(Expression::var(converter)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -1695,9 +1689,9 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
             Expression::var(sink),
             vec![Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![arg.clone()],
+                params: vec![arg],
                 body: vec![Statement::return_(Expression::call(
-                    Expression::var(exported.clone()),
+                    Expression::var(exported),
                     vec![Expression::var(arg)],
                     CallInfo::default(),
                 ))],
@@ -1713,13 +1707,13 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second, third] = block.as_slice() else {
         panic!("expected the function binding, later effect, and late export alias");
     };
@@ -1793,7 +1787,7 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
     let global_this = Ident::create_persistent("globalThis");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: process.clone(),
+            ident: process,
             value: Some(Expression::new(ExpressionDesc::StaticIndex(
                 Box::new(Expression::var(global_this)),
                 "process".to_string(),
@@ -1803,8 +1797,8 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
             ident_info: IdentInfo::default(),
         }),
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
-            value: Some(Expression::var(process.clone())),
+            ident: exported,
+            value: Some(Expression::var(process)),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -1813,13 +1807,13 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected both non-function aliases to stay materialized");
     };
@@ -1860,14 +1854,14 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
     let qualified = Expression::qualified(module.clone(), Some("v".to_string()));
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(qualified.clone()),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
             Expression::var(sink),
-            vec![Expression::var(exported.clone())],
+            vec![Expression::var(exported)],
             CallInfo::default(),
         )),
     ];
@@ -1875,13 +1869,13 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the rewritten later effect plus the late export alias");
     };
@@ -1939,7 +1933,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
     let effect = Ident::create_persistent("effect");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(Expression::qualified(
                 module.clone(),
                 Some("make".to_string()),
@@ -1948,7 +1942,7 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
             ident_info: IdentInfo::default(),
         }),
         Statement::exp(Expression::call(
-            Expression::var(effect.clone()),
+            Expression::var(effect),
             vec![],
             CallInfo::default(),
         )),
@@ -1957,13 +1951,13 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
-            values: vec![Expression::var(exported.clone())],
+            exports: vec![exported],
+            values: vec![Expression::var(exported)],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the later effect followed by the late ML export alias");
     };
@@ -2021,7 +2015,7 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
     let sink = Ident::create_persistent("sink");
     let mut block = vec![
         Statement::variable(VariableDeclaration {
-            ident: exported.clone(),
+            ident: exported,
             value: Some(Expression::qualified(
                 module.clone(),
                 Some("default".to_string()),
@@ -2031,7 +2025,7 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
         }),
         Statement::exp(Expression::call(
             Expression::var(sink),
-            vec![Expression::var(exported.clone())],
+            vec![Expression::var(exported)],
             CallInfo::default(),
         )),
     ];
@@ -2039,13 +2033,13 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
     let exports = compiler.coerce_toplevel_exports(
         &mut block,
         ExtractedExports {
-            exports: vec![exported.clone()],
+            exports: vec![exported],
             values: vec![Expression::qualified(module, Some("default".to_string()))],
         },
     );
     let exports = resolve_export_aliases(&block, exports);
 
-    assert_eq!(exports, vec![exported.clone()]);
+    assert_eq!(exports, vec![exported]);
     let [first, second] = block.as_slice() else {
         panic!("expected the qualified alias binding to remain ahead of the value-position effect");
     };

@@ -565,37 +565,37 @@ fn compile_one(
     // namespace signatures into the shared registry, and the DAG scheduler
     // guarantees all dependencies of this module are registered before it
     // is dispatched.
-    if build_command_state.build_mode().is_in_process() {
-        if let SourceType::SourceFile(_) = &module.source_type {
-            let interface_generation_before = build_command_state.get_interface_generation(module_name);
-            let result = compile_module_in_process_to_js_boundary(
-                package,
-                module,
-                module_name,
-                registry_snapshot,
-                stored_asts.expect("in-process compile requires stored AST snapshot"),
-                build_state,
-                build_command_state,
-                in_process_hooks.as_ref(),
-            );
-            let interface_generation_after = build_command_state.get_interface_generation(module_name);
-            return match result {
-                Ok(mut msg) => {
-                    let is_clean_interface = interface_generation_before.is_some()
-                        && interface_generation_before == interface_generation_after;
-                    msg.is_clean = is_clean_interface;
-                    WorkerMsg::PreJsReady(msg)
-                }
-                Err(err) => WorkerMsg::Completed(CompletionMsg {
-                    module_name: module_name.to_string(),
-                    result: Err(err),
-                    interface_result: None,
-                    is_clean: false,
-                    is_compiled: true,
-                    registry_updates: Vec::new(),
-                }),
-            };
-        }
+    if build_command_state.build_mode().is_in_process()
+        && let SourceType::SourceFile(_) = &module.source_type
+    {
+        let interface_generation_before = build_command_state.get_interface_generation(module_name);
+        let result = compile_module_in_process_to_js_boundary(
+            package,
+            module,
+            module_name,
+            registry_snapshot,
+            stored_asts.expect("in-process compile requires stored AST snapshot"),
+            build_state,
+            build_command_state,
+            in_process_hooks.as_ref(),
+        );
+        let interface_generation_after = build_command_state.get_interface_generation(module_name);
+        return match result {
+            Ok(mut msg) => {
+                let is_clean_interface = interface_generation_before.is_some()
+                    && interface_generation_before == interface_generation_after;
+                msg.is_clean = is_clean_interface;
+                WorkerMsg::PreJsReady(msg)
+            }
+            Err(err) => WorkerMsg::Completed(CompletionMsg {
+                module_name: module_name.to_string(),
+                result: Err(err),
+                interface_result: None,
+                is_clean: false,
+                is_compiled: true,
+                registry_updates: Vec::new(),
+            }),
+        };
     }
 
     WorkerMsg::Completed(match &module.source_type {
@@ -2090,10 +2090,10 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
                 }
             }
             "-enable-experimental" => {
-                if let Some(feature) = iter.next() {
-                    if feature == "LetUnwrap" {
-                        parsed.experimental_let_unwrap = true;
-                    }
+                if let Some(feature) = iter.next()
+                    && feature == "LetUnwrap"
+                {
+                    parsed.experimental_let_unwrap = true;
                 }
             }
             "-open" => {
@@ -2837,33 +2837,32 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
     if let Ok(entries) = std::fs::read_dir(runtime_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if ext == "res" || ext == "resi" {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        // Capitalize the module name (Pervasives, Js, etc.)
-                        let module_name = {
-                            let mut chars = stem.chars();
-                            match chars.next() {
-                                None => continue,
-                                Some(ch) => {
-                                    format!("{}{}", ch.to_uppercase(), chars.as_str())
-                                }
-                            }
-                        };
-
-                        // For .res files, check if a .resi exists and prefer it
-                        if ext == "res" {
-                            let resi_path = path.with_extension("resi");
-                            if resi_path.exists() {
-                                fallback_paths.insert(module_name, resi_path);
-                            } else {
-                                fallback_paths.entry(module_name).or_insert(path.clone());
-                            }
-                        } else {
-                            // .resi always takes precedence
-                            fallback_paths.insert(module_name, path.clone());
+            if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && (ext == "res" || ext == "resi")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                // Capitalize the module name (Pervasives, Js, etc.)
+                let module_name = {
+                    let mut chars = stem.chars();
+                    match chars.next() {
+                        None => continue,
+                        Some(ch) => {
+                            format!("{}{}", ch.to_uppercase(), chars.as_str())
                         }
                     }
+                };
+
+                // For .res files, check if a .resi exists and prefer it
+                if ext == "res" {
+                    let resi_path = path.with_extension("resi");
+                    if resi_path.exists() {
+                        fallback_paths.insert(module_name, resi_path);
+                    } else {
+                        fallback_paths.entry(module_name).or_insert(path.clone());
+                    }
+                } else {
+                    // .resi always takes precedence
+                    fallback_paths.insert(module_name, path.clone());
                 }
             }
         }

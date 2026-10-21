@@ -3062,7 +3062,7 @@ fn push_optional_expression_vec(
 
 fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeItem>) {
     let CaseClause {
-        source_loc,
+        source_loc: _,
         body,
         should_break: _,
         comment: _,
@@ -3072,7 +3072,7 @@ fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeI
 
 fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeItem>) {
     let Statement {
-        source_loc,
+        source_loc: _,
         desc,
         comment: _,
     } = statement;
@@ -3142,7 +3142,7 @@ fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeI
 
 fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<DisposeItem>) {
     let Expression {
-        source_loc,
+        source_loc: _,
         desc,
         comment: _,
     } = expression;
@@ -3239,7 +3239,7 @@ mod tests {
     #[test]
     fn test_variable_expression() {
         let id = Ident::create_local("x");
-        let expr = Expression::var(id.clone());
+        let expr = Expression::var(id);
         match &expr.desc {
             ExpressionDesc::Var(VIdent::Id(i)) => {
                 assert_eq!(i.name(), "x");
@@ -3587,9 +3587,7 @@ mod tests {
     fn test_cond_negated_test_swaps_non_empty_branches() {
         let value = Ident::create_local("value");
         let expr = Expression::cond(
-            Expression::new(ExpressionDesc::JsNot(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::JsNot(Box::new(Expression::var(value)))),
             Expression::number(Number::int(1)),
             Expression::number(Number::int(2)),
         );
@@ -3847,12 +3845,12 @@ mod tests {
             Expression::var(Ident::create_local("cond")),
             vec![Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(target.clone()),
+                Expression::var(target),
                 Expression::number(Number::int(1)),
             ))],
             vec![Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(target.clone()),
+                Expression::var(target),
                 Expression::number(Number::int(2)),
             ))],
         );
@@ -3952,9 +3950,9 @@ mod tests {
             CallInfo::default(),
         );
         let stmt = Statement::if_(
-            Expression::var(outer.clone()),
+            Expression::var(outer),
             vec![Statement::new(StatementDesc::If(
-                Expression::var(inner.clone()),
+                Expression::var(inner),
                 vec![Statement::exp(truthy.clone())],
                 vec![Statement::exp(falsy.clone())],
             ))],
@@ -4004,14 +4002,12 @@ mod tests {
         let value = Ident::create_local("value");
         let outer_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("string"),
         );
         let inner_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::string("My name is"),
         );
         let success = Expression::call(
@@ -4136,18 +4132,14 @@ mod tests {
             BinOp::Or,
             Expression::bin(
                 BinOp::EqEqEq,
-                Expression::var(key.clone()),
+                Expression::var(key),
                 Expression::string("space"),
             ),
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string("a"),
-            ),
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a")),
         );
         let inner_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(key.clone()),
+            Expression::var(key),
             Expression::string("space"),
         );
         let then_block = vec![Statement::new(StatementDesc::If(
@@ -4190,18 +4182,14 @@ mod tests {
             BinOp::Or,
             Expression::bin(
                 BinOp::EqEqEq,
-                Expression::var(key.clone()),
+                Expression::var(key),
                 Expression::string("space"),
             ),
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string("a"),
-            ),
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a")),
         );
         let inner_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(key.clone()),
+            Expression::var(key),
             Expression::string("space"),
         );
         let active_guard = Statement::new(StatementDesc::If(
@@ -4244,15 +4232,11 @@ mod tests {
     #[test]
     fn test_if_statement_keeps_positive_strict_null_success_return_branch() {
         let elem = Ident::create_local("elem");
-        let cond = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(elem.clone()),
-            Expression::null(),
-        );
+        let cond = Expression::bin(BinOp::NotEqEq, Expression::var(elem), Expression::null());
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(elem.clone())],
+                vec![Expression::var(elem)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::number(Number::int(2))),
@@ -4307,12 +4291,12 @@ mod tests {
     #[test]
     fn test_if_statement_rewrites_loose_nullish_else_to_fallthrough() {
         let elem = Ident::create_local("elem");
-        let cond = Expression::is_null_or_undefined(Expression::var(elem.clone()));
+        let cond = Expression::is_null_or_undefined(Expression::var(elem));
         let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
         let else_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(elem.clone())],
+                vec![Expression::var(elem)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::number(Number::int(2))),
@@ -4332,11 +4316,11 @@ mod tests {
     fn test_if_statement_rewrites_loose_nullish_conditional_unit_success_tail_like_ocaml() {
         let value = Ident::create_local("value");
         let flag = Ident::create_local("flag");
-        let cond = Expression::is_null_or_undefined(Expression::var(value.clone()));
+        let cond = Expression::is_null_or_undefined(Expression::var(value));
         let unit_effect = Expression::new(ExpressionDesc::Seq(
             Box::new(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Box::new(Expression::undefined(true)),
@@ -4402,13 +4386,13 @@ mod tests {
         let value = Ident::create_local("value");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(true),
         );
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::undefined(true)),
@@ -4463,15 +4447,11 @@ mod tests {
     #[test]
     fn test_if_statement_rewrites_strict_null_unit_success_tail_like_ocaml() {
         let value = Ident::create_local("value");
-        let cond = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
+        let cond = Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null());
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::undefined(true)),
@@ -4528,18 +4508,18 @@ mod tests {
         let value = Ident::create_local("value");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::number(Number::int(2))),
         ];
-        let else_block = vec![Statement::return_(Expression::var(value.clone()))];
+        let else_block = vec![Statement::return_(Expression::var(value))];
 
         let stmt = Statement::if_(cond.clone(), then_block, else_block);
 
@@ -4592,22 +4572,18 @@ mod tests {
         let tmp = Ident::create_local("tmp");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(match_id.clone()),
+            Expression::var(match_id),
             Expression::undefined(false),
         );
         let then_block = vec![
             Statement::variable(VariableDeclaration {
-                ident: tmp.clone(),
-                value: Some(Expression::var(match_id.clone())),
+                ident: tmp,
+                value: Some(Expression::var(match_id)),
                 property: crate::lambda::LetKind::Strict,
                 ident_info: IdentInfo::default(),
             }),
             Statement::if_(
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(tmp.clone()),
-                    Expression::null(),
-                ),
+                Expression::bin(BinOp::EqEqEq, Expression::var(tmp), Expression::null()),
                 vec![Statement::return_(Expression::string("yes"))],
                 vec![],
             ),
@@ -4672,14 +4648,14 @@ mod tests {
         let next_value = Ident::create_local("nextValue");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let then_block = vec![
             Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(next_value.clone()),
-                Expression::var(value.clone()),
+                Expression::var(next_value),
+                Expression::var(value),
             )),
             Statement::continue_(),
         ];
@@ -4743,13 +4719,13 @@ mod tests {
         let next_value = Ident::create_local("nextValue");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let then_block = vec![Statement::block(vec![
             Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(next_value.clone()),
+                Expression::var(next_value),
                 Expression::var(value),
             )),
             Statement::continue_(),
@@ -4792,10 +4768,10 @@ mod tests {
             CallInfo::default(),
         );
         let stmt = Statement::if_(
-            Expression::var(outer.clone()),
+            Expression::var(outer),
             vec![Statement::exp(truthy.clone())],
             vec![Statement::new(StatementDesc::If(
-                Expression::var(inner.clone()),
+                Expression::var(inner),
                 vec![Statement::exp(truthy)],
                 vec![Statement::exp(falsy.clone())],
             ))],
@@ -4846,14 +4822,10 @@ mod tests {
             BinOp::Or,
             Expression::bin(
                 BinOp::EqEqEq,
-                Expression::var(key.clone()),
+                Expression::var(key),
                 Expression::string("space"),
             ),
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string("a"),
-            ),
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a")),
         );
 
         let stmt = Statement::if_(
@@ -4861,7 +4833,7 @@ mod tests {
             vec![Statement::if_(
                 Expression::bin(
                     BinOp::EqEqEq,
-                    Expression::var(key.clone()),
+                    Expression::var(key),
                     Expression::string("space"),
                 ),
                 vec![Statement::return_(Expression::number(Number::int(1)))],
@@ -4945,13 +4917,13 @@ mod tests {
         let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
         let else_block = vec![Statement::new(StatementDesc::Block(vec![Statement::new(
             StatementDesc::If(
-                Expression::var(inner.clone()),
+                Expression::var(inner),
                 then_block.clone(),
                 vec![Statement::return_(Expression::number(Number::int(0)))],
             ),
         )]))];
 
-        let stmt = Statement::if_(Expression::var(outer.clone()), then_block, else_block);
+        let stmt = Statement::if_(Expression::var(outer), then_block, else_block);
 
         let StatementDesc::Block(block) = &stmt.desc else {
             panic!("expected the wrapped else-if to stay as a block, got {stmt:?}");
@@ -5018,30 +4990,22 @@ mod tests {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("boolean"),
         );
 
-        let equals_null = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
-        let not_equals_null = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
+        let equals_null =
+            Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null());
+        let not_equals_null =
+            Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null());
         let equals_undefined = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let not_equals_undefined = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
 
@@ -5072,27 +5036,21 @@ mod tests {
                 "isArray".to_string(),
                 None,
             )),
-            vec![Expression::var(value.clone())],
+            vec![Expression::var(value)],
             CallInfo::default(),
         );
-        let equals_null = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
-        let not_equals_null = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
+        let equals_null =
+            Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null());
+        let not_equals_null =
+            Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null());
         let equals_undefined = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let not_equals_undefined = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
 
@@ -5165,16 +5123,10 @@ mod tests {
                 BinOp::And,
                 Expression::bin(
                     BinOp::EqEqEq,
-                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                        value.clone(),
-                    )))),
+                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
                     Expression::string("object"),
                 ),
-                Expression::bin(
-                    BinOp::NotEqEq,
-                    Expression::var(value.clone()),
-                    Expression::null(),
-                ),
+                Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null()),
             ),
             Expression::not(Expression::call(
                 Expression::new(ExpressionDesc::StaticIndex(
@@ -5182,13 +5134,13 @@ mod tests {
                     "isArray".to_string(),
                     None,
                 )),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
         );
         let not_equals_undefined = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
 
@@ -5211,14 +5163,11 @@ mod tests {
         let key = Ident::create_local("key");
         let space = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(key.clone()),
+            Expression::var(key),
             Expression::string("space"),
         );
-        let letter_a = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("a"),
-        );
+        let letter_a =
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a"));
 
         let simplified = js_and_expression(
             Expression::bin(BinOp::Or, space.clone(), letter_a),
@@ -5248,11 +5197,7 @@ mod tests {
     fn test_js_or_absorbs_large_conjunction_membership_against_same_literal_like_ocaml() {
         let key = Ident::create_local("key");
         let literal = |txt: &str| {
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string(txt))
         };
         let space = literal("space");
         let rest = [
@@ -5293,9 +5238,7 @@ mod tests {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("boolean"),
         );
         let nested = Expression::cond(
@@ -5316,9 +5259,7 @@ mod tests {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("boolean"),
         );
         let nested = Expression::cond(

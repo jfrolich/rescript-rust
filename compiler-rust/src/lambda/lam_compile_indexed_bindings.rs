@@ -12,7 +12,7 @@ impl IndexedJsConsumer<'_> {
         lower: &mut impl FnMut(&mut Self, NodeId, &Continuation) -> Output,
     ) -> Output {
         let (kind, id, value, body) = match self.context.store().view(node) {
-            NodeView::Let(kind, id, value, body) => (kind, id.clone(), value, body),
+            NodeView::Let(kind, id, value, body) => (kind, *id, value, body),
             _ => panic!("let lowering requires a let node"),
         };
         if let Some(output) = self.record_spread(&id, value, body, continuation, lower) {
@@ -47,7 +47,7 @@ impl IndexedJsConsumer<'_> {
         lower: &mut impl FnMut(&mut Self, NodeId, &Continuation) -> Output,
     ) -> Output {
         let (body, exception, handler) = match self.context.store().view(node) {
-            NodeView::TryWith(body, exception, handler) => (body, exception.clone(), handler),
+            NodeView::TryWith(body, exception, handler) => (body, *exception, handler),
             _ => panic!("try lowering requires a try node"),
         };
         let mut block = Vec::new();
@@ -55,29 +55,25 @@ impl IndexedJsConsumer<'_> {
             Continuation::NeedValue(_) => {
                 let id = self.compiler.fresh_tmp_ident();
                 block.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: id,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),
                 }));
                 (
-                    Continuation::Assign(id.clone()),
-                    Continuation::Assign(id.clone()),
+                    Continuation::Assign(id),
+                    Continuation::Assign(id),
                     Some(Expression::var(id)),
                 )
             }
             Continuation::Declare(kind, id) => {
                 block.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     value: None,
                     property: *kind,
                     ident_info: IdentInfo::default(),
                 }));
-                (
-                    Continuation::Assign(id.clone()),
-                    Continuation::Assign(id.clone()),
-                    None,
-                )
+                (Continuation::Assign(*id), Continuation::Assign(*id), None)
             }
             Continuation::Assign(_) => (continuation.clone(), continuation.clone(), None),
             Continuation::EffectCall(tail) => {

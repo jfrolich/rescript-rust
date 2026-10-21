@@ -828,7 +828,7 @@ fn recorded_as_is(module_name: &str, module: &Module, record: Option<&PackageRec
     record
         .sources
         .get(module_name)
-        .is_some_and(|recorded| recorded.iter().map(PathBuf::as_path).eq(paths.into_iter()))
+        .is_some_and(|recorded| recorded.iter().map(PathBuf::as_path).eq(paths))
 }
 
 /// Facts about one source module, gathered from the file system.

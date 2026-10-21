@@ -793,95 +793,6 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
     ])
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{constant, escape_ocaml_string, switch_key};
-    use crate::lambda::lam_constant::Constant;
-
-    #[test]
-    fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
-        let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
-        let location = crate::location::Location::new_for_error("printer.res", 3, 9);
-        let lambda = crate::lambda::Lambda::prim(
-            crate::lambda::Primitive::Pidentity,
-            vec![crate::lambda::Lambda::var(id)],
-            location,
-        );
-        let context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
-        let mut indexed = Vec::new();
-        super::print_indexed_context(&context, true, &mut indexed).unwrap();
-        let mut recursive = Vec::new();
-        super::print_lambda_with_locs(&lambda, &mut recursive).unwrap();
-        assert_eq!(indexed, recursive);
-    }
-
-    #[test]
-    fn prints_semantic_constructor_switch_keys() {
-        let constant_key = crate::lambda::SwitchKey::Constructor(
-            crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                name: "Null".to_string(),
-                literal: None,
-            }),
-        );
-        let block_key =
-            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
-                    tag: crate::types::VariantTag {
-                        name: "Boolean".to_string(),
-                        literal: None,
-                    },
-                    tag_name: None,
-                }),
-            ));
-
-        let constant_printed = switch_key(&constant_key).to_string();
-        let block_printed = switch_key(&block_key).to_string();
-        assert!(constant_printed.contains("Switch_constructor"));
-        assert!(constant_printed.contains("\"Null\""));
-        assert!(block_printed.contains("Switch_constructor"));
-        assert!(block_printed.contains("\"Boolean\""));
-    }
-
-    #[test]
-    fn prints_const_string_without_delimiter() {
-        let printed = constant(&Constant::String("hello".to_string())).to_string();
-
-        assert!(printed.contains("\"hello\""));
-        assert!(!printed.contains("DNone"));
-    }
-
-    #[test]
-    fn prints_bigint_sign_as_ocaml_positive_flag() {
-        let printed = constant(&Constant::BigInt {
-            negative: false,
-            value: "100".to_string(),
-        })
-        .to_string();
-
-        assert!(printed.contains("true"));
-    }
-
-    #[test]
-    fn does_not_escape_apostrophes_in_strings() {
-        assert_eq!(escape_ocaml_string("l'"), "l'");
-        assert_eq!(escape_ocaml_string("a'b\"c"), "a'b\\\"c");
-    }
-
-    #[test]
-    fn escapes_non_ascii_bytes_as_ocaml_decimal_escapes() {
-        assert_eq!(
-            escape_ocaml_string("\u{00e4}\u{00bd}\u{00a0}"),
-            "\\228\\189\\160"
-        );
-        assert_eq!(escape_ocaml_string("\u{00d7}"), "\\215");
-    }
-
-    #[test]
-    fn keeps_standard_control_character_escapes() {
-        assert_eq!(escape_ocaml_string("a\n\t\r\\\""), "a\\n\\t\\r\\\\\\\"");
-    }
-}
-
 fn indexed_lambda(
     store: &crate::lambda::indexed::IndexedLambda,
     node: crate::lambda::indexed::NodeId,
@@ -1063,4 +974,93 @@ pub fn print_lambda(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
 pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
     let sexp = lambda(lam, true);
     writeln!(out, "{}", sexp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{constant, escape_ocaml_string, switch_key};
+    use crate::lambda::lam_constant::Constant;
+
+    #[test]
+    fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
+        let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
+        let location = crate::location::Location::new_for_error("printer.res", 3, 9);
+        let lambda = crate::lambda::Lambda::prim(
+            crate::lambda::Primitive::Pidentity,
+            vec![crate::lambda::Lambda::var(id)],
+            location,
+        );
+        let context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        let mut indexed = Vec::new();
+        super::print_indexed_context(&context, true, &mut indexed).unwrap();
+        let mut recursive = Vec::new();
+        super::print_lambda_with_locs(&lambda, &mut recursive).unwrap();
+        assert_eq!(indexed, recursive);
+    }
+
+    #[test]
+    fn prints_semantic_constructor_switch_keys() {
+        let constant_key = crate::lambda::SwitchKey::Constructor(
+            crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                name: "Null".to_string(),
+                literal: None,
+            }),
+        );
+        let block_key =
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                    tag: crate::types::VariantTag {
+                        name: "Boolean".to_string(),
+                        literal: None,
+                    },
+                    tag_name: None,
+                }),
+            ));
+
+        let constant_printed = switch_key(&constant_key).to_string();
+        let block_printed = switch_key(&block_key).to_string();
+        assert!(constant_printed.contains("Switch_constructor"));
+        assert!(constant_printed.contains("\"Null\""));
+        assert!(block_printed.contains("Switch_constructor"));
+        assert!(block_printed.contains("\"Boolean\""));
+    }
+
+    #[test]
+    fn prints_const_string_without_delimiter() {
+        let printed = constant(&Constant::String("hello".to_string())).to_string();
+
+        assert!(printed.contains("\"hello\""));
+        assert!(!printed.contains("DNone"));
+    }
+
+    #[test]
+    fn prints_bigint_sign_as_ocaml_positive_flag() {
+        let printed = constant(&Constant::BigInt {
+            negative: false,
+            value: "100".to_string(),
+        })
+        .to_string();
+
+        assert!(printed.contains("true"));
+    }
+
+    #[test]
+    fn does_not_escape_apostrophes_in_strings() {
+        assert_eq!(escape_ocaml_string("l'"), "l'");
+        assert_eq!(escape_ocaml_string("a'b\"c"), "a'b\\\"c");
+    }
+
+    #[test]
+    fn escapes_non_ascii_bytes_as_ocaml_decimal_escapes() {
+        assert_eq!(
+            escape_ocaml_string("\u{00e4}\u{00bd}\u{00a0}"),
+            "\\228\\189\\160"
+        );
+        assert_eq!(escape_ocaml_string("\u{00d7}"), "\\215");
+    }
+
+    #[test]
+    fn keeps_standard_control_character_escapes() {
+        assert_eq!(escape_ocaml_string("a\n\t\r\\\""), "a\\n\\t\\r\\\\\\\"");
+    }
 }

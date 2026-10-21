@@ -3,21 +3,17 @@
 //! Port of `lam_compile_const.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use ahash::AHashMap as HashMap;
-
 use super::js_exp_make::{
-    int_expr, js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access,
-    pure_indexed_block_item, pure_record_field_item,
+    js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access, pure_indexed_block_item,
+    pure_record_field_item,
 };
 use super::lam_compile::{LambdaCompiler, pointer_info_comment_text};
 use crate::cmi::persistent_env::CmjExportConstant;
-use crate::ident::Ident;
 use crate::js_ir::op::{Kind, MutableFlag, Number};
 use crate::js_ir::printer::convert_ident_name;
-use crate::js_ir::{BinOp, Block, Expression, ExpressionDesc, ModuleId};
-use crate::lambda::lam_compat::{FieldDbgInfo, SetFieldDbgInfo};
+use crate::js_ir::{BinOp, Expression, ExpressionDesc, ModuleId};
+use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
-use crate::lambda::lam_primitive::Primitive;
 
 impl LambdaCompiler {
     pub(crate) fn some_none_depth(cst: &Constant) -> Option<usize> {

@@ -4,10 +4,10 @@
 //! Lambda-to-JS compilation.
 
 use crate::ident::Ident;
-use crate::js_ir::op::{Kind, LengthObject, Number};
+use crate::js_ir::op::{Kind, Number};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, ModuleId, Statement,
-    StatementDesc, StringClause, VIdent, expression_has_no_side_effects,
+    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
+    StringClause, VIdent, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_primitive::Primitive;
@@ -277,9 +277,9 @@ pub(crate) fn compare_bool_literals(cmp: Comparison, left: bool, right: bool) ->
     match cmp {
         Comparison::Eq => left == right,
         Comparison::Neq => left != right,
-        Comparison::Lt => left < right,
+        Comparison::Lt => !left & right,
         Comparison::Le => left <= right,
-        Comparison::Gt => left > right,
+        Comparison::Gt => left & !right,
         Comparison::Ge => left >= right,
     }
 }
@@ -623,7 +623,7 @@ pub(crate) fn int32_offset(expr: Expression, offset: i32) -> Expression {
 
 pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
     let Expression {
-        source_loc,
+        source_loc: _,
         desc,
         comment,
     } = expr;

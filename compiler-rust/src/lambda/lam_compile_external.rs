@@ -4,32 +4,25 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{
-    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, is_nullish_literal,
-    is_optional_block, is_pure_subexpression, js_expr_no_side_effects, js_seq, poly_var_tag_access,
-    poly_var_value_access, remove_pure_subexpression, runtime_member_for_eta_wrapped_primitive,
+    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, js_seq,
+    poly_var_tag_access, poly_var_value_access, runtime_member_for_eta_wrapped_primitive,
     string_switch_iife,
 };
-use super::lam_compile::{
-    Compiled, ExternalModuleCacheKey, LambdaCompiler, call_info_of_apply_status,
-};
+use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
 use super::lam_compile_input::{FunctionInput, LambdaInput, LambdaInputView};
 use crate::ident::Ident;
-use crate::js_ir::op::{
-    IdentInfo, ImportAttributes as JsImportAttributes, Kind, Number, PropertyName, UsedStats,
-};
+use crate::js_ir::op::{IdentInfo, ImportAttributes as JsImportAttributes, Kind, PropertyName};
 use crate::js_ir::printer::js_export_name;
-use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc, VIdent,
-    VariableDeclaration, expression_has_no_side_effects,
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, VariableDeclaration,
+    expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
-use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{
-    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
+    Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
-use crate::lambda::{ApplyStatus, Lambda, TagInfo};
+use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
 
 pub(crate) fn external_module_import_attributes(
@@ -332,7 +325,7 @@ impl LambdaCompiler {
                     {
                         return None;
                     }
-                    module_target_var.get_or_insert_with(|| id.clone());
+                    module_target_var.get_or_insert(*id);
                     Some(())
                 }
                 LambdaInputView::GlobalModule(id) => {
@@ -343,7 +336,7 @@ impl LambdaCompiler {
                     {
                         return None;
                     }
-                    module_target_global.get_or_insert_with(|| id.clone());
+                    module_target_global.get_or_insert(*id);
                     Some(())
                 }
                 _ => None,
@@ -367,7 +360,7 @@ impl LambdaCompiler {
                     let target = args.first()?;
                     note_target(target)?;
 
-                    alias_chain.push((alias_id.clone(), *index, name.clone()));
+                    alias_chain.push((*alias_id, *index, name.clone()));
                     cursor = body;
                 }
                 LambdaInputView::Prim(primitive, args, _) => {
@@ -421,17 +414,17 @@ impl LambdaCompiler {
 
                     return if let Some(id) = module_target_var {
                         Some(Expression::var(id))
-                    } else if let Some(id) = module_target_global {
-                        Some(Expression::qualified(
-                            ModuleId {
-                                id,
-                                kind: Kind::Ml,
-                                dynamic_import: false,
-                            },
-                            None,
-                        ))
                     } else {
-                        None
+                        module_target_global.map(|id| {
+                            Expression::qualified(
+                                ModuleId {
+                                    id,
+                                    kind: Kind::Ml,
+                                    dynamic_import: false,
+                                },
+                                None,
+                            )
+                        })
                     };
                 }
                 _ => return None,
@@ -451,11 +444,10 @@ impl LambdaCompiler {
             bundle: module_name.bundle.clone(),
             default,
         };
-        let id = self
+        let id = *self
             .external_module_ids
             .entry(key)
-            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)))
-            .clone();
+            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)));
 
         ModuleId {
             id,
@@ -922,7 +914,7 @@ impl LambdaCompiler {
 
         let obj = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
-            ident: obj.clone(),
+            ident: obj,
             value: Some(object),
             property: LetKind::Variable,
             ident_info: IdentInfo::default(),
@@ -934,7 +926,7 @@ impl LambdaCompiler {
             } else {
                 let tmp = self.fresh_tmp_ident();
                 prelude.push(Statement::variable(VariableDeclaration {
-                    ident: tmp.clone(),
+                    ident: tmp,
                     value: Some(pending.arg),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -955,7 +947,7 @@ impl LambdaCompiler {
             let cond = Expression::bin(BinOp::NotEqEq, prepared, Expression::undefined(false));
             let assign = Expression::bin(
                 BinOp::Eq,
-                self.static_index(Expression::var(obj.clone()), &pending.name),
+                self.static_index(Expression::var(obj), &pending.name),
                 self.add_external_effect(effect, value),
             );
             prelude.push(Statement::if_(cond, vec![Statement::exp(assign)], vec![]));
@@ -1134,7 +1126,7 @@ impl LambdaCompiler {
     /// (`Lam_compile_primitive.wrap_then_path`).
     fn wrap_then_path(&self, import: Expression, path: &[String]) -> Expression {
         let param = self.fresh_ident("m");
-        let mut value = Expression::var(param.clone());
+        let mut value = Expression::var(param);
         for segment in path {
             value = self.static_index(value, segment);
         }
@@ -1170,7 +1162,7 @@ impl LambdaCompiler {
         match source {
             ImportSource::ImportModule { module_, path } => {
                 let oid = ModuleId {
-                    id: module_.clone(),
+                    id: *module_,
                     kind: Kind::Ml,
                     dynamic_import: true,
                 };

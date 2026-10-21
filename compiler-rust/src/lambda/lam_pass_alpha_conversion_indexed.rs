@@ -2,7 +2,6 @@
 //! `compiler/core/lam_pass_alpha_conversion.ml` and `lam_eta_conversion.ml`.
 
 use crate::context::IdGenerator;
-use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
@@ -11,7 +10,6 @@ use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_pass_collect_indexed::{IndexedLamStats, get_arity_external};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{ApInfo, ApplyStatus, FunctionAttribute};
-use crate::location::Location;
 
 fn safe_to_share(store: &IndexedLambda, node: NodeId) -> bool {
     match store.view(node) {
@@ -47,7 +45,7 @@ fn transform_under_supply(
         .collect::<Vec<_>>();
     let extra_args = extra_params
         .iter()
-        .map(|id| store.append(NodeSnapshot::Var(id.clone())))
+        .map(|id| store.append(NodeSnapshot::Var(*id)))
         .collect::<Vec<_>>();
 
     let mut shared = Vec::with_capacity(args.len() + 1);
@@ -62,7 +60,7 @@ fn transform_under_supply(
     let mut bindings = Vec::new();
     for (node, replacement) in shared.iter_mut().zip(replacements) {
         if let Some(id) = replacement {
-            bindings.push((id.clone(), *node));
+            bindings.push((id, *node));
             *node = store.append(NodeSnapshot::Var(id));
         }
     }
@@ -309,9 +307,11 @@ impl IndexedLambdaContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ident::Ident;
     use crate::ident::IdentFlags;
     use crate::lambda::lam_compile_context::ExternalArityInfo;
     use crate::lambda::{Apply, Constant, Lambda};
+    use crate::location::Location;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -347,8 +347,8 @@ mod tests {
         let access = |name: &str| {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
-                vec![Lambda::LglobalModule(module.clone())],
-                location.clone(),
+                vec![Lambda::LglobalModule(module)],
+                location,
             )
         };
         let call = |function, argument, jsx| {
@@ -356,7 +356,7 @@ mod tests {
                 ap_func: Box::new(function),
                 ap_args: vec![Lambda::const_(Constant::int(argument))],
                 ap_info: ApInfo {
-                    loc: location.clone(),
+                    loc: location,
                     inlined: crate::lambda::InlineAttribute::Default,
                     status: ApplyStatus::Na,
                 },
@@ -413,7 +413,7 @@ mod tests {
 
     fn under_call(function: &Ident) -> Lambda {
         apply(
-            Lambda::var(function.clone()),
+            Lambda::var(*function),
             vec![Lambda::const_(Constant::int(1))],
             ApplyStatus::Na,
             false,
@@ -436,7 +436,7 @@ mod tests {
             LetKind::Strict,
             id("side", 3),
             under_call(&inner),
-            Lambda::var(outer.clone()),
+            Lambda::var(outer),
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -444,7 +444,7 @@ mod tests {
             function_definition(1, 10),
             Lambda::let_(
                 LetKind::Strict,
-                inner.clone(),
+                inner,
                 function_definition(2, 20),
                 apply(
                     function_expression,
@@ -478,11 +478,11 @@ mod tests {
         let inner = id("inner", 2);
         let input = Lambda::let_(
             LetKind::Strict,
-            outer.clone(),
+            outer,
             function_definition(2, 10),
             Lambda::let_(
                 LetKind::Strict,
-                inner.clone(),
+                inner,
                 function_definition(2, 20),
                 apply(
                     Lambda::var(outer),
@@ -515,7 +515,7 @@ mod tests {
             LetKind::Strict,
             id("side", 3),
             under_call(&inner),
-            Lambda::var(outer.clone()),
+            Lambda::var(outer),
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -523,7 +523,7 @@ mod tests {
             function_definition(3, 10),
             Lambda::let_(
                 LetKind::Strict,
-                inner.clone(),
+                inner,
                 function_definition(2, 20),
                 apply(
                     function_expression,
@@ -570,7 +570,7 @@ mod tests {
         let recursive = id("recursive", 2);
         let input = Lambda::let_(
             LetKind::Strict,
-            inner.clone(),
+            inner,
             function_definition(2, 10),
             Lambda::letrec(vec![(recursive, under_call(&inner))], under_call(&inner)),
         );
@@ -593,7 +593,7 @@ mod tests {
             apply(
                 Lambda::prim(
                     Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
-                    vec![Lambda::LglobalModule(module.clone())],
+                    vec![Lambda::LglobalModule(module)],
                     Location::none(),
                 ),
                 vec![Lambda::const_(Constant::int(0))],
@@ -631,7 +631,7 @@ mod tests {
         let inner = id("inner", 2);
         let input = Lambda::let_(
             LetKind::Strict,
-            outer.clone(),
+            outer,
             Lambda::function_(
                 1,
                 vec![id("x", 3)],
@@ -641,7 +641,7 @@ mod tests {
             ),
             Lambda::let_(
                 LetKind::Strict,
-                inner.clone(),
+                inner,
                 Lambda::function_(
                     2,
                     vec![id("a", 4), id("b", 5)],
@@ -653,7 +653,7 @@ mod tests {
                     Lambda::var(outer),
                     vec![
                         apply(
-                            Lambda::var(inner.clone()),
+                            Lambda::var(inner),
                             vec![Lambda::const_(Constant::int(1))],
                             ApplyStatus::Na,
                             false,
@@ -715,7 +715,7 @@ mod tests {
         let q = id("q", 3);
         let definition = Lambda::function_(
             2,
-            vec![p.clone(), q.clone()],
+            vec![p, q],
             Lambda::var(p),
             FunctionAttribute::default(),
             crate::location::Location::none(),
@@ -739,9 +739,9 @@ mod tests {
         ] {
             let input = Lambda::let_(
                 LetKind::Strict,
-                function.clone(),
+                function,
                 definition.clone(),
-                apply(Lambda::var(function.clone()), args, ApplyStatus::Na, true),
+                apply(Lambda::var(function), args, ApplyStatus::Na, true),
             );
             let (actual, frontier) = run(input, 20);
             let Lambda::Llet(_, _, _, body) = actual else {
@@ -788,7 +788,7 @@ mod tests {
             LetKind::Strict,
             id("side", 2),
             effect("callee"),
-            Lambda::var(known.clone()),
+            Lambda::var(known),
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -872,7 +872,7 @@ mod tests {
         let function = id("function", 1);
         let input = Lambda::let_(
             LetKind::Strict,
-            function.clone(),
+            function,
             Lambda::function_(
                 2,
                 vec![id("a", 2), id("b", 3)],
@@ -894,7 +894,7 @@ mod tests {
         let NodeView::Let(kind, id, value, call) = context.store().view(original) else {
             panic!("expected input let")
         };
-        let (kind, id, value, call) = (kind, id.clone(), value, call);
+        let (kind, id, value, call) = (kind, *id, value, call);
         let shared_body = context.store_mut().append_sequence(call, call);
         let root = context
             .store_mut()
@@ -939,7 +939,7 @@ mod tests {
         };
         let input = Lambda::let_(
             LetKind::Strict,
-            function.clone(),
+            function,
             Lambda::function_(
                 2,
                 vec![id("a", 2), id("b", 3)],
@@ -997,7 +997,7 @@ mod tests {
         let known = id("known2", 9);
         let input = Lambda::let_(
             LetKind::Strict,
-            known.clone(),
+            known,
             Lambda::function_(
                 2,
                 vec![id("x", 10), id("y", 11)],

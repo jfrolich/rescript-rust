@@ -579,9 +579,7 @@ pub(crate) fn record_sparse_record(used: bool, label_count: usize, field_count: 
         };
         let modules = MODULE_SPARSE_RECORDS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut modules = modules.lock().unwrap();
-        let entry = modules
-            .entry(module.clone())
-            .or_insert_with(SparseRecordSite::default);
+        let entry = modules.entry(module.clone()).or_default();
         entry.large += 1;
         if used {
             entry.used += 1;
@@ -635,9 +633,7 @@ pub(crate) fn record_signature_copy(
 
     let sites = SIGNATURE_COPY_SITES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut sites = sites.lock().unwrap();
-    let entry = sites
-        .entry((location.file(), location.line()))
-        .or_insert_with(SignatureCopySite::default);
+    let entry = sites.entry((location.file(), location.line())).or_default();
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
@@ -650,7 +646,7 @@ pub(crate) fn record_signature_copy(
 pub(crate) fn record_signature_qualification(kind: &'static str, item_count: usize) {
     let kinds = SIGNATURE_QUALIFICATION_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut kinds = kinds.lock().unwrap();
-    let entry = kinds.entry(kind).or_insert_with(SignatureCopySite::default);
+    let entry = kinds.entry(kind).or_default();
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
@@ -667,7 +663,7 @@ pub(crate) fn record_signature_qualification_name(
     let names = SIGNATURE_QUALIFICATION_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut names = names.lock().unwrap();
     let key = format!("{kind}:{name}");
-    let entry = names.entry(key).or_insert_with(SignatureCopySite::default);
+    let entry = names.entry(key).or_default();
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
@@ -679,7 +675,7 @@ pub(crate) fn record_signature_qualification_name(
 pub(crate) fn record_signature_freshen(kind: &'static str, item_count: usize) {
     let kinds = SIGNATURE_FRESHEN_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut kinds = kinds.lock().unwrap();
-    let entry = kinds.entry(kind).or_insert_with(SignatureCopySite::default);
+    let entry = kinds.entry(kind).or_default();
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
@@ -693,7 +689,7 @@ pub(crate) fn record_signature_freshen_name(kind: &'static str, name: &str, item
     let names = SIGNATURE_FRESHEN_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut names = names.lock().unwrap();
     let key = format!("{kind}:{name}");
-    let entry = names.entry(key).or_insert_with(SignatureCopySite::default);
+    let entry = names.entry(key).or_default();
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
@@ -707,9 +703,7 @@ fn record_current_module_signature_copy(item_count: usize) {
         };
         let modules = MODULE_SIGNATURE_COPIES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut modules = modules.lock().unwrap();
-        let entry = modules
-            .entry(module.clone())
-            .or_insert_with(SignatureCopySite::default);
+        let entry = modules.entry(module.clone()).or_default();
         entry.calls += 1;
         entry.items += item_count as u64;
         entry.max_items = entry.max_items.max(item_count as u64);
@@ -724,9 +718,7 @@ fn record_current_module_signature_freshen(item_count: usize) {
         };
         let modules = MODULE_SIGNATURE_FRESHENS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut modules = modules.lock().unwrap();
-        let entry = modules
-            .entry(module.clone())
-            .or_insert_with(SignatureCopySite::default);
+        let entry = modules.entry(module.clone()).or_default();
         entry.calls += 1;
         entry.items += item_count as u64;
         entry.max_items = entry.max_items.max(item_count as u64);

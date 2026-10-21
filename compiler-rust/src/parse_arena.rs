@@ -1496,7 +1496,7 @@ impl ParseArena {
             if pos.file_name == StrIdx::default() && pos.line == 0 {
                 return self.none_pos();
             }
-            let mut pos = pos.clone();
+            let mut pos = *pos;
             if let Some(name) = foreign_file_name(pos.file_name) {
                 pos.file_name = self.push_typecheck_string(name);
             }
@@ -1577,8 +1577,8 @@ impl ParseArena {
     pub fn to_location(&self, idx: LocIdx) -> Location {
         let loc = self.get_location(idx);
         Location {
-            loc_start: self.get_position(loc.loc_start).clone(),
-            loc_end: self.get_position(loc.loc_end).clone(),
+            loc_start: *self.get_position(loc.loc_start),
+            loc_end: *self.get_position(loc.loc_end),
             loc_ghost: loc.loc_ghost,
         }
     }
@@ -2562,10 +2562,7 @@ impl ParseArena {
         });
         for name in constraint.pvc_newtypes.iter().rev() {
             wrapped = self.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((
-                    name.clone(),
-                    wrapped,
-                )))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((*name, wrapped)))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             });
@@ -2646,7 +2643,7 @@ impl ParseArena {
         } else {
             let mut params = vec![FunParam {
                 p_attrs: self.get_pat(fun.lhs).ppat_attributes.clone(),
-                p_lbl: fun.arg_label.clone(),
+                p_lbl: fun.arg_label,
                 p_default: fun.default,
                 p_pat: fun.lhs,
             }];
@@ -2658,7 +2655,7 @@ impl ParseArena {
                     };
                     params.push(FunParam {
                         p_attrs: self.get_pat(next.lhs).ppat_attributes.clone(),
-                        p_lbl: next.arg_label.clone(),
+                        p_lbl: next.arg_label,
                         p_default: next.default,
                         p_pat: next.lhs,
                     });

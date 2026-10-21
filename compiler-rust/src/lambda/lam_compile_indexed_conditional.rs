@@ -42,13 +42,13 @@ impl IndexedJsConsumer<'_> {
                     };
                 }
                 let id = self.compiler.fresh_tmp_ident();
-                let assign = Continuation::Assign(id.clone());
+                let assign = Continuation::Assign(id);
                 let else_output = lower(self, else_, &assign);
                 let then_output = lower(self, then_, &assign);
                 block.insert(
                     0,
                     Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
+                        ident: id,
                         value: None,
                         property: LetKind::Variable,
                         ident_info: IdentInfo::default(),
@@ -76,7 +76,7 @@ impl IndexedJsConsumer<'_> {
                         Expression::cond(predicate, value(then_probe), value(else_probe)),
                     );
                 }
-                let assign = Continuation::Assign(id.clone());
+                let assign = Continuation::Assign(*id);
                 // S.if_'s labelled else argument precedes its then argument.
                 let else_output = lower(self, else_, &assign).into_block();
                 let then_output = lower(self, then_, &assign).into_block();

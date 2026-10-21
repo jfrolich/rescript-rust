@@ -155,7 +155,7 @@ pub(crate) fn is_closed_with_map(
             NodeView::Var(id) => {
                 if !local.contains(id) {
                     stats
-                        .entry(id.clone())
+                        .entry(*id)
                         .or_insert_with(VarStats::fresh)
                         .update(position);
                 }
@@ -163,7 +163,7 @@ pub(crate) fn is_closed_with_map(
             NodeView::Assign(id, value) => {
                 if !local.contains(id) {
                     stats
-                        .entry(id.clone())
+                        .entry(*id)
                         .or_insert_with(VarStats::fresh)
                         .update(position);
                 }
@@ -187,11 +187,11 @@ pub(crate) fn is_closed_with_map(
             }
             NodeView::Let(_, id, value, body) => {
                 iter(store, value, position, stats, local);
-                local.insert(id.clone());
+                local.insert(*id);
                 iter(store, body, Position::Sink, stats, local);
             }
             NodeView::LetRec(bindings, body) => {
-                local.extend(bindings.iter().map(|(id, _)| id.clone()));
+                local.extend(bindings.iter().map(|(id, _)| *id));
                 for (_, node) in bindings {
                     iter(store, *node, Position::Sink, stats, local);
                 }
@@ -267,13 +267,13 @@ pub(crate) fn is_closed_with_map(
                 iter(store, b, Position::Sink, stats, local);
             }
             NodeView::For(id, a, b, _, c) => {
-                local.insert(id.clone());
+                local.insert(*id);
                 iter(store, a, Position::Sink, stats, local);
                 iter(store, b, Position::Sink, stats, local);
                 iter(store, c, Position::Sink, stats, local);
             }
             NodeView::ForOf(id, a, b) | NodeView::ForAwaitOf(id, a, b) => {
-                local.insert(id.clone());
+                local.insert(*id);
                 iter(store, a, Position::Sink, stats, local);
                 iter(store, b, Position::Sink, stats, local);
             }

@@ -49,7 +49,7 @@ pub fn transform_under_supply(
             // OCaml allocates this with the same global counter as source
             // identifiers (compiler/core/lam_eta_conversion.ml:41-53).
             let v = id_gen.create("partial_arg");
-            let var = Lambda::var(v.clone());
+            let var = Lambda::var(v);
             bindings.push((v, lam));
             acc.push(var);
         }

@@ -50,12 +50,9 @@ pub fn extract_from_core_type(type_params: &[TypedCoreType]) -> Vec<String> {
     let mut so_far = Vec::new();
 
     for type_expr in type_params {
-        match &type_expr.ctyp_desc {
-            TypedCoreTypeDesc::Ttyp_var(Some(s)) => {
-                let type_name = s.clone();
-                so_far.push(type_name);
-            }
-            _ => {}
+        if let TypedCoreTypeDesc::Ttyp_var(Some(s)) = &type_expr.ctyp_desc {
+            let type_name = s.clone();
+            so_far.push(type_name);
         }
     }
 

@@ -702,7 +702,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
     }
 }
 
-fn raw_innermost_let_body<'a>(mut lam: &'a Lambda) -> &'a Lambda {
+fn raw_innermost_let_body(mut lam: &Lambda) -> &Lambda {
     loop {
         match lam {
             Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => lam = body.as_ref(),
@@ -956,7 +956,7 @@ fn extract_top_level_lets(lam: &Lambda) -> Option<Vec<(LetKind, Ident, Lambda)>>
     loop {
         match current {
             Lambda::Llet(kind, id, arg, body) => {
-                bindings.push((*kind, id.clone(), arg.as_ref().clone()));
+                bindings.push((*kind, *id, arg.as_ref().clone()));
                 current = body.as_ref();
             }
             other if other.is_unit() => return Some(bindings),
@@ -984,10 +984,10 @@ fn rebuild_top_level_structure(lam: &Lambda) -> Option<Lambda> {
 
     for item in flat_items {
         if let Some(bindings) = extract_top_level_lets(item) {
-            export_ids.extend(bindings.iter().map(|(_, id, _)| id.clone()));
+            export_ids.extend(bindings.iter().map(|(_, id, _)| *id));
             items.push(TopLevelItem::Lets(bindings));
         } else if let Some(bindings) = extract_top_level_letrec(item) {
-            export_ids.extend(bindings.iter().map(|(id, _)| id.clone()));
+            export_ids.extend(bindings.iter().map(|(id, _)| *id));
             items.push(TopLevelItem::LetRec(bindings));
         } else {
             items.push(TopLevelItem::Eval(item.clone()));
@@ -1058,8 +1058,8 @@ mod tests {
         let x = Ident::create_local("x");
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(x.clone()),
+            vec![x],
+            Lambda::var(x),
             FunctionAttribute::default(),
             crate::location::Location::none(),
         );

@@ -131,13 +131,13 @@ fn materialize_diagnostic_groups(
         .map(|(id, group)| match group {
             IndexedGroup::Single(kind, root) => IndexedDiagnosticGroup::Single(
                 *kind,
-                id.as_ref().unwrap().clone(),
+                *id.as_ref().unwrap(),
                 context.store().materialize_node(*root),
             ),
             IndexedGroup::Recursive(bindings) => IndexedDiagnosticGroup::Recursive(
                 bindings
                     .iter()
-                    .map(|(id, root)| (id.clone(), context.store().materialize_node(*root)))
+                    .map(|(id, root)| (*id, context.store().materialize_node(*root)))
                     .collect(),
             ),
             IndexedGroup::Nop(root) => {
@@ -351,7 +351,7 @@ impl IndexedPreJsBackend {
             .iter()
             .map(|(id, group)| {
                 (
-                    id.clone(),
+                    *id,
                     match group {
                         IndexedGroup::Single(_, root) | IndexedGroup::Nop(root) => {
                             self.context.store().materialize_node(*root)
@@ -360,7 +360,7 @@ impl IndexedPreJsBackend {
                             bindings
                                 .iter()
                                 .map(|(id, root)| {
-                                    (id.clone(), self.context.store().materialize_node(*root))
+                                    (*id, self.context.store().materialize_node(*root))
                                 })
                                 .collect(),
                             Box::new(Lambda::unit()),
@@ -380,7 +380,7 @@ impl IndexedPreJsBackend {
     fn export_map(&self) -> Vec<(Ident, Lambda)> {
         self.export_map
             .iter()
-            .map(|(id, root)| (id.clone(), self.context.store().materialize_node(*root)))
+            .map(|(id, root)| (*id, self.context.store().materialize_node(*root)))
             .collect()
     }
 
@@ -409,7 +409,7 @@ fn flatten(
 ) -> (NodeId, Vec<(Option<Ident>, IndexedGroup)>) {
     match store.view(node) {
         NodeView::Let(kind, id, value, body) => {
-            let id = id.clone();
+            let id = *id;
             let (value, mut groups) = flatten(store, value, acc);
             groups.insert(0, (Some(id), IndexedGroup::Single(kind, value)));
             flatten(store, body, groups)
@@ -461,11 +461,11 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
     fn visit(store: &IndexedLambda, node: NodeId, free: &mut Vec<Ident>) {
         match store.view(node) {
             NodeView::Var(id) => {
-                set_insert(free, id.clone());
+                set_insert(free, *id);
             }
             NodeView::Assign(id, value) => {
                 visit(store, value, free);
-                set_insert(free, id.clone());
+                set_insert(free, *id);
             }
             NodeView::Apply(function, args, _, _) => {
                 visit(store, function, free);
@@ -583,16 +583,16 @@ fn remove_dead_groups(
         match group {
             IndexedGroup::Single(kind, root) => {
                 let id = id.as_ref().expect("single group has an identifier");
-                free_by_ident.push((id.clone(), pass_free_variables(store, *root)));
+                free_by_ident.push((*id, pass_free_variables(store, *root)));
                 if matches!(kind, LetKind::Strict | LetKind::Variable) {
-                    initial.insert(0, id.clone());
+                    initial.insert(0, *id);
                 }
             }
             IndexedGroup::Recursive(bindings) => {
                 for (id, value) in bindings {
-                    free_by_ident.push((id.clone(), pass_free_variables(store, *value)));
+                    free_by_ident.push((*id, pass_free_variables(store, *value)));
                     if !matches!(store.view(*value), NodeView::Function(_, _, _, _, _)) {
-                        initial.insert(0, id.clone());
+                        initial.insert(0, *id);
                     }
                 }
             }
@@ -609,7 +609,7 @@ fn remove_dead_groups(
         if id.is_global() || id.is_js() || visited.iter().any(|seen| seen.same(id)) {
             return;
         }
-        visited.push(id.clone());
+        visited.push(*id);
         let free = free_by_ident
             .iter()
             .rev()
@@ -677,30 +677,27 @@ fn coerce_and_group(
         }
         match context.store().view(value) {
             NodeView::Var(id) if id.name() == original.name() => {
-                let id = id.clone();
-                export_list.insert(0, id.clone());
+                let id = *id;
+                export_list.insert(0, id);
                 if id.stamp() != original.stamp() {
                     export_set.remove(&original);
                     export_set.insert(id);
                 }
             }
             NodeView::Var(id) => {
-                let source = id.clone();
+                let source = *id;
                 let newid = original.rename(id_gen);
                 if let Some(kind) = context.metadata().ident_tbl.get(&source).cloned() {
                     context
                         .metadata_mut_for_backend()
                         .ident_tbl
-                        .insert(newid.clone(), kind);
+                        .insert(newid, kind);
                 }
-                export_list.insert(0, newid.clone());
-                export_map.insert(0, (newid.clone(), value));
+                export_list.insert(0, newid);
+                export_map.insert(0, (newid, value));
                 coercions.insert(
                     0,
-                    (
-                        Some(newid.clone()),
-                        IndexedGroup::Single(LetKind::Alias, value),
-                    ),
+                    (Some(newid), IndexedGroup::Single(LetKind::Alias, value)),
                 );
                 let _ = source;
             }
@@ -719,16 +716,13 @@ fn coerce_and_group(
                     context
                         .metadata_mut_for_backend()
                         .ident_tbl
-                        .insert(newid.clone(), IndexedIdKind::FunctionId { arity, lambda });
+                        .insert(newid, IndexedIdKind::FunctionId { arity, lambda });
                 }
-                export_list.insert(0, newid.clone());
-                export_map.insert(0, (newid.clone(), value));
+                export_list.insert(0, newid);
+                export_map.insert(0, (newid, value));
                 coercions.insert(
                     0,
-                    (
-                        Some(newid.clone()),
-                        IndexedGroup::Single(LetKind::Strict, value),
-                    ),
+                    (Some(newid), IndexedGroup::Single(LetKind::Strict, value)),
                 );
                 let _ = original;
             }
@@ -746,7 +740,7 @@ fn coerce_and_group(
             if let Some((_, existing)) = export_map.iter_mut().find(|(key, _)| key.same(id)) {
                 *existing = *root;
             } else {
-                export_map.push((id.clone(), *root));
+                export_map.push((*id, *root));
             }
         }
         groups.insert(0, group);
@@ -791,7 +785,7 @@ fn collect_group_bindings(
     for (id, group) in groups {
         match group {
             IndexedGroup::Single(_, root) => {
-                bindings.insert(id.as_ref().unwrap().clone(), *root);
+                bindings.insert(*id.as_ref().unwrap(), *root);
             }
             IndexedGroup::Recursive(items) => {
                 bindings.extend(items.iter().cloned());
@@ -810,8 +804,8 @@ fn resolve_binding(
 ) -> (NodeId, Option<Ident>) {
     match store.view(node) {
         NodeView::Var(id) => {
-            let id = id.clone();
-            if !seen.insert(id.clone()) {
+            let id = *id;
+            if !seen.insert(id) {
                 return (node, Some(id));
             }
             match groups.get(&id).copied() {
@@ -876,7 +870,7 @@ fn add_hoisted_aliases(
         .metadata()
         .exports
         .iter()
-        .map(|id| (id.name().to_string(), id.clone()))
+        .map(|id| (id.name().to_string(), *id))
         .collect::<AHashMap<_, _>>();
     let mut occupied = groups
         .iter()
@@ -956,9 +950,7 @@ fn add_hoisted_aliases(
             });
         }
         let alias_id = id_gen.create(&name);
-        let mut access = context
-            .store_mut()
-            .append(NodeSnapshot::Var(top_id.clone()));
+        let mut access = context.store_mut().append(NodeSnapshot::Var(*top_id));
         for (position, field) in positions {
             access = context.store_mut().append(NodeSnapshot::Prim(
                 Primitive::Pfield(position, FieldDbgInfo::Module { name: field }),
@@ -973,12 +965,9 @@ fn add_hoisted_aliases(
     // again, then groups/exports use `List.rev`, leaving those aliases in
     // reverse source order. Hoisted CMJ metadata keeps source order.
     for (id, root, path, name) in aliases {
-        groups.push((Some(id.clone()), IndexedGroup::Single(LetKind::Alias, root)));
-        context.metadata_mut_for_backend().exports.push(id.clone());
-        context
-            .metadata_mut_for_backend()
-            .export_idents
-            .insert(id.clone());
+        groups.push((Some(id), IndexedGroup::Single(LetKind::Alias, root)));
+        context.metadata_mut_for_backend().exports.push(id);
+        context.metadata_mut_for_backend().export_idents.insert(id);
         export_map.push((id, root));
         metadata.insert(
             0,
@@ -998,7 +987,7 @@ fn collect_required_modules(
     fn visit(store: &IndexedLambda, node: NodeId, modules: &mut AHashSet<ModuleId>) {
         if let NodeView::GlobalModule(id) = store.view(node) {
             modules.insert(ModuleId {
-                id: id.clone(),
+                id: *id,
                 kind: Kind::Ml,
                 dynamic_import: false,
             });
@@ -1229,7 +1218,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     dump(&mut diagnostics, "simplify_lets", &context);
 
     let (mut groups, mut export_map) = coerce_and_group(&mut context, &id_gen, external_arity)?;
-    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+    if let Some(diagnostics) = diagnostics {
         diagnostics.groups(materialize_diagnostic_groups(&context, &groups));
     }
     let maybe_pure = group_side_effect_reason(context.store(), &groups);
@@ -1307,7 +1296,7 @@ mod tests {
         let generator = Arc::new(IdGenerator::with_start_stamp(100));
         let result = run(
             module_export(
-                vec![a.clone(), b.clone()],
+                vec![a, b],
                 vec![
                     Lambda::const_(Constant::int(1)),
                     Lambda::const_(Constant::int(2)),
@@ -1342,7 +1331,7 @@ mod tests {
         let original = id("value", 10);
         let target = Ident::new("value", 7, IdentFlags::GLOBAL);
         let result = run(
-            module_export(vec![original], vec![Lambda::var(target.clone())]),
+            module_export(vec![original], vec![Lambda::var(target)]),
             &[],
             Arc::new(IdGenerator::with_start_stamp(20)),
         )
@@ -1393,7 +1382,7 @@ mod tests {
         let context = IndexedLambdaContext::from_lambda(
             Lambda::prim(
                 Primitive::Pdebugger,
-                vec![Lambda::var(js.clone())],
+                vec![Lambda::var(js)],
                 Location::none(),
             ),
             [],
@@ -1404,8 +1393,8 @@ mod tests {
         assert!(js.is_js());
         assert_eq!(js.flags().bits(), 8);
         for args in [
-            vec![Lambda::var(js.clone()), Lambda::var(id("Math", 0))],
-            vec![Lambda::var(id("Math", 0)), Lambda::var(js.clone())],
+            vec![Lambda::var(js), Lambda::var(id("Math", 0))],
+            vec![Lambda::var(id("Math", 0)), Lambda::var(js)],
         ] {
             let context = IndexedLambdaContext::from_lambda(
                 Lambda::prim(Primitive::Pdebugger, args, Location::none()),
@@ -1444,16 +1433,14 @@ mod tests {
         let first_root = context
             .store_mut()
             .append_compat_lambda(Lambda::const_(Constant::int(1)));
-        let second_root = context
-            .store_mut()
-            .append_compat_lambda(Lambda::var(first.clone()));
+        let second_root = context.store_mut().append_compat_lambda(Lambda::var(first));
         let groups = vec![
             (
-                Some(first.clone()),
+                Some(first),
                 IndexedGroup::Single(LetKind::Alias, first_root),
             ),
             (
-                Some(second.clone()),
+                Some(second),
                 IndexedGroup::Single(LetKind::Alias, second_root),
             ),
         ];
@@ -1483,10 +1470,7 @@ mod tests {
             let root = context
                 .store_mut()
                 .append_compat_lambda(Lambda::const_(Constant::int(1)));
-            let groups = vec![(
-                Some(binding.clone()),
-                IndexedGroup::Single(LetKind::Alias, root),
-            )];
+            let groups = vec![(Some(binding), IndexedGroup::Single(LetKind::Alias, root))];
             let kept = remove_dead_groups(context.store(), &[export], groups);
             assert_eq!(kept.len(), 1);
             assert_eq!(kept[0].0.as_ref().unwrap().flags(), binding.flags());
@@ -1502,24 +1486,20 @@ mod tests {
         let original_nonvar = id("computed", 3);
         let input = Lambda::let_(
             LetKind::Alias,
-            replacement_same.clone(),
+            replacement_same,
             Lambda::unit(),
             Lambda::let_(
                 LetKind::Alias,
-                source.clone(),
+                source,
                 Lambda::unit(),
                 Lambda::let_(
                     LetKind::Alias,
-                    original_renamed.clone(),
+                    original_renamed,
                     Lambda::const_(Constant::int(9)),
                     module_export(
+                        vec![original_same, original_renamed, original_nonvar],
                         vec![
-                            original_same.clone(),
-                            original_renamed.clone(),
-                            original_nonvar.clone(),
-                        ],
-                        vec![
-                            Lambda::var(replacement_same.clone()),
+                            Lambda::var(replacement_same),
                             Lambda::var(source),
                             Lambda::const_(Constant::int(7)),
                         ],
@@ -1529,11 +1509,7 @@ mod tests {
         );
         let mut context = IndexedLambdaContext::from_lambda(
             input,
-            vec![
-                original_same.clone(),
-                original_renamed.clone(),
-                original_nonvar.clone(),
-            ],
+            vec![original_same, original_renamed, original_nonvar],
         );
         context.collect_info();
         let generator = IdGenerator::with_start_stamp(100);
@@ -1625,12 +1601,12 @@ mod tests {
         let module = id("A", 1);
         let module_value = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
-            vec![Lambda::var(binding.clone())],
+            vec![Lambda::var(binding)],
             Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,
-            binding.clone(),
+            binding,
             Lambda::function_(
                 0,
                 vec![],
@@ -1640,9 +1616,9 @@ mod tests {
             ),
             Lambda::let_(
                 LetKind::Strict,
-                module.clone(),
+                module,
                 module_value,
-                module_export(vec![module.clone()], vec![Lambda::var(module.clone())]),
+                module_export(vec![module], vec![Lambda::var(module)]),
             ),
         );
         let hoisted = HoistedFunction {
@@ -1700,7 +1676,7 @@ mod tests {
         let input = Lambda::let_(
             LetKind::Alias,
             dead,
-            Lambda::global_module(dep.clone()),
+            Lambda::global_module(dep),
             module_export(vec![export], vec![Lambda::unit()]),
         );
         let extra = ModuleId {
@@ -1851,7 +1827,7 @@ mod tests {
         let export = id("submodule", 1);
         let first_module = id("First", 0);
         let second_module = id("Second", 0);
-        let field = |module: Ident, dynamic, name: &str| {
+        let field = |module: Ident, _dynamic, name: &str| {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
                 vec![Lambda::global_module(module)],
@@ -1864,16 +1840,16 @@ mod tests {
                 Mutable::Immutable,
             ),
             vec![
-                field(first_module.clone(), false, "a"),
-                field(second_module.clone(), true, "b"),
+                field(first_module, false, "a"),
+                field(second_module, true, "b"),
             ],
             Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,
-            export.clone(),
+            export,
             value,
-            module_export(vec![export.clone()], vec![Lambda::var(export.clone())]),
+            module_export(vec![export], vec![Lambda::var(export)]),
         );
         let mut context = IndexedLambdaContext::from_lambda(input, vec![export]);
         context.collect_info();
@@ -1936,12 +1912,12 @@ mod tests {
         let no_group = Ident::new("NoGroup", 0, IdentFlags::GLOBAL);
         let module_value = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
-            vec![Lambda::var(binding.clone())],
+            vec![Lambda::var(binding)],
             Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,
-            binding.clone(),
+            binding,
             Lambda::function_(
                 0,
                 vec![],
@@ -1951,10 +1927,10 @@ mod tests {
             ),
             Lambda::let_(
                 LetKind::Strict,
-                module.clone(),
+                module,
                 module_value,
                 module_export(
-                    vec![module.clone(), no_group.clone()],
+                    vec![module, no_group],
                     vec![Lambda::var(module), Lambda::var(no_group)],
                 ),
             ),
@@ -1964,25 +1940,25 @@ mod tests {
             .collect::<Vec<_>>();
         let items = vec![
             HoistedFunction {
-                binding: binding.clone(),
+                binding: binding,
                 path: vec![],
                 loc: locations[0],
                 target_loc: Location::none(),
             },
             HoistedFunction {
-                binding: binding.clone(),
+                binding: binding,
                 path: vec!["Missing".into(), "make".into()],
                 loc: locations[1],
                 target_loc: Location::none(),
             },
             HoistedFunction {
-                binding: binding.clone(),
+                binding: binding,
                 path: vec!["NoGroup".into(), "make".into()],
                 loc: locations[2],
                 target_loc: Location::none(),
             },
             HoistedFunction {
-                binding: binding.clone(),
+                binding: binding,
                 path: vec!["A".into(), "absent".into()],
                 loc: locations[3],
                 target_loc: Location::none(),
@@ -2076,12 +2052,12 @@ mod tests {
         let occupied = id("A$make", 3);
         let module_value = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
-            vec![Lambda::var(binding.clone())],
+            vec![Lambda::var(binding)],
             Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,
-            occupied.clone(),
+            occupied,
             Lambda::function_(
                 0,
                 vec![],
@@ -2091,7 +2067,7 @@ mod tests {
             ),
             Lambda::let_(
                 LetKind::Strict,
-                binding.clone(),
+                binding,
                 Lambda::function_(
                     0,
                     vec![],
@@ -2101,10 +2077,10 @@ mod tests {
                 ),
                 Lambda::let_(
                     LetKind::Strict,
-                    module.clone(),
+                    module,
                     module_value,
                     module_export(
-                        vec![module.clone(), occupied.clone()],
+                        vec![module, occupied],
                         vec![Lambda::var(module), Lambda::var(occupied)],
                     ),
                 ),
@@ -2139,13 +2115,11 @@ mod tests {
         let binding = id("make", 2);
         let module = id("A", 1);
         let occupied = id("A$make", 3);
-        let mut context = IndexedLambdaContext::from_lambda(Lambda::unit(), [module.clone()]);
+        let mut context = IndexedLambdaContext::from_lambda(Lambda::unit(), [module]);
         let target = context
             .store_mut()
             .append_compat_lambda(Lambda::const_(Constant::int(1)));
-        let target_var = context
-            .store_mut()
-            .append(NodeSnapshot::Var(binding.clone()));
+        let target_var = context.store_mut().append(NodeSnapshot::Var(binding));
         let module_root = context.store_mut().append(NodeSnapshot::Prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
             vec![target_var],
@@ -2155,10 +2129,7 @@ mod tests {
             .store_mut()
             .append_compat_lambda(Lambda::const_(Constant::int(2)));
         let mut groups = vec![
-            (
-                Some(binding.clone()),
-                IndexedGroup::Single(LetKind::Strict, target),
-            ),
+            (Some(binding), IndexedGroup::Single(LetKind::Strict, target)),
             (
                 Some(module),
                 IndexedGroup::Single(LetKind::Strict, module_root),
@@ -2186,7 +2157,7 @@ mod tests {
                     target_loc: Location::none(),
                 },
                 HoistedFunction {
-                    binding: binding.clone(),
+                    binding: binding,
                     path: vec!["A".into(), "make".into()],
                     loc: hoisted_loc,
                     target_loc: Location::new_for_error("nonfunction.res", 20, 30),
@@ -2255,12 +2226,12 @@ mod tests {
                 TagInfo::Module(vec!["first".into(), "second".into()]),
                 Mutable::Immutable,
             ),
-            vec![Lambda::var(first.clone()), Lambda::var(second.clone())],
+            vec![Lambda::var(first), Lambda::var(second)],
             Location::none(),
         );
         let input = Lambda::let_(
             LetKind::Strict,
-            first.clone(),
+            first,
             Lambda::function_(
                 0,
                 vec![],
@@ -2270,7 +2241,7 @@ mod tests {
             ),
             Lambda::let_(
                 LetKind::Strict,
-                second.clone(),
+                second,
                 Lambda::function_(
                     0,
                     vec![],
@@ -2280,9 +2251,9 @@ mod tests {
                 ),
                 Lambda::let_(
                     LetKind::Strict,
-                    module.clone(),
+                    module,
                     module_value,
-                    module_export(vec![module.clone()], vec![Lambda::var(module)]),
+                    module_export(vec![module], vec![Lambda::var(module)]),
                 ),
             ),
         );
@@ -2379,7 +2350,7 @@ mod tests {
         let mut context = IndexedLambdaContext::from_lambda(Lambda::unit(), []);
         let single = context.store_mut().append_compat_lambda(Lambda::prim(
             Primitive::Pidentity,
-            vec![Lambda::var(exotic.clone())],
+            vec![Lambda::var(exotic)],
             Location::new_for_error("groups.res", 4, 8),
         ));
         let rec_root = context.store_mut().append_compat_lambda(Lambda::function_(
@@ -2391,14 +2362,8 @@ mod tests {
         ));
         let nop = context.store_mut().append_compat_lambda(Lambda::Lbreak);
         let groups = vec![
-            (
-                Some(exotic.clone()),
-                IndexedGroup::Single(LetKind::Alias, single),
-            ),
-            (
-                None,
-                IndexedGroup::Recursive(vec![(recursive.clone(), rec_root)]),
-            ),
+            (Some(exotic), IndexedGroup::Single(LetKind::Alias, single)),
+            (None, IndexedGroup::Recursive(vec![(recursive, rec_root)])),
             (None, IndexedGroup::Nop(nop)),
         ];
         let materialized = materialize_diagnostic_groups(&context, &groups);
@@ -2422,7 +2387,7 @@ mod tests {
     #[test]
     fn empty_grouped_output_consumes_the_optimizer_root_authority() {
         let export = Ident::new("value", 1, IdentFlags::GLOBAL);
-        let input = module_export(vec![export.clone()], vec![Lambda::var(export)]);
+        let input = module_export(vec![export], vec![Lambda::var(export)]);
         let result = run(input, &[], Arc::new(IdGenerator::with_start_stamp(2))).unwrap();
         assert!(result.groups.is_empty());
         assert!(result.context.backend_roots().is_empty());

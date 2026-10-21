@@ -398,7 +398,7 @@ fn remove_obsolete_outputs(package: &Package, previous: Option<&AHashSet<String>
         if current.contains(output.as_str()) {
             continue;
         }
-        let file = package.path.join(&output);
+        let file = package.path.join(output);
         if output.contains(".gen.") {
             let generated = std::fs::read_to_string(&file)
                 .is_ok_and(|content| content.starts_with("/* TypeScript file generated from"));

@@ -786,12 +786,12 @@ pub fn process_typed_artifact(
                 }
             )
         });
-    let output_file = crate::gentype::paths::get_output_file(&config, &source_file);
+    let output_file = crate::gentype::paths::get_output_file(config, &source_file);
     let output_file_relative =
-        crate::gentype::paths::get_output_file_relative(&config, &source_file);
+        crate::gentype::paths::get_output_file_relative(config, &source_file);
     let local_resolver = shared_resolver.is_none().then(|| {
         crate::gentype::module_resolver::create_lazy_resolver(
-            &config,
+            config,
             &[".res".to_string(), ".shim.ts".to_string()],
             |fname| fname == "React.res" || fname == "ReasonReact.res",
         )
@@ -800,13 +800,12 @@ pub fn process_typed_artifact(
         .or(local_resolver.as_ref())
         .expect("GenType resolver must be available");
     let type_declaration_translation = typed_artifact_translate_type_declarations(
-        &config,
+        config,
         &output_file_relative,
         resolver,
         &artifact,
     );
-    if let Some(cmt_file) =
-        cmt_file_for_typed_artifact(&config, &source_file, artifact.is_interface)
+    if let Some(cmt_file) = cmt_file_for_typed_artifact(config, &source_file, artifact.is_interface)
     {
         register_in_process_type_declarations(
             &artifact.compiler_module_name,
@@ -830,7 +829,7 @@ pub fn process_typed_artifact(
     );
     if has_gentype_annotations {
         let translation =
-            translate_typed_artifact(&config, &output_file_relative, resolver, &artifact);
+            translate_typed_artifact(config, &output_file_relative, resolver, &artifact);
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         // Only emitting mutates the config; modules without GenType

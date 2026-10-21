@@ -607,7 +607,7 @@ impl<T: Clone> IdTbl<T> {
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
-            return Some((Path::pident(id.clone()), value));
+            return Some((Path::pident(*id), value));
         }
 
         match &self.opened {
@@ -619,7 +619,7 @@ impl<T: Clone> IdTbl<T> {
                         .root
                         .as_ref()
                         .map(|root| Path::pdot_pos(root.clone(), key, *pos))
-                        .unwrap_or_else(|| Path::pident(id.clone()));
+                        .unwrap_or_else(|| Path::pident(*id));
                     (path, value)
                 })
                 .or_else(|| opened.next.find_by_key_with_path(key)),
@@ -660,7 +660,7 @@ impl<T: Clone> IdTbl<T> {
         {
             let updated = f(value);
             *value = updated.clone();
-            return Some((id.clone(), updated));
+            return Some((*id, updated));
         }
 
         if let Some(opened) = self.opened.as_mut() {
@@ -668,7 +668,7 @@ impl<T: Clone> IdTbl<T> {
             if let Some((id, value, _)) = Arc::make_mut(&mut opened.components).get_mut(&key) {
                 let updated = f(value);
                 *value = updated.clone();
-                return Some((id.clone(), updated));
+                return Some((*id, updated));
             }
             return Arc::make_mut(&mut opened.next).update_by_key(key, f);
         }
@@ -1416,7 +1416,7 @@ impl Env {
                 .visible_local_entries()
                 .filter_map(|(id, decl)| match &decl.md_type {
                     ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
-                        Some((id.clone(), target.clone()))
+                        Some((*id, target.clone()))
                     }
                     _ => None,
                 })
@@ -1878,20 +1878,18 @@ impl Env {
         self.bump_scope();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
-        self.data_mut().modules.add(id.clone(), decl);
-        self.data_mut()
-            .module_components
-            .add(id.clone(), stored_components);
+        self.data_mut().modules.add(id, decl);
+        self.data_mut().module_components.add(id, stored_components);
     }
 
     /// Add a module binding.
     pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
-        self.add_module_with_component_path(id.clone(), decl, Path::pident(id));
+        self.add_module_with_component_path(id, decl, Path::pident(id));
     }
 
     /// Add a functor-parameter module binding.
     pub fn add_module_arg(&mut self, id: Ident, decl: ModuleDeclaration) {
-        self.add_module(id.clone(), decl);
+        self.add_module(id, decl);
         // `add_module` above already started a new scope.
         self.data_mut().functor_args.insert(id);
     }
@@ -1991,9 +1989,7 @@ impl Env {
     fn first_dotted_component_path(path: &Path) -> Option<Path> {
         match path {
             Path::Pdot(parent, name, pos) => match parent.as_ref() {
-                Path::Pident(_) => {
-                    Some(Path::pdot_pos(parent.as_ref().clone(), name.clone(), *pos))
-                }
+                Path::Pident(_) => Some(Path::pdot_pos(parent.as_ref().clone(), *name, *pos)),
                 _ => Self::first_dotted_component_path(parent),
             },
             Path::Pident(_) | Path::Papply(_, _) => None,
@@ -2124,8 +2120,7 @@ impl Env {
 
             match path {
                 Path::Pident(id) => {
-                    let result = env
-                        .data
+                    env.data
                         .modules
                         .find_by_ident(id)
                         .or_else(|| {
@@ -2133,8 +2128,7 @@ impl Env {
                             env.data.modules.find_by_name(id.name())
                         })
                         .map(|m| m.as_ref())
-                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()));
-                    result
+                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
                 }
                 Path::Pdot(parent, name, _) => {
                     let parent_md = lookup_module_inner(env, parent, visiting)?;
@@ -2167,7 +2161,7 @@ impl Env {
                 if normalized_prefix == **prefix {
                     path.clone()
                 } else {
-                    Path::Pdot(std::sync::Arc::new(normalized_prefix), name.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
                 }
             }
             Path::Pident(_) => path.clone(),
@@ -2186,7 +2180,7 @@ impl Env {
                 if p_norm == **p {
                     path.clone()
                 } else {
-                    Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
                 }
             }
             _ => path.clone(),
@@ -2442,7 +2436,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                                  id: Ident,
                                  decl: TypeDeclaration,
                                  ctx: &TypeContext| {
-        let type_path = Path::pident(id.clone());
+        let type_path = Path::pident(id);
 
         // Extract constructors/labels from predef declarations so they are
         // available for disambiguation just like OCaml's initial environment.
@@ -2496,7 +2490,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         cstr_inlined: None,
                     };
 
-                    env.add_constructor(cd.cd_id.clone(), cstr_desc);
+                    env.add_constructor(cd.cd_id, cstr_desc);
                 }
             }
             TypeKind::TypeRecord(labels, repr) => {
@@ -2520,7 +2514,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                         lbl_loc: ld.ld_loc,
                         lbl_attributes: ld.ld_attributes.clone(),
                     };
-                    env.add_label(ld.ld_id.clone(), label_desc);
+                    env.add_label(ld.ld_id, label_desc);
                 }
             }
             _ => {}
@@ -3091,7 +3085,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 
         let add_exception =
             |env: &mut Env, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
-                let path = Path::pident(id.clone());
+                let path = Path::pident(id);
                 let warn_on_literal_pattern_attr = crate::types::decl::Attribute {
                     attr_name: crate::types::asttypes::Located::noloc(
                         "ocaml.warn_on_literal_pattern".to_string(),
@@ -3231,7 +3225,7 @@ mod tests {
             val_attributes: vec![],
             val_path: None,
         };
-        env.add_value(id.clone(), desc);
+        env.add_value(id, desc);
 
         assert!(env.find_value("x").is_ok());
         assert!(env.find_value("y").is_err());
@@ -3256,7 +3250,7 @@ mod tests {
             type_inlined_types: vec![],
             type_path: None,
         };
-        env.add_type(id.clone(), decl);
+        env.add_type(id, decl);
 
         assert!(env.find_type("t").is_ok());
         assert!(env.find_type("u").is_err());
@@ -3322,7 +3316,7 @@ mod tests {
             val_attributes: vec![],
             val_path: None,
         };
-        env.add_value(id.clone(), desc);
+        env.add_value(id, desc);
 
         let path = Path::pident(id);
         assert!(env.lookup_value(&path).is_ok());
@@ -3335,7 +3329,7 @@ mod tests {
         let mut env = Env::empty();
         let target_id = Ident::create_local("Target");
         env.add_module(
-            target_id.clone(),
+            target_id,
             ModuleDeclaration {
                 md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                 md_attributes: vec![],
@@ -3346,19 +3340,16 @@ mod tests {
 
         let alias_id = Ident::create_local("Alias");
         env.add_module(
-            alias_id.clone(),
+            alias_id,
             ModuleDeclaration {
-                md_type: ModuleType::MtyAlias(
-                    AliasPresence::MtaPresent,
-                    Path::pident(target_id.clone()),
-                ),
+                md_type: ModuleType::MtyAlias(AliasPresence::MtaPresent, Path::pident(target_id)),
                 md_attributes: vec![],
                 md_loc: Location::none(),
                 md_path: None,
             },
         );
 
-        let target_child_path = Path::pdot(Path::pident(target_id.clone()), "Inner");
+        let target_child_path = Path::pdot(Path::pident(target_id), "Inner");
         assert!(env.module_path_requires_env_scoped_cache(&target_child_path));
 
         env.add_module(

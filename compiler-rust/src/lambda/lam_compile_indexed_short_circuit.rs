@@ -79,8 +79,8 @@ impl IndexedJsConsumer<'_> {
             );
         }
         let (target, declare, value) = match continuation {
-            Continuation::Assign(id) => (id.clone(), false, false),
-            Continuation::Declare(_, id) => (id.clone(), true, false),
+            Continuation::Assign(id) => (*id, false, false),
+            Continuation::Declare(_, id) => (*id, true, false),
             Continuation::NeedValue(_) | Continuation::EffectCall(_) => {
                 (self.compiler.fresh_tmp_ident(), true, true)
             }
@@ -88,13 +88,13 @@ impl IndexedJsConsumer<'_> {
         let mut rhs_block = rhs.prelude;
         rhs_block.push(Statement::exp(Expression::bin(
             BinOp::Eq,
-            Expression::var(target.clone()),
+            Expression::var(target),
             rhs.expr,
         )));
         let mut block = lhs.prelude;
         let else_block = if declare {
             let declaration = Statement::variable(VariableDeclaration {
-                ident: target.clone(),
+                ident: target,
                 value: Some(op.default_expr()),
                 property: LetKind::Variable,
                 ident_info: IdentInfo::default(),
@@ -111,7 +111,7 @@ impl IndexedJsConsumer<'_> {
         } else {
             vec![Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(target.clone()),
+                Expression::var(target),
                 op.default_expr(),
             ))]
         };

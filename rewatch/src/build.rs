@@ -558,16 +558,16 @@ pub fn incremental_build_without_lock(
         });
         build_state.module_registry = registry;
         phase_mark("runtime-precompile-joined");
-        if let Err(err) = precompile_result {
-            if result_asts.is_ok() {
-                logs::finalize(&build_state.packages);
-                pb.finish();
-                print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
-                return Err(IncrementalBuildError {
-                    kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())),
-                    plain_output,
-                });
-            }
+        if let Err(err) = precompile_result
+            && result_asts.is_ok()
+        {
+            logs::finalize(&build_state.packages);
+            pb.finish();
+            print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
+            return Err(IncrementalBuildError {
+                kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())),
+                plain_output,
+            });
         }
         result_asts
     } else {

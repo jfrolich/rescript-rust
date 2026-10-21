@@ -268,21 +268,15 @@ mod tests {
         let lam = bind_rec(
             vec![
                 (
-                    find_end.clone(),
+                    find_end,
                     function(
                         "n",
-                        RawLambda::seq(
-                            RawLambda::var(find_end.clone()),
-                            RawLambda::var(find_beg.clone()),
-                        ),
+                        RawLambda::seq(RawLambda::var(find_end), RawLambda::var(find_beg)),
                     ),
                 ),
-                (
-                    find_beg.clone(),
-                    function("p", RawLambda::var(find_beg.clone())),
-                ),
+                (find_beg, function("p", RawLambda::var(find_beg))),
             ],
-            RawLambda::var(find_end.clone()),
+            RawLambda::var(find_end),
         );
         let RawLambda::Lletrec(outer, inner) = lam else {
             panic!("expected letrec")
@@ -299,7 +293,7 @@ mod tests {
     fn demotes_a_non_recursive_binding() {
         let f = Ident::create_local("f");
         let lam = bind_rec(
-            vec![(f.clone(), function("x", RawLambda::unit()))],
+            vec![(f, function("x", RawLambda::unit()))],
             RawLambda::var(f),
         );
         assert!(matches!(lam, RawLambda::Llet(LetKind::Strict, _, _, _)));

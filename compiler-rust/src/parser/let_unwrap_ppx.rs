@@ -114,7 +114,7 @@ fn rewrite_structure_item(
         StructureItemDesc::Pstr_module(mb) => {
             let rewritten_expr = rewrite_mod_expr_idx(mb.pmb_expr, arena, let_unwrap_enabled)?;
             StructureItemDesc::Pstr_module(Box::new(crate::parser::ast::ModuleBinding {
-                pmb_name: mb.pmb_name.clone(),
+                pmb_name: mb.pmb_name,
                 pmb_expr: rewritten_expr,
                 pmb_attributes: mb.pmb_attributes.clone(),
                 pmb_loc: mb.pmb_loc,
@@ -127,7 +127,7 @@ fn rewrite_structure_item(
                     let rewritten_expr =
                         rewrite_mod_expr_idx(mb.pmb_expr, arena, let_unwrap_enabled)?;
                     Ok(crate::parser::ast::ModuleBinding {
-                        pmb_name: mb.pmb_name.clone(),
+                        pmb_name: mb.pmb_name,
                         pmb_expr: rewritten_expr,
                         pmb_attributes: mb.pmb_attributes.clone(),
                         pmb_loc: mb.pmb_loc,
@@ -165,7 +165,7 @@ fn rewrite_extension(
 ) -> Result<Extension, String> {
     let (name, payload) = ext;
     let payload = rewrite_payload(payload, arena, let_unwrap_enabled)?;
-    Ok((name.clone(), payload))
+    Ok((*name, payload))
 }
 
 fn rewrite_payload(
@@ -227,7 +227,7 @@ fn rewrite_module_expr(
         ModuleExprDesc::Pmod_functor(inner) => {
             let (name, mod_type, body) = &**inner;
             let rewritten_body = rewrite_mod_expr_idx(*body, arena, let_unwrap_enabled)?;
-            ModuleExprDesc::Pmod_functor(Box::new((name.clone(), *mod_type, rewritten_body)))
+            ModuleExprDesc::Pmod_functor(Box::new((*name, *mod_type, rewritten_body)))
         }
         ModuleExprDesc::Pmod_apply(lhs, rhs) => {
             let rewritten_lhs = rewrite_mod_expr_idx(*lhs, arena, let_unwrap_enabled)?;
@@ -297,7 +297,7 @@ fn rewrite_expression(
                 .transpose()?;
             let rewritten_rhs = rewrite_expr_idx(inner.rhs, arena, let_unwrap_enabled)?;
             ExpressionDesc::Pexp_fun(Box::new(crate::parser::ast::PexpFun {
-                arg_label: inner.arg_label.clone(),
+                arg_label: inner.arg_label,
                 default: rewritten_default,
                 lhs: inner.lhs,
                 rhs: rewritten_rhs,
@@ -312,7 +312,7 @@ fn rewrite_expression(
                 .iter()
                 .map(|(lbl, arg)| {
                     let rewritten = rewrite_expr_idx(*arg, arena, let_unwrap_enabled)?;
-                    Ok((lbl.clone(), rewritten))
+                    Ok((*lbl, rewritten))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             ExpressionDesc::Pexp_apply(Box::new(crate::parser::ast::PexpApply {
@@ -498,7 +498,7 @@ fn rewrite_expression(
             let (name, mod_expr, body) = &**inner;
             let rewritten_mod = rewrite_mod_expr_idx(*mod_expr, arena, let_unwrap_enabled)?;
             let rewritten_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_letmodule(Box::new((name.clone(), rewritten_mod, rewritten_body)))
+            ExpressionDesc::Pexp_letmodule(Box::new((*name, rewritten_mod, rewritten_body)))
         }
         ExpressionDesc::Pexp_letexception(inner) => {
             let (ext, body) = &**inner;
@@ -512,7 +512,7 @@ fn rewrite_expression(
         ExpressionDesc::Pexp_newtype(inner) => {
             let (name, body) = &**inner;
             let rewritten_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
-            ExpressionDesc::Pexp_newtype(Box::new((name.clone(), rewritten_body)))
+            ExpressionDesc::Pexp_newtype(Box::new((*name, rewritten_body)))
         }
         ExpressionDesc::Pexp_pack(mod_expr) => {
             let rewritten_mod = rewrite_mod_expr_idx(*mod_expr, arena, let_unwrap_enabled)?;

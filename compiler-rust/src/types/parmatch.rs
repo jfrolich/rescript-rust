@@ -2306,9 +2306,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let desc = match node.desc {
             Desc::Any | Desc::Var(VarKind::Extra) => PatternDesc::Tpat_any,
             Desc::Var(VarKind::Source) => match node.src.map(|src| &src.pat_desc) {
-                Some(PatternDesc::Tpat_var(id, name)) => {
-                    PatternDesc::Tpat_var(id.clone(), name.clone())
-                }
+                Some(PatternDesc::Tpat_var(id, name)) => PatternDesc::Tpat_var(*id, name.clone()),
                 _ => PatternDesc::Tpat_any,
             },
             Desc::Var(VarKind::Extension(ident, loc)) => PatternDesc::Tpat_var(
@@ -2322,7 +2320,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let inner = self.export(inner);
                 match node.src.map(|src| &src.pat_desc) {
                     Some(PatternDesc::Tpat_alias(_, id, name)) => {
-                        PatternDesc::Tpat_alias(Box::new(inner), id.clone(), name.clone())
+                        PatternDesc::Tpat_alias(Box::new(inner), *id, name.clone())
                     }
                     _ => return inner,
                 }
@@ -2841,7 +2839,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     fn bound_ident(&self, p: P) -> Option<Ident> {
         match self.node(p).src.map(|src| &src.pat_desc) {
             Some(PatternDesc::Tpat_var(id, _)) | Some(PatternDesc::Tpat_alias(_, id, _)) => {
-                Some(id.clone())
+                Some(*id)
             }
             _ => None,
         }
@@ -3093,16 +3091,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
-            out.insert(id.clone());
+            out.insert(*id);
         }
         PatternDesc::Tpat_alias(p, id, _) => {
             pat_bound_idents(p, out);
-            out.insert(id.clone());
+            out.insert(*id);
         }
         PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(p1, out),
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
-                out.insert(rest.rest_ident.clone());
+                out.insert(rest.rest_ident);
             }
             for (_, _, p, _) in fields {
                 pat_bound_idents(p, out);

@@ -227,8 +227,8 @@ fn rebind(
     id: &Ident,
 ) -> Ident {
     let fresh = id.rename(id_gen);
-    let var = store.append(NodeSnapshot::Var(fresh.clone()));
-    map.insert(id.clone(), var);
+    let var = store.append(NodeSnapshot::Var(fresh));
+    map.insert(*id, var);
     diagnostics.record(store, map);
     fresh
 }
@@ -368,19 +368,19 @@ fn propagate(
                         .is_some_and(|stat| stat.top_and_used_zero_or_one())
             });
         if direct {
-            map.insert(param.clone(), arg);
+            map.insert(*param, arg);
             diagnostics.record(store, &map);
             continue;
         }
         let fresh = param.rename(id_gen);
-        let fresh_var = store.append(NodeSnapshot::Var(fresh.clone()));
+        let fresh_var = store.append(NodeSnapshot::Var(fresh));
         bindings.push((fresh, arg));
-        map.insert(param.clone(), fresh_var);
+        map.insert(*param, fresh_var);
         diagnostics.record(store, &map);
     }
     let mut result = rewrite_bounded(store, &mut map, diagnostics, body, id_gen);
     for (id, arg) in bindings.into_iter().rev() {
-        register_kind(store, meta, id.clone(), arg);
+        register_kind(store, meta, id, arg);
         result = append_refine_let(store, LetKind::Strict, id, arg, result);
     }
     result
@@ -462,7 +462,7 @@ mod tests {
         let params = ids(1, 3);
         let body = crate::lambda::Lambda::prim(
             Primitive::Pidentity,
-            vec![crate::lambda::Lambda::var(params[0].clone())],
+            vec![crate::lambda::Lambda::var(params[0])],
             Location::none(),
         );
         let mut store = IndexedLambda::from_lambda(body);
@@ -492,8 +492,8 @@ mod tests {
         let body = crate::lambda::Lambda::prim(
             Primitive::Paddint,
             vec![
-                crate::lambda::Lambda::var(params[0].clone()),
-                crate::lambda::Lambda::var(params[0].clone()),
+                crate::lambda::Lambda::var(params[0]),
+                crate::lambda::Lambda::var(params[0]),
             ],
             Location::none(),
         );

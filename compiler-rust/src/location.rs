@@ -47,7 +47,7 @@ impl fmt::Display for Location {
 ///
 /// This corresponds to `Lexing.position` in OCaml.
 /// File name is stored as StrIdx for efficient sharing in marshal output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct Position {
     /// File name (interned string index).
     pub file_name: StrIdx,
@@ -57,17 +57,6 @@ pub struct Position {
     pub bol: i32,
     /// Character offset from beginning of file (0-indexed).
     pub cnum: i32,
-}
-
-impl Default for Position {
-    fn default() -> Self {
-        Self {
-            file_name: StrIdx::default(),
-            line: 0,
-            bol: 0,
-            cnum: 0,
-        }
-    }
 }
 
 impl Position {

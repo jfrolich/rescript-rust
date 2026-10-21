@@ -587,6 +587,24 @@ impl Doc {
     }
 }
 
+/// The width res_doc.ml:152,198 gives a text: OCaml's `String.length`, a
+/// byte count of the source. Printer text carries source bytes as Latin-1
+/// chars (one char per byte); other chars count as their UTF-8 bytes.
+fn text_width(txt: &str) -> i32 {
+    if txt.is_ascii() {
+        return txt.len() as i32;
+    }
+    txt.chars()
+        .map(|c| {
+            if (c as u32) <= 0xFF {
+                1
+            } else {
+                c.len_utf8() as i32
+            }
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,22 +699,4 @@ mod tests {
         );
         assert_eq!(doc.to_string(80), "a\n\nb");
     }
-}
-
-/// The width res_doc.ml:152,198 gives a text: OCaml's `String.length`, a
-/// byte count of the source. Printer text carries source bytes as Latin-1
-/// chars (one char per byte); other chars count as their UTF-8 bytes.
-fn text_width(txt: &str) -> i32 {
-    if txt.is_ascii() {
-        return txt.len() as i32;
-    }
-    txt.chars()
-        .map(|c| {
-            if (c as u32) <= 0xFF {
-                1
-            } else {
-                c.len_utf8() as i32
-            }
-        })
-        .sum()
 }

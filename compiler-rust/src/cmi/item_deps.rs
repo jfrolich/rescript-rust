@@ -82,7 +82,7 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
     let Ok((root, segs)) = path.flatten() else {
         // A dotted path under a functor application.
         for head in path.heads() {
-            read_of_path(&Path::Pident(head.clone()), Kind::Module, own_unit, out);
+            read_of_path(&Path::Pident(*head), Kind::Module, own_unit, out);
         }
         return;
     };

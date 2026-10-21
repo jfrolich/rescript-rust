@@ -184,7 +184,7 @@ impl Interner {
     ///
     /// Panics if the index is invalid.
     #[inline]
-    #[inline]
+
     pub fn get(&self, idx: StrIdx) -> &str {
         let (start, end) = self.spans[idx.0 as usize];
         &self.bytes[start as usize..end as usize]

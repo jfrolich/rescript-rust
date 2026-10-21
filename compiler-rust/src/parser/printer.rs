@@ -4,9 +4,7 @@
 //! for pretty-printing instead of direct string output.
 
 use crate::location::Location as FullLocation;
-use crate::parse_arena::{
-    CoreTypeIdx, ExprIdx, LocIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
-};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ParseArena, PatIdx};
 use crate::parser::ast::*;
 use crate::parser::comment::Comment;
 use crate::parser::comment_table::{CommentTable, PosRange, walk_signature, walk_structure};
@@ -258,7 +256,7 @@ pub fn print_lident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> 
 
             match flat_lid(arena, path) {
                 Some(txts) => {
-                    let mut docs: Vec<Doc> = txts.into_iter().map(|t| Doc::text(t)).collect();
+                    let mut docs: Vec<Doc> = txts.into_iter().map(Doc::text).collect();
                     let txt = arena.get_string(*txt_idx);
                     docs.push(print_ident(txt));
                     Doc::join(Doc::dot(), docs)
@@ -393,7 +391,7 @@ fn print_leading_comment(comment: &Comment, next_comment: Option<&Comment>) -> D
         if let Some(next) = next_comment {
             let next_loc = next.loc();
             let curr_loc = comment.loc();
-            let diff = next_loc.loc_start.line as i32 - curr_loc.loc_end.line as i32;
+            let diff = next_loc.loc_start.line - curr_loc.loc_end.line;
             let next_single_line = next.is_single_line();
 
             if single_line && next_single_line {
@@ -434,7 +432,7 @@ fn print_trailing_comment(
     };
 
     let cmt_start = &comment.loc().loc_start;
-    let diff = cmt_start.line as i32 - prev_loc.loc_end.line as i32;
+    let diff = cmt_start.line - prev_loc.loc_end.line;
     let is_below = comment.loc().loc_start.line > node_loc.loc_end.line;
 
     if diff > 0 || is_below {
@@ -477,7 +475,7 @@ fn print_leading_comments_with(node: Doc, comments: Vec<Comment>, full_loc: &Ful
 
     // Calculate separator based on last comment
     if let Some(last_comment) = comments.last() {
-        let diff = full_loc.loc_start.line as i32 - last_comment.loc().loc_end.line as i32;
+        let diff = full_loc.loc_start.line - last_comment.loc().loc_end.line;
         let separator = if last_comment.is_single_line() {
             if diff > 1 {
                 Doc::hard_line()
@@ -506,11 +504,11 @@ fn print_trailing_comments_with(node: Doc, comments: Vec<Comment>, full_loc: &Fu
     }
 
     let mut acc = Vec::new();
-    let mut prev_loc = full_loc.clone();
+    let mut prev_loc = *full_loc;
 
     for comment in &comments {
         acc.push(print_trailing_comment(&prev_loc, full_loc, comment));
-        prev_loc = comment.loc().clone();
+        prev_loc = *comment.loc();
     }
 
     Doc::concat(vec![node, Doc::concat(acc)])
@@ -651,8 +649,8 @@ where
         let loc = get_loc(node);
 
         let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
-            Some(comment) => comment.loc().loc_start.clone(),
-            None => arena.loc_start(loc).clone(),
+            Some(comment) => comment.loc().loc_start,
+            None => *arena.loc_start(loc),
         };
 
         let raw_doc = print(node, cmt_tbl);
@@ -662,7 +660,7 @@ where
 
         if let Some(previous_loc) = previous_loc {
             let previous_end = arena.loc_end(previous_loc);
-            let separator = if start_pos.line as i32 - previous_end.line as i32 > 1 {
+            let separator = if start_pos.line as i32 - previous_end.line > 1 {
                 Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
             } else {
                 Doc::hard_line()
@@ -720,12 +718,12 @@ where
 
         // Determine separator based on line distance
         let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
-            Some(comment) => comment.loc().loc_start.clone(),
-            None => arena.loc_start(loc).clone(),
+            Some(comment) => comment.loc().loc_start,
+            None => *arena.loc_start(loc),
         };
 
         let prev_end = arena.loc_end(prev_loc);
-        let sep = if start_pos.line as i32 - prev_end.line as i32 > 1 && !ignore_empty_lines {
+        let sep = if start_pos.line as i32 - prev_end.line > 1 && !ignore_empty_lines {
             Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
         } else {
             Doc::line()
@@ -852,7 +850,7 @@ fn is_valid_numeric_polyvar_number(s: &str) -> bool {
             return false;
         }
         // Rest must be digits
-        bytes[1..].iter().all(|&c| c >= b'0' && c <= b'9')
+        bytes[1..].iter().all(|&c| c.is_ascii_digit())
     } else {
         first >= b'0'
     }
@@ -1395,7 +1393,7 @@ pub fn print_expression(
                         print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena);
                     // Don't print "module(...)" wrapper - we're already inside module()
                     let type_doc = print_comments(
-                        print_package_type(state, &**package_type, false, cmt_tbl, arena),
+                        print_package_type(state, package_type, false, cmt_tbl, arena),
                         cmt_tbl,
                         typ.ptyp_loc,
                         arena,
@@ -1734,7 +1732,7 @@ fn print_expression_args(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let mut print_arg = |expr: &Expression, cmt_tbl: &mut CommentTable| {
+    let print_arg = |expr: &Expression, cmt_tbl: &mut CommentTable| {
         let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
         match parens::expr_allowing_coercion(arena, expr) {
             ParenKind::Parenthesized => add_parens(doc),
@@ -1882,7 +1880,7 @@ fn print_list_expression(
                         let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
                         match parens::expr_allowing_coercion(arena, expr) {
                             ParenKind::Parenthesized => add_parens(doc),
-                            ParenKind::Braced(loc) => print_braces(doc, *expr, loc, arena),
+                            ParenKind::Braced(loc) => print_braces(doc, expr, loc, arena),
                             ParenKind::Nothing => doc,
                         }
                     })
@@ -3210,7 +3208,7 @@ fn print_dict_rows(
                                 // Print key with its comments
                                 let key_doc = Doc::concat(vec![
                                     Doc::text("\""),
-                                    Doc::text(txt.clone()),
+                                    Doc::text(txt),
                                     Doc::text("\""),
                                 ]);
                                 let key_doc =
@@ -5258,7 +5256,7 @@ fn make_combined_pos_range(
         start: start.cnum,
         end: end.cnum,
     };
-    let full_loc = FullLocation::from_positions(start.clone(), end.clone());
+    let full_loc = FullLocation::from_positions(*start, *end);
     (pos_range, full_loc)
 }
 
@@ -5431,7 +5429,7 @@ pub fn print_pattern(
             if parsetree_viewer::has_dict_pattern_attribute(arena, &pat.ppat_attributes) {
                 print_dict_pattern(state, fields, cmt_tbl, arena)
             } else {
-                print_record_pattern(state, fields, &closed, record_rest.as_ref(), cmt_tbl, arena)
+                print_record_pattern(state, fields, closed, record_rest.as_ref(), cmt_tbl, arena)
             }
         }
         // p | p
@@ -5485,7 +5483,7 @@ pub fn print_pattern(
             {
                 let name_doc = Doc::text(arena.get_string(name.txt));
                 let name_doc = print_comments(name_doc, cmt_tbl, name.loc, arena);
-                let pkg_doc = print_package_type(state, &**package_type, false, cmt_tbl, arena);
+                let pkg_doc = print_package_type(state, package_type, false, cmt_tbl, arena);
                 let pkg_doc = print_comments(pkg_doc, cmt_tbl, typ.ptyp_loc, arena);
                 Doc::concat(vec![
                     Doc::text("module("),
@@ -5729,8 +5727,8 @@ fn print_record_pattern(
                     let leading = cmt_tbl.remove_leading_comments_by_pos(pos_range);
                     let trailing = cmt_tbl.remove_trailing_comments_by_pos(pos_range);
                     let full_loc = FullLocation {
-                        loc_start: arena.loc_start(field.lid.loc).clone(),
-                        loc_end: arena.loc_end(field_pat.ppat_loc).clone(),
+                        loc_start: *arena.loc_start(field.lid.loc),
+                        loc_end: *arena.loc_end(field_pat.ppat_loc),
                         loc_ghost: false,
                     };
                     let doc = print_leading_comments_with(doc, leading, &full_loc);
@@ -5867,8 +5865,8 @@ fn print_dict_pattern_row(
     let leading = cmt_tbl.remove_leading_comments_by_pos(pos_range);
     let trailing = cmt_tbl.remove_trailing_comments_by_pos(pos_range);
     let full_loc = FullLocation {
-        loc_start: arena.loc_start(field.lid.loc).clone(),
-        loc_end: arena.loc_end(field_pat.ppat_loc).clone(),
+        loc_start: *arena.loc_start(field.lid.loc),
+        loc_end: *arena.loc_end(field_pat.ppat_loc),
         loc_ghost: false,
     };
     let doc = print_leading_comments_with(doc, leading, &full_loc);
@@ -6724,7 +6722,7 @@ fn print_mod_expr(
                     match &*typ.ptyp_desc {
                         CoreTypeDesc::Ptyp_package(package_type) => {
                             let package_doc =
-                                print_package_type(state, &**package_type, false, cmt_tbl, arena);
+                                print_package_type(state, package_type, false, cmt_tbl, arena);
                             let package_doc =
                                 print_comments(package_doc, cmt_tbl, typ.ptyp_loc, arena);
                             let type_doc = Doc::group(Doc::concat(vec![
@@ -7136,12 +7134,12 @@ fn print_module_type_functor(
         // Use the param_mty location for comments since it covers the whole param
         [(attrs, _lbl, Some(param_mty))] if arena.get_string(_lbl.txt) == "_" => {
             let attrs_doc = print_attributes(state, attrs, cmt_tbl, arena);
-            let doc = Doc::concat(vec![
+
+            // Comments are handled by print_module_type, just return doc
+            Doc::concat(vec![
                 attrs_doc,
                 print_module_type(state, param_mty, cmt_tbl, arena),
-            ]);
-            // Comments are handled by print_module_type, just return doc
-            doc
+            ])
         }
         // Multiple parameters - use parens
         params => {
@@ -7195,10 +7193,7 @@ fn print_module_type_functor(
                                     Some(mty) => {
                                         let start = arena.loc_start(lbl.loc);
                                         let end = arena.loc_end(mty.pmty_loc);
-                                        let full_loc = FullLocation::from_positions(
-                                            start.clone(),
-                                            end.clone(),
-                                        );
+                                        let full_loc = FullLocation::from_positions(*start, *end);
                                         (PosRange::from_location(&full_loc), full_loc)
                                     }
                                 };
@@ -7580,8 +7575,8 @@ fn print_cases(
         // If there's a leading comment, use the comment's start line instead of the case's
         // This matches OCaml's print_list behavior
         let start_line = match cmt_tbl.get_first_leading_comment_by_pos(pos_range) {
-            Some(comment) => comment.loc.loc_start.line as i32,
-            None => arena.loc_start(arena.get_pat(case.pc_lhs).ppat_loc).line as i32,
+            Some(comment) => comment.loc.loc_start.line,
+            None => arena.loc_start(arena.get_pat(case.pc_lhs).ppat_loc).line,
         };
 
         // Add separator between cases (not before first case)
@@ -7605,11 +7600,11 @@ fn print_cases(
         // Use braces attribute location if present, matching get_case_pos_range
         let rhs = arena.get_expr(case.pc_rhs);
         let end_pos = match parsetree_viewer::process_braces(arena, rhs).0 {
-            Some(braces_loc) => arena.loc_end(braces_loc).clone(),
-            None => arena.loc_end(rhs.pexp_loc).clone(),
+            Some(braces_loc) => *arena.loc_end(braces_loc),
+            None => *arena.loc_end(rhs.pexp_loc),
         };
         let full_loc = crate::location::Location {
-            loc_start: arena.loc_start(arena.get_pat(case.pc_lhs).ppat_loc).clone(),
+            loc_start: *arena.loc_start(arena.get_pat(case.pc_lhs).ppat_loc),
             loc_end: end_pos,
             loc_ghost: false,
         };
@@ -7622,8 +7617,8 @@ fn print_cases(
         // Use braces attribute location if present, matching get_case_pos_range and full_loc
         prev_end_line = match parsetree_viewer::process_braces(arena, arena.get_expr(case.pc_rhs)).0
         {
-            Some(braces_loc) => arena.loc_end(braces_loc).line as i32,
-            None => arena.loc_end(arena.get_expr(case.pc_rhs).pexp_loc).line as i32,
+            Some(braces_loc) => arena.loc_end(braces_loc).line,
+            None => arena.loc_end(arena.get_expr(case.pc_rhs).pexp_loc).line,
         };
     }
 
@@ -9162,8 +9157,8 @@ fn print_constructor_arguments(
                     Doc::rparen()
                 },
             ]);
-            let result = Doc::group(if indent { Doc::indent(inner) } else { inner });
-            result
+
+            Doc::group(if indent { Doc::indent(inner) } else { inner })
         }
         ConstructorArguments::Pcstr_record(fields) => {
             // Manually inline the printRecordDeclaration, gives better layout
@@ -9383,7 +9378,7 @@ fn print_extension_constructor(
         ExtensionConstructorKind::Pext_rebind(lid) => Doc::indent(Doc::concat(vec![
             Doc::text(" ="),
             Doc::line(),
-            print_longident_location(&lid, cmt_tbl, arena),
+            print_longident_location(lid, cmt_tbl, arena),
         ])),
     };
 
@@ -9845,15 +9840,14 @@ fn print_jsx_prop(
     let prop_full_loc = get_jsx_prop_full_loc(prop, arena);
     let doc = match prop {
         JsxProp::Punning { optional, name } => {
-            let name_doc = if *optional {
+            if *optional {
                 Doc::concat(vec![
                     Doc::question(),
                     print_ident_like(arena.get_string(name.txt), false, false),
                 ])
             } else {
                 print_ident_like(arena.get_string(name.txt), false, false)
-            };
-            name_doc
+            }
         }
         JsxProp::Value {
             name,
@@ -9999,7 +9993,7 @@ fn unary_element_closing_token_pos_range(
     };
     let full_loc = FullLocation {
         loc_start: start_pos,
-        loc_end: end.clone(),
+        loc_end: *end,
         loc_ghost: false,
     };
     (pos_range, full_loc)
@@ -10017,8 +10011,8 @@ fn container_element_closing_tag_pos_range(
         end: end_pos.cnum,
     };
     let full_loc = FullLocation {
-        loc_start: start_pos.clone(),
-        loc_end: end_pos.clone(),
+        loc_start: *start_pos,
+        loc_end: *end_pos,
         loc_ghost: false,
     };
     (pos_range, full_loc)
@@ -10208,8 +10202,8 @@ fn print_jsx_container_tag(
         end: opening_greater_than.cnum,
     };
     let opening_greater_than_full_loc = FullLocation {
-        loc_start: opening_greater_than.clone(),
-        loc_end: opening_greater_than.clone(),
+        loc_start: *opening_greater_than,
+        loc_end: *opening_greater_than,
         loc_ghost: false,
     };
 
@@ -10313,8 +10307,8 @@ fn print_jsx_fragment(
         end: opening_greater_than.cnum,
     };
     let opening_full_loc = FullLocation {
-        loc_start: fragment_start.clone(),
-        loc_end: opening_greater_than.clone(),
+        loc_start: *fragment_start,
+        loc_end: *opening_greater_than,
         loc_ghost: false,
     };
     let opening = print_comments_by_pos(
@@ -10329,8 +10323,8 @@ fn print_jsx_fragment(
         end: fragment_end.cnum,
     };
     let closing_full_loc = FullLocation {
-        loc_start: closing_lesser_than.clone(),
-        loc_end: fragment_end.clone(),
+        loc_start: *closing_lesser_than,
+        loc_end: *fragment_end,
         loc_ghost: false,
     };
     let closing = print_comments_by_pos(

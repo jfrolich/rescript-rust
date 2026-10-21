@@ -6,7 +6,7 @@
 //! Used for debugging position parity between the Rust and OCaml parsers.
 
 use crate::binary_ast::parsetree0::*;
-use crate::location::{Located, Location};
+use crate::location::Location;
 use crate::parse_arena::ParseArena;
 use crate::parser::longident::Longident;
 use crate::parser::sexp::{Sexp, string_to_latin1_bytes};

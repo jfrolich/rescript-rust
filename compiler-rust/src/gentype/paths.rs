@@ -41,10 +41,7 @@ pub fn handle_namespace(cmt: &str) -> String {
 
 pub fn find_name_space(cmt: &str) -> Option<String> {
     fn keep_after_dash(s: &str) -> Option<String> {
-        match s.find('-') {
-            Some(n) => Some(s[n + 1..].to_string()),
-            None => None,
-        }
+        s.find('-').map(|n| s[n + 1..].to_string())
     }
 
     let basename = Path::new(cmt)

@@ -81,7 +81,7 @@ pub fn row_field_is_reither(ctx: &TypeContext, field: &RowField) -> bool {
     match field {
         RowField::Reither { link, .. } => ctx
             .get_row_field(*link)
-            .map_or(true, |linked| row_field_is_reither(ctx, &linked)),
+            .is_none_or(|linked| row_field_is_reither(ctx, &linked)),
         _ => false,
     }
 }

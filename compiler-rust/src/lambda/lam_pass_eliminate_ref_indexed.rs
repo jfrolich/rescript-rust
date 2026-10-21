@@ -23,7 +23,7 @@ pub(crate) fn eliminate_ref(
             }
         }
         NodeSnapshot::Prim(Primitive::Pfield(0, _), args, _) if matches!(args.as_slice(), [value] if matches!(store.view(*value), NodeView::Var(id) if id.same(target))) => {
-            Ok(store.append(NodeSnapshot::Var(target.clone())))
+            Ok(store.append(NodeSnapshot::Var(*target)))
         }
         NodeSnapshot::Function(_, _, _, _, _) => {
             if hit_variable(store, target, node) {
@@ -35,7 +35,7 @@ pub(crate) fn eliminate_ref(
         NodeSnapshot::Prim(Primitive::Psetfield(0, _), args, _) if matches!(args.as_slice(), [base, _] if matches!(store.view(*base), NodeView::Var(id) if id.same(target))) =>
         {
             let value = eliminate_ref(store, target, args[1])?;
-            Ok(store.append(NodeSnapshot::Assign(target.clone(), value)))
+            Ok(store.append(NodeSnapshot::Assign(*target, value)))
         }
         NodeSnapshot::Const(_)
         | NodeSnapshot::GlobalModule(_)
@@ -218,28 +218,25 @@ mod tests {
         let input = Lambda::seq(
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Tuple),
-                vec![Lambda::var(reference.clone())],
+                vec![Lambda::var(reference)],
                 Location::none(),
             ),
             Lambda::seq(
                 Lambda::prim(
                     Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("value".into())),
-                    vec![
-                        Lambda::var(reference.clone()),
-                        Lambda::const_(Constant::int(2)),
-                    ],
+                    vec![Lambda::var(reference), Lambda::const_(Constant::int(2))],
                     Location::none(),
                 ),
                 Lambda::prim(
                     Primitive::Psetfield(0, SetFieldDbgInfo::RecordSet("contents".into())),
                     vec![
-                        Lambda::var(reference.clone()),
+                        Lambda::var(reference),
                         Lambda::prim(
                             Primitive::Paddint,
                             vec![
                                 Lambda::prim(
                                     Primitive::Pfield(0, FieldDbgInfo::Tuple),
-                                    vec![Lambda::var(reference.clone())],
+                                    vec![Lambda::var(reference)],
                                     Location::none(),
                                 ),
                                 Lambda::const_(Constant::int(1)),
@@ -255,17 +252,14 @@ mod tests {
         let root = store.root();
         let result = eliminate_ref(&mut store, &reference, root).unwrap();
         let expected = Lambda::seq(
-            Lambda::var(reference.clone()),
+            Lambda::var(reference),
             Lambda::seq(
-                Lambda::assign(reference.clone(), Lambda::const_(Constant::int(2))),
+                Lambda::assign(reference, Lambda::const_(Constant::int(2))),
                 Lambda::assign(
-                    reference.clone(),
+                    reference,
                     Lambda::prim(
                         Primitive::Paddint,
-                        vec![
-                            Lambda::var(reference.clone()),
-                            Lambda::const_(Constant::int(1)),
-                        ],
+                        vec![Lambda::var(reference), Lambda::const_(Constant::int(1))],
                         Location::none(),
                     ),
                 ),
@@ -291,12 +285,12 @@ mod tests {
         let reference = id("reference", 1);
         let parameter = id("parameter", 2);
         for (body, succeeds) in [
-            (Lambda::var(reference.clone()), false),
+            (Lambda::var(reference), false),
             (Lambda::const_(Constant::int(0)), true),
         ] {
             let function = Lambda::function_(
                 1,
-                vec![parameter.clone()],
+                vec![parameter],
                 body,
                 FunctionAttribute::default(),
                 crate::location::Location::none(),

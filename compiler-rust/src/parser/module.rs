@@ -46,8 +46,8 @@ fn parse_newline_or_semicolon_structure(p: &mut Parser<'_>) {
             // Same line: emit error
             // Use err_at which respects regions (like OCaml's Parser.err)
             p.err_at(
-                p.prev_end_pos.clone(),
-                p.end_pos.clone(),
+                p.prev_end_pos,
+                p.end_pos,
                 DiagnosticCategory::message(
                     "Consecutive statements on a line must be separated by ';' or a newline",
                 ),
@@ -75,8 +75,8 @@ fn parse_newline_or_semicolon_signature(p: &mut Parser<'_>) {
             // Same line: emit error
             // Use err_at which respects regions (like OCaml's Parser.err)
             p.err_at(
-                p.prev_end_pos.clone(),
-                p.end_pos.clone(),
+                p.prev_end_pos,
+                p.end_pos,
                 DiagnosticCategory::message(
                     "consecutive specifications on a line must be separated by ';' or a newline",
                 ),
@@ -215,8 +215,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             if rec_flag == RecFlag::Recursive && unwrap {
                 // Error location: from start of `let?` to start of next token after `rec`
                 p.err_at(
-                    start_pos.clone(),
-                    p.start_pos.clone(),
+                    start_pos,
+                    p.start_pos,
                     DiagnosticCategory::Message(
                         "let? is not allowed to be recursive. Use a regular `let` or remove `rec`."
                             .to_string(),
@@ -272,7 +272,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 // OCaml compiler/syntax/src/res_core.ml:6729-6741 emits the
                 // generated inline type item first, then queues the primitive.
                 let loc = p.mk_loc_idx_to_prev_end(item_start_idx);
-                item_loc_idx = Some(loc.clone());
+                item_loc_idx = Some(loc);
                 p.pending_structure_items.push(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
                     pstr_loc: loc,
@@ -393,9 +393,9 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 let attr_name_str = p.arena().get_string(attr.0.txt).to_string();
                 let attr_loc = p.to_location(attr.0.loc);
                 p.err_at(
-                    attr_loc.loc_start.clone(),
-                    attr_loc.loc_end.clone(),
-                    DiagnosticCategory::message(&error_messages::attribute_without_node(
+                    attr_loc.loc_start,
+                    attr_loc.loc_end,
+                    DiagnosticCategory::message(error_messages::attribute_without_node(
                         &attr_name_str,
                     )),
                 );
@@ -527,7 +527,7 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
     {
         return vec![];
     }
-    let opening_start = p.start_pos.clone();
+    let opening_start = p.start_pos;
     p.leave_breadcrumb(Grammar::TypeParams);
     p.next();
     let params = super::core::parse_comma_delimited_region(
@@ -557,7 +557,7 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
             true,
         )
         .to_string(80);
-        let end = p.end_pos.clone();
+        let end = p.end_pos;
         p.err_at(opening_start, end, DiagnosticCategory::Message(msg));
         p.next();
     } else {
@@ -586,7 +586,7 @@ fn parse_type_definitions(
     if has_inline_types {
         for (inline_name_idx, loc, type_kind, params) in ctx.found_inline_types.iter() {
             decls.push(TypeDeclaration {
-                ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc.clone()),
+                ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc),
                 ptype_params: params.clone(),
                 ptype_cstrs: vec![],
                 ptype_kind: type_kind.clone(),
@@ -594,7 +594,7 @@ fn parse_type_definitions(
                 ptype_manifest: None,
                 ptype_origin: TypeDeclarationOrigin::Inline_record_definition,
                 ptype_attributes: Attributes::new(),
-                ptype_loc: loc.clone(),
+                ptype_loc: *loc,
             });
         }
     }
@@ -728,8 +728,8 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             // OCaml parse_signature_item_region (res_core.ml:7308-7318).
             if *unwrap {
                 p.err_at(
-                    p.arena().get_position(start_pos_idx).clone(),
-                    p.end_pos.clone(),
+                    *p.arena().get_position(start_pos_idx),
+                    p.end_pos,
                     DiagnosticCategory::Message(
                         "let? is not allowed in signatures. Use a regular `let` instead."
                             .to_string(),
@@ -780,7 +780,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 // OCaml compiler/syntax/src/res_core.ml:7383-7395 emits the
                 // generated inline type item first, then queues the value item.
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                item_loc_idx = Some(loc.clone());
+                item_loc_idx = Some(loc);
                 p.pending_signature_items.push(SignatureItem {
                     psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
                     psig_loc: loc,
@@ -882,9 +882,9 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 let attr_name_str = p.arena().get_string(attr.0.txt).to_string();
                 let attr_loc = p.to_location(attr.0.loc);
                 p.err_at(
-                    attr_loc.loc_start.clone(),
-                    attr_loc.loc_end.clone(),
-                    DiagnosticCategory::message(&error_messages::attribute_without_node(
+                    attr_loc.loc_start,
+                    attr_loc.loc_end,
+                    DiagnosticCategory::message(error_messages::attribute_without_node(
                         &attr_name_str,
                     )),
                 );
@@ -951,7 +951,7 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     txt: await_idx,
                     loc,
                 },
-                Payload::PStr(Box::new(vec![])),
+                Payload::PStr(Box::default()),
             ),
         );
     }
@@ -1046,7 +1046,7 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
                     txt: await_idx,
                     loc,
                 },
-                Payload::PStr(Box::new(vec![])),
+                Payload::PStr(Box::default()),
             ),
         );
     }
@@ -1093,7 +1093,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             // Module path - use lid.loc directly (OCaml: Ast_helper.Mod.ident ~loc:longident.loc)
             let lid = parse_module_long_ident(p);
             ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(lid.clone())),
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(lid)),
                 pmod_loc: lid.loc,
                 pmod_attributes: Attributes::new(),
             }
@@ -1123,7 +1123,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     p.next();
                     ModuleExpr {
-                        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
+                        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
                         pmod_loc: loc,
                         pmod_attributes: Attributes::new(),
                     }
@@ -1224,7 +1224,7 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
         let args = if args.is_empty() {
             let loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             vec![ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
                 pmod_loc: loc,
                 pmod_attributes: Attributes::new(),
             }]
@@ -1327,10 +1327,7 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                     let lid_idx = p.push_longident(lid);
                     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let mod_type = ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(with_loc(
-                            lid_idx,
-                            loc.clone(),
-                        ))),
+                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(with_loc(lid_idx, loc))),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
                     };
@@ -1344,8 +1341,8 @@ fn parse_functor_arg(p: &mut Parser<'_>) -> Option<FunctorArg> {
                 _ => {
                     // Just Uident (punning for _ : Uident)
                     let loc = p.mk_loc_idx(start_pos_idx, ident_end_pos_idx);
-                    let lid_idx = p.push_lident(&*ident);
-                    let mod_ident = with_loc(lid_idx, loc.clone());
+                    let lid_idx = p.push_lident(&ident);
+                    let mod_ident = with_loc(lid_idx, loc);
                     let mod_type = ModuleType {
                         pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(mod_ident)),
                         pmty_loc: loc,
@@ -1802,7 +1799,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             let lid = parse_value_path_lid(p);
             // Use the StrIdx directly from the longident to enable sharing
             let type_name_idx = p.arena().get_longident(lid.txt).last_idx();
-            let type_loc = lid.loc.clone();
+            let type_loc = lid.loc;
 
             // OCaml `parse_type_params ~parent:type_constr` (res_core.ml:7239).
             let parent: Vec<String> = p
@@ -1845,7 +1842,7 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             let typ_idx = p.arena_mut().push_core_type(typ);
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
-                ptype_name: with_loc(type_name_idx, type_loc.clone()),
+                ptype_name: with_loc(type_name_idx, type_loc),
                 ptype_params: params,
                 ptype_cstrs: type_constraints,
                 ptype_kind: TypeKind::Ptype_abstract,
@@ -1976,14 +1973,14 @@ fn parse_module_long_ident_with_lowercase(p: &mut Parser<'_>, lowercase: bool) -
 ///
 /// Returns (path_parts, name_start_pos, name_end_pos).
 pub(super) fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Position, Position) {
-    let name_start = p.start_pos.clone();
+    let name_start = p.start_pos;
 
     // Recursive aux function that mirrors OCaml's aux in parse_value_path
     fn aux(p: &mut Parser<'_>, path_parts: &mut Vec<String>) {
         // Save current token info BEFORE advancing (like OCaml)
         let saved_token = p.token.clone();
-        let saved_start = p.start_pos.clone();
-        let saved_end = p.end_pos.clone();
+        let saved_start = p.start_pos;
+        let saved_end = p.end_pos;
 
         // Push the current name
         if let Token::Uident(name) | Token::Lident(name) = &saved_token {
@@ -2006,7 +2003,6 @@ pub(super) fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Pos
                 Token::Uident(_) => {
                     // Recurse for more path segments
                     aux(p, path_parts);
-                    return;
                 }
                 _ => {
                     // Error: unexpected token after dot
@@ -2023,7 +2019,6 @@ pub(super) fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Pos
                 DiagnosticCategory::Lident(saved_token.into_owned()),
             );
             // Return path as-is (OCaml returns `path`)
-            return;
         }
     }
 
@@ -2031,7 +2026,7 @@ pub(super) fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Pos
     aux(p, &mut path_parts);
 
     // OCaml: Parser.next_unsafe p - consume one more token
-    let name_end = p.prev_end_pos.clone();
+    let name_end = p.prev_end_pos;
     p.next_unsafe();
 
     (path_parts, name_start, name_end)
@@ -2129,7 +2124,7 @@ fn add_let_unwrap_attr(
     }
     let loc = p.mk_loc_idx(start_idx, end_idx);
     let name = p.arena_mut().intern("let.unwrap");
-    let unwrap_attr: Attribute = (with_loc(name, loc), Payload::PStr(Box::new(vec![])));
+    let unwrap_attr: Attribute = (with_loc(name, loc), Payload::PStr(Box::default()));
     Attributes::from_vec(vec![unwrap_attr]).concat(attrs)
 }
 
@@ -2227,7 +2222,7 @@ fn parse_type_declaration_body(
     if let Some(inline_ctx) = inline_ctx {
         let mut ctx = inline_ctx.borrow_mut();
         ctx.params = params.clone();
-        ctx.outer_name_loc = name.loc.clone();
+        ctx.outer_name_loc = name.loc;
     }
 
     // Convert name from Located<String> to Located<StrIdx> for ptype_name
@@ -2403,7 +2398,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
 /// OCaml `parse_private_eq_or_repr` (res_core.ml:6081-6097).
 fn parse_private_eq_or_repr(
     p: &mut Parser<'_>,
-    current_type_name_path: &Vec<StrIdx>,
+    _current_type_name_path: &Vec<StrIdx>,
 ) -> TypeEquation {
     p.expect(Token::Private);
     match p.token {
@@ -2557,7 +2552,7 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
 
     // First constructor: optional leading doc comment attribute.
     let first_doc_attrs = if let Token::DocComment { loc, content } = &p.token {
-        let loc = loc.clone();
+        let loc = *loc;
         let content = content.clone();
         p.next();
         let loc = p.from_location(&loc);
@@ -2601,7 +2596,7 @@ fn parse_constructor_declarations_with_bar(
         }
 
         let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
-            let loc = loc.clone();
+            let loc = *loc;
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
@@ -3511,8 +3506,8 @@ fn parse_external_value_description(
 
     // OCaml res_core.ml: `Parser.expect Equal` recovers when `=` is missing,
     // and the primitive string is read either way.
-    let equal_start = p.start_pos.clone();
-    let equal_end = p.end_pos.clone();
+    let equal_start = p.start_pos;
+    let equal_end = p.end_pos;
     p.expect(Token::Equal);
     let prim = match &p.token {
         Token::String(s) => {
@@ -3534,7 +3529,7 @@ fn parse_external_value_description(
 
     let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
     let vd = ValueDescription {
-        pval_name: name.clone(),
+        pval_name: name,
         pval_type: typ,
         pval_prim: prim,
         pval_attributes: attrs,
@@ -3544,7 +3539,7 @@ fn parse_external_value_description(
     let inline_types = inline_types_found
         .into_iter()
         .map(|(inline_name_idx, loc, kind, params)| TypeDeclaration {
-            ptype_name: with_loc(inline_name_idx, name.loc.clone()),
+            ptype_name: with_loc(inline_name_idx, name.loc),
             ptype_params: params,
             ptype_cstrs: vec![],
             ptype_kind: kind,
@@ -3780,7 +3775,7 @@ fn parse_module_bindings(
     loop {
         let start_pos_idx = p.start_pos_idx();
         let doc_attr = if let Token::DocComment { loc, content } = &p.token {
-            let loc = loc.clone();
+            let loc = *loc;
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
@@ -3994,7 +3989,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
                 attrs.push(parse_attribute_body(p, attr_start_idx));
             }
             Token::DocComment { loc, content } => {
-                let loc_cloned = loc.clone();
+                let loc_cloned = *loc;
                 let content = content.clone();
                 p.next();
                 let loc = p.from_location(&loc_cloned);
@@ -4040,7 +4035,7 @@ pub fn parse_payload_region(p: &mut Parser<'_>) -> Payload {
         p.eat_breadcrumb();
         payload
     } else {
-        Payload::PStr(Box::new(vec![]))
+        Payload::PStr(Box::default())
     }
 }
 

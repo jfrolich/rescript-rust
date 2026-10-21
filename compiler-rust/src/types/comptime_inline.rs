@@ -49,7 +49,7 @@ pub fn evaluate_js(source: &str) -> InlineEvalResult {
             } else if val.is_null() || val.is_undefined() {
                 InlineEvalResult::Value(ComptimeValue::Unit)
             } else {
-                InlineEvalResult::Error(format!("@comptime.inline: unsupported result type"))
+                InlineEvalResult::Error("@comptime.inline: unsupported result type".to_string())
             }
         }
         Err(e) => InlineEvalResult::Error(format!("JS eval error: {}", e)),

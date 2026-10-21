@@ -244,9 +244,7 @@ mod tests {
                         walk_dir(&path, base, corpus_name, files);
                     }
                 } else if file_type.is_file()
-                    && path
-                        .extension()
-                        .map_or(false, |e| e == "res" || e == "resi")
+                    && path.extension().is_some_and(|e| e == "res" || e == "resi")
                 {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     let rel = path.strip_prefix(base).unwrap_or(&path);
@@ -711,8 +709,8 @@ mod tests {
         if has_ocaml {
             println!("{:-<120}", "");
             println!(
-                "  {:<60} {:>6} {:>10} {:>10} {:>8} {:>8}  {}",
-                "File", "Size", "Rust parse", "OCaml subp", "MB/s", "Factor", ""
+                "  {:<60} {:>6} {:>10} {:>10} {:>8} {:>8}  ",
+                "File", "Size", "Rust parse", "OCaml subp", "MB/s", "Factor"
             );
             println!("{:-<120}", "");
         } else {
