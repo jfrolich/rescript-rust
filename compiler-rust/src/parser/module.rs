@@ -434,7 +434,7 @@ pub(super) fn parse_type_definition_or_extension_item(
         _ => RecFlag::Nonrecursive,
     };
     let (path, name_loc) = parse_value_path(p);
-    let params = parse_type_params(p, &path);
+    let params = parse_type_params(p, |_| path.join("."));
     if p.token == Token::PlusEqual {
         let lid_idx = super::core::build_longident_idx(p, &path);
         let name = with_loc(lid_idx, name_loc);
@@ -503,7 +503,12 @@ pub(super) fn parse_value_path(p: &mut Parser<'_>) -> (Vec<String>, LocIdx) {
 }
 
 /// OCaml `parse_type_params ~parent` (compiler/syntax/src/res_core.ml:5749-5790).
-fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx, Variance)> {
+/// `parent` renders the dotted parent path; it is only needed for the
+/// angle-bracket error message.
+fn parse_type_params(
+    p: &mut Parser<'_>,
+    parent: impl FnOnce(&crate::parse_arena::ParseArena) -> String,
+) -> Vec<(CoreTypeIdx, Variance)> {
     let opening = p.token.clone().into_owned();
     if !matches!(opening, Token::LessThan | Token::Lparen)
         || p.start_pos.line != p.prev_end_pos.line
@@ -522,7 +527,7 @@ fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx,
     if p.token == Token::Rparen && opening == Token::Lparen {
         // OCaml `parse_type_params` (res_core.ml:5762-5781): the message
         // reprints the parent longident and `print_type_params`.
-        let parent_doc = super::doc::Doc::text(parent.join("."));
+        let parent_doc = super::doc::Doc::text(parent(p.arena()));
         let params_doc = super::printer::print_type_params(
             &super::printer::PrinterState::init(),
             &params,
@@ -604,7 +609,7 @@ fn parse_type_def(
     p.leave_breadcrumb(Grammar::TypeConstrName);
     let (name, loc) = super::core::parse_lident(p);
     p.eat_breadcrumb();
-    let params = parse_type_params(p, std::slice::from_ref(&name));
+    let params = parse_type_params(p, |_| name.clone());
     let decl = parse_type_declaration_body(p, attrs, None, start_idx, with_loc(name, loc), params);
     p.eat_breadcrumb();
     decl
@@ -1780,14 +1785,15 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             let type_loc = lid.loc;
 
             // OCaml `parse_type_params ~parent:type_constr` (res_core.ml:7239).
-            let parent: Vec<String> = p
-                .arena()
-                .get_longident(lid.txt)
-                .flatten_idx()
-                .into_iter()
-                .map(|part| p.arena().get_string(part).to_string())
-                .collect();
-            let params = parse_type_params(p, &parent);
+            let params = parse_type_params(p, |arena| {
+                let parts: Vec<&str> = arena
+                    .get_longident(lid.txt)
+                    .flatten_idx()
+                    .into_iter()
+                    .map(|part| arena.get_string(part))
+                    .collect();
+                parts.join(".")
+            });
 
             // res_core.ml:7240-7270.
             let (is_substitution, private, typ, type_constraints) = match p.token {
