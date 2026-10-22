@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 pub type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, crate::gentype::module_name::T>;
 
@@ -104,12 +103,6 @@ pub struct FlagState {
     pub dep_paths_flag: Vec<(String, String)>,
 }
 
-static FLAGS: OnceLock<Mutex<FlagState>> = OnceLock::new();
-
-fn flags() -> &'static Mutex<FlagState> {
-    FLAGS.get_or_init(|| Mutex::new(FlagState::default()))
-}
-
 pub fn module_of_string(s: &str) -> Option<Module> {
     match s {
         "commonjs" => Some(Module::CommonJS),
@@ -127,75 +120,7 @@ pub fn module_resolution_of_string(s: &str) -> Option<ModuleResolution> {
     }
 }
 
-pub fn set_project_root(dir: String) {
-    flags().lock().unwrap().project_root = dir;
-}
-
-pub fn set_bsb_project_root(dir: String) {
-    flags().lock().unwrap().bsb_project_root = dir;
-}
-
-pub fn set_module_flag(module_: Option<Module>) {
-    flags().lock().unwrap().module_flag = module_;
-}
-
-pub fn set_module_resolution_flag(module_resolution: Option<ModuleResolution>) {
-    flags().lock().unwrap().module_resolution_flag = module_resolution;
-}
-
-pub fn set_export_interfaces_flag(value: bool) {
-    flags().lock().unwrap().export_interfaces_flag = value;
-}
-
-pub fn set_generated_file_extension_flag(value: Option<String>) {
-    flags().lock().unwrap().generated_file_extension_flag = value;
-}
-
-pub fn set_suffix_flag(value: Option<String>) {
-    flags().lock().unwrap().suffix_flag = value;
-}
-
-pub fn add_shim(raw: &str) {
-    if let Some((from_module, to_module)) = raw.split_once('=') {
-        flags()
-            .lock()
-            .unwrap()
-            .shims
-            .insert(0, (from_module.to_string(), to_module.to_string()));
-    }
-}
-
-pub fn add_bs_dependency(name: &str) {
-    flags()
-        .lock()
-        .unwrap()
-        .bs_dependencies_flag
-        .insert(0, name.to_string());
-}
-
-pub fn add_source_dir(dir: &str) {
-    flags()
-        .lock()
-        .unwrap()
-        .source_dirs_flag
-        .insert(0, dir.to_string());
-}
-
-pub fn add_dep_path(raw: &str) {
-    if let Some((name, path)) = raw.split_once('=') {
-        flags()
-            .lock()
-            .unwrap()
-            .dep_paths_flag
-            .insert(0, (name.to_string(), path.to_string()));
-    }
-}
-
 // ----- Build the Config.t from flags ----------------------------------
-
-pub fn build_config(namespace: Option<String>) -> T {
-    build_config_from_flags(namespace, flags().lock().unwrap().clone())
-}
 
 pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T {
     // Mirrors compiler/gentype/GenTypeConfig.ml:112-177. The input is the

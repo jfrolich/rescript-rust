@@ -39,18 +39,6 @@ pub fn handle_namespace(cmt: &str) -> String {
     }
 }
 
-pub fn find_name_space(cmt: &str) -> Option<String> {
-    fn keep_after_dash(s: &str) -> Option<String> {
-        s.find('-').map(|n| s[n + 1..].to_string())
-    }
-
-    let basename = Path::new(cmt)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(cmt);
-    keep_after_dash(&chop_extension(basename))
-}
-
 pub fn remove_path_prefix(prefix: &str, path: &str) -> String {
     let normalized_prefix = concat(prefix, "");
     let prefix_len = normalized_prefix.len();
@@ -146,17 +134,4 @@ pub fn get_cmt_file_from_cwd_with_exists(
     };
 
     cmt_file.to_string_lossy().to_string()
-}
-
-pub fn get_cmt_file_with_exists(cmt: &str, exists: impl Fn(&Path) -> bool) -> String {
-    let cwd = crate::process_cwd::current_dir().unwrap_or_else(|_| PathBuf::new());
-    get_cmt_file_from_cwd_with_exists(&cwd, cmt, exists)
-}
-
-pub fn get_cmt_file(cmt: &str) -> String {
-    get_cmt_file_with_exists(cmt, |path| path.exists())
-}
-
-pub fn read_config(namespace: Option<String>) -> crate::gentype::config::T {
-    crate::gentype::config::build_config(namespace)
 }

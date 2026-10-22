@@ -14,7 +14,6 @@ pub mod emit_text;
 pub mod emit_type;
 pub mod emitters;
 pub mod export_module;
-pub mod find_source_file;
 pub mod gen_ident;
 pub mod gen_type_common;
 pub mod generated_files;
