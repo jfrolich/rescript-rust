@@ -6,9 +6,6 @@
 //! - Signatures (module types)
 //! - Functor application and coercion
 
-#![allow(unused_variables)]
-#![allow(dead_code)]
-
 use crate::diagnostics::{Warning, WarningConfig};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
@@ -144,6 +141,8 @@ fn type_decl_could_be_fixed_type(decl: &crate::parser::ast::TypeDeclaration) -> 
     ) && matches!(decl.ptype_private, crate::parser::ast::PrivateFlag::Private)
 }
 
+/// The `fixed` argument OCaml passes to `transl_simple_type` for a manifest:
+/// `no_row = not (is_fixed_type sdecl)` (typedecl.ml:703-704, 1975-1980).
 fn type_decl_manifest_uses_fixed_type_variables(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
@@ -513,8 +512,12 @@ fn rebind_constructor_arguments(
             _ => Vec::new(),
         };
         let decl = crate::types::ctype::instance_declaration(ctx, inlined);
+        // typedecl.ml:1727-1728 asserts the arities agree and lets `Unify`
+        // escape; neither can happen for a well-formed inline record.
+        debug_assert_eq!(decl.type_params.len(), tl.len());
         for (param, ty) in decl.type_params.iter().zip(tl.iter()) {
-            let _ = crate::types::ctype::unify(ctx, &mut tctx.unify_state, *param, *ty);
+            let unified = crate::types::ctype::unify(ctx, &mut tctx.unify_state, *param, *ty);
+            debug_assert!(unified.is_ok(), "rebinding inline record parameters failed");
         }
         if let crate::types::TypeKind::TypeRecord(labels, _) = decl.type_kind {
             return crate::types::ConstructorArguments::CstrRecord(labels.to_vec());
@@ -1304,6 +1307,11 @@ fn inline_record_type_params(
         .collect()
 }
 
+/// The most recently interned arena location equal to `target`.
+///
+/// Searches from the end, unlike `make_typed_spread_label`'s first-match
+/// lookup; the two are kept separate because the chosen `LocIdx` decides
+/// location sharing in serialized output.
 fn find_existing_loc_idx(arena: &ParseArena, target: &Location) -> Option<LocIdx> {
     for idx in (0..arena.locations().len()).rev() {
         let loc_idx = LocIdx(idx as u32);
@@ -1447,15 +1455,28 @@ fn included_path_is_direct_child(
     }
 }
 
-fn rewrite_included_type_paths_to_local(
+/// Which path-bearing type nodes `rewrite_type_paths_in_place` rewrites,
+/// besides `Tconstr` paths (always rewritten).
+#[derive(Clone, Copy)]
+struct TypePathRewriteSites {
+    /// Rewrite `Tpackage` paths.
+    package_path: bool,
+    /// Rewrite a `Tvariant` row's `row_name` path and visit its arguments
+    /// (before `row_more`), as `Subst.typexp` does (compiler/ml/subst.ml:226-231).
+    row_name: bool,
+}
+
+/// Rewrite type paths in place over the graph rooted at `ty_ref`.
+///
+/// `rewrite` returns `Some(new_path)` to replace a path. Each node is visited
+/// once (tracked in `visited`); a node is rewritten before its children, and
+/// children are visited in descriptor order.
+fn rewrite_type_paths_in_place(
     ctx: &crate::types::context::TypeContext,
     ty_ref: TypeExprRef,
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    sites: TypePathRewriteSites,
     visited: &mut HashSet<TypeExprRef>,
+    rewrite: &mut impl FnMut(&Path) -> Option<Path>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
 
@@ -1467,229 +1488,125 @@ fn rewrite_included_type_paths_to_local(
     let desc = ctx.get_desc(ty_ref).into_desc();
     match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
-            if let Some(rewritten_path) = rewrite_included_path_to_local(
-                path,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-            ) {
+            if let Some(rewritten) = rewrite(path) {
                 ctx.set_desc(
                     ty_ref,
                     TypeDesc::Tconstr {
-                        path: rewritten_path,
+                        path: rewritten,
                         args: args.clone(),
                         abbrev: *abbrev,
                     },
                 );
             }
             for arg in args {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *arg,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
             for arg in args {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    arg.typ,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, arg.typ, sites, visited, rewrite);
             }
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *ret,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *ret, sites, visited, rewrite);
         }
         TypeDesc::Ttuple(types) => {
             for ty in types {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *ty,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
             }
         }
         TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *ty,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
         }
         TypeDesc::Tpoly { body, vars } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *body,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *body, sites, visited, rewrite);
             for var in vars {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *var,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, *var, sites, visited, rewrite);
             }
         }
         TypeDesc::Tobject { fields, .. } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *fields,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *fields, sites, visited, rewrite);
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *typ,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *rest,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *typ, sites, visited, rewrite);
+            rewrite_type_paths_in_place(ctx, *rest, sites, visited, rewrite);
         }
         TypeDesc::Tvariant(row) => {
-            // `Subst.typexp` (compiler/ml/subst.ml:226-231) also rewrites the
-            // row's `row_name` path and arguments.
-            if let Some((name_path, name_args)) = &row.row_name {
-                if let Some(rewritten_path) = rewrite_included_path_to_local(
-                    name_path,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                ) {
+            if sites.row_name
+                && let Some((name_path, name_args)) = &row.row_name
+            {
+                if let Some(rewritten) = rewrite(name_path) {
                     let mut new_row = row.clone();
-                    new_row.row_name = Some((rewritten_path, name_args.clone()));
+                    new_row.row_name = Some((rewritten, name_args.clone()));
                     ctx.set_desc(ty_ref, TypeDesc::Tvariant(new_row));
                 }
                 for arg in name_args {
-                    rewrite_included_type_paths_to_local(
-                        ctx,
-                        *arg,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
-                        visited,
-                    );
+                    rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
                 }
             }
-            rewrite_included_type_paths_to_local(
-                ctx,
-                row.row_more,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, row.row_more, sites, visited, rewrite);
             for (_, field) in &row.row_fields {
                 match field {
-                    RowField::Rpresent(Some(ty)) => rewrite_included_type_paths_to_local(
-                        ctx,
-                        *ty,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
-                        visited,
-                    ),
+                    RowField::Rpresent(Some(ty)) => {
+                        rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
+                    }
                     RowField::Reither { types, .. } => {
                         for ty in types {
-                            rewrite_included_type_paths_to_local(
-                                ctx,
-                                *ty,
-                                include_root_path,
-                                include_alias_heads,
-                                local_type_ids,
-                                local_module_ids,
-                                local_modtype_ids,
-                                visited,
-                            );
+                            rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
                         }
                     }
                     _ => {}
                 }
             }
         }
-        TypeDesc::Tpackage { args, .. } => {
-            for arg in args {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *arg,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
+        TypeDesc::Tpackage { path, args, lids } => {
+            if sites.package_path
+                && let Some(rewritten) = rewrite(path)
+            {
+                ctx.set_desc(
+                    ty_ref,
+                    TypeDesc::Tpackage {
+                        path: rewritten,
+                        lids: lids.clone(),
+                        args: args.clone(),
+                    },
                 );
+            }
+            for arg in args {
+                rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
+}
+
+fn rewrite_included_type_paths_to_local(
+    ctx: &crate::types::context::TypeContext,
+    ty_ref: TypeExprRef,
+    include_root_path: Option<&Path>,
+    include_alias_heads: &[String],
+    local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    rewrite_type_paths_in_place(
+        ctx,
+        ty_ref,
+        TypePathRewriteSites {
+            package_path: false,
+            row_name: true,
+        },
+        visited,
+        &mut |path| {
+            rewrite_included_path_to_local(
+                path,
+                include_root_path,
+                include_alias_heads,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            )
+        },
+    );
 }
 
 fn rewrite_included_type_decl_paths_to_local(
@@ -2037,7 +1954,7 @@ fn rewrite_included_signature_paths_to_local(
                     );
                 }
             }
-            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+            crate::types::decl::SignatureItem::SigModtype(_, mtd) => {
                 if let Some(mty) = mtd.mtd_type.as_mut() {
                     rewrite_included_module_type_paths_to_local(
                         ctx,
@@ -2050,7 +1967,6 @@ fn rewrite_included_signature_paths_to_local(
                         visited,
                     );
                 }
-                let _ = id;
             }
             crate::types::decl::SignatureItem::SigClass
             | crate::types::decl::SignatureItem::SigClassType => {}
@@ -2090,87 +2006,19 @@ fn rewrite_module_prefix_in_type(
     ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
 ) {
-    use crate::types::type_expr::{RowField, TypeDesc};
-
-    let ty_ref = ctx.repr(ty_ref);
-    if !visited.insert(ty_ref) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty_ref);
-
-    match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
+    rewrite_type_paths_in_place(
+        ctx,
+        ty_ref,
+        TypePathRewriteSites {
+            package_path: true,
+            row_name: false,
+        },
+        visited,
+        &mut |path| {
             let rewritten = rewrite_module_path_prefix(path, old_param, new_prefix);
-            if rewritten != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
-                    *path = rewritten;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
-                rewrite_module_prefix_in_type(arg.typ, old_param, new_prefix, ctx, visited);
-            }
-            rewrite_module_prefix_in_type(*ret, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Ttuple(types) => {
-            for &ty in types {
-                rewrite_module_prefix_in_type(ty, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_module_prefix_in_type(*ty, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_module_prefix_in_type(*body, old_param, new_prefix, ctx, visited);
-            for &var in vars {
-                rewrite_module_prefix_in_type(var, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            rewrite_module_prefix_in_type(*fields, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_module_prefix_in_type(*typ, old_param, new_prefix, ctx, visited);
-            rewrite_module_prefix_in_type(*rest, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tvariant(row) => {
-            rewrite_module_prefix_in_type(row.row_more, old_param, new_prefix, ctx, visited);
-            for (_, row_field) in &row.row_fields {
-                match row_field {
-                    RowField::Rpresent(Some(ty)) => {
-                        rewrite_module_prefix_in_type(*ty, old_param, new_prefix, ctx, visited);
-                    }
-                    RowField::Reither { types, .. } => {
-                        for &ty in types {
-                            rewrite_module_prefix_in_type(ty, old_param, new_prefix, ctx, visited);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeDesc::Tpackage { path, args, .. } => {
-            let rewritten = rewrite_module_path_prefix(path, old_param, new_prefix);
-            if rewritten != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
-                    *path = rewritten;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
+            (rewritten != *path).then_some(rewritten)
+        },
+    );
 }
 
 fn copy_and_rewrite_module_prefix_type(
@@ -2191,74 +2039,49 @@ fn copy_and_rewrite_module_prefix_type(
     copied
 }
 
-fn copy_and_rewrite_constructor_args(
+/// Rebuild constructor arguments with every type mapped through `f`, in
+/// argument / label order.
+fn map_constructor_args_types(
     args: &crate::types::decl::ConstructorArguments,
-    old_param: &Ident,
-    arg_path: &Path,
-    ctx: &crate::types::context::TypeContext,
-    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
 ) -> crate::types::decl::ConstructorArguments {
     match args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) => {
             crate::types::decl::ConstructorArguments::CstrTuple(
-                args.iter()
-                    .map(|ty| {
-                        copy_and_rewrite_module_prefix_type(
-                            *ty, old_param, arg_path, ctx, copy_cache,
-                        )
-                    })
-                    .collect(),
+                args.iter().map(|ty| f(*ty)).collect(),
             )
         }
         crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-            crate::types::decl::ConstructorArguments::CstrRecord(
-                labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_prefix_type(
-                            label.ld_type,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            )
+            crate::types::decl::ConstructorArguments::CstrRecord(map_label_types(labels, f))
         }
     }
 }
 
-fn copy_and_rewrite_type_kind(
+fn map_label_types<C: FromIterator<crate::types::decl::LabelDeclaration>>(
+    labels: &[crate::types::decl::LabelDeclaration],
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
+) -> C {
+    labels
+        .iter()
+        .map(|label| {
+            let mut copied = label.clone();
+            copied.ld_type = f(label.ld_type);
+            copied
+        })
+        .collect()
+}
+
+/// Rebuild a type kind with every type mapped through `f`: record labels in
+/// order, or for each constructor its arguments and then its result type.
+fn map_type_kind_types(
     type_kind: &crate::types::decl::TypeKind,
-    old_param: &Ident,
-    arg_path: &Path,
-    ctx: &crate::types::context::TypeContext,
-    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
 ) -> crate::types::decl::TypeKind {
     match type_kind {
         crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
         crate::types::decl::TypeKind::TypeOpen => crate::types::decl::TypeKind::TypeOpen,
         crate::types::decl::TypeKind::TypeRecord(labels, repr) => {
-            crate::types::decl::TypeKind::TypeRecord(
-                labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_prefix_type(
-                            label.ld_type,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-                repr.clone(),
-            )
+            crate::types::decl::TypeKind::TypeRecord(map_label_types(labels, f), repr.clone())
         }
         crate::types::decl::TypeKind::TypeVariant(constructors, layout) => {
             crate::types::decl::TypeKind::TypeVariant(
@@ -2266,18 +2089,8 @@ fn copy_and_rewrite_type_kind(
                     .iter()
                     .map(|constructor| {
                         let mut copied = constructor.clone();
-                        copied.cd_args = copy_and_rewrite_constructor_args(
-                            &constructor.cd_args,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied.cd_res = constructor.cd_res.map(|ty| {
-                            copy_and_rewrite_module_prefix_type(
-                                ty, old_param, arg_path, ctx, copy_cache,
-                            )
-                        });
+                        copied.cd_args = map_constructor_args_types(&constructor.cd_args, f);
+                        copied.cd_res = constructor.cd_res.map(&mut *f);
                         copied
                     })
                     .collect(),
@@ -2287,6 +2100,44 @@ fn copy_and_rewrite_type_kind(
     }
 }
 
+fn map_type_inlined_types(
+    inlined: &crate::types::decl::TypeInlinedType,
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
+) -> crate::types::decl::TypeInlinedType {
+    match inlined {
+        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
+            crate::types::decl::TypeInlinedType::Record {
+                type_name: type_name.clone(),
+                labels: map_label_types(labels, f),
+            }
+        }
+    }
+}
+
+fn copy_and_rewrite_constructor_args(
+    args: &crate::types::decl::ConstructorArguments,
+    old_param: &Ident,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::ConstructorArguments {
+    map_constructor_args_types(args, &mut |ty| {
+        copy_and_rewrite_module_prefix_type(ty, old_param, arg_path, ctx, copy_cache)
+    })
+}
+
+fn copy_and_rewrite_type_kind(
+    type_kind: &crate::types::decl::TypeKind,
+    old_param: &Ident,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeKind {
+    map_type_kind_types(type_kind, &mut |ty| {
+        copy_and_rewrite_module_prefix_type(ty, old_param, arg_path, ctx, copy_cache)
+    })
+}
+
 fn copy_and_rewrite_type_inlined(
     inlined: &crate::types::decl::TypeInlinedType,
     old_param: &Ident,
@@ -2294,27 +2145,9 @@ fn copy_and_rewrite_type_inlined(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
-    match inlined {
-        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
-            crate::types::decl::TypeInlinedType::Record {
-                type_name: type_name.clone(),
-                labels: labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_prefix_type(
-                            label.ld_type,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            }
-        }
-    }
+    map_type_inlined_types(inlined, &mut |ty| {
+        copy_and_rewrite_module_prefix_type(ty, old_param, arg_path, ctx, copy_cache)
+    })
 }
 
 fn substitute_functor_param_in_signature(
@@ -2671,98 +2504,19 @@ fn rewrite_module_aliases_in_type(
     ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
 ) {
-    use crate::types::type_expr::{RowField, TypeDesc};
-
-    let ty_ref = ctx.repr(ty_ref);
-    if !visited.insert(ty_ref) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty_ref).into_desc();
-    match &desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+    rewrite_type_paths_in_place(
+        ctx,
+        ty_ref,
+        TypePathRewriteSites {
+            package_path: true,
+            row_name: false,
+        },
+        visited,
+        &mut |path| {
             let rewritten = rewrite_module_path_prefix_with_aliases(path, old_param, arg_aliases);
-            if rewritten != *path {
-                ctx.set_desc(
-                    ty_ref,
-                    TypeDesc::Tconstr {
-                        path: rewritten,
-                        args: args.clone(),
-                        abbrev: *abbrev,
-                    },
-                );
-            }
-            for arg in args {
-                rewrite_module_aliases_in_type(*arg, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
-                rewrite_module_aliases_in_type(arg.typ, old_param, arg_aliases, ctx, visited);
-            }
-            rewrite_module_aliases_in_type(*ret, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Ttuple(tys) => {
-            for ty in tys {
-                rewrite_module_aliases_in_type(*ty, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_module_aliases_in_type(*ty, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_module_aliases_in_type(*body, old_param, arg_aliases, ctx, visited);
-            for var in vars {
-                rewrite_module_aliases_in_type(*var, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            rewrite_module_aliases_in_type(*fields, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_module_aliases_in_type(*typ, old_param, arg_aliases, ctx, visited);
-            rewrite_module_aliases_in_type(*rest, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Tvariant(row) => {
-            rewrite_module_aliases_in_type(row.row_more, old_param, arg_aliases, ctx, visited);
-            for (_, row_field) in &row.row_fields {
-                match row_field {
-                    RowField::Rpresent(Some(ty)) => {
-                        rewrite_module_aliases_in_type(*ty, old_param, arg_aliases, ctx, visited);
-                    }
-                    RowField::Reither { types, .. } => {
-                        for ty in types {
-                            rewrite_module_aliases_in_type(
-                                *ty,
-                                old_param,
-                                arg_aliases,
-                                ctx,
-                                visited,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeDesc::Tpackage { path, args, lids } => {
-            let rewritten = rewrite_module_path_prefix_with_aliases(path, old_param, arg_aliases);
-            if rewritten != *path {
-                ctx.set_desc(
-                    ty_ref,
-                    TypeDesc::Tpackage {
-                        path: rewritten,
-                        lids: lids.clone(),
-                        args: args.clone(),
-                    },
-                );
-            }
-            for arg in args {
-                rewrite_module_aliases_in_type(*arg, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
+            (rewritten != *path).then_some(rewritten)
+        },
+    );
 }
 
 fn copy_and_rewrite_module_aliases_type(
@@ -2788,41 +2542,9 @@ fn copy_and_rewrite_constructor_args_with_aliases(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
-    match args {
-        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-            crate::types::decl::ConstructorArguments::CstrTuple(
-                args.iter()
-                    .map(|ty| {
-                        copy_and_rewrite_module_aliases_type(
-                            *ty,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        )
-                    })
-                    .collect(),
-            )
-        }
-        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-            crate::types::decl::ConstructorArguments::CstrRecord(
-                labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_aliases_type(
-                            label.ld_type,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            )
-        }
-    }
+    map_constructor_args_types(args, &mut |ty| {
+        copy_and_rewrite_module_aliases_type(ty, old_param, arg_aliases, ctx, copy_cache)
+    })
 }
 
 fn copy_and_rewrite_type_kind_with_aliases(
@@ -2832,53 +2554,9 @@ fn copy_and_rewrite_type_kind_with_aliases(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::TypeKind {
-    match kind {
-        crate::types::TypeKind::TypeAbstract => crate::types::TypeKind::TypeAbstract,
-        crate::types::TypeKind::TypeOpen => crate::types::TypeKind::TypeOpen,
-        crate::types::TypeKind::TypeVariant(ctors, layout) => crate::types::TypeKind::TypeVariant(
-            ctors
-                .iter()
-                .map(|ctor| {
-                    let mut copied = ctor.clone();
-                    copied.cd_args = copy_and_rewrite_constructor_args_with_aliases(
-                        &ctor.cd_args,
-                        old_param,
-                        arg_aliases,
-                        ctx,
-                        copy_cache,
-                    );
-                    if let Some(ret) = ctor.cd_res {
-                        copied.cd_res = Some(copy_and_rewrite_module_aliases_type(
-                            ret,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        ));
-                    }
-                    copied
-                })
-                .collect(),
-            *layout,
-        ),
-        crate::types::TypeKind::TypeRecord(labels, repr) => crate::types::TypeKind::TypeRecord(
-            labels
-                .iter()
-                .map(|label| {
-                    let mut copied = label.clone();
-                    copied.ld_type = copy_and_rewrite_module_aliases_type(
-                        label.ld_type,
-                        old_param,
-                        arg_aliases,
-                        ctx,
-                        copy_cache,
-                    );
-                    copied
-                })
-                .collect(),
-            repr.clone(),
-        ),
-    }
+    map_type_kind_types(kind, &mut |ty| {
+        copy_and_rewrite_module_aliases_type(ty, old_param, arg_aliases, ctx, copy_cache)
+    })
 }
 
 fn copy_and_rewrite_type_inlined_with_aliases(
@@ -2888,27 +2566,9 @@ fn copy_and_rewrite_type_inlined_with_aliases(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
-    match inlined {
-        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
-            crate::types::decl::TypeInlinedType::Record {
-                type_name: type_name.clone(),
-                labels: labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_aliases_type(
-                            label.ld_type,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            }
-        }
-    }
+    map_type_inlined_types(inlined, &mut |ty| {
+        copy_and_rewrite_module_aliases_type(ty, old_param, arg_aliases, ctx, copy_cache)
+    })
 }
 
 fn substitute_functor_param_aliases_in_signature(
@@ -5444,8 +5104,8 @@ fn resolve_variant_spread_sources(
             continue;
         }
         // Type-check the spread source type to resolve qualified paths
-        let mut found = None;
-        let mut is_pdot = false;
+        let found;
+        let is_pdot;
         if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) = cstr.pcd_args {
             if let Some(spread_type_ct) = args.first() {
                 let spread_core_type = arena.get_core_type(*spread_type_ct);
@@ -5629,33 +5289,36 @@ fn build_spread_constructor(
                     .collect::<Vec<_>>();
                 let typed_lbls: Vec<TypedLabelDeclaration> = normalized_lbls
                     .iter()
-                    .map(|l| TypedLabelDeclaration {
-                        ld_id: l.ld_id,
-                        ld_name: crate::parse_arena::Located {
-                            txt: l.ld_id.name().to_string(),
-                            loc: find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc),
-                        },
-                        ld_runtime_name: l.ld_runtime_name.clone(),
-                        ld_mutable: match l.ld_mutable {
-                            crate::types::asttypes::MutableFlag::Mutable => {
-                                crate::parser::ast::MutableFlag::Mutable
-                            }
-                            crate::types::asttypes::MutableFlag::Immutable => {
-                                crate::parser::ast::MutableFlag::Immutable
-                            }
-                        },
-                        ld_optional: l.ld_optional,
-                        ld_type: TypedCoreType {
-                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                            ctyp_type: l.ld_type,
-                            ctyp_env: EnvRef(0),
-                            ctyp_loc: find_existing_loc_idx(arena, &l.ld_loc)
-                                .unwrap_or(source_cd_loc),
-                            ctyp_attributes: Attributes::new(),
-                        },
-                        ld_loc: find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc),
-                        ld_attributes: decl_attrs_to_parser_attrs(arena, &l.ld_attributes),
-                        ld_types_attributes: Some(l.ld_attributes.clone().into_boxed_slice()),
+                    .map(|l| {
+                        let label_loc =
+                            find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc);
+                        TypedLabelDeclaration {
+                            ld_id: l.ld_id,
+                            ld_name: crate::parse_arena::Located {
+                                txt: l.ld_id.name().to_string(),
+                                loc: label_loc,
+                            },
+                            ld_runtime_name: l.ld_runtime_name.clone(),
+                            ld_mutable: match l.ld_mutable {
+                                crate::types::asttypes::MutableFlag::Mutable => {
+                                    crate::parser::ast::MutableFlag::Mutable
+                                }
+                                crate::types::asttypes::MutableFlag::Immutable => {
+                                    crate::parser::ast::MutableFlag::Immutable
+                                }
+                            },
+                            ld_optional: l.ld_optional,
+                            ld_type: TypedCoreType {
+                                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                ctyp_type: l.ld_type,
+                                ctyp_env: EnvRef(0),
+                                ctyp_loc: label_loc,
+                                ctyp_attributes: Attributes::new(),
+                            },
+                            ld_loc: label_loc,
+                            ld_attributes: decl_attrs_to_parser_attrs(arena, &l.ld_attributes),
+                            ld_types_attributes: Some(l.ld_attributes.clone().into_boxed_slice()),
+                        }
                     })
                     .collect();
                 let args_vec = normalized_lbls
@@ -5729,13 +5392,13 @@ fn check_duplicate_constructor_declarations(
     loc: LocIdx,
     constructors: &[crate::parser::ast::ConstructorDeclaration],
 ) -> TypeModResult<()> {
-    let mut seen = HashSet::default();
+    let mut seen: HashSet<&str> = HashSet::default();
     for constructor in constructors {
         let name = arena.get_string(constructor.pcd_name.txt);
         if name == "..." {
             continue;
         }
-        if !seen.insert(name.to_string()) {
+        if !seen.insert(name) {
             return Err(TypeModError::DuplicateConstructor {
                 loc,
                 name: name.to_string(),
@@ -5789,10 +5452,10 @@ fn check_duplicate_typed_label_declarations(
     labels: &[TypedLabelDeclaration],
     record_name: Option<&str>,
 ) -> TypeModResult<()> {
-    let mut seen = HashSet::default();
+    let mut seen: HashSet<&str> = HashSet::default();
     for label in labels {
         let name = label.ld_id.name();
-        if !seen.insert(name.to_string()) {
+        if !seen.insert(name) {
             return Err(TypeModError::DuplicateLabel {
                 loc,
                 label: name.to_string(),
@@ -5817,16 +5480,18 @@ fn check_name(
     loc: LocIdx,
     name: &str,
 ) -> TypeModResult<()> {
-    if let Some(repeated_loc) = table.get(name).copied() {
-        return Err(TypeModError::RepeatedName {
+    match table.entry(name.to_string()) {
+        std::collections::hash_map::Entry::Occupied(entry) => Err(TypeModError::RepeatedName {
             loc,
             kind,
-            name: name.to_string(),
-            repeated_loc,
-        });
+            name: entry.key().clone(),
+            repeated_loc: *entry.get(),
+        }),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(loc);
+            Ok(())
+        }
     }
-    table.insert(name.to_string(), loc);
-    Ok(())
 }
 
 /// OCaml `check_sig_item` (compiler/ml/typemod.ml:637-642): names bound by an
@@ -6591,97 +6256,60 @@ fn check_variant_declaration_well_formed(
     Ok(())
 }
 
-fn path_is_t_of_persistent_module(path: &Path, module_name: &str) -> bool {
-    matches!(
-        path,
-        Path::Pdot(parent, type_name, _)
-            if type_name == "t"
-                && matches!(parent.as_ref(), Path::Pident(id) if id.name() == module_name)
-    )
-}
-
-fn path_is_t_of_stdlib_child(path: &Path, child_name: &str) -> bool {
-    matches!(
-        path,
-        Path::Pdot(parent, type_name, _)
-            if type_name == "t"
-                && matches!(
-                    parent.as_ref(),
-                    Path::Pdot(root, module_name, _)
-                        if module_name == child_name
-                            && matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib")
-                )
-    )
-}
-
 fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
-    if matches!(path, Path::Pident(id) if id.name() == "array" || id.name() == "promise") {
-        if matches!(path, Path::Pident(id) if id.name() == "array") {
-            return Some("Array");
-        }
-        return Some("Promise");
-    }
     // OCaml compiler/ml/ast_untagged_variants.ml:243-266 recognizes the
     // flattened `Stdlib_File.t` and `Stdlib_Blob.t` paths after expansion.
     // Rust can still hold the selected `Stdlib.File.t` / `Stdlib.Blob.t`
     // component paths before expansion, so recognize both representations.
-    if path_is_t_of_persistent_module(path, "Stdlib_ArrayBuffer")
-        || path_is_t_of_stdlib_child(path, "ArrayBuffer")
-    {
-        Some("ArrayBuffer")
-    } else if path_is_t_of_stdlib_child(path, "BigInt64Array") {
-        Some("BigInt64Array")
-    } else if path_is_t_of_stdlib_child(path, "BigUint64Array") {
-        Some("BigUint64Array")
-    } else if path_is_t_of_stdlib_child(path, "DataView") {
-        Some("DataView")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_Date") {
-        Some("Date")
-    } else if path_is_t_of_stdlib_child(path, "Float32Array") {
-        Some("Float32Array")
-    } else if path_is_t_of_stdlib_child(path, "Float64Array") {
-        Some("Float64Array")
-    } else if path_is_t_of_stdlib_child(path, "Int16Array") {
-        Some("Int16Array")
-    } else if path_is_t_of_stdlib_child(path, "Int32Array") {
-        Some("Int32Array")
-    } else if path_is_t_of_stdlib_child(path, "Int8Array") {
-        Some("Int8Array")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_RegExp") {
-        Some("RegExp")
-    } else if path_is_t_of_stdlib_child(path, "Uint16Array") {
-        Some("Uint16Array")
-    } else if path_is_t_of_stdlib_child(path, "Uint32Array") {
-        Some("Uint32Array")
-    } else if path_is_t_of_stdlib_child(path, "Uint8Array") {
-        Some("Uint8Array")
-    } else if path_is_t_of_stdlib_child(path, "Uint8ClampedArray") {
-        Some("Uint8ClampedArray")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_File")
-        || path_is_t_of_stdlib_child(path, "File")
-    {
-        Some("File")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_Blob")
-        || path_is_t_of_stdlib_child(path, "Blob")
-    {
-        Some("Blob")
-    } else if path_is_t_of_stdlib_child(path, "Set") {
-        Some("Set")
-    } else if path_is_t_of_stdlib_child(path, "Map") {
-        Some("Map")
-    } else if path_is_t_of_stdlib_child(path, "WeakSet") {
-        Some("WeakSet")
-    } else if path_is_t_of_stdlib_child(path, "WeakMap") {
-        Some("WeakMap")
-    } else if path_is_t_of_stdlib_child(path, "Promise") {
-        Some("Promise")
-    } else {
-        None
+    let parent = match path {
+        Path::Pident(id) => {
+            return match id.name() {
+                "array" => Some("Array"),
+                "promise" => Some("Promise"),
+                _ => None,
+            };
+        }
+        Path::Pdot(parent, type_name, _) if type_name == "t" => parent.as_ref(),
+        _ => return None,
+    };
+    match parent {
+        // `Stdlib_X.t`
+        Path::Pident(id) => match id.name() {
+            "Stdlib_ArrayBuffer" => Some("ArrayBuffer"),
+            "Stdlib_Date" => Some("Date"),
+            "Stdlib_RegExp" => Some("RegExp"),
+            "Stdlib_File" => Some("File"),
+            "Stdlib_Blob" => Some("Blob"),
+            _ => None,
+        },
+        // `Stdlib.X.t`
+        Path::Pdot(root, module_name, _) if matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib") => {
+            match module_name.as_str() {
+                "ArrayBuffer" => Some("ArrayBuffer"),
+                "BigInt64Array" => Some("BigInt64Array"),
+                "BigUint64Array" => Some("BigUint64Array"),
+                "DataView" => Some("DataView"),
+                "Float32Array" => Some("Float32Array"),
+                "Float64Array" => Some("Float64Array"),
+                "Int16Array" => Some("Int16Array"),
+                "Int32Array" => Some("Int32Array"),
+                "Int8Array" => Some("Int8Array"),
+                "Uint16Array" => Some("Uint16Array"),
+                "Uint32Array" => Some("Uint32Array"),
+                "Uint8Array" => Some("Uint8Array"),
+                "Uint8ClampedArray" => Some("Uint8ClampedArray"),
+                "File" => Some("File"),
+                "Blob" => Some("Blob"),
+                "Set" => Some("Set"),
+                "Map" => Some("Map"),
+                "WeakSet" => Some("WeakSet"),
+                "WeakMap" => Some("WeakMap"),
+                "Promise" => Some("Promise"),
+                _ => None,
+            }
+        }
+        _ => None,
     }
-}
-
-fn type_to_instanceof_backed_obj(path: &Path) -> bool {
-    type_to_instanceof_backed_obj_name(path).is_some()
 }
 
 fn touch_manifest_cyclic_abbrev_check(
@@ -7557,18 +7185,6 @@ fn check_recmod_type_declarations(
     Ok(())
 }
 
-fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
-    fn root_ident(path: &Path) -> Option<&Ident> {
-        match path {
-            Path::Pident(id) => Some(id),
-            Path::Pdot(prefix, _, _) => root_ident(prefix),
-            Path::Papply(_, _) => None,
-        }
-    }
-
-    root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
-}
-
 /// OCaml `Typedecl.check_constraints_rec` (typedecl.ml:758-779).
 fn check_constraints_rec(
     ctx: &crate::types::context::TypeContext,
@@ -7737,6 +7353,9 @@ fn compute_type_variance_fixpoint(
         .map(|decl| vec![TypesVariance::null(); decl.type_params.len()])
         .collect();
 
+    // OCaml iterates until the variances stop changing; this port caps the
+    // fixpoint at 32 rounds. Union only grows the rows, so the cap is only
+    // reached for very large recursive groups.
     for _ in 0..32 {
         let mut iter_env = env.clone();
         for ((type_id, template), variance) in
@@ -7817,519 +7436,6 @@ where
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_variant(_, None, _) => {}
     }
-}
-
-#[derive(Debug, Clone)]
-struct TopLevelModuleUseCheck {
-    id: Ident,
-    name: String,
-    loc: LocIdx,
-    item_index: usize,
-    recursive: bool,
-}
-
-#[derive(Debug, Clone)]
-struct TopLevelTypeUseCheck {
-    id: Ident,
-    name: String,
-    loc: LocIdx,
-    item_index: usize,
-    rec_flag: RecFlag,
-}
-
-#[derive(Debug, Clone)]
-struct TopLevelConstructorUseCheck {
-    type_id: Ident,
-    type_name: String,
-    name: String,
-    loc: LocIdx,
-    item_index: usize,
-    order: usize,
-}
-
-#[derive(Debug, Clone)]
-struct TopLevelExtensionUseCheck {
-    id: Ident,
-    type_name: String,
-    name: String,
-    loc: LocIdx,
-    item_index: usize,
-    order: usize,
-    is_exception: bool,
-}
-
-fn lid_is_unqualified(arena: &ParseArena, lid: &Located<LidentIdx>) -> bool {
-    matches!(arena.get_longident(lid.txt), Longident::Lident(_))
-}
-
-fn lid_is_unqualified_name(arena: &ParseArena, lid: &Located<LidentIdx>, name: &str) -> bool {
-    matches!(
-        arena.get_longident(lid.txt),
-        Longident::Lident(name_idx) if arena.get_string(*name_idx) == name
-    )
-}
-
-fn longident_starts_with_name(arena: &ParseArena, lid: &Longident, name: &str) -> bool {
-    match lid {
-        Longident::Lident(name_idx) => arena.get_string(*name_idx) == name,
-        Longident::Ldot(prefix, _) | Longident::Lapply(prefix, _) => {
-            longident_starts_with_name(arena, prefix, name)
-        }
-    }
-}
-
-fn lid_starts_with_name(arena: &ParseArena, lid: &Located<LidentIdx>, name: &str) -> bool {
-    longident_starts_with_name(arena, arena.get_longident(lid.txt), name)
-}
-
-fn longident_components(arena: &ParseArena, lid: &Longident, out: &mut Vec<String>) {
-    match lid {
-        Longident::Lident(name_idx) => out.push(arena.get_string(*name_idx).to_string()),
-        Longident::Ldot(prefix, name_idx) => {
-            longident_components(arena, prefix, out);
-            out.push(arena.get_string(*name_idx).to_string());
-        }
-        Longident::Lapply(func, arg) => {
-            longident_components(arena, func, out);
-            longident_components(arena, arg, out);
-        }
-    }
-}
-
-fn path_components(path: &Path) -> Option<Vec<String>> {
-    let (head, components) = path.flatten().ok()?;
-    let mut out = Vec::with_capacity(components.len() + 1);
-    out.push(head.name().to_string());
-    out.extend(components.into_iter().map(str::to_string));
-    Some(out)
-}
-
-fn lid_has_path_prefix(arena: &ParseArena, lid: &Located<LidentIdx>, path: &Path) -> bool {
-    let Some(path_components) = path_components(path) else {
-        return false;
-    };
-    let mut lid_components = Vec::new();
-    longident_components(arena, arena.get_longident(lid.txt), &mut lid_components);
-    path_components.len() <= lid_components.len()
-        && lid_components
-            .iter()
-            .zip(path_components.iter())
-            .all(|(left, right)| left == right)
-}
-
-fn expression_uses_unqualified_value_path(
-    arena: &ParseArena,
-    expr: &Expression,
-    name: &str,
-    target: &Path,
-) -> bool {
-    match &expr.exp_desc {
-        crate::types::typedtree::ExpressionDesc::Texp_ident(path, lid, _) => {
-            lid_is_unqualified_name(arena, lid, name) && path.same(target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings.iter().any(|binding| {
-                expression_uses_unqualified_value_path(arena, &binding.vb_expr, name, target)
-            }) || expression_uses_unqualified_value_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_function { body, .. } => {
-            expression_uses_unqualified_value_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
-            expression_uses_unqualified_value_path(arena, funct, name, target)
-                || args.iter().any(|arg| {
-                    arg.expression.as_ref().is_some_and(|expr| {
-                        expression_uses_unqualified_value_path(arena, expr, name, target)
-                    })
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_match(
-            scrutinee,
-            value_cases,
-            exn_cases,
-            _,
-        ) => {
-            expression_uses_unqualified_value_path(arena, scrutinee, name, target)
-                || value_cases.iter().chain(exn_cases.iter()).any(|case| {
-                    case.c_guard.as_ref().is_some_and(|guard| {
-                        expression_uses_unqualified_value_path(arena, guard, name, target)
-                    }) || expression_uses_unqualified_value_path(arena, &case.c_rhs, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_try(body, cases) => {
-            expression_uses_unqualified_value_path(arena, body, name, target)
-                || cases.iter().any(|case| {
-                    case.c_guard.as_ref().is_some_and(|guard| {
-                        expression_uses_unqualified_value_path(arena, guard, name, target)
-                    }) || expression_uses_unqualified_value_path(arena, &case.c_rhs, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tuple(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_array(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_construct(_, _, items) => items
-            .iter()
-            .any(|item| expression_uses_unqualified_value_path(arena, item, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_variant(_, payload) => payload
-            .as_deref()
-            .is_some_and(|expr| expression_uses_unqualified_value_path(arena, expr, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-            ..
-        }
-        | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            fields.iter().any(|(_, _, definition, _)| {
-                matches!(
-                    definition,
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr)
-                        if expression_uses_unqualified_value_path(arena, expr, name, target)
-                )
-            }) || extended_expression.as_deref().is_some_and(|expr| {
-                expression_uses_unqualified_value_path(arena, expr, name, target)
-            })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_field(base, _, _)
-        | crate::types::typedtree::ExpressionDesc::Texp_assert(base) => {
-            expression_uses_unqualified_value_path(arena, base, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_setfield(base, _, _, value) => {
-            expression_uses_unqualified_value_path(arena, base, name, target)
-                || expression_uses_unqualified_value_path(arena, value, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            expression_uses_unqualified_value_path(arena, cond, name, target)
-                || expression_uses_unqualified_value_path(arena, then_expr, name, target)
-                || else_expr.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_value_path(arena, expr, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_sequence(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_while(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_of(_, _, first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            expression_uses_unqualified_value_path(arena, first, name, target)
-                || expression_uses_unqualified_value_path(arena, second, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-            expression_uses_unqualified_value_path(arena, tag, name, target)
-                || values
-                    .iter()
-                    .any(|value| expression_uses_unqualified_value_path(arena, value, name, target))
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_template { values, .. } => values
-            .iter()
-            .any(|value| expression_uses_unqualified_value_path(arena, value, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            expression_uses_unqualified_value_path(arena, start, name, target)
-                || expression_uses_unqualified_value_path(arena, stop, name, target)
-                || expression_uses_unqualified_value_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_object_get(receiver, _) => {
-            expression_uses_unqualified_value_path(arena, receiver, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_object_set(receiver, _, value) => {
-            expression_uses_unqualified_value_path(arena, receiver, name, target)
-                || expression_uses_unqualified_value_path(arena, value, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_object_literal(fields) => fields
-            .iter()
-            .any(|(_, field)| expression_uses_unqualified_value_path(arena, field, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            module_expr_uses_unqualified_value_path(arena, module_expr, name, target)
-                || expression_uses_unqualified_value_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letexception(_, body) => {
-            expression_uses_unqualified_value_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_pack(module_expr) => {
-            module_expr_uses_unqualified_value_path(arena, module_expr, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_constant(_)
-        | crate::types::typedtree::ExpressionDesc::Texp_break
-        | crate::types::typedtree::ExpressionDesc::Texp_continue
-        | crate::types::typedtree::ExpressionDesc::Texp_extension_constructor(_, _) => false,
-    }
-}
-
-fn module_expr_uses_unqualified_value_path(
-    arena: &ParseArena,
-    module_expr: &ModuleExpr,
-    name: &str,
-    target: &Path,
-) -> bool {
-    match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_structure(structure) => structure
-            .str_items
-            .iter()
-            .any(|item| structure_item_uses_unqualified_value_path(arena, item, name, target)),
-        ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            module_expr_uses_unqualified_value_path(arena, func, name, target)
-                || module_expr_uses_unqualified_value_path(arena, arg, name, target)
-        }
-        ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            module_expr_uses_unqualified_value_path(arena, body, name, target)
-        }
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            module_expr_uses_unqualified_value_path(arena, inner, name, target)
-        }
-        ModuleExprDesc::Tmod_unpack(expr, _) => {
-            expression_uses_unqualified_value_path(arena, expr, name, target)
-        }
-        ModuleExprDesc::Tmod_ident(_, _) => false,
-    }
-}
-
-fn structure_item_uses_unqualified_value_path(
-    arena: &ParseArena,
-    item: &StructureItem,
-    name: &str,
-    target: &Path,
-) -> bool {
-    match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => {
-            expression_uses_unqualified_value_path(arena, expr, name, target)
-        }
-        StructureItemDesc::Tstr_value(_, bindings) => bindings.iter().any(|binding| {
-            expression_uses_unqualified_value_path(arena, &binding.vb_expr, name, target)
-        }),
-        StructureItemDesc::Tstr_module(binding) => {
-            module_expr_uses_unqualified_value_path(arena, &binding.mb_expr, name, target)
-        }
-        StructureItemDesc::Tstr_recmodule(bindings) => bindings.iter().any(|binding| {
-            module_expr_uses_unqualified_value_path(arena, &binding.mb_expr, name, target)
-        }),
-        StructureItemDesc::Tstr_include(include) => {
-            module_expr_uses_unqualified_value_path(arena, &include.incl_mod, name, target)
-        }
-        StructureItemDesc::Tstr_primitive(_)
-        | StructureItemDesc::Tstr_type(_, _)
-        | StructureItemDesc::Tstr_typext(_)
-        | StructureItemDesc::Tstr_exception(_)
-        | StructureItemDesc::Tstr_modtype(_)
-        | StructureItemDesc::Tstr_open(_)
-        | StructureItemDesc::Tstr_attribute(_) => false,
-    }
-}
-
-fn module_path_matches_shadow_target(path: &Path, target: &Path) -> bool {
-    path.same(target) || path_is_strict_prefix(path, target)
-}
-
-fn expression_uses_unqualified_module_path(
-    arena: &ParseArena,
-    expr: &Expression,
-    name: &str,
-    target: &Path,
-) -> bool {
-    match &expr.exp_desc {
-        crate::types::typedtree::ExpressionDesc::Texp_ident(path, lid, _) => {
-            lid_starts_with_name(arena, lid, name)
-                && module_path_matches_shadow_target(path, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings.iter().any(|binding| {
-                expression_uses_unqualified_module_path(arena, &binding.vb_expr, name, target)
-            }) || expression_uses_unqualified_module_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_function { body, .. } => {
-            expression_uses_unqualified_module_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
-            expression_uses_unqualified_module_path(arena, funct, name, target)
-                || args.iter().any(|arg| {
-                    arg.expression.as_ref().is_some_and(|expr| {
-                        expression_uses_unqualified_module_path(arena, expr, name, target)
-                    })
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_match(
-            scrutinee,
-            value_cases,
-            exn_cases,
-            _,
-        ) => {
-            expression_uses_unqualified_module_path(arena, scrutinee, name, target)
-                || value_cases.iter().chain(exn_cases.iter()).any(|case| {
-                    case.c_guard.as_ref().is_some_and(|guard| {
-                        expression_uses_unqualified_module_path(arena, guard, name, target)
-                    }) || expression_uses_unqualified_module_path(arena, &case.c_rhs, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_try(body, cases) => {
-            expression_uses_unqualified_module_path(arena, body, name, target)
-                || cases.iter().any(|case| {
-                    case.c_guard.as_ref().is_some_and(|guard| {
-                        expression_uses_unqualified_module_path(arena, guard, name, target)
-                    }) || expression_uses_unqualified_module_path(arena, &case.c_rhs, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tuple(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_array(items)
-        | crate::types::typedtree::ExpressionDesc::Texp_construct(_, _, items) => items
-            .iter()
-            .any(|item| expression_uses_unqualified_module_path(arena, item, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_variant(_, payload) => payload
-            .as_deref()
-            .is_some_and(|expr| expression_uses_unqualified_module_path(arena, expr, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-            ..
-        }
-        | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            fields.iter().any(|(_, _, definition, _)| {
-                matches!(
-                    definition,
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr)
-                        if expression_uses_unqualified_module_path(arena, expr, name, target)
-                )
-            }) || extended_expression.as_deref().is_some_and(|expr| {
-                expression_uses_unqualified_module_path(arena, expr, name, target)
-            })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_field(base, _, _)
-        | crate::types::typedtree::ExpressionDesc::Texp_assert(base) => {
-            expression_uses_unqualified_module_path(arena, base, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_setfield(base, _, _, value) => {
-            expression_uses_unqualified_module_path(arena, base, name, target)
-                || expression_uses_unqualified_module_path(arena, value, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            expression_uses_unqualified_module_path(arena, cond, name, target)
-                || expression_uses_unqualified_module_path(arena, then_expr, name, target)
-                || else_expr.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_module_path(arena, expr, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_sequence(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_while(first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_of(_, _, first, second)
-        | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            expression_uses_unqualified_module_path(arena, first, name, target)
-                || expression_uses_unqualified_module_path(arena, second, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-            expression_uses_unqualified_module_path(arena, tag, name, target)
-                || values.iter().any(|value| {
-                    expression_uses_unqualified_module_path(arena, value, name, target)
-                })
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_template { values, .. } => values
-            .iter()
-            .any(|value| expression_uses_unqualified_module_path(arena, value, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            expression_uses_unqualified_module_path(arena, start, name, target)
-                || expression_uses_unqualified_module_path(arena, stop, name, target)
-                || expression_uses_unqualified_module_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_object_get(receiver, _) => {
-            expression_uses_unqualified_module_path(arena, receiver, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_object_set(receiver, _, value) => {
-            expression_uses_unqualified_module_path(arena, receiver, name, target)
-                || expression_uses_unqualified_module_path(arena, value, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_object_literal(fields) => fields
-            .iter()
-            .any(|(_, field)| expression_uses_unqualified_module_path(arena, field, name, target)),
-        crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            module_expr_uses_unqualified_module_path(arena, module_expr, name, target)
-                || expression_uses_unqualified_module_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_letexception(_, body) => {
-            expression_uses_unqualified_module_path(arena, body, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_pack(module_expr) => {
-            module_expr_uses_unqualified_module_path(arena, module_expr, name, target)
-        }
-        crate::types::typedtree::ExpressionDesc::Texp_constant(_)
-        | crate::types::typedtree::ExpressionDesc::Texp_break
-        | crate::types::typedtree::ExpressionDesc::Texp_continue
-        | crate::types::typedtree::ExpressionDesc::Texp_extension_constructor(_, _) => false,
-    }
-}
-
-fn module_expr_uses_unqualified_module_path(
-    arena: &ParseArena,
-    module_expr: &ModuleExpr,
-    name: &str,
-    target: &Path,
-) -> bool {
-    match &module_expr.mod_desc {
-        ModuleExprDesc::Tmod_ident(path, lid) => {
-            lid_starts_with_name(arena, lid, name)
-                && module_path_matches_shadow_target(path, target)
-        }
-        ModuleExprDesc::Tmod_structure(structure) => structure
-            .str_items
-            .iter()
-            .any(|item| structure_item_uses_unqualified_module_path(arena, item, name, target)),
-        ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            module_expr_uses_unqualified_module_path(arena, func, name, target)
-                || module_expr_uses_unqualified_module_path(arena, arg, name, target)
-        }
-        ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            module_expr_uses_unqualified_module_path(arena, body, name, target)
-        }
-        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            module_expr_uses_unqualified_module_path(arena, inner, name, target)
-        }
-        ModuleExprDesc::Tmod_unpack(expr, _) => {
-            expression_uses_unqualified_module_path(arena, expr, name, target)
-        }
-    }
-}
-
-fn structure_item_uses_unqualified_module_path(
-    arena: &ParseArena,
-    item: &StructureItem,
-    name: &str,
-    target: &Path,
-) -> bool {
-    match &item.str_desc {
-        StructureItemDesc::Tstr_eval(expr, _) => {
-            expression_uses_unqualified_module_path(arena, expr, name, target)
-        }
-        StructureItemDesc::Tstr_value(_, bindings) => bindings.iter().any(|binding| {
-            expression_uses_unqualified_module_path(arena, &binding.vb_expr, name, target)
-        }),
-        StructureItemDesc::Tstr_module(binding) => {
-            module_expr_uses_unqualified_module_path(arena, &binding.mb_expr, name, target)
-        }
-        StructureItemDesc::Tstr_recmodule(bindings) => bindings.iter().any(|binding| {
-            module_expr_uses_unqualified_module_path(arena, &binding.mb_expr, name, target)
-        }),
-        StructureItemDesc::Tstr_include(include) => {
-            module_expr_uses_unqualified_module_path(arena, &include.incl_mod, name, target)
-        }
-        StructureItemDesc::Tstr_primitive(_)
-        | StructureItemDesc::Tstr_type(_, _)
-        | StructureItemDesc::Tstr_typext(_)
-        | StructureItemDesc::Tstr_exception(_)
-        | StructureItemDesc::Tstr_modtype(_)
-        | StructureItemDesc::Tstr_open(_)
-        | StructureItemDesc::Tstr_attribute(_) => false,
-    }
-}
-
-fn lid_unqualified_name_in(
-    arena: &ParseArena,
-    lid: &Located<LidentIdx>,
-    names: &HashSet<String>,
-) -> bool {
-    matches!(
-        arena.get_longident(lid.txt),
-        Longident::Lident(name_idx) if names.contains(arena.get_string(*name_idx))
-    )
 }
 
 fn push_sig_values_from_env_pattern(
@@ -8667,7 +7773,7 @@ fn lookup_module_path_for_module_expr<'a>(
         && target.is_persistent()
         && let Some(pers) = tctx.persistent_env.as_mut()
     {
-        let _ = pers.find_pers_struct(target.name(), tctx.type_ctx);
+        pers.find_pers_struct(target.name(), tctx.type_ctx);
     }
     Ok(path)
 }
@@ -8966,9 +8072,9 @@ pub fn lookup_module_type_by_lid(
                     // env.ml:872-874 for persistent roots and forces
                     // `Lazy.force ps.ps_sig` before include processing later
                     // freshens the extracted signature at typemod.ml:1575-1578.
-                    let _ = pers_env
-                        .as_mut()
-                        .and_then(|pers| pers.force_lazy_signature_rename(mod_name, ctx));
+                    if let Some(pers) = pers_env.as_mut() {
+                        pers.force_lazy_signature_rename(mod_name, ctx);
+                    }
                 }
                 return Some(md.md_type.clone());
             }
@@ -9141,42 +8247,6 @@ fn add_signature_items_to_env(
         }
     }
     Ok(())
-}
-
-/// Mirror the hidden stamp side effect of OCaml's
-/// `Typetexp.create_package_mty fake=true` followed by `transl_modtype`.
-///
-/// A package type with constraints is translated as nested `with type`
-/// module types. Each `Pmty_with` returns `Mtype.freshen (Mty_signature ...)`,
-/// which allocates fresh identifiers for every bound item in the signature even
-/// though those identifiers are not printed in the package core type. Keeping
-/// this side effect aligned preserves later typedtree identifier stamps.
-pub(crate) fn consume_fake_package_mty_freshening(
-    env: &Env,
-    package_path: &Path,
-    constraint_count: usize,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) {
-    if constraint_count == 0 {
-        return;
-    }
-
-    let Some(mut sig) = resolve_mod_type_to_sig(
-        &crate::types::decl::ModuleType::MtyIdent(package_path.clone()),
-        Some(env),
-        pers_env,
-        ctx,
-    ) else {
-        return;
-    };
-    for _ in 0..constraint_count {
-        sig = crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
-            "freshen_signature_in_place",
-            &sig,
-            ctx,
-        );
-    }
 }
 
 fn resolve_mod_type_to_sig_impl(
@@ -9473,352 +8543,6 @@ fn typed_params_are_constrained(
             _ => true,
         }
     })
-}
-
-fn rewrite_package_freshened_type_path(path: &Path, fresh_type_ids: &HashMap<i32, Ident>) -> Path {
-    match path {
-        Path::Pident(id) => fresh_type_ids
-            .get(&id.stamp())
-            .cloned()
-            .map(Path::pident)
-            .unwrap_or_else(|| path.clone()),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(rewrite_package_freshened_type_path(prefix, fresh_type_ids)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(rewrite_package_freshened_type_path(functor, fresh_type_ids)),
-            std::sync::Arc::new(rewrite_package_freshened_type_path(arg, fresh_type_ids)),
-        ),
-    }
-}
-
-fn rewrite_package_freshened_type_expr(
-    ctx: &crate::types::context::TypeContext,
-    ty_ref: TypeExprRef,
-    fresh_type_ids: &HashMap<i32, Ident>,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    use crate::types::type_expr::{RowField, TypeDesc};
-
-    let ty_ref = ctx.repr(ty_ref);
-    if !visited.insert(ty_ref) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty_ref).into_desc();
-    match &desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
-            let rewritten_path = rewrite_package_freshened_type_path(path, fresh_type_ids);
-            if rewritten_path != *path {
-                ctx.set_desc(
-                    ty_ref,
-                    TypeDesc::Tconstr {
-                        path: rewritten_path,
-                        args: args.clone(),
-                        abbrev: *abbrev,
-                    },
-                );
-            }
-            for arg in args {
-                rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
-            }
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
-                rewrite_package_freshened_type_expr(ctx, arg.typ, fresh_type_ids, visited);
-            }
-            rewrite_package_freshened_type_expr(ctx, *ret, fresh_type_ids, visited);
-        }
-        TypeDesc::Ttuple(types) => {
-            for ty in types {
-                rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
-            }
-        }
-        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_package_freshened_type_expr(ctx, *body, fresh_type_ids, visited);
-            for var in vars {
-                rewrite_package_freshened_type_expr(ctx, *var, fresh_type_ids, visited);
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            rewrite_package_freshened_type_expr(ctx, *fields, fresh_type_ids, visited);
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_package_freshened_type_expr(ctx, *typ, fresh_type_ids, visited);
-            rewrite_package_freshened_type_expr(ctx, *rest, fresh_type_ids, visited);
-        }
-        TypeDesc::Tvariant(row) => {
-            rewrite_package_freshened_type_expr(ctx, row.row_more, fresh_type_ids, visited);
-            for (_, field) in &row.row_fields {
-                match field {
-                    RowField::Rpresent(Some(ty)) => {
-                        rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
-                    }
-                    RowField::Reither { types, .. } => {
-                        for ty in types {
-                            rewrite_package_freshened_type_expr(ctx, *ty, fresh_type_ids, visited);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeDesc::Tpackage { args, .. } => {
-            for arg in args {
-                rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
-}
-
-fn rewrite_package_freshened_constructor_args(
-    args: &mut crate::types::decl::ConstructorArguments,
-    ctx: &crate::types::context::TypeContext,
-    fresh_type_ids: &HashMap<i32, Ident>,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    match args {
-        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-            for arg in args {
-                rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
-            }
-        }
-        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-            for label in labels {
-                rewrite_package_freshened_type_expr(ctx, label.ld_type, fresh_type_ids, visited);
-            }
-        }
-    }
-}
-
-fn rewrite_package_freshened_type_kind(
-    kind: &mut crate::types::TypeKind,
-    ctx: &crate::types::context::TypeContext,
-    fresh_type_ids: &HashMap<i32, Ident>,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    match kind {
-        crate::types::TypeKind::TypeAbstract | crate::types::TypeKind::TypeOpen => {}
-        crate::types::TypeKind::TypeRecord(labels, _) => {
-            for label in labels {
-                rewrite_package_freshened_type_expr(ctx, label.ld_type, fresh_type_ids, visited);
-            }
-        }
-        crate::types::TypeKind::TypeVariant(constructors, _) => {
-            for ctor in constructors {
-                rewrite_package_freshened_constructor_args(
-                    &mut ctor.cd_args,
-                    ctx,
-                    fresh_type_ids,
-                    visited,
-                );
-                if let Some(res) = ctor.cd_res {
-                    rewrite_package_freshened_type_expr(ctx, res, fresh_type_ids, visited);
-                }
-            }
-        }
-    }
-}
-
-fn rewrite_package_freshened_type_inlined(
-    inlined: &mut crate::types::decl::TypeInlinedType,
-    ctx: &crate::types::context::TypeContext,
-    fresh_type_ids: &HashMap<i32, Ident>,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    match inlined {
-        crate::types::decl::TypeInlinedType::Record { labels, .. } => {
-            for label in labels {
-                rewrite_package_freshened_type_expr(ctx, label.ld_type, fresh_type_ids, visited);
-            }
-        }
-    }
-}
-
-fn collect_package_fresh_type_ids_in_module_type(
-    mty: &crate::types::decl::ModuleType,
-    ctx: &crate::types::context::TypeContext,
-    fresh_type_ids: &mut HashMap<i32, Ident>,
-) {
-    use crate::types::decl::ModuleType as DeclMty;
-
-    match mty {
-        DeclMty::MtySignature(sig_items) => {
-            for item in sig_items.iter() {
-                match item {
-                    crate::types::decl::SignatureItem::SigType(id, _, _) => {
-                        if id.stamp() != 0 {
-                            fresh_type_ids
-                                .entry(id.stamp())
-                                .or_insert_with(|| ctx.create_ident(id.name()));
-                        }
-                    }
-                    crate::types::decl::SignatureItem::SigModule(_, md, _) => {
-                        collect_package_fresh_type_ids_in_module_type(
-                            &md.md_type,
-                            ctx,
-                            fresh_type_ids,
-                        );
-                    }
-                    crate::types::decl::SignatureItem::SigModtype(_, mtd) => {
-                        if let Some(inner) = &mtd.mtd_type {
-                            collect_package_fresh_type_ids_in_module_type(
-                                inner,
-                                ctx,
-                                fresh_type_ids,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        DeclMty::MtyFunctor {
-            param_type, result, ..
-        } => {
-            if let Some(param_type) = param_type.as_deref() {
-                collect_package_fresh_type_ids_in_module_type(param_type, ctx, fresh_type_ids);
-            }
-            collect_package_fresh_type_ids_in_module_type(result, ctx, fresh_type_ids);
-        }
-        DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => {}
-    }
-}
-
-fn freshen_package_type_ids_in_module_type(
-    mty: &mut crate::types::decl::ModuleType,
-    ctx: &crate::types::context::TypeContext,
-    fresh_type_ids: &HashMap<i32, Ident>,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    use crate::types::decl::ModuleType as DeclMty;
-
-    match mty {
-        DeclMty::MtySignature(sig_items) => {
-            for item in crate::types::decl::signature_mut(sig_items) {
-                match item {
-                    crate::types::decl::SignatureItem::SigValue(_, desc) => {
-                        rewrite_package_freshened_type_expr(
-                            ctx,
-                            desc.val_type,
-                            fresh_type_ids,
-                            visited,
-                        );
-                    }
-                    crate::types::decl::SignatureItem::SigType(id, decl, _) => {
-                        if let Some(new_id) = fresh_type_ids.get(&id.stamp()) {
-                            *id = *new_id;
-                            std::sync::Arc::make_mut(decl).type_path = Some(Path::pident(*new_id));
-                        }
-                        for param in &decl.type_params {
-                            rewrite_package_freshened_type_expr(
-                                ctx,
-                                *param,
-                                fresh_type_ids,
-                                visited,
-                            );
-                        }
-                        if let Some(manifest) = decl.type_manifest {
-                            rewrite_package_freshened_type_expr(
-                                ctx,
-                                manifest,
-                                fresh_type_ids,
-                                visited,
-                            );
-                        }
-                        rewrite_package_freshened_type_kind(
-                            &mut std::sync::Arc::make_mut(decl).type_kind,
-                            ctx,
-                            fresh_type_ids,
-                            visited,
-                        );
-                        for inlined in &mut std::sync::Arc::make_mut(decl).type_inlined_types {
-                            rewrite_package_freshened_type_inlined(
-                                inlined,
-                                ctx,
-                                fresh_type_ids,
-                                visited,
-                            );
-                        }
-                    }
-                    crate::types::decl::SignatureItem::SigTypext(_, ext, _) => {
-                        ext.ext_type_path =
-                            rewrite_package_freshened_type_path(&ext.ext_type_path, fresh_type_ids);
-                        for param in &ext.ext_type_params {
-                            rewrite_package_freshened_type_expr(
-                                ctx,
-                                *param,
-                                fresh_type_ids,
-                                visited,
-                            );
-                        }
-                        rewrite_package_freshened_constructor_args(
-                            &mut ext.ext_args,
-                            ctx,
-                            fresh_type_ids,
-                            visited,
-                        );
-                        if let Some(ret) = ext.ext_ret_type {
-                            rewrite_package_freshened_type_expr(ctx, ret, fresh_type_ids, visited);
-                        }
-                    }
-                    crate::types::decl::SignatureItem::SigModule(_, md, _) => {
-                        freshen_package_type_ids_in_module_type(
-                            &mut md.md_type,
-                            ctx,
-                            fresh_type_ids,
-                            visited,
-                        );
-                    }
-                    crate::types::decl::SignatureItem::SigModtype(_, mtd) => {
-                        if let Some(inner) = mtd.mtd_type.as_mut() {
-                            freshen_package_type_ids_in_module_type(
-                                inner,
-                                ctx,
-                                fresh_type_ids,
-                                visited,
-                            );
-                        }
-                    }
-                    crate::types::decl::SignatureItem::SigClass
-                    | crate::types::decl::SignatureItem::SigClassType => {}
-                }
-            }
-        }
-        DeclMty::MtyFunctor {
-            param_type, result, ..
-        } => {
-            if let Some(param_type) = param_type.as_mut() {
-                freshen_package_type_ids_in_module_type(param_type, ctx, fresh_type_ids, visited);
-            }
-            freshen_package_type_ids_in_module_type(result, ctx, fresh_type_ids, visited);
-        }
-        DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => {}
-    }
-}
-
-fn copy_signature_for_package_constraints(
-    sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &crate::types::context::TypeContext,
-) -> crate::types::decl::Signature {
-    let dummy_param = Ident::create_local("__pkg_copy_param__");
-    let dummy_path = Path::pident(Ident::create_local("__pkg_copy_path__"));
-    let copied = substitute_functor_param_in_signature(sig_items, &dummy_param, &dummy_path, ctx);
-    let mut fresh_type_ids = HashMap::new();
-    let mut copied_mty = crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(copied));
-    collect_package_fresh_type_ids_in_module_type(&copied_mty, ctx, &mut fresh_type_ids);
-    let mut visited = HashSet::new();
-    freshen_package_type_ids_in_module_type(&mut copied_mty, ctx, &fresh_type_ids, &mut visited);
-    match copied_mty {
-        crate::types::decl::ModuleType::MtySignature(sig) => std::sync::Arc::unwrap_or_clone(sig),
-        _ => unreachable!(),
-    }
 }
 
 fn apply_package_constraints_to_module_type(
