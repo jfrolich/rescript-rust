@@ -72,23 +72,16 @@ pub fn create_export_type_map(
 
         if crate::gentype::debug::code_items.load(std::sync::atomic::Ordering::Relaxed) {
             crate::gentype::log_::item(&format!(
-                "Type Map: {}{} {}\n",
+                "Type Map: {}{} {} = {}\n",
                 crate::gentype::resolved_name::to_string(&export_type.resolved_type_name),
                 match export_type.type_vars.is_empty() {
                     true => String::new(),
                     false => format!("({})", export_type.type_vars.join(",")),
                 },
-                format!(
-                    "{} = {}",
-                    crate::gentype::emit_text::comment(crate::gentype::annotation::to_string(
-                        annotation
-                    )),
-                    crate::gentype::emit_type::type_to_string(
-                        config,
-                        &|_| false,
-                        &export_type.type_
-                    )
-                )
+                crate::gentype::emit_text::comment(crate::gentype::annotation::to_string(
+                    annotation
+                )),
+                crate::gentype::emit_type::type_to_string(config, &|_| false, &export_type.type_)
             ));
         }
 

@@ -341,105 +341,94 @@ fn translate_variant(
     core_type: &TypedCoreType,
     row_fields: &[RowFieldType],
 ) -> crate::gentype::translate_type_expr_from_types::Translation {
-    match process_variant(row_fields) {
-        ProcessVariant {
-            no_payloads,
-            payloads,
-            inherits,
-        } => {
-            let as_string = crate::gentype::annotation::has_attribute(
-                arena,
-                crate::gentype::annotation::tag_is_string,
-                &core_type.ctyp_attributes,
-            );
-            let as_int = crate::gentype::annotation::has_attribute(
-                arena,
-                crate::gentype::annotation::tag_is_int,
-                &core_type.ctyp_attributes,
-            );
-            let mut last_bs_int = -1;
-            let no_payloads = no_payloads
-                .into_iter()
-                .map(|(label, attributes)| {
-                    let label_js = if as_string {
-                        match crate::gentype::annotation::get_as_string(arena, &attributes) {
-                            Some(label_renamed) => LabelJs::StringLabel(
-                                crate::gentype::emit_text::escape_string_contents(&label_renamed),
-                            ),
-                            None if is_number(&label) => LabelJs::IntLabel(label),
-                            None => LabelJs::StringLabel(label),
-                        }
-                    } else if as_int {
-                        match crate::gentype::annotation::get_as_int(arena, &attributes) {
-                            Some(n) => {
-                                last_bs_int = n;
-                                LabelJs::IntLabel(n.to_string())
-                            }
-                            None => {
-                                last_bs_int += 1;
-                                LabelJs::IntLabel(last_bs_int.to_string())
-                            }
-                        }
-                    } else if is_number(&label) {
-                        LabelJs::IntLabel(label)
-                    } else {
-                        LabelJs::StringLabel(label)
-                    };
-                    VariantCase { label_js }
-                })
-                .collect::<Vec<_>>();
+    let ProcessVariant {
+        no_payloads,
+        payloads,
+        inherits,
+    } = process_variant(row_fields);
+    let as_string = crate::gentype::annotation::has_attribute(
+        arena,
+        crate::gentype::annotation::tag_is_string,
+        &core_type.ctyp_attributes,
+    );
+    let as_int = crate::gentype::annotation::has_attribute(
+        arena,
+        crate::gentype::annotation::tag_is_int,
+        &core_type.ctyp_attributes,
+    );
+    let mut last_bs_int = -1;
+    let no_payloads = no_payloads
+        .into_iter()
+        .map(|(label, attributes)| {
+            let label_js = if as_string {
+                match crate::gentype::annotation::get_as_string(arena, &attributes) {
+                    Some(label_renamed) => LabelJs::StringLabel(
+                        crate::gentype::emit_text::escape_string_contents(&label_renamed),
+                    ),
+                    None if is_number(&label) => LabelJs::IntLabel(label),
+                    None => LabelJs::StringLabel(label),
+                }
+            } else if as_int {
+                match crate::gentype::annotation::get_as_int(arena, &attributes) {
+                    Some(n) => {
+                        last_bs_int = n;
+                        LabelJs::IntLabel(n.to_string())
+                    }
+                    None => {
+                        last_bs_int += 1;
+                        LabelJs::IntLabel(last_bs_int.to_string())
+                    }
+                }
+            } else if is_number(&label) {
+                LabelJs::IntLabel(label)
+            } else {
+                LabelJs::StringLabel(label)
+            };
+            VariantCase { label_js }
+        })
+        .collect::<Vec<_>>();
 
-            let payloads_translations = payloads
-                .iter()
-                .map(|(label, attributes, payload)| {
-                    (
-                        label.clone(),
-                        attributes.clone(),
-                        translateCoreType_(
-                            ctx,
-                            arena,
-                            config,
-                            type_vars_gen,
-                            false,
-                            type_env,
-                            payload,
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let payloads = payloads_translations
-                .iter()
-                .map(|(label, _, translation)| Payload {
-                    case: VariantCase {
-                        label_js: if is_number(label) {
-                            LabelJs::IntLabel(label.clone())
-                        } else {
-                            LabelJs::StringLabel(label.clone())
-                        },
-                    },
-                    t: translation.type_.clone(),
-                })
-                .collect::<Vec<_>>();
-            let inherits_translations =
-                translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, &inherits);
-            let inherits = inherits_translations
-                .iter()
-                .map(|translation| translation.type_.clone())
-                .collect::<Vec<_>>();
-            let mut dependencies = inherits_translations
-                .iter()
-                .flat_map(|translation| translation.dependencies.clone())
-                .collect::<Vec<_>>();
-            dependencies.extend(
-                payloads_translations
-                    .iter()
-                    .flat_map(|(_, _, translation)| translation.dependencies.clone()),
-            );
-            crate::gentype::translate_type_expr_from_types::Translation {
-                dependencies,
-                type_: create_variant(inherits, no_payloads, payloads, true, None, false),
-            }
-        }
+    let payloads_translations = payloads
+        .iter()
+        .map(|(label, attributes, payload)| {
+            (
+                label.clone(),
+                attributes.clone(),
+                translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, payload),
+            )
+        })
+        .collect::<Vec<_>>();
+    let payloads = payloads_translations
+        .iter()
+        .map(|(label, _, translation)| Payload {
+            case: VariantCase {
+                label_js: if is_number(label) {
+                    LabelJs::IntLabel(label.clone())
+                } else {
+                    LabelJs::StringLabel(label.clone())
+                },
+            },
+            t: translation.type_.clone(),
+        })
+        .collect::<Vec<_>>();
+    let inherits_translations =
+        translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, &inherits);
+    let inherits = inherits_translations
+        .iter()
+        .map(|translation| translation.type_.clone())
+        .collect::<Vec<_>>();
+    let mut dependencies = inherits_translations
+        .iter()
+        .flat_map(|translation| translation.dependencies.clone())
+        .collect::<Vec<_>>();
+    dependencies.extend(
+        payloads_translations
+            .iter()
+            .flat_map(|(_, _, translation)| translation.dependencies.clone()),
+    );
+    crate::gentype::translate_type_expr_from_types::Translation {
+        dependencies,
+        type_: create_variant(inherits, no_payloads, payloads, true, None, false),
     }
 }
 

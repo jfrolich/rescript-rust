@@ -11,7 +11,6 @@ use crate::types::typedtree::{
 #[allow(non_snake_case)]
 pub fn addAnnotationsToTypes_(
     arena: &ParseArena,
-    config: &crate::gentype::config::T,
     expr: &Expression,
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
@@ -28,12 +27,7 @@ pub fn addAnnotationsToTypes_(
                         a_type: a_type.clone(),
                     }),
                     None => {
-                        out.extend(addAnnotationsToTypes_(
-                            arena,
-                            config,
-                            body,
-                            &arg_types[index..],
-                        ));
+                        out.extend(addAnnotationsToTypes_(arena, body, &arg_types[index..]));
                         break;
                     }
                 }
@@ -51,7 +45,7 @@ pub fn add_annotations_to_types(
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
     // Mirrors compiler/gentype/TranslateStructure.ml:34-47.
-    let arg_types = addAnnotationsToTypes_(arena, config, expr, arg_types);
+    let arg_types = addAnnotationsToTypes_(arena, expr, arg_types);
     if arg_types
         .iter()
         .filter(|ArgType { a_name, .. }| a_name == "param")
