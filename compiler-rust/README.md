@@ -864,10 +864,7 @@ Rust aligns with the typechecking and ordering parts of this behavior in
 - If a `.resi` exists, keep the declared interface as the target signature and
   do not replace it with the implementation signature for export coercion.
 - The main in-process compile path also publishes the inferred signature before
-  RawLambda conversion when there is no interface. The exported helper
-  `typecheck_implementation_in_process` is lighter-weight and explicitly lacks
-  the post-typecheck interface constraint pass; do not use it as the model for
-  full implementation compilation.
+  RawLambda conversion when there is no interface.
 - Rust direct interface helpers and `typecheck_preprocessed_signature_in_process`
   do not currently run the whole OCaml `after_parsing_sig` artifact contract in
   every mode: direct helpers typecheck and dump, while in-process helpers publish
@@ -2318,10 +2315,6 @@ Current semantic and coverage caveats:
 - In-process backend metadata covers purity, constants, and arities. Closed
   Lambda exports for cross-module inlining are decoded from disk `.cmj` files
   only.
-- `typecheck_implementation_in_process` is a helper for signature publication,
-  not the full implementation compiler; the full in-process compile path is
-  `compile_preprocessed_structure_in_process_until_js` followed by the JS finish
-  step.
 - Source-fallback signature typechecking in `PersistentEnv` is Rust-specific and
   should not be treated as OCaml's normal compiled-interface lookup behavior.
 - Several lazy-environment side caches and explicit mode splits remain in the
@@ -2368,10 +2361,6 @@ parity.
 - Source-fallback signature typechecking in `PersistentEnv` is Rust-specific.
   It can recover missing registry/file artifacts by typechecking source up to a
   depth limit; OCaml's normal driver expects compiled interfaces.
-- `typecheck_implementation_in_process` is only a helper for signature
-  publication and intentionally lacks the post-typecheck interface constraint
-  pass. Use `compile_preprocessed_structure_in_process_until_js` plus the JS
-  finish step as the authoritative in-process implementation path.
 - Implementation coercion for a `.resi` path is recomputed at RawLambda
   conversion time. If `Includemod.compunit` fails there, Rust currently falls
   back to `build_name_based_coercion` so exports are filtered by name. That is
