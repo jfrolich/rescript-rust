@@ -14,13 +14,14 @@ use std::io::Write;
 const WIDTH: i32 = 80;
 
 /// Document type matching OCaml's Res_doc.t
+/// Text borrows from the `Sexp` being printed.
 #[derive(Clone)]
-enum Doc {
-    Text(String),
-    Concat(Vec<Doc>),
-    Indent(Box<Doc>),
+enum Doc<'a> {
+    Text(&'a str),
+    Concat(Vec<Doc<'a>>),
+    Indent(Box<Doc<'a>>),
     Line, // Becomes space if group fits, newline otherwise
-    Group(Box<Doc>),
+    Group(Box<Doc<'a>>),
 }
 
 /// Mode for rendering: Flat (lines become spaces) or Break (lines become newlines)
@@ -30,24 +31,24 @@ enum Mode {
     Break,
 }
 
-impl Doc {
-    fn text(s: &str) -> Doc {
-        Doc::Text(s.to_string())
+impl<'a> Doc<'a> {
+    fn text(s: &'a str) -> Doc<'a> {
+        Doc::Text(s)
     }
 
-    fn concat(docs: Vec<Doc>) -> Doc {
+    fn concat(docs: Vec<Doc<'a>>) -> Doc<'a> {
         Doc::Concat(docs)
     }
 
-    fn indent(doc: Doc) -> Doc {
+    fn indent(doc: Doc<'a>) -> Doc<'a> {
         Doc::Indent(Box::new(doc))
     }
 
-    fn group(doc: Doc) -> Doc {
+    fn group(doc: Doc<'a>) -> Doc<'a> {
         Doc::Group(Box::new(doc))
     }
 
-    fn join(sep: Doc, docs: Vec<Doc>) -> Doc {
+    fn join(sep: Doc<'a>, docs: Vec<Doc<'a>>) -> Doc<'a> {
         let mut result = Vec::new();
         for (i, doc) in docs.into_iter().enumerate() {
             if i > 0 {
@@ -58,23 +59,16 @@ impl Doc {
         Doc::Concat(result)
     }
 
-    /// Check if the documents on the stack fit within the remaining width
-    /// This matches OCaml's fits function behavior exactly
-    fn fits(mut width: i32, stack: &[(i32, Mode, &Doc)]) -> bool {
-        // Use a work stack to process docs in order (like OCaml's recursive approach)
-        // Key difference from naive iterative: we process Concat children in-order,
-        // and continue with the outer stack AFTER all children are done.
+    /// Check whether `first`, followed by the pending render `stack` (top
+    /// first), fits within the remaining width. Matches OCaml's `fits`.
+    /// The stack is read lazily from the top, so a group check never copies it.
+    fn fits(mut width: i32, first: (i32, Mode, &Doc<'a>), stack: &[(i32, Mode, &Doc<'a>)]) -> bool {
+        // Work stack processed in order: children of a Concat are pushed in
+        // reverse, and the outer stack is only consulted once it is empty.
+        let mut work: Vec<(i32, Mode, &Doc<'a>)> = vec![first];
+        let mut pending = stack.iter().rev();
 
-        // Work items: (indent, mode, doc, continuation_stack_idx)
-        // When a doc is fully processed, we continue with continuation_stack_idx
-        let mut work: Vec<(i32, Mode, &Doc)> = Vec::new();
-
-        // Initialize with stack items in reverse order (so first is processed first)
-        for item in stack.iter().rev() {
-            work.push(*item);
-        }
-
-        while let Some((indent, mode, doc)) = work.pop() {
+        while let Some((indent, mode, doc)) = work.pop().or_else(|| pending.next().copied()) {
             if width < 0 {
                 return false;
             }
@@ -118,7 +112,7 @@ impl Doc {
         let mut col: i32 = 0;
 
         // Stack of (indent, mode, doc)
-        let mut stack: Vec<(i32, Mode, &Doc)> = vec![(0, Mode::Break, self)];
+        let mut stack: Vec<(i32, Mode, &Doc<'a>)> = vec![(0, Mode::Break, self)];
 
         while let Some((indent, mode, doc)) = stack.pop() {
             match doc {
@@ -151,18 +145,9 @@ impl Doc {
                     }
                 },
                 Doc::Group(d) => {
-                    // Check if the group fits WITH the rest of the stack
-                    // Build check stack: this group in flat mode, plus remaining stack (in top-to-bottom order)
-                    let mut check_stack: Vec<(i32, Mode, &Doc)> =
-                        vec![(indent, Mode::Flat, d.as_ref())];
-                    // Stack items are added from top (last index) to bottom (first index)
-                    // so they're processed in the correct order after we reverse in fits
-                    for item in stack.iter().rev() {
-                        check_stack.push(*item);
-                    }
-
+                    // Check if the group, in flat mode, fits WITH the rest of the stack.
                     let remaining = WIDTH - col;
-                    let does_fit = Self::fits(remaining, &check_stack);
+                    let does_fit = Self::fits(remaining, (indent, Mode::Flat, d.as_ref()), &stack);
 
                     if does_fit {
                         // Fits: render in flat mode
@@ -200,7 +185,7 @@ impl Sexp {
     }
 
     /// Convert Sexp to Doc, matching OCaml's res_ast_debugger to_doc function
-    fn to_doc(&self) -> Doc {
+    fn to_doc(&self) -> Doc<'_> {
         match self {
             Sexp::Atom(s) => Doc::text(s),
             Sexp::List(items) if items.is_empty() => Doc::text("()"),
