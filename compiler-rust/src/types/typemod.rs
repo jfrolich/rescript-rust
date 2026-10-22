@@ -12661,107 +12661,6 @@ fn extract_functor_result_type<'b>(
     }
 }
 
-/// Find an embedded packed module expression inside an unpack payload expression.
-/// This follows common wrappers produced by await/import rewrites.
-fn find_packed_module_expr<'a>(
-    expr: &'a crate::parser::ast::Expression,
-    arena: &'a ParseArena,
-) -> Option<&'a ParsedModuleExpr> {
-    use crate::parser::ast::ExpressionDesc;
-
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_pack(mod_expr_idx) => Some(arena.get_mod_expr(*mod_expr_idx)),
-        ExpressionDesc::Pexp_constraint(inner) => {
-            find_packed_module_expr(arena.get_expr(inner.0), arena)
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            find_packed_module_expr(arena.get_expr(inner.0), arena)
-        }
-        ExpressionDesc::Pexp_await(inner) => find_packed_module_expr(arena.get_expr(*inner), arena),
-        ExpressionDesc::Pexp_apply(apply) => {
-            find_packed_module_expr(arena.get_expr(apply.funct), arena).or_else(|| {
-                apply
-                    .args
-                    .iter()
-                    .find_map(|(_, arg)| find_packed_module_expr(arena.get_expr(*arg), arena))
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Build a typed module-type hint from a parsed module expression when the module
-/// expression is (or wraps) an identifier.
-fn module_type_hint_from_parsed_module_expr<'a>(
-    tctx: &TypeCheckContext<'a>,
-    arena: &'a ParseArena,
-    mod_expr: &ParsedModuleExpr,
-) -> Option<ModuleType> {
-    match &*mod_expr.pmod_desc {
-        ParsedModuleExprDesc::Pmod_ident(lid) => {
-            let longident = tctx.resolve_lid(lid.txt);
-            let path = path_from_longident(longident, |idx| arena.get_string(idx));
-            Some(ModuleType {
-                mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_ident(path.clone(), *lid),
-                mty_type: crate::types::decl::ModuleType::MtyIdent(path),
-                mty_env: EnvRef(0),
-                mty_loc: mod_expr.pmod_loc,
-                mty_attributes: mod_expr.pmod_attributes.clone(),
-            })
-        }
-        ParsedModuleExprDesc::Pmod_constraint(inner, _) => {
-            module_type_hint_from_parsed_module_expr(tctx, arena, arena.get_mod_expr(*inner))
-        }
-        _ => None,
-    }
-}
-
-fn typed_module_type(
-    desc: crate::types::typedtree::ModuleTypeDesc,
-    mty_type: crate::types::decl::ModuleType,
-    mty_env: EnvRef,
-    mty_loc: LocIdx,
-    mty_attributes: Attributes,
-) -> ModuleType {
-    ModuleType {
-        mty_desc: desc,
-        mty_type,
-        mty_env,
-        mty_loc,
-        mty_attributes,
-    }
-}
-
-/// Find an embedded packed typed module expression inside a typed expression.
-/// This mirrors `find_packed_module_expr` for parser expressions and is used when
-/// recovering semantic module signatures from `Tmod_unpack`.
-fn find_packed_typed_module_expr(expr: &Expression) -> Option<&ModuleExpr> {
-    use crate::types::typedtree::ExpressionDesc;
-
-    match &expr.exp_desc {
-        ExpressionDesc::Texp_pack(mod_expr) => Some(mod_expr),
-        ExpressionDesc::Texp_apply { funct, args, .. } => find_packed_typed_module_expr(funct)
-            .or_else(|| {
-                args.iter().find_map(|arg| {
-                    arg.expression
-                        .as_ref()
-                        .and_then(find_packed_typed_module_expr)
-                })
-            }),
-        ExpressionDesc::Texp_let(_, bindings, body) => bindings
-            .iter()
-            .find_map(|vb| find_packed_typed_module_expr(&vb.vb_expr))
-            .or_else(|| find_packed_typed_module_expr(body)),
-        ExpressionDesc::Texp_sequence(lhs, rhs) => {
-            find_packed_typed_module_expr(lhs).or_else(|| find_packed_typed_module_expr(rhs))
-        }
-        ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => find_packed_typed_module_expr(cond)
-            .or_else(|| find_packed_typed_module_expr(then_))
-            .or_else(|| else_.as_deref().and_then(find_packed_typed_module_expr)),
-        _ => None,
-    }
-}
-
 /// Extract semantic module type information from an unpack payload expression.
 fn module_type_from_typed_unpack_expr<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -14305,16 +14204,6 @@ fn approx_modtype_rec<'a>(
     }
 }
 
-/// Extract a `decl::ModuleType` from a typed module expression (public wrapper).
-pub fn extract_module_type_from_mod_expr_pub(
-    mod_expr: &ModuleExpr,
-) -> Option<crate::types::decl::ModuleType> {
-    let mut no_ident_resolver = |_lid: &Located<LidentIdx>,
-                                 _env: Option<&Env>|
-     -> Option<crate::types::decl::Signature> { None };
-    extract_module_type_from_mod_expr_with_resolver(mod_expr, None, None, &mut no_ident_resolver)
-}
-
 fn anchor_local_module_aliases_to_owner(
     mty: &mut crate::types::decl::ModuleType,
     owner_path: &Path,
@@ -14408,10 +14297,8 @@ fn anchor_local_module_aliases_to_owner(
     }
 }
 
-/// Extract a `decl::ModuleType` from a typed module expression.
-/// For structure modules, builds a signature from the structure items.
-/// Convert a typed tree ModuleType to a decl ModuleType.
-/// Used both in extract_module_type_from_mod_expr and in transl_signature
+/// Convert a typed signature to a decl signature.
+/// Used both in extract_module_type_from_mod_expr_with_ctx and in transl_signature
 /// to add modules to sig_env for subsequent items.
 pub(crate) fn decl_signature_from_typed_signature(
     sig: &crate::types::typedtree::TypedSignature,
@@ -14534,30 +14421,12 @@ pub(crate) fn decl_module_type_from_typed(
     }
 }
 
-fn extract_module_type_from_mod_expr(
-    mod_expr: &ModuleExpr,
-    env: Option<&Env>,
-) -> Option<crate::types::decl::ModuleType> {
-    let mut no_ident_resolver = |_lid: &Located<LidentIdx>,
-                                 _env: Option<&Env>|
-     -> Option<crate::types::decl::Signature> { None };
-    extract_module_type_from_mod_expr_with_resolver(mod_expr, env, None, &mut no_ident_resolver)
-}
-
 pub(crate) fn extract_module_type_from_mod_expr_with_ctx(
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
     type_ctx: &crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
-    let mut no_ident_resolver = |_lid: &Located<LidentIdx>,
-                                 _env: Option<&Env>|
-     -> Option<crate::types::decl::Signature> { None };
-    extract_module_type_from_mod_expr_with_resolver(
-        mod_expr,
-        env,
-        Some(type_ctx),
-        &mut no_ident_resolver,
-    )
+    extract_module_type_from_mod_expr_inner(mod_expr, env, Some(type_ctx))
 }
 
 fn strip_self_module_prefix_in_sig(
@@ -15057,15 +14926,11 @@ fn localize_raw_unpack_modules_in_structure_sig(
     }
 }
 
-fn extract_module_type_from_mod_expr_with_resolver<F>(
+fn extract_module_type_from_mod_expr_inner(
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
     type_ctx: Option<&crate::types::context::TypeContext>,
-    resolve_ident_sig: &mut F,
-) -> Option<crate::types::decl::ModuleType>
-where
-    F: FnMut(&Located<LidentIdx>, Option<&Env>) -> Option<crate::types::decl::Signature>,
-{
+) -> Option<crate::types::decl::ModuleType> {
     fn preserve_structure_module_alias(
         mod_expr: &ModuleExpr,
     ) -> Option<crate::types::decl::ModuleType> {
@@ -15452,11 +15317,10 @@ where
                     StructureItemDesc::Tstr_module(mb) => {
                         let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
                             .or_else(|| {
-                                extract_module_type_from_mod_expr_with_resolver(
+                                extract_module_type_from_mod_expr_inner(
                                     &mb.mb_expr,
                                     current_env,
                                     type_ctx,
-                                    resolve_ident_sig,
                                 )
                             })
                             .unwrap_or(DeclMty::MtySignature(std::sync::Arc::new(vec![])));
@@ -15489,11 +15353,10 @@ where
                         for mb in mbs {
                             let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
                                 .or_else(|| {
-                                    extract_module_type_from_mod_expr_with_resolver(
+                                    extract_module_type_from_mod_expr_inner(
                                         &mb.mb_expr,
                                         current_env,
                                         type_ctx,
-                                        resolve_ident_sig,
                                     )
                                 })
                                 .unwrap_or(DeclMty::MtySignature(std::sync::Arc::new(vec![])));
@@ -15585,11 +15448,10 @@ where
                             included = true;
                         }
                         if !included {
-                            if let Some(inner_mty) = extract_module_type_from_mod_expr_with_resolver(
+                            if let Some(inner_mty) = extract_module_type_from_mod_expr_inner(
                                 &incl.incl_mod,
                                 current_env,
                                 type_ctx,
-                                resolve_ident_sig,
                             ) {
                                 let inner_sig_opt = match inner_mty {
                                     DeclMty::MtySignature(inner_sig) => Some(std::sync::Arc::unwrap_or_clone(inner_sig)),
@@ -15631,30 +15493,17 @@ where
                             }
                         }
                         if !included {
-                            if let ModuleExprDesc::Tmod_ident(_, lid) = &incl.incl_mod.mod_desc {
-                                if let Some(inner_sig) = resolve_ident_sig(lid, current_env) {
-                                    for sig_item in inner_sig {
-                                        if let Some(env_mut) = local_env.as_mut() {
-                                            add_sig_item_to_env(&sig_item, env_mut);
-                                        }
-                                        sig_items.push(sig_item);
-                                    }
-                                    included = true;
-                                }
-                            }
-                        }
-                        if !included {
                             if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
-                                let mod_name = match path {
-                                    crate::types::Path::Pident(id) => Some(id.name().to_string()),
-                                    crate::types::Path::Pdot(_, name, _) => Some(name.to_string()),
+                                let mod_name: Option<&str> = match path {
+                                    crate::types::Path::Pident(id) => Some(id.name()),
+                                    crate::types::Path::Pdot(_, name, _) => Some(name.as_ref()),
                                     _ => None,
                                 };
                                 if let Some(mod_name) = mod_name {
                                     let found_sig: Option<Vec<SigItem>> =
                                         sig_items.iter().find_map(|si| {
                                             if let SigItem::SigModule(id, md, _) = si {
-                                                if id.name() == mod_name.as_str() {
+                                                if id.name() == mod_name {
                                                     return match &md.md_type {
                                                         DeclMty::MtySignature(inner) => {
                                                             Some((**inner).clone())
@@ -15728,11 +15577,10 @@ where
                 None
             };
 
-            let result_mty = extract_module_type_from_mod_expr_with_resolver(
+            let result_mty = extract_module_type_from_mod_expr_inner(
                 body,
                 body_env,
                 type_ctx,
-                resolve_ident_sig,
             )?;
             Some(DeclMty::MtyFunctor {
                 param: *param_id,
@@ -15741,11 +15589,10 @@ where
             })
         }
         ModuleExprDesc::Tmod_apply(functor, _arg, _) => {
-            let extracted_functor_mty = extract_module_type_from_mod_expr_with_resolver(
+            let extracted_functor_mty = extract_module_type_from_mod_expr_inner(
                 functor,
                 env,
                 type_ctx,
-                resolve_ident_sig,
             );
             if let Some(functor_mty) = extracted_functor_mty {
                 let resolved_functor_mty = match &functor_mty {
@@ -15789,11 +15636,10 @@ where
                 }
             };
             constrained.or_else(|| {
-                extract_module_type_from_mod_expr_with_resolver(
+                extract_module_type_from_mod_expr_inner(
                     inner,
                     env,
                     type_ctx,
-                    resolve_ident_sig,
                 )
             })
         }
@@ -16975,36 +16821,6 @@ fn type_module_expr_with_alias_inner<'a>(
             crate::types::typecore::builtin_extension_error(arena, ext),
         )),
     }
-}
-
-fn wrap_constraint<'a>(
-    tctx: &mut TypeCheckContext<'a>,
-    env: &Env,
-    arg: ModuleExpr,
-    mty: ModuleType,
-    explicit: crate::types::typedtree::ModuleTypeConstraint,
-    mod_loc: LocIdx,
-    mod_attributes: Attributes,
-) -> TypeModResult<ModuleExpr> {
-    let decl_mty = decl_module_type_from_typed(&mty).unwrap_or(
-        crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
-    );
-    let arg_mty = extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx)
-        .or_else(|| Some(arg.mod_type.clone()))
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(
-            std::sync::Arc::new(vec![]),
-        ));
-    wrap_constraint_with_decl_and_arg_mty(
-        tctx,
-        env,
-        arg,
-        mty,
-        arg_mty,
-        decl_mty,
-        explicit,
-        mod_loc,
-        mod_attributes,
-    )
 }
 
 fn wrap_constraint_with_decl_mty<'a>(
