@@ -3,6 +3,7 @@
 //! This module contains the type expression parsing logic, converting tokens
 //! into type AST nodes.
 
+use super::module::parse_attributes;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -1557,58 +1558,6 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
 /// OCaml `parse_lident` (res_core.ml), including its recovery.
 fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
     super::core::parse_lident(p)
-}
-
-/// Parse attributes (including doc comments which become res.doc attributes).
-fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
-    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
-    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
-    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
-    let mut attrs = Attributes::new();
-    loop {
-        match &p.token {
-            Token::At => {
-                if let Some(attr) = parse_attribute(p) {
-                    attrs.push(attr);
-                }
-            }
-            Token::DocComment { loc, content } => {
-                let loc_cloned = *loc;
-                let content = content.clone();
-                p.next();
-                let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(
-                    p.arena_mut(),
-                    loc,
-                    content,
-                ));
-            }
-            _ => break,
-        }
-    }
-    p.eat_breadcrumb();
-    attrs
-}
-
-/// Parse a single attribute.
-fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
-    if p.token != Token::At {
-        return None;
-    }
-    // Use push_start_pos() to get a cached PosIdx for position sharing.
-    // In OCaml, when parsing type parameters with attributes, both the
-    // parameter's start_pos and the attribute's location start point to the
-    // same position object (pointer equality). Using the cache ensures we
-    // get the same PosIdx if someone else already captured this position.
-    let start_pos_idx = p.start_pos_idx();
-    p.next();
-
-    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
-    let attr_id = super::module::parse_extension_id(p, start_pos_idx);
-
-    let payload = super::module::parse_payload_region(p);
-
-    Some((attr_id, payload))
 }
 
 // ============================================================================

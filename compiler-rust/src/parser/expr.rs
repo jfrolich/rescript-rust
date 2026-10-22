@@ -3,6 +3,7 @@
 //! This module contains the expression parsing logic, converting tokens
 //! into expression AST nodes.
 
+use super::module::parse_attributes;
 use std::borrow::Cow;
 
 use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
@@ -1390,61 +1391,6 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
             ("_".to_string(), p.mk_loc_current())
         }
     }
-}
-
-/// Parse attributes (including doc comments which become res.doc attributes).
-fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
-    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
-    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
-    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
-    let mut attrs = Attributes::new();
-    loop {
-        match &p.token {
-            Token::At => {
-                if let Some(attr) = parse_attribute(p) {
-                    attrs.push(attr);
-                }
-            }
-            Token::DocComment { loc, content } => {
-                let loc = *loc;
-                let content = content.clone();
-                p.next();
-                let loc = p.from_location(&loc);
-                attrs.push(super::core::doc_comment_to_attribute(
-                    p.arena_mut(),
-                    loc,
-                    content,
-                ));
-            }
-            _ => break,
-        }
-    }
-    p.eat_breadcrumb();
-    attrs
-}
-
-/// Parse a single attribute.
-fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
-    if p.token != Token::At {
-        return None;
-    }
-    // Capture position before @ so attribute location includes it
-    let start_pos_idx = p.start_pos_idx();
-    p.next();
-
-    let attr_id = parse_attribute_id(p, start_pos_idx);
-
-    let payload = super::module::parse_payload_region(p);
-
-    Some((attr_id, payload))
-}
-
-/// Parse an attribute identifier.
-/// Attribute identifiers can be regular identifiers or certain keywords like `as`, `type`, etc.
-/// The `start_pos_idx` parameter should be the PosIdx from BEFORE the `@` was consumed.
-fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
-    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
-    super::module::parse_extension_id(p, start_pos_idx)
 }
 
 // ============================================================================
@@ -4406,7 +4352,7 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             let unit_pat = super::pattern::make_unit_construct_pattern(p, loc);
-            let pat = super::pattern::parse_alias_pattern(p, unit_pat, vec![]);
+            let pat = super::pattern::parse_alias_pattern(p, unit_pat, &[]);
             (pat, false)
         } else {
             // Could be:
@@ -4420,7 +4366,7 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
                 // Tuple pattern: for (a, b, ...) in ...
                 p.next();
                 let tuple_pat = super::pattern::parse_tuple_pattern(p, lparen_pos_idx, pat, vec![]);
-                let aliased = super::pattern::parse_alias_pattern(p, tuple_pat, vec![]);
+                let aliased = super::pattern::parse_alias_pattern(p, tuple_pat, &[]);
                 (aliased, false)
             } else {
                 // Pattern with outer paren: for (pattern in ...)

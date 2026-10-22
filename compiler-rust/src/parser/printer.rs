@@ -11,7 +11,6 @@ use crate::parser::comment_table::{CommentTable, PosRange, walk_signature, walk_
 use crate::parser::doc::Doc;
 use crate::parser::longident::Longident;
 use crate::parser::token::Token;
-// (HashMap import removed - unused)
 
 // ============================================================================
 // Printer State
@@ -272,28 +271,10 @@ pub fn print_lident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> 
 // Comment Printing
 // ============================================================================
 
-/// Trim leading/trailing spaces (not newlines) from comment text.
-/// This matches OCaml's Comment.trim_spaces which only trims ' ' characters.
-fn trim_spaces(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    if len == 0 {
-        return s;
-    }
-
-    // Find start (skip leading spaces only)
-    let mut start = 0;
-    while start < len && bytes[start] == b' ' {
-        start += 1;
-    }
-
-    // Find end (skip trailing spaces only)
-    let mut end = len;
-    while end > start && bytes[end - 1] == b' ' {
-        end -= 1;
-    }
-
-    if start < end { &s[start..end] } else { "" }
+/// OCaml `String.trim`: strips only ' ', '\t', '\n', '\r' and '\012'
+/// (form feed), unlike Rust's Unicode-aware `str::trim`.
+fn ocaml_string_trim(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'))
 }
 
 /// Print multiline comment content with proper formatting.
@@ -306,11 +287,11 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
     match lines.len() {
         0 => Doc::text("/* */"),
         1 => {
-            let trimmed = trim_spaces(lines[0]);
+            let trimmed = Comment::trim_spaces(lines[0]);
             Doc::concat(vec![Doc::text("/* "), Doc::text(trimmed), Doc::text(" */")])
         }
         _ => {
-            let first_line = trim_spaces(lines[0]);
+            let first_line = Comment::trim_spaces(lines[0]);
             let rest = &lines[1..];
 
             // Helper function similar to OCaml's indent_stars
@@ -320,7 +301,7 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
                 let mut docs = Vec::new();
 
                 for (i, line) in lines.iter().enumerate() {
-                    let trimmed = line.trim();
+                    let trimmed = ocaml_string_trim(line);
                     let is_last = i == lines.len() - 1;
 
                     if is_last {
@@ -339,7 +320,7 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
                         } else {
                             Doc::nil()
                         };
-                        let content = trim_spaces(txt);
+                        let content = Comment::trim_spaces(txt);
                         return (Doc::concat(vec![Doc::text(content), trailing_space]), true);
                     }
                 }
@@ -392,13 +373,8 @@ fn print_leading_comment(comment: &Comment, next_comment: Option<&Comment>) -> D
             let next_loc = next.loc();
             let curr_loc = comment.loc();
             let diff = next_loc.loc_start.line - curr_loc.loc_end.line;
-            let next_single_line = next.is_single_line();
 
-            if single_line && next_single_line {
-                if diff > 1 {
-                    parts.push(Doc::hard_line());
-                }
-            } else if single_line && !next_single_line {
+            if single_line {
                 if diff > 1 {
                     parts.push(Doc::hard_line());
                 }
@@ -605,16 +581,6 @@ fn print_leading_comments(
     print_leading_comments_with(doc, leading_comments, &full_loc)
 }
 
-/// Get the first leading comment for a location, if any.
-/// Uses position-based keys like OCaml's Location.t.
-pub fn get_first_leading_comment<'a>(
-    cmt_tbl: &'a CommentTable,
-    loc: LocIdx,
-    arena: &ParseArena,
-) -> Option<&'a Comment> {
-    cmt_tbl.get_first_leading_comment(loc, arena)
-}
-
 // ============================================================================
 // List Printing
 // ============================================================================
@@ -648,7 +614,7 @@ where
     for node in nodes {
         let loc = get_loc(node);
 
-        let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
+        let start_pos = match cmt_tbl.get_first_leading_comment(loc, arena) {
             Some(comment) => comment.loc().loc_start,
             None => *arena.loc_start(loc),
         };
@@ -660,7 +626,7 @@ where
 
         if let Some(previous_loc) = previous_loc {
             let previous_end = arena.loc_end(previous_loc);
-            let separator = if start_pos.line as i32 - previous_end.line > 1 {
+            let separator = if start_pos.line - previous_end.line > 1 {
                 Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
             } else {
                 Doc::hard_line()
@@ -717,13 +683,13 @@ where
         let loc = get_loc(node);
 
         // Determine separator based on line distance
-        let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
+        let start_pos = match cmt_tbl.get_first_leading_comment(loc, arena) {
             Some(comment) => comment.loc().loc_start,
             None => *arena.loc_start(loc),
         };
 
         let prev_end = arena.loc_end(prev_loc);
-        let sep = if start_pos.line as i32 - prev_end.line > 1 && !ignore_empty_lines {
+        let sep = if start_pos.line - prev_end.line > 1 && !ignore_empty_lines {
             Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
         } else {
             Doc::line()
@@ -803,7 +769,7 @@ pub fn print_comments_inside(cmt_tbl: &mut CommentTable, loc: LocIdx, arena: &Pa
 }
 
 /// Print comments inside an empty file.
-pub fn print_comments_inside_file(cmt_tbl: &mut CommentTable, _arena: &ParseArena) -> Doc {
+pub fn print_comments_inside_file(cmt_tbl: &mut CommentTable) -> Doc {
     // Use PosRange::none() which corresponds to Location::none()
     match cmt_tbl.inside.remove(&PosRange::none()) {
         None => Doc::nil(),
@@ -895,17 +861,6 @@ pub fn print_poly_var_ident(txt: &str) -> Doc {
 pub fn print_string_loc(sloc: &StringLoc, cmt_tbl: &mut CommentTable, arena: &ParseArena) -> Doc {
     let doc = print_ident(arena.get_string(sloc.txt));
     print_comments(doc, cmt_tbl, sloc.loc, arena)
-}
-
-/// Print a longident location.
-/// Print a longident location with escaping (for value identifiers).
-pub fn print_longident_loc(
-    lid: &crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    let doc = print_lident(arena, arena.get_longident(lid.txt));
-    print_comments(doc, cmt_tbl, lid.loc, arena)
 }
 
 /// Print a longident location without escaping (for module paths).
@@ -1123,9 +1078,8 @@ pub fn print_expression(
         e
     };
     let printed_expression = match &*e.pexp_desc {
-        ExpressionDesc::Pexp_braces(braces) => {
-            print_expression(state, arena.get_expr(braces.expr), cmt_tbl, arena)
-        }
+        // Every `Pexp_braces` layer was unwrapped above.
+        ExpressionDesc::Pexp_braces(_) => unreachable!("braces are unwrapped above"),
         // (__x) => f(a, __x, c) -----> f(a, _, c)
         ExpressionDesc::Pexp_fun(fun_inner)
             if {
@@ -1815,7 +1769,7 @@ fn print_pattern_args(
         [arg] => {
             let arg = arena.get_pat(*arg);
             let arg_doc = print_pattern(state, arg, cmt_tbl, arena);
-            let should_hug = is_huggable_pattern(arg);
+            let should_hug = parsetree_viewer::is_huggable_pattern(arg);
             Doc::concat(vec![
                 Doc::lparen(),
                 if should_hug {
@@ -2093,7 +2047,7 @@ fn print_expr_fun_parameters(
                 default_expr: None,
                 pat,
             },
-        ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
+        ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(&*pat.ppat_desc, PatternDesc::Ppat_any) =>
         {
             let doc = if has_constraint {
@@ -2112,7 +2066,7 @@ fn print_expr_fun_parameters(
                 default_expr: None,
                 pat,
             },
-        ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
+        ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(&*pat.ppat_desc, PatternDesc::Ppat_var(_))
             && pat.ppat_attributes.is_empty() =>
         {
@@ -2131,7 +2085,7 @@ fn print_expr_fun_parameters(
                 default_expr: None,
                 pat,
             },
-        ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
+        ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(
                 &*pat.ppat_desc,
                 PatternDesc::Ppat_construct(lid, args)
@@ -2196,7 +2150,7 @@ fn parameters_should_hug(parameters: &[parsetree_viewer::FunParam<'_>]) -> bool 
                 default_expr: None,
                 pat,
             },
-        ] if attrs.is_empty() => is_huggable_pattern(pat),
+        ] if attrs.is_empty() => parsetree_viewer::is_huggable_pattern(pat),
         _ => false,
     }
 }
@@ -2589,20 +2543,13 @@ fn print_ternary_expression(
     };
 
     // Print attributes - ternary handles its own attributes
-    let attrs: Vec<&Attribute> = e.pexp_attributes.iter().collect();
-
     // Check if any of the printable attributes need parens wrapping
-    let collected_attrs: Attributes = attrs.iter().map(|a| (*a).clone()).collect();
-    let needs_parens = parsetree_viewer::filter_parsing_attrs(arena, &collected_attrs)
-        .iter()
-        .any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
+    let needs_parens = e.pexp_attributes.iter().any(|attr| {
+        !parsetree_viewer::is_parsing_attr(arena, attr)
+            && parsetree_viewer::is_printable_attribute(arena, attr)
+    });
 
-    let attrs_doc = print_attributes(
-        state,
-        &attrs.into_iter().cloned().collect::<Vec<_>>(),
-        cmt_tbl,
-        arena,
-    );
+    let attrs_doc = print_attributes(state, e.pexp_attributes.as_slice(), cmt_tbl, arena);
     Doc::concat(vec![
         attrs_doc,
         if needs_parens {
@@ -3135,11 +3082,6 @@ fn print_value_bindings_with_rec(
     )
 }
 
-/// Check if an expression is an array of tuples (for dict detection)
-fn is_tuple_array(arena: &ParseArena, expr: &Expression) -> bool {
-    parsetree_viewer::is_tuple_array(arena, expr)
-}
-
 /// Try to print dict{} syntax for Primitive_dict.make([("key", value), ...])
 fn try_print_dict_expr(
     state: &PrinterState,
@@ -3161,7 +3103,7 @@ fn try_print_dict_expr(
                     if args.len() == 1 {
                         if let (ArgLabel::Nolabel, key_values) = &args[0] {
                             let key_values = arena.get_expr(*key_values);
-                            if is_tuple_array(arena, key_values) {
+                            if parsetree_viewer::is_tuple_array(arena, key_values) {
                                 return Some(print_dict_expr(
                                     state, expr, key_values, cmt_tbl, arena,
                                 ));
@@ -3621,15 +3563,15 @@ fn print_underscore_apply_call(
     if !requires_regular_layout
         && parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, false)
     {
-        let args_doc = print_arguments_with_callback_in_first_position_underscore_subst(
-            state, args, false, cmt_tbl, arena,
+        let args_doc = print_arguments_with_callback_in_first_position(
+            state, args, false, true, cmt_tbl, arena,
         );
         Doc::concat(vec![funct_doc, args_doc])
     } else if !requires_regular_layout
         && parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, false)
     {
-        let args_doc = print_arguments_with_callback_in_last_position_underscore_subst(
-            state, args, false, cmt_tbl, arena,
+        let args_doc = print_arguments_with_callback_in_last_position(
+            state, args, false, true, cmt_tbl, arena,
         );
         let maybe_break_parent = if args_doc.will_break() {
             Doc::break_parent()
@@ -3757,229 +3699,6 @@ fn print_arguments_with_underscore_subst(
     )
 }
 
-/// Print arguments with callback in first position, with underscore substitution.
-/// This is used when printing underscore apply sugar that has a callback in first position.
-fn print_arguments_with_callback_in_first_position_underscore_subst(
-    state: &PrinterState,
-    args: &[(ArgLabel, ExprIdx)],
-    partial: bool,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    // Because the same subtree gets printed twice, we need to copy the cmt_tbl.
-    let state = state.next_custom_layout();
-
-    // If we should break callback due to nesting depth, just break all args
-    if state.should_break_callback() {
-        return print_arguments_with_underscore_subst(&state, args, partial, cmt_tbl, arena);
-    }
-
-    let cmt_tbl_copy = cmt_tbl.copy();
-
-    // Split args into callback and non-callback args
-    let (callback_doc, printed_args_doc) =
-        if let Some(((label, expr_idx), rest)) = args.split_first() {
-            let expr = arena.get_expr(*expr_idx);
-            // Print label prefix for the callback
-            let lbl_doc = print_arg_label_prefix(label, arena);
-
-            // Print callback - it may itself be underscore apply sugar
-            let callback = if parsetree_viewer::is_underscore_apply_sugar(arena, expr) {
-                let inner = get_underscore_apply_body(expr, arena);
-                let doc = Doc::concat(vec![
-                    lbl_doc,
-                    print_underscore_apply(&state, inner, cmt_tbl, arena),
-                ]);
-                print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
-            } else {
-                let pexp_fun_doc =
-                    print_pexp_fun(&state, InCallback::FitsOnOneLine, expr, cmt_tbl, arena);
-                let doc = Doc::concat(vec![lbl_doc, pexp_fun_doc]);
-                print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
-            };
-
-            // Print non-callback args with underscore substitution
-            let mut printed_args = Vec::new();
-            for (lbl, arg) in rest {
-                printed_args.push(print_argument_with_underscore_subst(
-                    &state, lbl, arg, cmt_tbl, arena,
-                ));
-            }
-            if partial {
-                printed_args.push(Doc::text("..."));
-            }
-            let printed_args_doc =
-                Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), printed_args);
-
-            (callback, printed_args_doc)
-        } else {
-            return Doc::text("()");
-        };
-
-    // Thing.map((arg1, arg2) => MyModuleBlah.toList(argument), foo)
-    let fits_on_one_line = Doc::concat(vec![
-        Doc::lparen(),
-        callback_doc,
-        Doc::comma(),
-        Doc::line(),
-        printed_args_doc.clone(),
-        Doc::rparen(),
-    ]);
-
-    // Thing.map(
-    //   (param1, parm2) => doStuff(param1, parm2),
-    //   arg1,
-    //   arg2,
-    // )
-    let break_all_args = {
-        let mut cmt_tbl_for_break = cmt_tbl_copy;
-        print_arguments_with_underscore_subst(&state, args, partial, &mut cmt_tbl_for_break, arena)
-    };
-
-    // Check if any non-callback args will break
-    if printed_args_doc.will_break() {
-        return break_all_args;
-    }
-
-    Doc::custom_layout(vec![fits_on_one_line, break_all_args])
-}
-
-/// Print arguments with callback in last position, with underscore substitution.
-/// This is used when printing underscore apply sugar that has a callback in last position.
-fn print_arguments_with_callback_in_last_position_underscore_subst(
-    state: &PrinterState,
-    args: &[(ArgLabel, ExprIdx)],
-    partial: bool,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    // Because the same subtree gets printed twice, we need to copy the cmt_tbl.
-    let state = state.next_custom_layout();
-
-    // If we should break callback due to nesting depth, just break all args
-    if state.should_break_callback() {
-        return print_arguments_with_underscore_subst(&state, args, partial, cmt_tbl, arena);
-    }
-
-    let cmt_tbl_copy = cmt_tbl.copy();
-    let cmt_tbl_copy2 = cmt_tbl.copy();
-
-    // Split args into non-callback args and the callback
-    let (non_callback_args, callback) = if let Some(((label, expr_idx), rest)) = args.split_last() {
-        let expr = arena.get_expr(*expr_idx);
-        // Print label prefix for the callback
-        let lbl_doc = print_arg_label_prefix(label, arena);
-
-        // Print non-callback args with underscore substitution
-        let mut printed_args = Vec::new();
-        for (lbl, arg) in rest {
-            printed_args.push(print_argument_with_underscore_subst(
-                &state, lbl, arg, cmt_tbl, arena,
-            ));
-        }
-        let printed_args_doc = if printed_args.is_empty() {
-            Doc::nil()
-        } else {
-            Doc::concat(vec![
-                Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), printed_args),
-                Doc::comma(),
-                Doc::line(),
-            ])
-        };
-
-        // Callback that fits on one line - may itself be underscore apply sugar
-        let callback_fits_on_one_line = if parsetree_viewer::is_underscore_apply_sugar(arena, expr)
-        {
-            let inner = get_underscore_apply_body(expr, arena);
-            let mut cmt_tbl_for_callback = cmt_tbl.copy();
-            let doc = Doc::concat(vec![
-                lbl_doc.clone(),
-                print_underscore_apply(&state, inner, &mut cmt_tbl_for_callback, arena),
-            ]);
-            print_comments(doc, &mut cmt_tbl_for_callback, expr.pexp_loc, arena)
-        } else {
-            let mut cmt_tbl_for_callback = cmt_tbl.copy();
-            let pexp_fun_doc = print_pexp_fun(
-                &state,
-                InCallback::FitsOnOneLine,
-                expr,
-                &mut cmt_tbl_for_callback,
-                arena,
-            );
-            let doc = Doc::concat(vec![lbl_doc.clone(), pexp_fun_doc]);
-            print_comments(doc, &mut cmt_tbl_for_callback, expr.pexp_loc, arena)
-        };
-
-        // Callback with arguments fitting on one line (body may break)
-        let callback_args_fit_on_one_line =
-            if parsetree_viewer::is_underscore_apply_sugar(arena, expr) {
-                let inner = get_underscore_apply_body(expr, arena);
-                let mut cmt_tbl_for_callback = cmt_tbl_copy.clone();
-                let doc = Doc::concat(vec![
-                    lbl_doc,
-                    print_underscore_apply(&state, inner, &mut cmt_tbl_for_callback, arena),
-                ]);
-                print_comments(doc, &mut cmt_tbl_for_callback, expr.pexp_loc, arena)
-            } else {
-                let mut cmt_tbl_for_callback = cmt_tbl_copy.clone();
-                let pexp_fun_doc = print_pexp_fun(
-                    &state,
-                    InCallback::ArgumentsFitOnOneLine,
-                    expr,
-                    &mut cmt_tbl_for_callback,
-                    arena,
-                );
-                let doc = Doc::concat(vec![lbl_doc, pexp_fun_doc]);
-                print_comments(doc, &mut cmt_tbl_for_callback, expr.pexp_loc, arena)
-            };
-
-        (
-            printed_args_doc,
-            (callback_fits_on_one_line, callback_args_fit_on_one_line),
-        )
-    } else {
-        return Doc::text("()");
-    };
-
-    let (callback_fits_on_one_line, callback_args_fit_on_one_line) = callback;
-
-    // Break all args fallback
-    let break_all_args = {
-        let mut cmt_tbl_for_break = cmt_tbl_copy2;
-        print_arguments_with_underscore_subst(&state, args, partial, &mut cmt_tbl_for_break, arena)
-    };
-
-    // Check if any non-callback args will break
-    if non_callback_args.will_break() {
-        return break_all_args;
-    }
-
-    // Thing.map(foo, (arg1, arg2) => MyModuleBlah.toList(argument))
-    let fits_on_one_line = Doc::concat(vec![
-        Doc::lparen(),
-        non_callback_args.clone(),
-        callback_fits_on_one_line,
-        Doc::rparen(),
-    ]);
-
-    // Thing.map(longArgument, veryLooooongArgument, (arg1, arg2) =>
-    //   MyModuleBlah.toList(argument)
-    // )
-    let arguments_fit_on_one_line = Doc::concat(vec![
-        Doc::lparen(),
-        non_callback_args,
-        Doc::breakable_group(callback_args_fit_on_one_line, true),
-        Doc::rparen(),
-    ]);
-
-    Doc::custom_layout(vec![
-        fits_on_one_line,
-        arguments_fit_on_one_line,
-        break_all_args,
-    ])
-}
-
-/// Print function application.
 /// The member of an `Array.get`/`Array.set` access (res_printer.ml:4639-4657).
 fn print_array_access_member(
     state: &PrinterState,
@@ -4274,15 +3993,17 @@ fn print_pexp_apply(
     if !requires_regular_layout
         && parsetree_viewer::requires_special_callback_printing_first_arg(arena, args, partial)
     {
-        let args_doc =
-            print_arguments_with_callback_in_first_position(state, args, partial, cmt_tbl, arena);
+        let args_doc = print_arguments_with_callback_in_first_position(
+            state, args, partial, false, cmt_tbl, arena,
+        );
         let attrs_doc = print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena);
         Doc::concat(vec![attrs_doc, funct_doc, args_doc])
     } else if !requires_regular_layout
         && parsetree_viewer::requires_special_callback_printing_last_arg(arena, args, partial)
     {
-        let args_doc =
-            print_arguments_with_callback_in_last_position(state, args, partial, cmt_tbl, arena);
+        let args_doc = print_arguments_with_callback_in_last_position(
+            state, args, partial, false, cmt_tbl, arena,
+        );
         // Check if args doc will break - if so, add break_parent
         // Fixes layout issues with nested callbacks
         let maybe_break_parent = if args_doc.will_break() {
@@ -4613,7 +4334,7 @@ fn print_binary_expression(
     if operator == "->"
         && !(parsetree_viewer::is_binary_expression(arena, lhs)
             || parsetree_viewer::is_binary_expression(arena, rhs)
-            || !parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes).is_empty())
+            || parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()))
     {
         let lhs_has_comment_below = has_comment_below(cmt_tbl, lhs.pexp_loc, arena);
         let lhs_doc = print_binary_operand(
@@ -4699,12 +4420,14 @@ fn print_binary_expression(
         ]),
         force_pipe_breaks && operator == "->",
     );
-    let printable = parsetree_viewer::filter_printable_attributes(arena, &expr.pexp_attributes);
-    let mut printable_expr = expr.clone();
-    printable_expr.pexp_attributes = printable.into_iter().cloned().collect();
+    // `binary_expr` of the expression restricted to its printable attributes.
+    let has_printable_attrs = expr
+        .pexp_attributes
+        .iter()
+        .any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
     Doc::group(Doc::concat(vec![
         print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena),
-        match parens::binary_expr(arena, &printable_expr) {
+        match parens::binary_expr_with_attrs(arena, expr, has_printable_attrs) {
             ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
             ParenKind::Parenthesized => add_parens(doc),
             ParenKind::Nothing => doc,
@@ -4769,100 +4492,78 @@ fn print_arg_label_prefix(label: &ArgLabel, arena: &ParseArena) -> Doc {
     }
 }
 
-/// Print arguments with callback in last position.
+/// Print one call argument. With `subst_underscore`, a `__x` argument prints
+/// as `_`: OCaml rewrites underscore-apply sugar with `rewrite_underscore_apply`
+/// before printing (res_parsetree_viewer.ml:82-175); Rust substitutes while
+/// printing instead.
+fn print_call_argument(
+    state: &PrinterState,
+    label: &ArgLabel,
+    expr_idx: &ExprIdx,
+    subst_underscore: bool,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    if subst_underscore {
+        print_argument_with_underscore_subst(state, label, expr_idx, cmt_tbl, arena)
+    } else {
+        print_argument(state, label, arena.get_expr(*expr_idx), cmt_tbl, arena)
+    }
+}
+
+/// Print a whole argument list, substituting `__x` by `_` when
+/// `subst_underscore` is set (see [`print_call_argument`]).
+fn print_call_arguments(
+    state: &PrinterState,
+    args: &[(ArgLabel, ExprIdx)],
+    partial: bool,
+    subst_underscore: bool,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    if subst_underscore {
+        print_arguments_with_underscore_subst(state, args, partial, cmt_tbl, arena)
+    } else {
+        print_arguments(state, args, partial, cmt_tbl, arena)
+    }
+}
+
+/// Print arguments with callback in last position (res_printer.ml:5029-5126).
 /// Uses custom_layout to try different layouts for callback formatting.
+///
+/// Printing consumes comments from the table, so each alternative layout
+/// prints from its own copy. OCaml builds the layouts lazily; they are built
+/// here in the order OCaml forces them, and only when they are used.
 fn print_arguments_with_callback_in_last_position(
     state: &PrinterState,
     args: &[(ArgLabel, ExprIdx)],
     partial: bool,
+    subst_underscore: bool,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // Because the same subtree gets printed twice, we need to copy the cmt_tbl.
-    // Consumed comments need to be marked not-consumed and reprinted.
     let state = state.next_custom_layout();
+    let mut cmt_tbl_copy = cmt_tbl.copy();
+    let mut cmt_tbl_copy2 = cmt_tbl.copy();
 
-    // If we should break callback due to nesting depth, just break all args
-    // IMPORTANT: Check this BEFORE computing anything to avoid infinite recursion
-    if state.should_break_callback() {
-        return print_arguments(&state, args, partial, cmt_tbl, arena);
-    }
-
-    let cmt_tbl_copy = cmt_tbl.copy();
-    let cmt_tbl_copy2 = cmt_tbl.copy();
-
-    // Split args into non-callback args and the callback
-    let (non_callback_args, callback) = if let Some(((label, expr), rest)) = args.split_last() {
-        // Print label prefix for the callback
-        let lbl_doc = print_arg_label_prefix(label, arena);
-
-        // Print non-callback args
-        let mut printed_args = Vec::new();
-        for (lbl, arg) in rest {
-            printed_args.push(print_argument(
-                &state,
-                lbl,
-                arena.get_expr(*arg),
-                cmt_tbl,
-                arena,
-            ));
-        }
-        let printed_args_doc = if printed_args.is_empty() {
-            Doc::nil()
-        } else {
-            Doc::concat(vec![
-                Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), printed_args),
-                Doc::comma(),
-                Doc::line(),
-            ])
-        };
-
-        // Callback that fits on one line
-        let callback_fits_on_one_line = {
-            let expr = arena.get_expr(*expr);
-            let mut cmt_tbl_for_callback = cmt_tbl.copy();
-            let pexp_fun_doc = print_pexp_fun(
-                &state,
-                InCallback::FitsOnOneLine,
-                expr,
-                &mut cmt_tbl_for_callback,
-                arena,
-            );
-            let doc = Doc::concat(vec![lbl_doc.clone(), pexp_fun_doc]);
-            print_comments(doc, &mut cmt_tbl_for_callback, expr.pexp_loc, arena)
-        };
-
-        // Callback with arguments fitting on one line (body may break)
-        let callback_args_fit_on_one_line = {
-            let expr = arena.get_expr(*expr);
-            let mut cmt_tbl_for_callback = cmt_tbl_copy.clone();
-            let pexp_fun_doc = print_pexp_fun(
-                &state,
-                InCallback::ArgumentsFitOnOneLine,
-                expr,
-                &mut cmt_tbl_for_callback,
-                arena,
-            );
-            let doc = Doc::concat(vec![lbl_doc, pexp_fun_doc]);
-            print_comments(doc, &mut cmt_tbl_for_callback, expr.pexp_loc, arena)
-        };
-
-        (
-            printed_args_doc,
-            (callback_fits_on_one_line, callback_args_fit_on_one_line),
-        )
-    } else {
+    let Some(((label, expr), rest)) = args.split_last() else {
         return Doc::text("()");
     };
 
-    let (callback_fits_on_one_line, callback_args_fit_on_one_line) = callback;
-
-    // If we should break callback due to nesting depth, just break all args
-    // IMPORTANT: Check this BEFORE computing break_all_args to avoid infinite recursion
-    if state.should_break_callback() {
-        let mut cmt_tbl_for_break = cmt_tbl_copy2;
-        return print_arguments(&state, args, partial, &mut cmt_tbl_for_break, arena);
-    }
+    // The non-callback arguments are printed eagerly with `cmt_tbl`.
+    let printed_args: Vec<Doc> = rest
+        .iter()
+        .map(|(lbl, arg)| print_call_argument(&state, lbl, arg, subst_underscore, cmt_tbl, arena))
+        .collect();
+    let non_callback_args = if printed_args.is_empty() {
+        Doc::nil()
+    } else {
+        Doc::concat(vec![
+            Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), printed_args),
+            Doc::comma(),
+            Doc::line(),
+        ])
+    };
 
     // Thing.map(
     //   arg1,
@@ -4870,15 +4571,43 @@ fn print_arguments_with_callback_in_last_position(
     //   arg3,
     //   (param1, parm2) => doStuff(param1, parm2)
     // )
-    let break_all_args = {
-        let mut cmt_tbl_for_break = cmt_tbl_copy2;
-        print_arguments(&state, args, partial, &mut cmt_tbl_for_break, arena)
+    //
+    // Sometimes one of the non-callback arguments will break (a single line
+    // comment, a multiline string, ...). Then the arguments are always broken
+    // over multiple lines, like a normal function call.
+    if state.should_break_callback() || non_callback_args.will_break() {
+        return print_call_arguments(
+            &state,
+            args,
+            partial,
+            subst_underscore,
+            &mut cmt_tbl_copy2,
+            arena,
+        );
+    }
+
+    let expr = arena.get_expr(*expr);
+    let lbl_doc = print_arg_label_prefix(label, arena);
+
+    // Callback that fits on one line
+    let callback_fits_on_one_line = {
+        let pexp_fun_doc = print_pexp_fun(&state, InCallback::FitsOnOneLine, expr, cmt_tbl, arena);
+        let doc = Doc::concat(vec![lbl_doc.clone(), pexp_fun_doc]);
+        print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
     };
 
-    // Check if any non-callback args will break - check before consuming non_callback_args
-    if non_callback_args.will_break() {
-        return break_all_args;
-    }
+    // Callback with arguments fitting on one line (body may break)
+    let callback_args_fit_on_one_line = {
+        let pexp_fun_doc = print_pexp_fun(
+            &state,
+            InCallback::ArgumentsFitOnOneLine,
+            expr,
+            &mut cmt_tbl_copy,
+            arena,
+        );
+        let doc = Doc::concat(vec![lbl_doc, pexp_fun_doc]);
+        print_comments(doc, &mut cmt_tbl_copy, expr.pexp_loc, arena)
+    };
 
     // Thing.map(foo, (arg1, arg2) => MyModuleBlah.toList(argument))
     let fits_on_one_line = Doc::concat(vec![
@@ -4898,6 +4627,15 @@ fn print_arguments_with_callback_in_last_position(
         Doc::rparen(),
     ]);
 
+    let break_all_args = print_call_arguments(
+        &state,
+        args,
+        partial,
+        subst_underscore,
+        &mut cmt_tbl_copy2,
+        arena,
+    );
+
     Doc::custom_layout(vec![
         fits_on_one_line,
         arguments_fit_on_one_line,
@@ -4905,73 +4643,32 @@ fn print_arguments_with_callback_in_last_position(
     ])
 }
 
-/// Print arguments with callback in first position.
+/// Print arguments with callback in first position (res_printer.ml:4951-5027).
 /// Uses custom_layout to try different layouts for callback formatting.
+///
+/// As in [`print_arguments_with_callback_in_last_position`], the layouts are
+/// built in OCaml's lazy force order, and only when they are used.
 fn print_arguments_with_callback_in_first_position(
     state: &PrinterState,
     args: &[(ArgLabel, ExprIdx)],
     partial: bool,
+    subst_underscore: bool,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    // Because the same subtree gets printed twice, we need to copy the cmt_tbl.
     let state = state.next_custom_layout();
+    let mut cmt_tbl_copy = cmt_tbl.copy();
 
-    // If we should break callback due to nesting depth, just break all args
-    // IMPORTANT: Check this BEFORE computing anything to avoid infinite recursion
-    if state.should_break_callback() {
-        return print_arguments(&state, args, partial, cmt_tbl, arena);
-    }
-
-    let cmt_tbl_copy = cmt_tbl.copy();
-
-    // Split args into callback and non-callback args
-    let (callback_doc, printed_args_doc) = if let Some(((label, expr), rest)) = args.split_first() {
-        // Print label prefix for the callback
-        let lbl_doc = print_arg_label_prefix(label, arena);
-
-        // Print callback
-        let callback = {
-            let expr = arena.get_expr(*expr);
-            let pexp_fun_doc =
-                print_pexp_fun(&state, InCallback::FitsOnOneLine, expr, cmt_tbl, arena);
-            let doc = Doc::concat(vec![lbl_doc, pexp_fun_doc]);
-            print_comments(doc, cmt_tbl, expr.pexp_loc, arena)
-        };
-
-        // Print non-callback args
-        let mut printed_args = Vec::new();
-        for (lbl, arg) in rest {
-            printed_args.push(print_argument(
-                &state,
-                lbl,
-                arena.get_expr(*arg),
-                cmt_tbl,
-                arena,
-            ));
-        }
-        if partial {
-            printed_args.push(Doc::text("..."));
-        }
-        let printed_args_doc =
-            Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), printed_args);
-
-        (callback, printed_args_doc)
-    } else {
+    let Some(((label, expr), rest)) = args.split_first() else {
         return Doc::text("()");
     };
 
-    // Thing.map((arg1, arg2) => MyModuleBlah.toList(argument), foo)
-    // Thing.map((arg1, arg2) => {
-    //   MyModuleBlah.toList(argument)
-    // }, longArgument, veryLooooongArgument)
-    let fits_on_one_line = Doc::concat(vec![
-        Doc::lparen(),
-        callback_doc,
-        Doc::comma(),
-        Doc::line(),
-        printed_args_doc.clone(),
-        Doc::rparen(),
+    // The callback body is printed eagerly with `cmt_tbl`; its own comments
+    // are only attached once the one-line layout is used.
+    let expr = arena.get_expr(*expr);
+    let callback = Doc::concat(vec![
+        print_arg_label_prefix(label, arena),
+        print_pexp_fun(&state, InCallback::FitsOnOneLine, expr, cmt_tbl, arena),
     ]);
 
     // Thing.map(
@@ -4980,15 +4677,59 @@ fn print_arguments_with_callback_in_first_position(
     //   arg2,
     //   arg3,
     // )
-    let break_all_args = {
-        let mut cmt_tbl_for_break = cmt_tbl_copy;
-        print_arguments(&state, args, partial, &mut cmt_tbl_for_break, arena)
-    };
-
-    // Check if any non-callback args will break
-    if printed_args_doc.will_break() {
-        return break_all_args;
+    if state.should_break_callback() {
+        return print_call_arguments(
+            &state,
+            args,
+            partial,
+            subst_underscore,
+            &mut cmt_tbl_copy,
+            arena,
+        );
     }
+
+    let mut printed_args: Vec<Doc> = rest
+        .iter()
+        .map(|(lbl, arg)| print_call_argument(&state, lbl, arg, subst_underscore, cmt_tbl, arena))
+        .collect();
+    if partial {
+        printed_args.push(Doc::text("..."));
+    }
+    let printed_args = Doc::join(Doc::concat(vec![Doc::comma(), Doc::line()]), printed_args);
+
+    // When one of the non-callback arguments breaks, break all arguments.
+    if printed_args.will_break() {
+        return print_call_arguments(
+            &state,
+            args,
+            partial,
+            subst_underscore,
+            &mut cmt_tbl_copy,
+            arena,
+        );
+    }
+
+    // Thing.map((arg1, arg2) => MyModuleBlah.toList(argument), foo)
+    // Thing.map((arg1, arg2) => {
+    //   MyModuleBlah.toList(argument)
+    // }, longArgument, veryLooooongArgument)
+    let fits_on_one_line = Doc::concat(vec![
+        Doc::lparen(),
+        print_comments(callback, cmt_tbl, expr.pexp_loc, arena),
+        Doc::comma(),
+        Doc::line(),
+        printed_args,
+        Doc::rparen(),
+    ]);
+
+    let break_all_args = print_call_arguments(
+        &state,
+        args,
+        partial,
+        subst_underscore,
+        &mut cmt_tbl_copy,
+        arena,
+    );
 
     Doc::custom_layout(vec![fits_on_one_line, break_all_args])
 }
@@ -5328,17 +5069,6 @@ fn has_comment_below(cmt_tbl: &CommentTable, loc: LocIdx, arena: &ParseArena) ->
 // Pattern Printing
 // ============================================================================
 
-/// Print a pattern with comments.
-pub fn print_pattern_with_comments(
-    state: &PrinterState,
-    pat: &Pattern,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    let doc = print_pattern(state, pat, cmt_tbl, arena);
-    print_comments(doc, cmt_tbl, pat.ppat_loc, arena)
-}
-
 /// Print a pattern.
 pub fn print_pattern(
     state: &PrinterState,
@@ -5591,18 +5321,6 @@ pub fn print_pattern(
     print_comments(doc, cmt_tbl, pat.ppat_loc, arena)
 }
 
-/// Check if a pattern is "huggable" (can be printed without line breaks).
-fn is_huggable_pattern(pat: &Pattern) -> bool {
-    matches!(
-        &*pat.ppat_desc,
-        PatternDesc::Ppat_array(_)
-            | PatternDesc::Ppat_tuple(_)
-            | PatternDesc::Ppat_record(_)
-            | PatternDesc::Ppat_variant(_)
-            | PatternDesc::Ppat_construct(_, _)
-    )
-}
-
 /// Print list pattern.
 fn print_list_pattern(
     state: &PrinterState,
@@ -5616,8 +5334,8 @@ fn print_list_pattern(
         &*tail.ppat_desc,
         PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]")
     );
-    let should_hug =
-        matches!(patterns.as_slice(), [single] if is_huggable_pattern(single)) && tail_is_nil;
+    let should_hug = matches!(patterns.as_slice(), [single] if parsetree_viewer::is_huggable_pattern(single))
+        && tail_is_nil;
     let mut docs: Vec<Doc> = Vec::with_capacity(patterns.len());
     for p in &patterns {
         docs.push(print_pattern(state, p, cmt_tbl, arena));
@@ -5710,7 +5428,7 @@ fn print_record_pattern(
                     let doc = Doc::group(Doc::concat(vec![
                         label,
                         Doc::text(":"),
-                        if is_huggable_pattern(field_pat) {
+                        if parsetree_viewer::is_huggable_pattern(field_pat) {
                             Doc::concat(vec![Doc::space(), rhs_doc])
                         } else {
                             Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc]))
@@ -7510,7 +7228,7 @@ fn print_try_expression(
 
 /// Check if a pattern needs parentheses in a case context.
 /// Constraint patterns like `(p: typ)` need parens at the case level.
-fn case_pattern_needs_parens(_arena: &ParseArena, pattern: &Pattern) -> bool {
+fn case_pattern_needs_parens(pattern: &Pattern) -> bool {
     // res_printer.ml:5545-5549: every constrained case pattern is
     // parenthesized, `(module(M: S))` included.
     matches!(&*pattern.ppat_desc, PatternDesc::Ppat_constraint(_))
@@ -7668,7 +7386,7 @@ fn print_case_content(
                 matches!(name, "()" | "true" | "false")
             }
             ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_ident(_) => true,
-            _ if parsetree_viewer::is_huggable_rhs(arena, rhs_expr) => true,
+            _ if parsetree_viewer::is_huggable_rhs(rhs_expr) => true,
             _ => false,
         };
 
@@ -7678,7 +7396,7 @@ fn print_case_content(
     // Print pattern
     let pattern_doc = {
         let doc = print_pattern(state, lhs, cmt_tbl, arena);
-        if case_pattern_needs_parens(arena, lhs) {
+        if case_pattern_needs_parens(lhs) {
             add_parens(doc)
         } else {
             doc
@@ -8269,7 +7987,7 @@ pub fn print_structure(
     arena: &ParseArena,
 ) -> Doc {
     if structure.is_empty() {
-        return print_comments_inside_file(cmt_tbl, arena);
+        return print_comments_inside_file(cmt_tbl);
     }
 
     let mut sequential_state = state.clone();
@@ -8293,7 +8011,7 @@ pub fn print_signature(
     arena: &ParseArena,
 ) -> Doc {
     if signature.is_empty() {
-        return print_comments_inside_file(cmt_tbl, arena);
+        return print_comments_inside_file(cmt_tbl);
     }
 
     let mut sequential_state = state.clone();
@@ -10404,6 +10122,21 @@ fn add_braces(doc: Doc, force_break: bool) -> Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_comment_star_lines_use_ocaml_string_trim() {
+        // res_printer.ml:135-140 trims lines with `String.trim`, which strips
+        // tabs but not a no-break space, so the second comment is not
+        // star-aligned.
+        assert_eq!(
+            print_multiline_comment_content("first\n\t* second\n").to_string(80),
+            "/* first\n * second\n */"
+        );
+        assert_eq!(
+            print_multiline_comment_content("first\n\u{a0}* second\n ").to_string(80),
+            "/* first\n\u{a0}* second\n */"
+        );
+    }
 
     #[test]
     fn test_classify_ident_content() {
