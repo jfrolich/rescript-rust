@@ -231,10 +231,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         pm
     }
 
-    pub fn omega(&self) -> P {
-        self.omega
-    }
-
     /// `irrefutable pat` (parmatch.ml:2260): `le_pat pat omega`.
     pub fn irrefutable(&mut self, pat: &'a Pattern) -> bool {
         let p = self.import(pat);
@@ -377,11 +373,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             TypeDesc::Tconstr { path, .. } => Some(path.clone()),
             _ => None,
         }
-    }
-
-    fn record_label_count(&mut self, p: P, lbl: &LabelDescription) -> usize {
-        let env = self.node(p).env;
-        self.oracle.record_labels(env, lbl.lbl_res).len()
     }
 
     fn coherent_heads(&mut self, hp1: P, hp2: P) -> bool {

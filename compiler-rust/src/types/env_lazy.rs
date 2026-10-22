@@ -633,13 +633,17 @@ struct StructureComponentTables {
     /// compilations on this worker, so entries are forced as store builds and
     /// carry the replay record of their forcing.
     in_store: std::cell::Cell<bool>,
-    store_pieces: RefCell<HashMap<(ForcedKind, String), Arc<super::context::StorePiece>>>,
+    /// Store pieces per forced entry, one table per `ForcedKind` so lookups
+    /// can borrow the entry name.
+    store_pieces: RefCell<[HashMap<String, Arc<super::context::StorePiece>>; FORCED_KIND_COUNT]>,
     /// The layer tables `open` adds for this view, built on first open.
     opened_layers: OnceCell<(
         Arc<super::env::OpenedLayers>,
         Option<Arc<super::context::StorePiece>>,
     )>,
 }
+
+const FORCED_KIND_COUNT: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ForcedKind {
@@ -649,6 +653,8 @@ enum ForcedKind {
     ChildComponents,
     QualifiedModule,
 }
+
+const _: () = assert!(ForcedKind::QualifiedModule as usize + 1 == FORCED_KIND_COUNT);
 
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
@@ -749,15 +755,6 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc(access_path, Arc::new(signature), HashMap::new(), ctx)
-    }
-
-    pub(crate) fn new_with_child_components(
-        access_path: Path,
-        signature: Signature,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        ctx: &super::context::TypeContext,
-    ) -> Self {
-        Self::new_with_child_components_arc(access_path, Arc::new(signature), child_components, ctx)
     }
 
     pub(crate) fn new_with_child_components_arc(
@@ -947,7 +944,7 @@ impl QualifiedModuleComponents {
                 }),
                 value_subst_maps: RefCell::new(None),
                 in_store: std::cell::Cell::new(super::thread_store::store_build_active()),
-                store_pieces: RefCell::new(HashMap::new()),
+                store_pieces: RefCell::new(Default::default()),
                 opened_layers: OnceCell::new(),
             }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
@@ -982,11 +979,8 @@ impl QualifiedModuleComponents {
         if !self.tables.in_store.get() {
             return force();
         }
-        let known = self
-            .tables
-            .store_pieces
-            .borrow()
-            .get(&(kind, name.to_string()))
+        let known = self.tables.store_pieces.borrow()[kind as usize]
+            .get(name)
             .cloned();
         if let Some(piece) = known {
             ctx.touch_store_piece(&piece);
@@ -1002,10 +996,8 @@ impl QualifiedModuleComponents {
         let (result, piece) = ctx.build_in_store(force);
         match piece {
             Some(piece) => {
-                self.tables
-                    .store_pieces
-                    .borrow_mut()
-                    .insert((kind, name.to_string()), piece);
+                self.tables.store_pieces.borrow_mut()[kind as usize]
+                    .insert(name.to_string(), piece);
             }
             None => self.forget_entry(kind, name),
         }
@@ -1073,10 +1065,6 @@ impl QualifiedModuleComponents {
 
     pub(crate) fn signature_arc(&self) -> Arc<Signature> {
         self.signature.clone()
-    }
-
-    pub(crate) fn cloned_signature(&self) -> Signature {
-        self.signature.as_ref().clone()
     }
 
     fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
