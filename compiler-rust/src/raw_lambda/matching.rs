@@ -4,8 +4,6 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
-#![allow(dead_code)]
-
 use crate::fast_hash::AHashMap as HashMap;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeSet;
@@ -835,11 +833,6 @@ fn do_set_args<'p>(
     result.push(&*pa.alloc(head));
     result.extend_from_slice(rest);
     result
-}
-
-/// `set_args q r` — set actual arguments of the matching pattern.
-fn set_args<'p>(pa: &'p PatArena, q: &'p Pattern, r: &[&'p Pattern]) -> Vec<&'p Pattern> {
-    do_set_args(pa, false, q, r)
 }
 
 /// `set_args_erase_mutable q r` — like set_args but replaces mutable fields with omega.
@@ -3550,13 +3543,6 @@ fn condb(act: &MatchAction, ps: &[&Pattern], qs: &[&Pattern]) -> bool {
     !act.is_guarded() && le_pats(qs, ps)
 }
 
-/// Check if p can be appended/inserted into the or-matrix l, given
-/// surrounding patterns ps.
-/// Equivalent to OCaml's `or_ok`.
-fn or_ok(p: &Pattern, ps: &[&Pattern], l: &[Clause<'_>]) -> bool {
-    or_ok_iter(p, ps, l.iter())
-}
-
 fn or_ok_iter<'p: 'a, 'a>(
     p: &'p Pattern,
     ps: &[&'p Pattern],
@@ -5489,24 +5475,6 @@ fn divide_tuple<'p>(
 
 // --- Records (lines 1417-1476) ---
 
-/// Build a list of patterns for record matching, filling in omegas for missing fields.
-/// Equivalent to OCaml's `record_matching_line`.
-fn record_matching_line<'p>(
-    num_fields: usize,
-    lbl_pat_list: &'p [(
-        impl std::any::Any,
-        std::sync::Arc<LabelDescription>,
-        Pattern,
-        bool,
-    )],
-) -> Vec<&'p Pattern> {
-    let mut patv: Vec<&'p Pattern> = vec![omega(); num_fields];
-    for (_, lbl, pat, _) in lbl_pat_list {
-        patv[lbl.lbl_pos as usize] = pat;
-    }
-    patv
-}
-
 /// Build a record matching line from a Tpat_record pattern's fields.
 /// This version takes the typed record fields directly.
 fn record_matching_line_from_fields<'p>(
@@ -5779,184 +5747,6 @@ fn divide_array<'p>(
 }
 
 // ============================================================================
-// Layer 7: String matching — OCaml matching.ml lines 1532-1659
-// ============================================================================
-
-/// Threshold for switching from dichotomic tree to sequential tests.
-/// Equivalent to OCaml's `strings_test_threshold`.
-const STRINGS_TEST_THRESHOLD: usize = 8;
-
-/// Bind a switch argument to a variable if it's not already a variable.
-/// Equivalent to OCaml's `bind_sw`.
-fn bind_sw(
-    ctx_ref: &TypeContext,
-    arg: RawLambda,
-    k: impl FnOnce(RawLambda) -> RawLambda,
-) -> RawLambda {
-    match &arg {
-        RawLambda::Lvar(_) => k(arg),
-        _ => {
-            let id = ctx_ref.create_ident("switch");
-            let var = RawLambda::Lvar(id);
-            let body = k(var);
-            RawLambda::Llet(LetKind::Strict, id, Box::new(arg), Box::new(body))
-        }
-    }
-}
-
-/// Build a sequential string equality test sequence.
-/// Equivalent to OCaml's `make_string_test_sequence`.
-fn make_string_test_sequence(
-    ctx_ref: &TypeContext,
-    loc: Location,
-    arg: RawLambda,
-    sw: Vec<(String, RawLambda)>,
-    d: Option<RawLambda>,
-) -> RawLambda {
-    let (d, sw) = match d {
-        None => {
-            let mut sw = sw;
-            assert!(!sw.is_empty());
-            let (_, d) = sw.remove(0);
-            (d, sw)
-        }
-        Some(d) => (d, sw),
-    };
-    bind_sw(ctx_ref, arg, |arg| {
-        // fold_right: iterate from the end
-        let mut result = d;
-        for (s, lam) in sw.into_iter().rev() {
-            result = RawLambda::LifThenElse(
-                Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                    primitive: Primitive::Pstringcomp(Comparison::Neq),
-                    args: vec![
-                        arg.clone(),
-                        RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
-                    ],
-                    loc,
-                }))),
-                Box::new(result),
-                Box::new(lam),
-            );
-        }
-        result
-    })
-}
-
-/// Split a list into three parts: before middle, middle element, after middle.
-/// Equivalent to OCaml's `split`.
-fn split<T>(k: usize, xs: Vec<T>) -> (Vec<T>, T, Vec<T>) {
-    assert!(!xs.is_empty());
-    let mut iter = xs.into_iter();
-    if k <= 1 {
-        let x0 = iter.next().unwrap();
-        let rest: Vec<T> = iter.collect();
-        (Vec::new(), x0, rest)
-    } else {
-        let x0 = iter.next().unwrap();
-        let rest: Vec<T> = iter.collect();
-        let (mut xs, y0, ys) = split(k - 2, rest);
-        xs.insert(0, x0);
-        (xs, y0, ys)
-    }
-}
-
-/// Zero lambda constant.
-/// Equivalent to OCaml's `zero_lam`.
-fn zero_lam() -> RawLambda {
-    RawLambda::Lconst(crate::lambda::Constant::int(0))
-}
-
-/// Three-way test on an integer value (less than, equal, greater than zero).
-/// Equivalent to OCaml's `tree_way_test`.
-fn tree_way_test(
-    loc: Location,
-    arg: RawLambda,
-    lt: RawLambda,
-    eq: RawLambda,
-    gt: RawLambda,
-) -> RawLambda {
-    RawLambda::LifThenElse(
-        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: Primitive::Pintcomp(Comparison::Lt),
-            args: vec![arg.clone(), zero_lam()],
-            loc,
-        }))),
-        Box::new(lt),
-        Box::new(RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::Pintcomp(Comparison::Lt),
-                args: vec![zero_lam(), arg],
-                loc,
-            }))),
-            Box::new(gt),
-            Box::new(eq),
-        )),
-    )
-}
-
-/// Build a dichotomic string test tree.
-/// Equivalent to OCaml's `do_make_string_test_tree`.
-fn do_make_string_test_tree(
-    ctx_ref: &TypeContext,
-    loc: Location,
-    arg: RawLambda,
-    sw: Vec<(String, RawLambda)>,
-    delta: usize,
-    d: Option<RawLambda>,
-) -> RawLambda {
-    let len = sw.len();
-    if len <= STRINGS_TEST_THRESHOLD + delta {
-        make_string_test_sequence(ctx_ref, loc, arg, sw, d)
-    } else {
-        let (lt, (s, act), gt) = split(len, sw);
-        bind_sw(
-            ctx_ref,
-            RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::Pstringcomp(Comparison::Eq),
-                args: vec![
-                    arg.clone(),
-                    RawLambda::Lconst(crate::lambda::Constant::ImmString(s)),
-                ],
-                loc,
-            })),
-            |r| {
-                tree_way_test(
-                    loc,
-                    r,
-                    do_make_string_test_tree(ctx_ref, loc, arg.clone(), lt, delta, d.clone()),
-                    act,
-                    do_make_string_test_tree(ctx_ref, loc, arg.clone(), gt, delta, d.clone()),
-                )
-            },
-        )
-    }
-}
-
-/// Expand a string switch into a test tree.
-/// Entry point for string matching.
-/// Equivalent to OCaml's `expand_stringswitch`.
-pub fn expand_stringswitch(
-    ctx_ref: &TypeContext,
-    loc: Location,
-    arg: RawLambda,
-    sw: Vec<(String, RawLambda)>,
-    d: Option<RawLambda>,
-    next_raise_count: &mut i32,
-) -> RawLambda {
-    match d {
-        None => bind_sw(ctx_ref, arg, |arg| {
-            do_make_string_test_tree(ctx_ref, loc, arg, sw, 0, None)
-        }),
-        Some(e) => bind_sw(ctx_ref, arg, |arg| {
-            make_catch(e, next_raise_count, |d| {
-                do_make_string_test_tree(ctx_ref, loc, arg, sw, 1, Some(d))
-            })
-        }),
-    }
-}
-
-// ============================================================================
 // Generic test trees — Sharing (OCaml matching.ml lines 1609-1659)
 // ============================================================================
 
@@ -6099,47 +5889,6 @@ fn sort_lambda_list(mut l: Vec<(Constant, RawLambda)>) -> Vec<(Constant, RawLamb
 // Layer 8: Integer/switch matching — OCaml matching.ml lines 1661-1941
 // ============================================================================
 
-/// Cut a list at position n, returning (first_n_elements, rest).
-/// Equivalent to OCaml's `cut`.
-fn cut<T>(n: usize, l: Vec<T>) -> (Vec<T>, Vec<T>) {
-    if n == 0 {
-        return (Vec::new(), l);
-    }
-    assert!(!l.is_empty(), "cut: list too short");
-    let mut iter = l.into_iter();
-    let mut first = Vec::with_capacity(n);
-    for _ in 0..n {
-        first.push(iter.next().expect("cut: list too short"));
-    }
-    let rest: Vec<T> = iter.collect();
-    (first, rest)
-}
-
-/// Sequential equality tests with a fail action.
-/// Equivalent to OCaml's `do_tests_fail`.
-fn do_tests_fail(
-    loc: Location,
-    fail: RawLambda,
-    tst: Primitive,
-    arg: RawLambda,
-    cases: &[(Constant, RawLambda)],
-) -> RawLambda {
-    if cases.is_empty() {
-        return fail;
-    }
-    let (c, act) = &cases[0];
-    let rest = &cases[1..];
-    RawLambda::LifThenElse(
-        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: tst.clone(),
-            args: vec![arg.clone(), typed_const_to_lambda_const(c)],
-            loc,
-        }))),
-        Box::new(do_tests_fail(loc, fail, tst, arg, rest)),
-        Box::new(act.clone()),
-    )
-}
-
 fn do_tests_fail_owned(
     loc: Location,
     fail: RawLambda,
@@ -6163,31 +5912,6 @@ fn do_tests_fail_owned(
             Box::new(act),
         )
     })
-}
-
-/// Sequential equality tests without a fail action.
-/// Equivalent to OCaml's `do_tests_nofail`.
-fn do_tests_nofail(
-    loc: Location,
-    tst: Primitive,
-    arg: RawLambda,
-    cases: &[(Constant, RawLambda)],
-) -> RawLambda {
-    assert!(!cases.is_empty(), "Matching.do_tests_nofail");
-    if cases.len() == 1 {
-        return cases[0].1.clone();
-    }
-    let (c, act) = &cases[0];
-    let rest = &cases[1..];
-    RawLambda::LifThenElse(
-        Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-            primitive: tst.clone(),
-            args: vec![arg.clone(), typed_const_to_lambda_const(c)],
-            loc,
-        }))),
-        Box::new(do_tests_nofail(loc, tst, arg, rest)),
-        Box::new(act.clone()),
-    )
 }
 
 fn do_tests_nofail_owned(
@@ -6247,30 +5971,6 @@ fn make_test_sequence(
     let (handlers, const_lambda_list, fail) =
         share_actions_tree(const_lambda_list, fail, next_raise_count);
 
-    fn make_test_seq_inner(
-        loc: &Location,
-        fail: &Option<RawLambda>,
-        tst: &Primitive,
-        lt_tst: &Primitive,
-        arg: &RawLambda,
-        const_lambda_list: &[(Constant, RawLambda)],
-    ) -> RawLambda {
-        if const_lambda_list.len() >= 4 && !matches!(lt_tst, Primitive::Pignore) {
-            split_sequence(loc, fail, tst, lt_tst, arg, const_lambda_list)
-        } else {
-            match fail {
-                None => do_tests_nofail(*loc, tst.clone(), arg.clone(), const_lambda_list),
-                Some(fail) => do_tests_fail(
-                    *loc,
-                    fail.clone(),
-                    tst.clone(),
-                    arg.clone(),
-                    const_lambda_list,
-                ),
-            }
-        }
-    }
-
     fn make_test_seq_inner_owned(
         loc: &Location,
         fail: Option<RawLambda>,
@@ -6309,28 +6009,6 @@ fn make_test_sequence(
                 }
             }
         }
-    }
-
-    fn split_sequence(
-        loc: &Location,
-        fail: &Option<RawLambda>,
-        tst: &Primitive,
-        lt_tst: &Primitive,
-        arg: &RawLambda,
-        const_lambda_list: &[(Constant, RawLambda)],
-    ) -> RawLambda {
-        let mid = const_lambda_list.len() / 2;
-        let (list1, list2) = const_lambda_list.split_at(mid);
-        let pivot_const = &list2[0].0;
-        RawLambda::LifThenElse(
-            Box::new(RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: lt_tst.clone(),
-                args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
-                loc: *loc,
-            }))),
-            Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list1)),
-            Box::new(make_test_seq_inner(loc, fail, tst, lt_tst, arg, list2)),
-        )
     }
 
     let result = make_test_seq_inner_owned(&loc, fail, &tst, &lt_tst, &arg, const_lambda_list);
@@ -8077,37 +7755,6 @@ fn compile_orhandlers<'p>(
     }
 
     do_rec(pa, compile_fun, lambda1, total1, ctx, to_catch)
-}
-
-/// Compile a test (divide + combine pattern).
-/// Equivalent to OCaml's `compile_test`.
-fn compile_test<'p, K: Clone>(
-    pa: &'p PatArena,
-    compile_fun: &mut dyn FnMut(
-        &[Ctx<'p>],
-        &PatternMatching<'p>,
-    ) -> Result<(RawLambda, Jumps<'p>), Unused>,
-    partial: &Partial,
-    divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)>,
-    combine_fn: &mut dyn FnMut(
-        &[Ctx<'p>],
-        &DefaultEnv<'p>,
-        (Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
-    ) -> (RawLambda, Jumps<'p>),
-    ctx: &[Ctx<'p>],
-    to_match: &PatternMatching<'p>,
-) -> Result<(RawLambda, Jumps<'p>), Unused> {
-    let division = divide_fn(ctx, to_match);
-    let c_div = compile_list(pa, compile_fun, division)?;
-    match &c_div {
-        (list, _, _) if list.is_empty() => {
-            match mk_failaction_neg(partial, ctx, &to_match.default) {
-                (None, _) => Err(Unused),
-                (Some(l), total) => Ok((l, total)),
-            }
-        }
-        _ => Ok(combine_fn(ctx, &to_match.default, c_div)),
-    }
 }
 
 /// Check if v approximately appears in lam.
