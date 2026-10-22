@@ -21,7 +21,7 @@ pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
             false => concat(root, dir),
         };
         if Path::new(&abs_dir).exists() && Path::new(&abs_dir).is_dir() {
-            dirs.insert(0, dir.to_string());
+            dirs.push(dir.to_string());
             if let Ok(entries) = fs::read_dir(&abs_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -32,6 +32,9 @@ pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
     }
 
     find_sub_dirs(root, "", &mut dirs);
+    // OCaml conses each directory onto the result, so it lists them in
+    // reverse visit order.
+    dirs.reverse();
     dirs
 }
 
