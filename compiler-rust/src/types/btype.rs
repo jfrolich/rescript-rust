@@ -15,24 +15,10 @@ use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField,
-    RowFieldRef, TypeDesc, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeDesc,
+    TypeExprRef,
 };
 use std::borrow::Cow;
-
-// ============================================================================
-// Type Level Constants
-// ============================================================================
-
-/// Check if a type is at the generic level.
-pub fn is_generic(ctx: &TypeContext, t: TypeExprRef) -> bool {
-    ctx.get_level(t) == GENERIC_LEVEL
-}
-
-/// Check if a type's level is >= lowest_level (not marked).
-pub fn is_unmarked(ctx: &TypeContext, t: TypeExprRef) -> bool {
-    ctx.get_level(t) >= LOWEST_LEVEL
-}
 
 // ============================================================================
 // Type Predicates
@@ -64,7 +50,37 @@ pub fn is_tconstr(ctx: &TypeContext, t: TypeExprRef) -> bool {
 ///
 /// This follows the `link` chain in `Reither` fields.
 pub fn row_field_repr(ctx: &TypeContext, field: &RowField) -> RowField {
-    row_field_repr_aux(ctx, &[], field)
+    // OCaml btype.ml `row_field_repr_aux`: accumulate the `Reither` types
+    // along the link chain, outermost first.
+    let mut tl: Vec<TypeExprRef> = Vec::new();
+    let mut current = Cow::Borrowed(field);
+    loop {
+        match &*current {
+            RowField::Reither {
+                constant,
+                types,
+                matched,
+                link,
+            } => {
+                tl.extend(types.iter().copied());
+                match ctx.get_row_field(*link) {
+                    Some(linked) => current = Cow::Owned(linked),
+                    None => {
+                        return RowField::Reither {
+                            constant: *constant,
+                            types: tl,
+                            matched: *matched,
+                            link: *link,
+                        };
+                    }
+                }
+            }
+            RowField::Rpresent(Some(_)) if !tl.is_empty() => {
+                return RowField::Rpresent(Some(tl[0]));
+            }
+            other => return other.clone(),
+        }
+    }
 }
 
 pub fn row_field_is_absent(ctx: &TypeContext, field: &RowField) -> bool {
@@ -100,34 +116,6 @@ pub fn row_field_unmatched_reither_link(
     }
 }
 
-fn row_field_repr_aux(ctx: &TypeContext, tl: &[TypeExprRef], field: &RowField) -> RowField {
-    match field {
-        RowField::Reither {
-            constant,
-            types,
-            matched,
-            link,
-        } => {
-            // Follow link if set (like OCaml's {contents = Some fi} pattern)
-            if let Some(linked) = ctx.get_row_field(*link) {
-                let mut combined = tl.to_vec();
-                combined.extend(types.iter().copied());
-                return row_field_repr_aux(ctx, &combined, &linked);
-            }
-            let mut combined_types = tl.to_vec();
-            combined_types.extend(types.iter().copied());
-            RowField::Reither {
-                constant: *constant,
-                types: combined_types,
-                matched: *matched,
-                link: *link,
-            }
-        }
-        RowField::Rpresent(Some(_)) if !tl.is_empty() => RowField::Rpresent(Some(tl[0])),
-        other => other.clone(),
-    }
-}
-
 /// Get the "more" type variable from a row.
 ///
 /// This follows variant type chains to find the underlying type variable.
@@ -143,31 +131,12 @@ pub fn row_more(ctx: &TypeContext, row: &RowDesc) -> TypeExprRef {
 ///
 /// Flattens nested variant rows by combining their fields.
 pub fn row_repr(ctx: &TypeContext, row: &RowDesc) -> RowDesc {
-    row_repr_aux(ctx, &[], row)
-}
-
-pub fn row_repr_ref<'row>(ctx: &TypeContext, row: &'row RowDesc) -> Cow<'row, RowDesc> {
-    let more = ctx.repr(row.row_more);
-    let desc = ctx.borrow_desc(more);
-    if matches!(&*desc, TypeDesc::Tvariant(_)) {
-        drop(desc);
-        Cow::Owned(row_repr(ctx, row))
-    } else {
-        Cow::Borrowed(row)
-    }
-}
-
-fn row_repr_aux(
-    ctx: &TypeContext,
-    ll: &[super::decl::SharedVec<(crate::types::asttypes::Label, RowField)>],
-    row: &RowDesc,
-) -> RowDesc {
     // OCaml btype.ml `row_repr_aux`: follow `row_more` through nested
     // `Tvariant`s, prepending each non-empty field list to `ll`, then return
     // `rev_concat row.row_fields ll`. Collect the lists outermost first
     // instead of re-prepending, which yields the same concatenation order.
     let mut outer: Vec<super::decl::SharedVec<(crate::types::asttypes::Label, RowField)>> =
-        ll.iter().rev().cloned().collect();
+        Vec::new();
     let mut current = row.clone();
     loop {
         let more = ctx.repr(current.row_more);
@@ -199,6 +168,17 @@ fn row_repr_aux(
         row_closed: current.row_closed,
         row_fixed: current.row_fixed,
         row_name: current.row_name,
+    }
+}
+
+pub fn row_repr_ref<'row>(ctx: &TypeContext, row: &'row RowDesc) -> Cow<'row, RowDesc> {
+    let more = ctx.repr(row.row_more);
+    let desc = ctx.borrow_desc(more);
+    if matches!(&*desc, TypeDesc::Tvariant(_)) {
+        drop(desc);
+        Cow::Owned(row_repr(ctx, row))
+    } else {
+        Cow::Borrowed(row)
     }
 }
 
@@ -448,16 +428,6 @@ where
 // Type Marking (for traversal)
 // ============================================================================
 
-/// Mark a type by negating its level around pivot_level.
-pub fn mark_type(ctx: &TypeContext, ty: TypeExprRef) {
-    let ty = ctx.repr(ty);
-    let level = ctx.get_level(ty);
-    if level >= LOWEST_LEVEL {
-        ctx.set_level(ty, PIVOT_LEVEL - level);
-        iter_type_expr(ctx, ty, |t| mark_type(ctx, t));
-    }
-}
-
 /// Mark just the type node (not its children).
 pub fn mark_type_node(ctx: &TypeContext, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
@@ -465,11 +435,6 @@ pub fn mark_type_node(ctx: &TypeContext, ty: TypeExprRef) {
     if level >= LOWEST_LEVEL {
         ctx.set_level(ty, PIVOT_LEVEL - level);
     }
-}
-
-/// Mark type parameters (children only).
-pub fn mark_type_params(ctx: &TypeContext, ty: TypeExprRef) {
-    iter_type_expr(ctx, ty, |t| mark_type(ctx, t));
 }
 
 /// Unmark a type by reversing the mark operation.

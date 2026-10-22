@@ -223,6 +223,16 @@ enum TypeMutation {
     SavedLevels(Vec<(i32, i32)>),
 }
 
+/// A record label as cached for pattern/record lowering: name, position,
+/// mutability, record representation and attributes.
+pub type CachedRecordLabel = (
+    String,
+    i32,
+    super::asttypes::MutableFlag,
+    super::decl::RecordRepresentation,
+    Vec<super::decl::Attribute>,
+);
+
 /// The type-declaration maps fed lazily from `type_decl_log`.
 #[derive(Clone, Copy)]
 enum TypeDeclMap {
@@ -837,18 +847,7 @@ pub struct TypeContext {
     /// Maps type path (with stamp for uniqueness) → Vec<(field_name, position, mutable, repr, attributes)>.
     /// Populated during type checking when record patterns are processed.
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
-    record_labels_cache: RefCell<
-        crate::fast_hash::AHashMap<
-            Path,
-            Vec<(
-                String,
-                i32,
-                super::asttypes::MutableFlag,
-                super::decl::RecordRepresentation,
-                Vec<super::decl::Attribute>,
-            )>,
-        >,
-    >,
+    record_labels_cache: RefCell<crate::fast_hash::AHashMap<Path, Vec<CachedRecordLabel>>>,
 
     /// Reconstructed record label descriptions keyed by type path.
     /// OCaml installs one shared `lbl_all` array for a record declaration and
@@ -875,15 +874,7 @@ pub struct TypeContext {
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
     /// pattern field is resolved; we model that with an append-only side table.
-    dict_pattern_labels_cache: RefCell<
-        Vec<(
-            String,
-            i32,
-            super::asttypes::MutableFlag,
-            super::decl::RecordRepresentation,
-            Vec<super::decl::Attribute>,
-        )>,
-    >,
+    dict_pattern_labels_cache: RefCell<Vec<CachedRecordLabel>>,
 
     /// Lident indices synthesized while filling omitted optional record fields.
     /// This avoids repeated reverse scans through the parse arena for large JSX
@@ -3171,17 +3162,7 @@ impl TypeContext {
 
     /// Cache record label info for a type path.
     /// Called during type checking when record patterns are processed.
-    pub fn register_record_labels(
-        &self,
-        type_path: &Path,
-        labels: Vec<(
-            String,
-            i32,
-            super::asttypes::MutableFlag,
-            super::decl::RecordRepresentation,
-            Vec<super::decl::Attribute>,
-        )>,
-    ) {
+    pub fn register_record_labels(&self, type_path: &Path, labels: Vec<CachedRecordLabel>) {
         self.poison_store_build_for("register_record_labels");
         self.record_labels_cache
             .borrow_mut()
@@ -3189,18 +3170,7 @@ impl TypeContext {
     }
 
     /// Look up cached record labels for a type path.
-    pub fn get_record_labels(
-        &self,
-        type_path: &Path,
-    ) -> Option<
-        Vec<(
-            String,
-            i32,
-            super::asttypes::MutableFlag,
-            super::decl::RecordRepresentation,
-            Vec<super::decl::Attribute>,
-        )>,
-    > {
+    pub fn get_record_labels(&self, type_path: &Path) -> Option<Vec<CachedRecordLabel>> {
         self.record_labels_cache.borrow().get(type_path).cloned()
     }
 
@@ -3304,30 +3274,18 @@ impl TypeContext {
     }
 
     /// Replace the synthetic dict-pattern label cache.
-    pub fn set_dict_pattern_labels(
-        &self,
-        labels: Vec<(
-            String,
-            i32,
-            super::asttypes::MutableFlag,
-            super::decl::RecordRepresentation,
-            Vec<super::decl::Attribute>,
-        )>,
-    ) {
+    pub fn set_dict_pattern_labels(&self, labels: Vec<CachedRecordLabel>) {
         self.poison_store_build_for("set_dict_pattern_labels");
         *self.dict_pattern_labels_cache.borrow_mut() = labels;
     }
 
+    /// Number of synthetic dict-pattern labels created so far.
+    pub fn dict_pattern_label_count(&self) -> usize {
+        self.dict_pattern_labels_cache.borrow().len()
+    }
+
     /// Snapshot the synthetic dict-pattern labels created so far.
-    pub fn get_dict_pattern_labels(
-        &self,
-    ) -> Vec<(
-        String,
-        i32,
-        super::asttypes::MutableFlag,
-        super::decl::RecordRepresentation,
-        Vec<super::decl::Attribute>,
-    )> {
+    pub fn get_dict_pattern_labels(&self) -> Vec<CachedRecordLabel> {
         self.dict_pattern_labels_cache.borrow().clone()
     }
 

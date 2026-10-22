@@ -7,44 +7,6 @@ use crate::location::Location;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-/// Constant values in the AST.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Constant {
-    /// Integer constant
-    Int(i64),
-    /// Character constant (Unicode codepoint)
-    Char(u32),
-    /// String constant with optional delimiter
-    String(String, Option<String>),
-    /// Float constant (stored as string for precision)
-    Float(String),
-    /// 32-bit integer
-    Int32(i32),
-    /// 64-bit integer
-    Int64(i64),
-    /// Big integer (sign, digits as string)
-    BigInt(bool, String),
-}
-
-/// Recursive flag for let bindings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum RecFlag {
-    /// Non-recursive binding
-    #[default]
-    Nonrecursive,
-    /// Recursive binding
-    Recursive,
-}
-
-/// Direction flag for for loops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DirectionFlag {
-    /// Counting up
-    Upto,
-    /// Counting down
-    Downto,
-}
-
 /// Private/public flag for type definitions.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -67,49 +29,8 @@ pub enum MutableFlag {
     Mutable,
 }
 
-/// Virtual/concrete flag for class methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum VirtualFlag {
-    /// Virtual method
-    Virtual,
-    /// Concrete method
-    Concrete,
-}
-
-/// Override/fresh flag for class methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum OverrideFlag {
-    /// Overriding method
-    Override,
-    /// Fresh method
-    Fresh,
-}
-
-/// Closed/open flag for polymorphic variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ClosedFlag {
-    /// Closed variant
-    Closed,
-    /// Open variant
-    Open,
-}
-
 /// A label (field name, method name, etc.).
 pub type Label = SmolStr;
-
-/// Arity of a function (None means unknown).
-pub type Arity = Option<i32>;
-
-/// Variance annotation for type parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum VarianceAnnotation {
-    /// Covariant (+)
-    Covariant,
-    /// Contravariant (-)
-    Contravariant,
-    /// Invariant
-    Invariant,
-}
 
 /// Argument label for function parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -141,6 +62,7 @@ impl ArgLabel {
     }
 
     /// Create a labeled argument with no location.
+    #[cfg(test)]
     pub fn labelled_noloc(name: impl Into<String>) -> Self {
         ArgLabel::Labelled(Located {
             txt: name.into(),
@@ -149,6 +71,7 @@ impl ArgLabel {
     }
 
     /// Create an optional argument with no location.
+    #[cfg(test)]
     pub fn optional_noloc(name: impl Into<String>) -> Self {
         ArgLabel::Optional(Located {
             txt: name.into(),
@@ -235,55 +158,9 @@ impl<T> Located<T> {
     }
 }
 
-/// Argument label without location (for internal use).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ArgLabelNoloc {
-    /// No label
-    Nolabel,
-    /// Labeled
-    Labelled(String),
-    /// Optional
-    Optional(String),
-}
-
-impl ArgLabelNoloc {
-    /// Convert to ArgLabel with a location.
-    pub fn to_arg_label(&self, loc: Location) -> ArgLabel {
-        match self {
-            ArgLabelNoloc::Nolabel => ArgLabel::Nolabel,
-            ArgLabelNoloc::Labelled(s) => ArgLabel::labelled(s.clone(), loc),
-            ArgLabelNoloc::Optional(s) => ArgLabel::optional(s.clone(), loc),
-        }
-    }
-
-    /// Convert to ArgLabel with no location.
-    pub fn to_arg_label_noloc(&self) -> ArgLabel {
-        self.to_arg_label(Location::none())
-    }
-}
-
-impl From<&ArgLabel> for ArgLabelNoloc {
-    fn from(label: &ArgLabel) -> Self {
-        match label {
-            ArgLabel::Nolabel => ArgLabelNoloc::Nolabel,
-            ArgLabel::Labelled(l) => ArgLabelNoloc::Labelled(l.txt.clone()),
-            ArgLabel::Optional(l) => ArgLabelNoloc::Optional(l.txt.clone()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_constant() {
-        let c = Constant::Int(42);
-        assert_eq!(c, Constant::Int(42));
-
-        let s = Constant::String("hello".to_string(), None);
-        assert_eq!(s, Constant::String("hello".to_string(), None));
-    }
 
     #[test]
     fn test_arg_label() {
@@ -323,7 +200,6 @@ mod tests {
     #[test]
     fn test_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Constant>();
         assert_send_sync::<ArgLabel>();
         assert_send_sync::<Located<String>>();
     }
