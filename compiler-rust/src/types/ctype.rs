@@ -731,9 +731,6 @@ fn local_non_recursive_abbrev(
     go(ctx, env, source, false, &mut visited, ty)
 }
 
-/// Add a GADT equation: source_path = destination type.
-/// Creates a local constraint with a manifest type declaration.
-/// Matches OCaml's `add_gadt_equation` in ctype.ml.
 // ============================================================================
 // Pattern compatibility (OCaml `mcomp`, compiler/ml/ctype.ml:1729-1964)
 // ============================================================================
@@ -4004,21 +4001,19 @@ fn normalize_path_full_inner(
             return path;
         }
         let mut resolve_visiting = HashSet::new();
-        if let Some(mty) =
+        if let Some(super::decl::ModuleType::MtyAlias(_, alias_path)) =
             resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
         {
-            if let super::decl::ModuleType::MtyAlias(_, alias_path) = &mty {
-                return normalize_path_full_inner(
-                    ctx,
-                    env,
-                    alias_path,
-                    depth + 1,
-                    visiting,
-                    allow_reverse_local_aliases,
-                    force_module_lookup_side_effects,
-                    None,
-                );
-            }
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                &alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
+                None,
+            );
         }
     } else {
         let md = match &path {
@@ -6545,15 +6540,7 @@ fn expand_head_with_mode(
     let mut seen = [TypeExprRef(0); 20];
     let mut seen_len: usize = 0;
     for _ in 0..20 {
-        // Check if current was already seen
-        let mut already_seen = false;
-        for i in 0..seen_len {
-            if seen[i] == current {
-                already_seen = true;
-                break;
-            }
-        }
-        if already_seen {
+        if seen[..seen_len].contains(&current) {
             break;
         }
         seen[seen_len] = current;
@@ -6564,15 +6551,7 @@ fn expand_head_with_mode(
                 if expanded == current {
                     break;
                 }
-                // Check if expanded was already seen
-                let mut exp_seen = false;
-                for i in 0..seen_len {
-                    if seen[i] == expanded {
-                        exp_seen = true;
-                        break;
-                    }
-                }
-                if exp_seen {
+                if seen[..seen_len].contains(&expanded) {
                     break;
                 }
                 current = expanded;
