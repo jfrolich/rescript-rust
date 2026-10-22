@@ -1268,6 +1268,9 @@ pub struct TypeCheckContext<'a> {
     /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
     pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
     pub monomorph_cache: crate::types::comptime::MonomorphCache,
+    /// Nesting depth of comptime function specializations; a fallback guard
+    /// behind the monomorphization cache against runaway recursion.
+    comptime_depth: usize,
     /// Comptime let bindings whose body is a type builder — to be evaluated
     /// at end of type_structure and emitted as type declarations.
     pub pending_type_builders: Vec<(String, crate::parse_arena::ExprIdx)>,
@@ -1400,6 +1403,7 @@ impl<'a> TypeCheckContext<'a> {
             comptime_functions: HashMap::new(),
             comptime_bindings: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),
+            comptime_depth: 0,
             pending_type_builders: Vec::new(),
         }
     }
@@ -30360,21 +30364,9 @@ fn try_comptime_match(
 
     // Determine constructor name
     let ctor_name = match &type_info {
-        crate::types::comptime::TypeInfo::Int => "Int",
-        crate::types::comptime::TypeInfo::Float => "Float",
-        crate::types::comptime::TypeInfo::String => "String",
-        crate::types::comptime::TypeInfo::Bool => "Bool",
-        crate::types::comptime::TypeInfo::Unit => "Unit",
-        crate::types::comptime::TypeInfo::Char => "Char",
-        crate::types::comptime::TypeInfo::Bigint => "Bigint",
-        crate::types::comptime::TypeInfo::Record { .. } => "Record",
-        crate::types::comptime::TypeInfo::Variant { .. } => "Variant",
-        crate::types::comptime::TypeInfo::Array { .. } => "Array",
-        crate::types::comptime::TypeInfo::Option { .. } => "Option",
-        crate::types::comptime::TypeInfo::Function { .. } => "Function",
-        crate::types::comptime::TypeInfo::External { .. } => "External",
-        crate::types::comptime::TypeInfo::Opaque { .. } => "Opaque",
-        _ => return None,
+        crate::types::comptime::TypeInfo::Tuple { .. }
+        | crate::types::comptime::TypeInfo::Unknown { .. } => return None,
+        ti => constructor_name_of(ti),
     };
 
     // Find the matching case by constructor name
@@ -30523,14 +30515,13 @@ fn bind_comptime_record_fields(
                 // unboxed: bool
                 ctx.new_constr(crate::types::predef::path_bool(), vec![])
             }
-            (TypeInfo::Variant { name, .. }, "name") => {
+            (TypeInfo::Variant { .. }, "name") => {
                 // name: string
-                let _ = name;
                 ctx.new_constr(crate::types::predef::path_string(), vec![])
             }
-            (TypeInfo::Variant { constructors, .. }, "constructors") => {
-                // constructors: array<constructorInfo>
-                let _ = constructors;
+            (TypeInfo::Variant { .. }, "constructors") => {
+                // constructors: array<constructorInfo>, currently typed with
+                // the fieldInfo predef.
                 let field_info_ty = ctx.new_constr(crate::types::predef::path_field_info(), vec![]);
                 ctx.new_constr(crate::types::predef::path_array(), vec![field_info_ty])
             }
@@ -30669,13 +30660,26 @@ fn try_comptime_application(
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
     // Safety: depth limit as fallback (monomorph cache is the primary guard)
-    static COMPTIME_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let depth = COMPTIME_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if depth > 200 {
-        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    if tctx.comptime_depth > 200 {
         return None;
     }
+    tctx.comptime_depth += 1;
+    let result =
+        specialize_comptime_application(tctx, env, func_name, &comptime_fn, args, expected_ty);
+    tctx.comptime_depth -= 1;
+    result
+}
 
+/// Specialize a registered @comptime function for one call site. Called by
+/// `try_comptime_application`, which tracks the nesting depth around it.
+fn specialize_comptime_application(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    func_name: String,
+    comptime_fn: &crate::types::comptime::ComptimeFunction,
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    expected_ty: TypeExprRef,
+) -> Option<TypeCoreResult<Expression>> {
     // Extract function parameters and body from parse tree
     let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
     let (params, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
@@ -30719,7 +30723,6 @@ fn try_comptime_application(
                 typed_args.push((param_name, dummy, true));
             } else {
                 tctx.comptime_bindings = saved_bindings;
-                COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 return None;
             }
         } else {
@@ -30741,7 +30744,6 @@ fn try_comptime_application(
                 }
                 Err(_) => {
                     tctx.comptime_bindings = saved_bindings;
-                    COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     return None;
                 }
             }
@@ -30779,7 +30781,6 @@ fn try_comptime_application(
     // Already completed? Just emit a call.
     if tctx.monomorph_cache.lookup(&func_name, &type_key).is_some() {
         tctx.comptime_bindings = saved_bindings;
-        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         return Some(Ok(make_comptime_call(
             tctx,
             &gen_name,
@@ -30791,7 +30792,6 @@ fn try_comptime_application(
     // Recursive: in-progress for the same type? Emit forward reference.
     if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
         tctx.comptime_bindings = saved_bindings;
-        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         return Some(Ok(make_comptime_call(
             tctx,
             &gen_name,
@@ -30837,7 +30837,6 @@ fn try_comptime_application(
     let body_result = type_expect(tctx, &spec_env, &inner_body, expected_ty, None);
 
     tctx.comptime_bindings = saved_bindings;
-    COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
     match body_result {
         Ok(typed_body) => {
@@ -30872,58 +30871,6 @@ fn try_comptime_application(
         }
         Err(_) => None,
     }
-}
-
-/// Fallback: inline-at-call-site for comptime functions without type-bearing params.
-fn try_comptime_application_inline(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    _func_name: &str,
-    _comptime_fn: &crate::types::comptime::ComptimeFunction,
-    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
-    expected_ty: TypeExprRef,
-    params: &[crate::types::comptime::ComptimeParam],
-    inner_body: &ParsedExpression,
-) -> Option<TypeCoreResult<Expression>> {
-    let saved_bindings = tctx.comptime_bindings.clone();
-    let mut inline_env = env.clone();
-    let ctx = tctx.type_ctx;
-
-    for (i, (_label, arg_idx)) in args.iter().enumerate() {
-        let arg_expr = tctx.arena.get_expr(*arg_idx);
-        let arg_ty = ctx.new_var(None);
-        match type_expect(tctx, &inline_env, arg_expr, arg_ty, None) {
-            Ok(typed_arg) => {
-                if let Some(param) = params.get(i) {
-                    let id = ctx.create_ident(&param.name);
-                    let vd = crate::types::decl::ValueDescription {
-                        val_type: typed_arg.exp_type,
-                        val_kind: crate::types::decl::ValueKind::ValReg,
-                        val_loc: crate::location::Location::none(),
-                        val_attributes: vec![],
-                        val_path: None,
-                    };
-                    inline_env.add_value(id, vd);
-                    tctx.comptime_bindings.insert(
-                        param.name.clone(),
-                        crate::types::comptime::ComptimeValue::TypedExpr(typed_arg.clone()),
-                    );
-                }
-            }
-            Err(_) => {
-                tctx.comptime_bindings = saved_bindings;
-                return None;
-            }
-        }
-    }
-
-    let result = match type_expect(tctx, &inline_env, inner_body, expected_ty, None) {
-        Ok(typed_expr) => Some(Ok(typed_expr)),
-        Err(_) => None,
-    };
-
-    tctx.comptime_bindings = saved_bindings;
-    result
 }
 
 /// Resolve a call-site argument as a comptime type.
@@ -31005,15 +30952,9 @@ fn resolve_comptime_type_arg(
 /// switch/match branches, or via a call to a @comptime function whose body
 /// contains one). Used to detect @comptime let bindings that should be
 /// emitted as type declarations rather than registered as comptime functions.
-pub fn contains_build_variant(
-    expr: &ParsedExpression,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    contains_build_variant_with_registry(expr, arena, None)
-}
-
-/// Like contains_build_variant, but can follow calls to registered @comptime
-/// functions (provided via the registry) to check their bodies.
+///
+/// Can follow calls to registered @comptime functions (provided via the
+/// registry) to check their bodies.
 pub fn contains_build_variant_with_registry(
     expr: &ParsedExpression,
     arena: &crate::parse_arena::ParseArena,
@@ -31918,100 +31859,6 @@ fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
     }
 }
 
-/// Substitute all occurrences of a named identifier in a typed expression
-/// with a replacement expression. Used to replace @comptime function
-/// parameters with their actual arguments after type-checking.
-fn substitute_ident(expr: &mut Expression, name: &str, replacement: &Expression) {
-    match &mut expr.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => {
-            if path.name_eq(name) {
-                *expr = replacement.clone();
-            }
-        }
-        ExpressionDesc::Texp_let(_, bindings, body) => {
-            for vb in bindings {
-                substitute_ident(&mut vb.vb_expr, name, replacement);
-            }
-            substitute_ident(body, name, replacement);
-        }
-        ExpressionDesc::Texp_apply { funct, args, .. } => {
-            substitute_ident(funct, name, replacement);
-            for arg in args {
-                if let Some(ref mut e) = arg.expression {
-                    substitute_ident(e, name, replacement);
-                }
-            }
-        }
-        ExpressionDesc::Texp_sequence(e1, e2) => {
-            substitute_ident(e1, name, replacement);
-            substitute_ident(e2, name, replacement);
-        }
-        ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
-            substitute_ident(cond, name, replacement);
-            substitute_ident(then_, name, replacement);
-            if let Some(e) = else_ {
-                substitute_ident(e, name, replacement);
-            }
-        }
-        ExpressionDesc::Texp_field(base, _, _) => {
-            substitute_ident(base, name, replacement);
-        }
-        ExpressionDesc::Texp_tuple(elems) => {
-            for e in elems {
-                substitute_ident(e, name, replacement);
-            }
-        }
-        ExpressionDesc::Texp_array(elems) => {
-            for e in elems {
-                substitute_ident(e, name, replacement);
-            }
-        }
-        ExpressionDesc::Texp_construct(_, _, args) => {
-            for e in args {
-                substitute_ident(e, name, replacement);
-            }
-        }
-        ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            for (_, _, def, _) in fields {
-                if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {
-                    substitute_ident(e, name, replacement);
-                }
-            }
-            if let Some(e) = extended_expression {
-                substitute_ident(e, name, replacement);
-            }
-        }
-        ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            for (_, _, def, _) in fields {
-                if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {
-                    substitute_ident(e, name, replacement);
-                }
-            }
-            if let Some(e) = extended_expression {
-                substitute_ident(e, name, replacement);
-            }
-        }
-        ExpressionDesc::Texp_match(scrutinee, cases, exc_cases, _) => {
-            substitute_ident(scrutinee, name, replacement);
-            for case in cases {
-                substitute_ident(&mut case.c_rhs, name, replacement);
-            }
-            for case in exc_cases {
-                substitute_ident(&mut case.c_rhs, name, replacement);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Extract parameter info and innermost body from a function parse tree.
 /// Handles both `Pexp_fun` (value params) and `Pexp_newtype` (type params).
 fn extract_function_params_and_body<'a>(
@@ -32076,21 +31923,6 @@ fn extract_function_params_and_body<'a>(
             }
             _ => return (params, current.clone()),
         }
-    }
-}
-
-/// Extract the innermost body expression from a function parse tree.
-/// Unwraps (x) => (y) => body → body.
-fn extract_function_body<'a>(
-    expr: &'a ParsedExpression,
-    arena: &'a crate::parse_arena::ParseArena,
-) -> ParsedExpression {
-    match &*expr.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
-            let body = arena.get_expr(inner.rhs);
-            extract_function_body(body, arena)
-        }
-        _ => expr.clone(),
     }
 }
 
