@@ -298,9 +298,7 @@ fn case_append(c1: &[(i32, i32, usize)], c2: &[(i32, i32, usize)]) -> Vec<(i32, 
     let (l2, h2, act2) = c2[0];
     if act1 == act2 {
         let mut r = Vec::with_capacity(len1 + len2 - 1);
-        for i in 0..len1 - 1 {
-            r.push(c1[i]);
-        }
+        r.extend_from_slice(&c1[..len1 - 1]);
         let l = if len1 >= 2 {
             let (_, h, _) = r[len1 - 2];
             if h + 1 < l1 { h + 1 } else { l1 }
@@ -314,29 +312,19 @@ fn case_append(c1: &[(i32, i32, usize)], c2: &[(i32, i32, usize)]) -> Vec<(i32, 
             h2
         };
         r.push((l, h, act1));
-        for i in 1..len2 {
-            r.push(c2[i]);
-        }
+        r.extend_from_slice(&c2[1..]);
         r
     } else if h1 > l1 {
         let mut r = Vec::with_capacity(len1 + len2);
-        for i in 0..len1 - 1 {
-            r.push(c1[i]);
-        }
+        r.extend_from_slice(&c1[..len1 - 1]);
         r.push((l1, l2 - 1, act1));
-        for i in 0..len2 {
-            r.push(c2[i]);
-        }
+        r.extend_from_slice(c2);
         r
     } else if h2 > l2 {
         let mut r = Vec::with_capacity(len1 + len2);
-        for i in 0..len1 {
-            r.push(c1[i]);
-        }
+        r.extend_from_slice(c1);
         r.push((h1 + 1, h2, act2));
-        for i in 1..len2 {
-            r.push(c2[i]);
-        }
+        r.extend_from_slice(&c2[1..]);
         r
     } else {
         let mut r = c1.to_vec();

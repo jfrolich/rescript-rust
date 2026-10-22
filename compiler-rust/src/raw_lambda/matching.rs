@@ -1863,6 +1863,7 @@ fn charge_logical_record_fields(
 /// - Alias lets are substituted (variable replaced by its definition)
 /// - Other let-bound variables get sequential normalized names
 /// - Locations are cleared
+///
 /// Returns None if the lambda is too complex (functions, letrec, loops, etc.)
 ///
 /// Equivalent to OCaml's `Lambda.make_key`.
@@ -6333,12 +6334,8 @@ fn complete_pats_constrs<'p>(
             let env_opt = ctx_ref.get_typed_env(p.pat_env);
             let all_constrs: Vec<ConstructorDescription> = if let Some(env) = env_opt {
                 // Try to find the type declaration and its constructors
-                match &cstr.cstr_res {
-                    ty => {
-                        // Try to expand the type and find its constructors
-                        get_variant_constructors_from_env(ctx_ref, env.as_ref(), *ty)
-                    }
-                }
+                // Try to expand the type and find its constructors
+                get_variant_constructors_from_env(ctx_ref, env.as_ref(), cstr.cstr_res)
             } else {
                 Vec::new()
             };
@@ -7713,7 +7710,7 @@ fn comp_match_handlers<'p>(
     // structurally by sharing the tail list. Borrow the Rust slice for the
     // same control flow instead of cloning precompiled match trees.
     match comp_fun(&Partial::Partial, ctx, arg, first_match) {
-        Ok((first_lam, total)) => c_rec(comp_fun, partial, ctx, arg, first_lam, total, next_matchs),
+        Ok((first_lam, total)) => c_rec(comp_fun, partial, arg, first_lam, total, next_matchs),
         Err(Unused) => match next_matchs.split_first() {
             None => Err(Unused),
             Some(((_, x), xs)) => comp_match_handlers(comp_fun, partial, ctx, arg, x, xs),
@@ -7730,7 +7727,6 @@ fn c_rec<'p>(
         &PmHalfCompiled<'p>,
     ) -> Result<(RawLambda, Jumps<'p>), Unused>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
     arg: &RawLambda,
     body: RawLambda,
     total_body: Jumps<'p>,
@@ -7744,7 +7740,7 @@ fn c_rec<'p>(
             let has_ctx_i =
                 jumps_position(*i, &total_body).is_some_and(|p| !total_body[p].1.is_empty());
             if !has_ctx_i {
-                c_rec(comp_fun, partial, ctx, arg, body, total_body, rem)
+                c_rec(comp_fun, partial, arg, body, total_body, rem)
             } else {
                 let (ctx_i, total_rem) = jumps_extract(*i, total_body);
                 let this_partial = if rem.is_empty() {
@@ -7756,7 +7752,6 @@ fn c_rec<'p>(
                     Ok((li, total_i)) => c_rec(
                         comp_fun,
                         partial,
-                        ctx,
                         arg,
                         RawLambda::LstaticCatch(Box::new(body), (*i, Vec::new()), Box::new(li)),
                         jumps_union(total_i, total_rem),
@@ -7765,7 +7760,6 @@ fn c_rec<'p>(
                     Err(Unused) => c_rec(
                         comp_fun,
                         partial,
-                        ctx,
                         arg,
                         RawLambda::LstaticCatch(
                             Box::new(body),

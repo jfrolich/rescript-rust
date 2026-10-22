@@ -323,7 +323,10 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
         }
         match &*ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, args, .. } => {
-                if path.head_name() == name || path.last() == name {
+                // NOTE: OCaml `Typeopt.is_base_type` (typeopt.ml:99-101) tests
+                // `Path.same p Predef.path_*`; this last-component name test
+                // is broader and is kept as-is to preserve output.
+                if path.last() == name {
                     return true;
                 }
                 // Strengthening can give an expression a stamped owner path
