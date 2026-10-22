@@ -23323,6 +23323,101 @@ impl Env {
             result
         }
 
+        /// Resolve the module type of the selected child `parent.submod_name`
+        /// (declared as `sub_md`, selected through `access_path`).
+        #[allow(clippy::too_many_arguments)]
+        fn resolve_selected_child_md(
+            env: &Env,
+            parent: &Path,
+            submod_name: &str,
+            sub_md: &crate::types::decl::ModuleDeclaration,
+            access_path: &Path,
+            pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+            ctx: &crate::types::context::TypeContext,
+            visiting: &mut HashSet<Path>,
+            cache_mode: ComponentLookupApi,
+        ) -> Option<(crate::types::decl::Signature, Option<String>)> {
+            use crate::types::decl::{ModuleType, SignatureItem};
+            let self_alias = matches!(
+                &sub_md.md_type,
+                ModuleType::MtyAlias(_, target) if target.same(access_path)
+            );
+            if self_alias
+                && let Path::Pident(parent_id) = parent
+                && (parent_id.is_persistent() || parent_id.stamp() == 0)
+                && let Some(pers) = pers_env.as_mut()
+                && let Some(parent_ps) = pers.find_pers_struct(parent_id.name(), ctx)
+            {
+                let raw_parent_sig = parent_ps.ps_sig.clone();
+                if let Some((raw_id, raw_md)) = raw_parent_sig.iter().find_map(|item| match item {
+                    SignatureItem::SigModule(id, md, _) if id.name() == submod_name => {
+                        Some((*id, md.clone()))
+                    }
+                    _ => None,
+                }) {
+                    // OCaml compiler/ml/env.ml:1440-1446 `scrape_alias` resolves
+                    // the selected module through env.ml:865-882 `find_module`;
+                    // for persistent parents that reaches env.ml:1568's lazy
+                    // module-declaration thunk, which starts from the raw parent
+                    // item before compiler/ml/mtype.ml:98-102 can expose a
+                    // strengthened self-alias. Apply the same
+                    // compiler/ml/subst.ml:352-400 child-module freshening here,
+                    // then continue from the real module type instead of
+                    // resolving the strengthened alias to itself.
+                    let md = if let Some((_, cached_md)) =
+                        ctx.find_qualified_module_decl(parent, submod_name)
+                        && !matches!(
+                            &cached_md.md_type,
+                            ModuleType::MtyAlias(_, target) if target.same(access_path)
+                        ) {
+                        cached_md
+                    } else {
+                        let (_, md) =
+                            crate::types::env_lazy::force_component_module_declaration_thunk(
+                                parent,
+                                submod_name,
+                                parent,
+                                raw_parent_sig.as_ref(),
+                                raw_id,
+                                raw_md,
+                                ctx,
+                            );
+                        md
+                    };
+                    return resolve_module_type_inner(
+                        env,
+                        &md.md_type,
+                        pers_env,
+                        ctx,
+                        visiting,
+                        cache_mode,
+                    );
+                }
+            }
+            let result = resolve_module_type_inner(
+                env,
+                &sub_md.md_type,
+                pers_env,
+                ctx,
+                visiting,
+                cache_mode,
+            );
+            if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
+                result.map(|(sig, resolved_name)| {
+                    let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
+                    rebind_direct_sig_type_family_to_access_path(ctx, access_path, &mut sig);
+                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
+                        &sig,
+                        access_path,
+                        ctx,
+                    );
+                    (sig, resolved_name)
+                })
+            } else {
+                result
+            }
+        }
+
         fn resolve_path(
             env: &Env,
             path: &Path,
@@ -23354,96 +23449,17 @@ impl Env {
                         ctx,
                     )
                 {
-                    let self_alias = matches!(
-                        &sub_md.md_type,
-                        crate::types::decl::ModuleType::MtyAlias(_, target)
-                            if target.same(&access_path)
-                    );
-                    if self_alias
-                        && let Path::Pident(parent_id) = parent.as_ref()
-                        && (parent_id.is_persistent() || parent_id.stamp() == 0)
-                        && let Some(pers) = pers_env.as_mut()
-                        && let Some(parent_ps) = pers.find_pers_struct(parent_id.name(), ctx)
-                    {
-                        let parent_sig = parent_ps.ps_sig.clone();
-                        if let Some((raw_id, raw_md)) =
-                            parent_sig.iter().find_map(|item| match item {
-                                SignatureItem::SigModule(id, md, _)
-                                    if id.name() == submod_name.as_str() =>
-                                {
-                                    Some((*id, md.clone()))
-                                }
-                                _ => None,
-                            })
-                        {
-                            // OCaml compiler/ml/env.ml:1440-1446 `scrape_alias`
-                            // resolves the selected module through
-                            // `find_module`; for persistent parents that reaches
-                            // env.ml:1568's lazy module-declaration thunk before
-                            // compiler/ml/mtype.ml:98-102 can expose a
-                            // strengthened self-alias. Apply the same
-                            // compiler/ml/subst.ml:352-400 child-module
-                            // freshening here, then continue from the real
-                            // module type instead of recursing on `p`.
-                            let md = if let Some((_, cached_md)) =
-                                ctx.find_qualified_module_decl(parent, submod_name.as_str())
-                                && !matches!(
-                                    &cached_md.md_type,
-                                    crate::types::decl::ModuleType::MtyAlias(_, target)
-                                        if target.same(&access_path)
-                                ) {
-                                cached_md
-                            } else {
-                                let (_, md) =
-                                    crate::types::env_lazy::force_component_module_declaration_thunk(
-                                        parent,
-                                        submod_name.as_str(),
-                                        parent,
-                                        parent_sig.as_ref(),
-                                        raw_id,
-                                        raw_md,
-                                        ctx,
-                                    );
-                                md
-                            };
-                            let result = resolve_module_type_inner(
-                                env,
-                                &md.md_type,
-                                pers_env,
-                                ctx,
-                                visiting,
-                                cache_mode,
-                            );
-                            visiting.remove(path);
-                            return result;
-                        }
-                    }
-                    let result = resolve_module_type_inner(
+                    let result = resolve_selected_child_md(
                         env,
-                        &sub_md.md_type,
+                        parent,
+                        submod_name.as_str(),
+                        &sub_md,
+                        &access_path,
                         pers_env,
                         ctx,
                         visiting,
                         cache_mode,
                     );
-                    let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
-                        result.map(|(sig, resolved_name)| {
-                            let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
-                            rebind_direct_sig_type_family_to_access_path(
-                                ctx,
-                                &access_path,
-                                &mut sig,
-                            );
-                            crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                                &sig,
-                                &access_path,
-                                ctx,
-                            );
-                            (sig, resolved_name)
-                        })
-                    } else {
-                        result
-                    };
                     visiting.remove(path);
                     return result;
                 }
@@ -23506,106 +23522,17 @@ impl Env {
                     for sig_item in parent_sig.iter() {
                         if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name.as_str() {
-                                let self_alias = matches!(
-                                    &sub_md.md_type,
-                                    crate::types::decl::ModuleType::MtyAlias(_, target)
-                                        if target.same(path)
-                                );
-                                if self_alias
-                                    && let Path::Pident(parent_id) = parent.as_ref()
-                                    && (parent_id.is_persistent() || parent_id.stamp() == 0)
-                                    && let Some(pers) = pers_env.as_mut()
-                                    && let Some(parent_ps) =
-                                        pers.find_pers_struct(parent_id.name(), ctx)
-                                {
-                                    let raw_parent_sig = parent_ps.ps_sig.clone();
-                                    if let Some((raw_id, raw_md)) =
-                                        raw_parent_sig.iter().find_map(|item| match item {
-                                            SignatureItem::SigModule(id, md, _)
-                                                if id.name() == submod_name.as_str() =>
-                                            {
-                                                Some((*id, md.clone()))
-                                            }
-                                            _ => None,
-                                        })
-                                    {
-                                        // OCaml compiler/ml/env.ml:1440-1446
-                                        // `scrape_alias` calls env.ml:865-882
-                                        // `find_module` for aliases. For a
-                                        // persistent selected child whose
-                                        // component signature was already
-                                        // strengthened by compiler/ml/mtype.ml:98-102
-                                        // into a self alias, env.ml:1568's module
-                                        // declaration thunk still starts from the
-                                        // raw parent item and applies
-                                        // compiler/ml/subst.ml:352-400. Do the
-                                        // same before recursing, rather than
-                                        // resolving the strengthened alias to
-                                        // itself.
-                                        let md = if let Some((_, cached_md)) = ctx
-                                            .find_qualified_module_decl(
-                                                parent,
-                                                submod_name.as_str(),
-                                            )
-                                            && !matches!(
-                                                &cached_md.md_type,
-                                                crate::types::decl::ModuleType::MtyAlias(_, target)
-                                                    if target.same(path)
-                                            ) {
-                                            cached_md
-                                        } else {
-                                            let (_, md) =
-                                                crate::types::env_lazy::force_component_module_declaration_thunk(
-                                                    parent,
-                                                    submod_name.as_str(),
-                                                    parent,
-                                                    &raw_parent_sig,
-                                                    raw_id,
-                                                    raw_md,
-                                                    ctx,
-                                                );
-                                            md
-                                        };
-                                        let result = resolve_module_type_inner(
-                                            env,
-                                            &md.md_type,
-                                            pers_env,
-                                            ctx,
-                                            visiting,
-                                            cache_mode,
-                                        );
-                                        visiting.remove(path);
-                                        return result;
-                                    }
-                                }
-                                let result = resolve_module_type_inner(
+                                let result = resolve_selected_child_md(
                                     env,
-                                    &sub_md.md_type,
+                                    parent,
+                                    submod_name.as_str(),
+                                    sub_md,
+                                    path,
                                     pers_env,
                                     ctx,
                                     visiting,
                                     cache_mode,
                                 );
-                                let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type)
-                                {
-                                    result.map(|(sig, resolved_name)| {
-                                        let access_path = path.clone();
-                                        let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
-                                        rebind_direct_sig_type_family_to_access_path(
-                                            ctx,
-                                            &access_path,
-                                            &mut sig,
-                                        );
-                                        crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                                            &sig,
-                                            &access_path,
-                                            ctx,
-                                        );
-                                        (sig, resolved_name)
-                                    })
-                                } else {
-                                    result
-                                };
                                 visiting.remove(path);
                                 return result;
                             }
