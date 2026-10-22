@@ -183,7 +183,6 @@ struct ActiveTypeSnapshot {
     full: bool,
     type_len: usize,
     row_field_len: usize,
-    abbrev_len: usize,
 }
 
 impl ActiveTypeSnapshot {
@@ -195,10 +194,6 @@ impl ActiveTypeSnapshot {
 
     fn records_row_field(self, row: RowFieldRef) -> bool {
         row.is_store() || row.index() < self.row_field_len
-    }
-
-    fn records_abbrev(self, memo: AbbrevMemoRef) -> bool {
-        memo.is_store() || memo.index() < self.abbrev_len
     }
 }
 
@@ -221,8 +216,6 @@ enum TypeMutation {
     RowField(RowFieldRef, Option<RowField>),
     /// btype.ml `Cmutability (r, old)`.
     Mutability(MutabilityRef, FieldMutability),
-    AbbrevMemo(AbbrevMemoRef, AbbrevMemo),
-    MemoizedAbbrevRefs(Vec<AbbrevMemoRef>),
     CurrentAbbreviations(AbbrevMemoRef),
     CurrentLevel(i32),
     NongenLevel(i32),
@@ -257,12 +250,6 @@ impl TypeMutationJournal {
         self.active
             .last()
             .is_some_and(|snapshot| snapshot.records_row_field(row))
-    }
-
-    fn records_abbrev(&self, memo: AbbrevMemoRef) -> bool {
-        self.active
-            .last()
-            .is_some_and(|snapshot| snapshot.records_abbrev(memo))
     }
 }
 
@@ -447,7 +434,7 @@ type PositionKey = (Result<u32, String>, i32, i32, i32);
 ///
 /// // Create an arrow type
 /// let int_type = ctx.new_constr(path_int, vec![]);
-/// let func_type = ctx.new_arrow(tvar, int_type);
+/// let func_type = ctx.new_arrow_simple(tvar, int_type);
 /// ```
 pub struct TypeContext {
     /// ID generator for type IDs.
@@ -788,9 +775,8 @@ pub struct TypeContext {
     /// Raw signatures loaded only for persistent component lookup.
     ///
     /// OCaml keeps `ps_comps` separate from `ps_sig`; this cache gives Rust the
-    /// same one-shot component backing store without making
-    /// `trigger_all_module_sig_renames` see modules that were only touched by
-    /// descriptor lookup.
+    /// same one-shot component backing store without making a ps_sig rename
+    /// see modules that were only touched by descriptor lookup.
     raw_component_module_sigs:
         RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
@@ -1800,20 +1786,6 @@ impl TypeContext {
         Some(f(components.as_ref()))
     }
 
-    pub(crate) fn has_qualified_module_components(
-        &self,
-        key: &QualifiedModuleComponentsCacheKey,
-    ) -> bool {
-        self.poison_store_build_for("read:has_qualified_module_components");
-        // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr` reuse
-        // `ps_comps` without forcing `ps_sig`; Rust stores that selected
-        // component view explicitly, so later normalization can observe that
-        // the component table is already available.
-        self.qualified_module_components_cache
-            .borrow()
-            .contains_key(key)
-    }
-
     /// Name index for the component tables of `sig`, shared by every table
     /// built from the same signature.
     pub(crate) fn signature_index(
@@ -2359,15 +2331,6 @@ impl TypeContext {
         self.persistent_env.borrow().clone()
     }
 
-    /// Drop the per-compile `PersistentEnv` reference held inside this
-    /// `TypeContext` before the context is parked in worker thread-local
-    /// storage. The shared `PersStruct` cache lives behind an `Arc` and
-    /// outlives this drop; only the compile-scoped wrapper struct is
-    /// released so the next compile can install its own.
-    pub(crate) fn clear_persistent_env_for_park(&self) {
-        *self.persistent_env.borrow_mut() = None;
-    }
-
     pub(crate) fn persistent_env_is_in_process(&self) -> bool {
         self.persistent_env
             .borrow()
@@ -2434,9 +2397,6 @@ impl TypeContext {
 
     /// Create a new type expression.
     fn alloc_type(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
-        // A n-ary arrow owns exactly the parameters supplied by its syntax
-        // node. Its return type may itself be an arrow (a sequential
-        // application such as `f(a)(b)`); never flatten that nested boundary.
         if self.in_store_build() {
             self.check_store_desc(&desc);
             return self.store.alloc_type(desc, level);
@@ -2475,15 +2435,14 @@ impl TypeContext {
         self.new_generic_type(TypeDesc::Tvar(name))
     }
 
-    /// Create an arrow (function) type.
-    pub fn new_arrow(
+    /// Create an arrow (function) type. When `ret_type` is itself an arrow,
+    /// its parameters are merged into the new arrow.
+    fn new_arrow(
         &self,
         arg_label: ArgLabel,
         arg_type: TypeExprRef,
         ret_type: TypeExprRef,
-        arity: Option<i32>,
     ) -> TypeExprRef {
-        let _ = arity;
         let mut args = vec![TypeArg::new(arg_label, arg_type)];
         let ret = {
             let desc = self.get_desc(self.repr(ret_type));
@@ -2506,7 +2465,7 @@ impl TypeContext {
 
     /// Create an unlabeled arrow type.
     pub fn new_arrow_simple(&self, arg: TypeExprRef, ret: TypeExprRef) -> TypeExprRef {
-        self.new_arrow(ArgLabel::Nolabel, arg, ret, None)
+        self.new_arrow(ArgLabel::Nolabel, arg, ret)
     }
 
     /// Create a tuple type.
@@ -2607,35 +2566,6 @@ impl TypeContext {
                 (inner, option_ty)
             }
         }
-    }
-
-    /// Create an arrow type at generic level (for type schemes).
-    pub fn new_generic_arrow(
-        &self,
-        arg_label: ArgLabel,
-        arg_type: TypeExprRef,
-        ret_type: TypeExprRef,
-        arity: Option<i32>,
-    ) -> TypeExprRef {
-        let _ = arity;
-        let mut args = vec![TypeArg::new(arg_label, arg_type)];
-        let ret = {
-            let desc = self.get_desc(self.repr(ret_type));
-            match &*desc {
-                TypeDesc::Tarrow {
-                    args: ret_args,
-                    ret,
-                } => {
-                    args.extend(ret_args.iter().cloned());
-                    *ret
-                }
-                _ => ret_type,
-            }
-        };
-        self.new_generic_type(TypeDesc::Tarrow {
-            args: args.into(),
-            ret,
-        })
     }
 
     /// Create a link type (for unification).
@@ -2798,22 +2728,6 @@ impl TypeContext {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
                     crate::perf_counters::TypeMutationKind::Row,
-                );
-            }
-        }
-    }
-
-    #[inline]
-    fn record_abbrev_mutation(&self, mutation: impl FnOnce() -> TypeMutation, memo: AbbrevMemoRef) {
-        if !self.mutation_logging.full.get() {
-            return;
-        }
-        let mut journal = self.mutation_journal.borrow_mut();
-        if journal.records_abbrev(memo) {
-            journal.entries.push(mutation());
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_type_mutation(
-                    crate::perf_counters::TypeMutationKind::Abbrev,
                 );
             }
         }
@@ -3099,7 +3013,6 @@ impl TypeContext {
             full,
             type_len: self.types.len(),
             row_field_len: self.row_fields.borrow().len(),
-            abbrev_len: self.abbrevs.borrow().len(),
         });
         let depth = journal.active.len();
         self.mutation_logging.update(&journal);
@@ -3205,7 +3118,6 @@ impl TypeContext {
                     self.write_mutability_raw(cell, value);
                     restored += 1;
                 }
-                TypeMutation::AbbrevMemo(..) | TypeMutation::MemoizedAbbrevRefs(..) => {}
                 TypeMutation::CurrentAbbreviations(value) => {
                     self.current_abbreviations.set(value);
                     restored += 1;
@@ -3534,6 +3446,41 @@ impl TypeContext {
         self.current_abbreviations.set(abbrev);
     }
 
+    /// Walk an abbreviation memo chain (following `Mlink`s) and return the
+    /// first `Mcons` entry for which `select(private_flag, path, abbrev,
+    /// expansion)` yields a type.
+    ///
+    /// The walk gives up after 128 cells; OCaml's `find_expans`/`find_repr`
+    /// (ctype.ml) recurse without a bound.
+    fn scan_abbrev_chain(
+        &self,
+        memo: AbbrevMemoRef,
+        select: impl Fn(PrivateFlag, &Path, TypeExprRef, TypeExprRef) -> Option<TypeExprRef>,
+    ) -> Option<TypeExprRef> {
+        let mut current = memo;
+        for _ in 0..128 {
+            let step = self.with_abbrev(current, |node| match node {
+                AbbrevMemo::Mnil => Err(None),
+                AbbrevMemo::Mcons {
+                    private_flag,
+                    path,
+                    abbrev,
+                    expansion,
+                    next,
+                } => match select(*private_flag, path, *abbrev, *expansion) {
+                    Some(found) => Err(Some(found)),
+                    None => Ok(*next),
+                },
+                AbbrevMemo::Mlink(next) => Ok(*next),
+            });
+            match step {
+                Ok(next) => current = next,
+                Err(found) => return found,
+            }
+        }
+        None
+    }
+
     /// Find a cached expansion for `(priv,path)` in an abbreviation memo chain.
     pub fn find_abbrev_expansion(
         &self,
@@ -3541,118 +3488,25 @@ impl TypeContext {
         private_flag: PrivateFlag,
         path: &Path,
     ) -> Option<TypeExprRef> {
-        let mut current = memo;
-        for _ in 0..128 {
-            let step = self.with_abbrev(current, |node| match node {
-                AbbrevMemo::Mnil => Err(None),
-                AbbrevMemo::Mcons {
-                    private_flag: cached_private,
-                    path: cached_path,
-                    expansion,
-                    next,
-                    ..
-                } => {
-                    if private_flag <= *cached_private && path.same(cached_path) {
-                        Err(Some(*expansion))
-                    } else {
-                        Ok(*next)
-                    }
-                }
-                AbbrevMemo::Mlink(next) => Ok(*next),
-            });
-            match step {
-                Ok(next) => current = next,
-                Err(found) => return found,
-            }
-        }
-        None
+        self.scan_abbrev_chain(memo, |cached_private, cached_path, _, expansion| {
+            (private_flag <= cached_private && path.same(cached_path)).then_some(expansion)
+        })
     }
 
     /// Find the original type (abbrev field) for a path in a memo chain.
     /// This is OCaml's `find_repr` — returns the ORIGINAL type node that was
     /// memoized, creating Tlink sharing in copy_type_cached.
     pub fn find_abbrev_repr(&self, memo: AbbrevMemoRef, path: &Path) -> Option<TypeExprRef> {
-        let mut current = memo;
-        for _ in 0..128 {
-            let step = self.with_abbrev(current, |node| match node {
-                AbbrevMemo::Mnil => Err(None),
-                AbbrevMemo::Mcons {
-                    private_flag: cached_private,
-                    path: cached_path,
-                    abbrev,
-                    next,
-                    ..
-                } => {
-                    // Match OCaml find_repr: only public memo entries participate
-                    // in repr reuse during copy.
-                    if *cached_private == PrivateFlag::Public && path.same(cached_path) {
-                        Err(Some(*abbrev))
-                    } else {
-                        Ok(*next)
-                    }
-                }
-                AbbrevMemo::Mlink(next) => Ok(*next),
-            });
-            match step {
-                Ok(next) => current = next,
-                Err(found) => return found,
-            }
-        }
-        None
+        // Match OCaml find_repr: only public memo entries participate in repr
+        // reuse during copy.
+        self.scan_abbrev_chain(memo, |cached_private, cached_path, abbrev, _| {
+            (cached_private == PrivateFlag::Public && path.same(cached_path)).then_some(abbrev)
+        })
     }
 
     /// Snapshot an abbreviation memo node.
     pub fn get_abbrev_memo(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
         self.read_abbrev(memo)
-    }
-
-    /// Debug snapshot of an abbreviation memo chain.
-    pub fn debug_abbrev_memo_snapshot(&self, memo: AbbrevMemoRef, limit: usize) -> String {
-        let mut current = memo;
-        let mut parts = Vec::new();
-        for idx in 0..limit {
-            match self.get_abbrev_memo(current) {
-                AbbrevMemo::Mnil => {
-                    if idx == 0 {
-                        parts.push("Mnil".to_string());
-                    }
-                    break;
-                }
-                AbbrevMemo::Mlink(next) => {
-                    parts.push(format!("Mlink({})", next.0));
-                    current = next;
-                }
-                AbbrevMemo::Mcons {
-                    private_flag,
-                    path,
-                    abbrev,
-                    expansion,
-                    next,
-                } => {
-                    let abbrev = self.repr(abbrev);
-                    let expansion = self.repr(expansion);
-                    parts.push(format!(
-                        "{}:{} abbrev={}@{} expansion={}@{} next={}",
-                        idx,
-                        path.name(),
-                        abbrev.0,
-                        self.get_level(abbrev),
-                        expansion.0,
-                        self.get_level(expansion),
-                        next.0
-                    ));
-                    if matches!(private_flag, PrivateFlag::Private) {
-                        parts.push("private".to_string());
-                    }
-                    current = next;
-                }
-            }
-        }
-        if parts.is_empty() {
-            "Mnil".to_string()
-        } else {
-            parts.join(" | ")
-        }
     }
 
     /// Reset a per-node abbreviation memo chain to Mnil.
@@ -3687,7 +3541,6 @@ impl TypeContext {
 
         if memo.is_store() {
             let previous = self.read_abbrev(memo);
-            self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous.clone()), memo);
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
@@ -3703,10 +3556,6 @@ impl TypeContext {
                     next,
                 },
             );
-            self.record_mutation(
-                || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
-                crate::perf_counters::TypeMutationKind::Abbrev,
-            );
             self.memoized_abbrev_refs.borrow_mut().push(memo);
             return;
         }
@@ -3719,7 +3568,6 @@ impl TypeContext {
             }
 
             let previous = abbrevs[memo_idx].borrow().clone();
-            self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous.clone()), memo);
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
@@ -3736,10 +3584,6 @@ impl TypeContext {
                 next,
             };
         }
-        self.record_mutation(
-            || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
-            crate::perf_counters::TypeMutationKind::Abbrev,
-        );
         self.memoized_abbrev_refs.borrow_mut().push(memo);
     }
 
@@ -4121,17 +3965,15 @@ impl TypeContext {
         self.id_gen.set_current_stamp(t);
     }
 
-    pub(crate) fn current_id_gen_stamp(&self) -> i32 {
-        self.id_gen.current_stamp()
-    }
-
     /// Shares the compilation's identifier stream with additive downstream
     /// stages. M5's inactive indexed path uses this instead of reconstructing
     /// a fresh generator from a scanned stamp frontier.
+    #[cfg(test)]
     pub(crate) fn id_generator(&self) -> Arc<IdGenerator> {
         Arc::clone(&self.id_gen)
     }
 
+    #[cfg(test)]
     pub(crate) fn current_def_level_state(&self) -> (i32, i32, i32, usize) {
         (
             self.current_level.get(),
@@ -4139,33 +3981,6 @@ impl TypeContext {
             self.global_level.get(),
             self.saved_levels.borrow().len(),
         )
-    }
-
-    pub(crate) fn restore_source_fallback_state(
-        &self,
-        id_gen_stamp: i32,
-        local_stamp: i32,
-        current_level: i32,
-        nongen_level: i32,
-        global_level: i32,
-        saved_levels_len: usize,
-    ) {
-        // OCaml compiler/ml/env.ml:669-678 acknowledges a persistent structure
-        // and builds `ps_comps` without making that dependency load consume the
-        // current unit's later `Ident` stamps or Ctype definition levels.
-        // Source fallback does real typechecking in Rust, so restore the
-        // current-unit counters after the isolated load completes.
-        self.id_gen.restore_current_stamp(id_gen_stamp);
-        Ident::set_current_time(local_stamp);
-        self.record_level_state();
-        self.record_mutation(
-            || TypeMutation::GlobalLevel(self.global_level.get()),
-            crate::perf_counters::TypeMutationKind::State,
-        );
-        self.current_level.set(current_level);
-        self.nongen_level.set(nongen_level);
-        self.global_level.set(global_level);
-        self.saved_levels.borrow_mut().truncate(saved_levels_len);
     }
 
     /// Register a raw module signature for lazy renaming.
@@ -4261,9 +4076,9 @@ impl TypeContext {
         // the CMI signature separately from `ps_sig`, and env.ml:781-788 returns
         // those components for exact persistent `Pident` descriptor lookup.
         // Keep this fallback separate from `raw_module_sigs`: that map drives
-        // ps_sig lazy renaming, and caching component-only loads there makes a
-        // later `trigger_all_module_sig_renames` freshen modules OCaml has only
-        // looked up through ps_comps.
+        // ps_sig lazy renaming, and caching component-only loads there would
+        // let a later rename freshen modules OCaml has only looked up through
+        // ps_comps.
         let sig = self.load_lazy_raw_module_sig_for_rename(module_name)?;
         self.raw_component_module_sigs
             .borrow_mut()
@@ -4284,24 +4099,6 @@ impl TypeContext {
             return; // Already renamed
         }
         self.rename_one_module_sig(module_name);
-    }
-
-    /// Trigger renaming for ALL registered module signatures.
-    /// In OCaml, accessing one module (e.g. Console) via components_of_module_maker
-    /// cascades into scrape_alias → find_module for dependent modules (e.g. Pervasives),
-    /// forcing ALL their ps_sig lazies. We match this by renaming all registered
-    /// modules when any one is first accessed.
-    pub fn trigger_all_module_sig_renames(&self) {
-        let names: Vec<String> = self.raw_module_sigs.borrow().keys().cloned().collect();
-        for name in &names {
-            if !self
-                .renamed_module_sigs
-                .borrow()
-                .contains_key(name.as_str())
-            {
-                self.rename_one_module_sig(name);
-            }
-        }
     }
 
     fn rename_one_module_sig(&self, module_name: &str) {

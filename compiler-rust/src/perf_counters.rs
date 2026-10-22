@@ -134,7 +134,6 @@ pub(crate) enum TypeMutationKind {
     Desc,
     Level,
     Row,
-    Abbrev,
     State,
 }
 
@@ -143,7 +142,6 @@ pub(crate) fn record_type_mutation(kind: TypeMutationKind) {
         TypeMutationKind::Desc => &TYPE_MUTATION_DESC,
         TypeMutationKind::Level => &TYPE_MUTATION_LEVEL,
         TypeMutationKind::Row => &TYPE_MUTATION_ROW,
-        TypeMutationKind::Abbrev => &TYPE_MUTATION_ABBREV,
         TypeMutationKind::State => &TYPE_MUTATION_STATE,
     };
     counter.fetch_add(1, Ordering::Relaxed);
