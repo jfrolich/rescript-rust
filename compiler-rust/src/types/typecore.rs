@@ -23165,148 +23165,14 @@ impl Env {
                         );
                         return Some((resolved_path, resolved_sig));
                     }
-                    let result = self.resolve_module_type(
+                    // Raw lookup: keep the declaration's signature as-is.
+                    if let Some((sig, _)) = self.resolve_module_type(
                         &md.md_type,
                         pers_env,
                         ctx,
                         ComponentLookupApi::LookupModule,
-                    );
-                    // Some opened submodules carry alias module types with hidden
-                    // local idents (e.g. ArrayExt!) that are not directly
-                    // resolvable via resolve_module_type. Fall back to resolving
-                    // through the declaration's qualified access path.
-                    if result.is_none() && apply_subst {
-                        if let Some(access_path) = md.md_path.as_ref() {
-                            if let Some((resolved_path, sig)) =
-                                resolve_module_signature_for_path_shared(
-                                    access_path,
-                                    self,
-                                    pers_env,
-                                    ctx,
-                                )
-                            {
-                                return Some((resolved_path, sig));
-                            }
-                        }
-                    }
-                    if let Some((sig, resolved_name)) = result {
+                    ) {
                         let path = access_path_hint.clone();
-                        // OCaml compiler/ml/env.ml:1530-1538 always builds a
-                        // component substitution with `prefix_idents`, and
-                        // compiler/ml/subst.ml:303-309 applies it to value
-                        // descriptions independently of whether the signature
-                        // also contains type or module declarations. Do not
-                        // decide copy/substitution from signature item shape.
-                        // Extract module alias targets for path-prefix rewriting.
-                        // - Pdot aliases (e.g. Js.Json) can be rewritten directly.
-                        // - Pident aliases (e.g. Types = Mistakes__Types) should only
-                        //   rewrite nested module prefixes (e.g. Mistakes__Types.Id -> Types.Id).
-                        let (alias_target_pdot, alias_target_pident) = if apply_subst {
-                            match &md.md_type {
-                                crate::types::decl::ModuleType::MtyAlias(_, target)
-                                    if !target.same(&path) =>
-                                {
-                                    match target {
-                                        Path::Pdot(..) => (Some(target.clone()), None),
-                                        Path::Pident(..) => (None, Some(target.clone())),
-                                        Path::Papply(..) => (None, None),
-                                    }
-                                }
-                                _ => (None, None),
-                            }
-                        } else {
-                            (None, None)
-                        };
-                        let needs_copy = apply_subst;
-                        let should_rebind_direct_type_family =
-                            apply_subst && should_rebind_direct_sig_type_family(&md.md_type, &path);
-                        let mut sig = if needs_copy {
-                            copy_lookup_signature_for_subst(&sig, ctx)
-                        } else {
-                            sig
-                        };
-                        if apply_subst
-                            && matches!(&md.md_type, crate::types::decl::ModuleType::MtyAlias(..))
-                        {
-                            sig = strengthen_sig_for_module_access_path(ctx, &path, &sig);
-                        }
-                        if apply_subst {
-                            if should_rebind_direct_type_family {
-                                rebind_direct_sig_type_family_to_access_path(ctx, &path, &mut sig);
-                            }
-                            if let Some(ref old_name) = resolved_name {
-                                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                    &sig, old_name, &path, ctx,
-                                );
-                                crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-                                    &mut sig, old_name, &path,
-                                );
-                            }
-                            crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                                &sig, &path, ctx,
-                            );
-                            crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
-                                &mut sig, &path,
-                            );
-                            // Rewrite paths for module aliases: replace the canonical
-                            // module path prefix with the alias path in all types.
-                            // E.g., module J = Js.Json: rewrite Js.Json.Kind.t → J.Kind.t
-                            if let Some(ref target) = alias_target_pdot {
-                                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                    &sig, target, &path, ctx,
-                                );
-                                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                    &mut sig, target, &path,
-                                );
-                            }
-                            if let Some(ref target) = alias_target_pident {
-                                if let Path::Pident(alias_id) = target {
-                                    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                        &sig,
-                                        alias_id.name(),
-                                        &path,
-                                        ctx,
-                                    );
-                                    crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-                                        &mut sig,
-                                        alias_id.name(),
-                                        &path,
-                                    );
-                                }
-                                let child_names = sig
-                                    .iter()
-                                    .filter_map(|item| match item {
-                                        crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                                            Some(id.name().to_string())
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>();
-                                for child_name in child_names {
-                                    let old_prefix = Path::pdot(target.clone(), child_name.clone());
-                                    let new_prefix = Path::pdot(path.clone(), child_name);
-                                    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                        &sig,
-                                        &old_prefix,
-                                        &new_prefix,
-                                        ctx,
-                                    );
-                                    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                        &mut sig,
-                                        &old_prefix,
-                                        &new_prefix,
-                                    );
-                                }
-                            }
-                            // When we intentionally preserve the original signature graph
-                            // (for local modules with only value items), forcing
-                            // generalization here would mutate the shared weak nodes
-                            // backing the module body typedtree. Only generalize after
-                            // we have detached the signature via `needs_copy`.
-                            if needs_copy {
-                                crate::types::ctype::force_generalize_signature_values(ctx, &sig);
-                            }
-                        }
                         let sig = Arc::new(sig);
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
@@ -23367,181 +23233,20 @@ impl Env {
                         |components| (components.access_path().clone(), components.signature_arc()),
                     );
                 }
-                // Recursively resolve the prefix to get a signature
-                if let Some((parent_path, parent_sig)) =
-                    self.resolve_module_lid_impl(prefix, arena, pers_env, ctx, apply_subst)
-                {
-                    // Search for the sub-module in the parent's signature using
-                    // OCaml runtime slot accounting.
-                    if let Some((pos, sub_md)) = crate::types::decl::signature_runtime_module(
-                        parent_sig.as_ref(),
-                        submod_name,
-                    ) {
-                        let sub_path = Path::pdot_pos(parent_path.clone(), submod_name, pos as i32);
-                        if apply_subst {
-                            return resolve_module_signature_for_path_shared(
-                                &sub_path, self, pers_env, ctx,
-                            );
-                        }
-                        let result = self.resolve_module_type(
-                            &sub_md.md_type,
-                            pers_env,
-                            ctx,
-                            ComponentLookupApi::LookupModule,
-                        );
-                        if let Some((sig, resolved_name)) = result {
-                            let (alias_target_pdot, alias_target_pident) = if apply_subst {
-                                match &sub_md.md_type {
-                                    crate::types::decl::ModuleType::MtyAlias(_, target)
-                                        if !target.same(&sub_path) =>
-                                    {
-                                        match target {
-                                            Path::Pdot(..) => (Some(target.clone()), None),
-                                            Path::Pident(..) => (None, Some(target.clone())),
-                                            Path::Papply(..) => (None, None),
-                                        }
-                                    }
-                                    _ => (None, None),
-                                }
-                            } else {
-                                (None, None)
-                            };
-                            // If an alias was followed, rewrite type paths from the
-                            // resolved module name to the access path.
-                            // E.g., Belt.Array aliases Belt_Array, so rewrite
-                            // Pdot(Pident("Belt_Array"), X) → Pdot(sub_path, X)
-                            let mut sig = if apply_subst {
-                                copy_lookup_signature_for_subst(&sig, ctx)
-                            } else {
-                                sig
-                            };
-                            if apply_subst
-                                && matches!(
-                                    &sub_md.md_type,
-                                    crate::types::decl::ModuleType::MtyAlias(..)
-                                )
-                            {
-                                sig = strengthen_sig_for_module_access_path(ctx, &sub_path, &sig);
-                            }
-                            if apply_subst {
-                                let mut should_rebind_direct_type_family =
-                                    should_rebind_direct_sig_type_family(
-                                        &sub_md.md_type,
-                                        &sub_path,
-                                    );
-                                if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
-                                    should_rebind_direct_type_family = true;
-                                }
-                                if should_rebind_direct_type_family {
-                                    rebind_direct_sig_type_family_to_access_path(
-                                        ctx, &sub_path, &mut sig,
-                                    );
-                                }
-                                // Match OCaml Subst behavior for nested module access:
-                                // when resolving A.B, first substitute parent-scope
-                                // type/module references inside B using A's signature.
-                                crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
-                                    &sig,
-                                    &parent_sig,
-                                    &parent_path,
-                                    ctx,
-                                );
-                                if let Some(ref old_name) = resolved_name {
-                                    if should_rewrite_nested_alias_self_path(
-                                        ctx,
-                                        old_name,
-                                        &parent_path,
-                                    ) {
-                                        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                            &sig, old_name, &sub_path, ctx,
-                                        );
-                                        crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-                                                    &mut sig, old_name, &sub_path,
-                                                );
-                                    }
-                                }
-                                crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                                    &sig, &sub_path, ctx,
-                                );
-                                crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(
-                                    &mut sig, &sub_path,
-                                );
-                                if let Some(pers) = pers_env.as_ref() {
-                                    for flat_head in
-                                        pers.flattened_alias_heads_for_path(&parent_path)
-                                    {
-                                        let flattened_parent =
-                                            Path::pident(Ident::create_persistent(&flat_head));
-                                        if !flattened_parent.same(&parent_path) {
-                                            rewrite_child_module_prefixes_from_sig(
-                                                &sig,
-                                                &parent_sig,
-                                                &parent_path,
-                                                &flattened_parent,
-                                                Some(submod_name),
-                                                ctx,
-                                            );
-                                        }
-                                    }
-                                }
-                                if let Some(ref target) = alias_target_pdot {
-                                    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                        &sig, target, &sub_path, ctx,
-                                    );
-                                    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                        &mut sig, target, &sub_path,
-                                    );
-                                }
-                                if let Some(ref target) = alias_target_pident {
-                                    if let Path::Pident(alias_id) = target {
-                                        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-                                            &sig,
-                                            alias_id.name(),
-                                            &sub_path,
-                                            ctx,
-                                        );
-                                        crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-                                                    &mut sig,
-                                                    alias_id.name(),
-                                                    &sub_path,
-                                                );
-                                    }
-                                    let child_names = sig
-                                        .iter()
-                                        .filter_map(|item| match item {
-                                            crate::types::decl::SignatureItem::SigModule(
-                                                id,
-                                                _,
-                                                _,
-                                            ) => Some(id.name().to_string()),
-                                            _ => None,
-                                        })
-                                        .collect::<Vec<_>>();
-                                    for child_name in child_names {
-                                        let old_prefix =
-                                            Path::pdot(target.clone(), child_name.clone());
-                                        let new_prefix = Path::pdot(sub_path.clone(), child_name);
-                                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                                            &sig,
-                                            &old_prefix,
-                                            &new_prefix,
-                                            ctx,
-                                        );
-                                        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                                                    &mut sig,
-                                                    &old_prefix,
-                                                    &new_prefix,
-                                                );
-                                    }
-                                }
-                                crate::types::ctype::force_generalize_signature_values(ctx, &sig);
-                            }
-                            return Some((sub_path, Arc::new(sig)));
-                        }
-                        return None;
-                    }
-                }
-                None
+                // Raw lookup: recursively resolve the prefix, then select the
+                // sub-module using OCaml runtime slot accounting.
+                let (parent_path, parent_sig) =
+                    self.resolve_module_lid_impl(prefix, arena, pers_env, ctx, false)?;
+                let (pos, sub_md) =
+                    crate::types::decl::signature_runtime_module(parent_sig.as_ref(), submod_name)?;
+                let sub_path = Path::pdot_pos(parent_path, submod_name, pos as i32);
+                let (sig, _) = self.resolve_module_type(
+                    &sub_md.md_type,
+                    pers_env,
+                    ctx,
+                    ComponentLookupApi::LookupModule,
+                )?;
+                Some((sub_path, Arc::new(sig)))
             }
             _ => None,
         }
