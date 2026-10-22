@@ -585,11 +585,6 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     lookup_type_decl_for_path(ctx, env, path).map(super::decl::TypeDeclarationRef::into_owned)
 }
 
-fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
-    let mut pending_type_lookup_paths = None;
-    get_level_with_lookup_capture(ctx, env, path, &mut pending_type_lookup_paths)
-}
-
 fn get_level_with_lookup_capture(
     ctx: &TypeContext,
     env: &Env,
@@ -654,25 +649,6 @@ pub(crate) fn path_root_is_persistent(path: &Path) -> bool {
         Path::Pdot(parent, _, _) => path_root_is_persistent(parent),
         Path::Papply(_, _) => false,
     }
-}
-
-fn path_root_ident(path: &Path) -> Option<&Ident> {
-    match path {
-        Path::Pident(id) => Some(id),
-        Path::Pdot(parent, _, _) => path_root_ident(parent),
-        Path::Papply(_, _) => None,
-    }
-}
-
-fn path_root_is_local_module_alias(env: &Env, path: &Path) -> bool {
-    let Some(root) = path_root_ident(path) else {
-        return false;
-    };
-    !root.is_persistent()
-        && env
-            .find_module_same(root)
-            .ok()
-            .is_some_and(|md| matches!(md.md_type, super::decl::ModuleType::MtyAlias(..)))
 }
 
 fn is_contractive(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
@@ -2610,18 +2586,6 @@ fn update_level_children(
         )?;
     }
     Ok(())
-}
-
-/// Check if a path is "local" (non-persistent root identifier with non-zero stamp).
-/// Matches OCaml's `Path.binding_time > 0` — local module aliases and type aliases
-/// have high stamps, while persistent (CMI-loaded) modules have stamp 0.
-#[inline]
-fn is_local_path(path: &Path) -> bool {
-    match path {
-        Path::Pident(id) => id.stamp() != 0,
-        Path::Pdot(parent, _, _) => is_local_path(parent),
-        Path::Papply(p1, p2) => is_local_path(p1) || is_local_path(p2),
-    }
 }
 
 // ============================================================================
@@ -4662,10 +4626,6 @@ fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<Type
     try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
-fn try_expand_head_unif(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
-    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
-}
-
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
 pub fn expand_head_once(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
@@ -4825,12 +4785,6 @@ fn primitive_coercion_path(path: &Path) -> bool {
         || path.same(&crate::types::predef::path_int())
         || path.same(&crate::types::predef::path_float())
         || path.same(&crate::types::predef::path_bigint())
-}
-
-fn can_try_coerce_variant_to_primitive(path: &Path, decl: &crate::types::TypeDeclaration) -> bool {
-    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_, _))
-        && decl.type_params.is_empty()
-        && !path.same(&crate::types::predef::path_bool())
 }
 
 fn variant_runtime_configuration(
@@ -5180,7 +5134,6 @@ impl std::ops::DerefMut for SubtypeAcc {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SubtypeChange {
     Unchanged,
-    Equiv,
     Changed,
 }
 
@@ -10192,7 +10145,6 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
 
     enum Action {
         LowerVar,
-        LowerTo(i32),
         PromoteAndRecurse {
             children: Vec<TypeExprRef>,
             clear_abbrev: Option<AbbrevMemoRef>,
@@ -10234,9 +10186,6 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
     match action {
         Action::LowerVar => {
             ctx.set_level(ty, var_level);
-        }
-        Action::LowerTo(level) => {
-            ctx.set_level(ty, level);
         }
         Action::PromoteAndRecurse {
             children,
@@ -11385,25 +11334,6 @@ pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeE
     copy_type_cached(ctx, ty, &mut cache)
 }
 
-/// Like instance(), but guarantees a fresh top-level node is returned.
-/// Used in try_expand_head to prevent manifest corruption: when instance()
-/// returns identity (same node) for non-generic types, subsequent unification
-/// can link the original manifest node, creating self-referential expansion
-/// loops. This creates a shallow copy of the top-level node when identity
-/// is returned, protecting the original declaration's manifest.
-fn instance_for_expansion(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let result = instance(ctx, ty);
-    let result_repr = ctx.repr(result);
-    let ty_repr = ctx.repr(ty);
-    if result_repr == ty_repr {
-        // instance returned identity — create a shallow copy to protect the original
-        let desc = ctx.get_desc(result_repr);
-        ctx.new_type((*desc).clone())
-    } else {
-        result
-    }
-}
-
 /// Like instance_for_expansion, but also caches the result in simple_expansion_cache
 /// Instantiate a list of types, sharing variable substitutions across all of them.
 /// Matches OCaml's Ctype.instance_list.
@@ -12453,11 +12383,6 @@ impl RowMoreMarkers {
         self.0.push((key, value));
         None
     }
-
-    fn remove(&mut self, key: &TypeExprRef) -> Option<CopyRowMoreMarker> {
-        let index = self.0.iter().position(|(k, _)| k == key)?;
-        Some(self.0.remove(index).1)
-    }
 }
 
 struct CopyPartial {
@@ -12515,140 +12440,6 @@ impl<'c> CopyCache<'c> {
 struct CopyRowMoreMarker {
     tuple: TypeExprRef,
     variant: TypeExprRef,
-}
-
-fn type_expr_contains_ident_stamp(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    target_stamp: i32,
-    seen: &mut TypeExprRefSet,
-) -> bool {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return false;
-    }
-
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, args, .. } => {
-            matches!(path, Path::Pident(id) if id.stamp() == target_stamp)
-                || args
-                    .iter()
-                    .copied()
-                    .any(|arg| type_expr_contains_ident_stamp(ctx, arg, target_stamp, seen))
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            args.iter()
-                .any(|arg| type_expr_contains_ident_stamp(ctx, arg.typ, target_stamp, seen))
-                || type_expr_contains_ident_stamp(ctx, *ret, target_stamp, seen)
-        }
-        TypeDesc::Ttuple(types) => types
-            .iter()
-            .copied()
-            .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen)),
-        TypeDesc::Tobject { fields } => {
-            type_expr_contains_ident_stamp(ctx, *fields, target_stamp, seen)
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            type_expr_contains_ident_stamp(ctx, *typ, target_stamp, seen)
-                || type_expr_contains_ident_stamp(ctx, *rest, target_stamp, seen)
-        }
-        TypeDesc::Tvariant(row) => {
-            type_expr_contains_ident_stamp(ctx, row.row_more, target_stamp, seen)
-                || row.row_fields.iter().any(|(_, field)| match field {
-                    RowField::Rpresent(Some(ty)) => {
-                        type_expr_contains_ident_stamp(ctx, *ty, target_stamp, seen)
-                    }
-                    RowField::Reither { types, .. } => types
-                        .iter()
-                        .copied()
-                        .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen)),
-                    _ => false,
-                })
-                || row.row_name.as_ref().is_some_and(|(_, args)| {
-                    args.iter()
-                        .copied()
-                        .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen))
-                })
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            type_expr_contains_ident_stamp(ctx, *body, target_stamp, seen)
-                || vars
-                    .iter()
-                    .copied()
-                    .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen))
-        }
-        TypeDesc::Tpackage { args, .. } => args
-            .iter()
-            .copied()
-            .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen)),
-        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-            type_expr_contains_ident_stamp(ctx, *target, target_stamp, seen)
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
-    }
-}
-
-pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext, path: &Path) -> bool {
-    let Path::Pident(id) = path else {
-        return false;
-    };
-
-    if id.is_persistent() || id.stamp() == 0 {
-        return false;
-    }
-
-    let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) else {
-        return false;
-    };
-
-    let contains_self = |ty: TypeExprRef| {
-        let mut seen = TypeExprRefSet::new();
-        type_expr_contains_ident_stamp(ctx, ty, id.stamp(), &mut seen)
-    };
-
-    match &decl.type_kind {
-        super::decl::TypeKind::TypeVariant(constructors, _) => constructors.iter().any(|ctor| {
-            let args_has_self = match &ctor.cd_args {
-                super::decl::ConstructorArguments::CstrTuple(args) => {
-                    args.iter().copied().any(contains_self)
-                }
-                super::decl::ConstructorArguments::CstrRecord(labels) => {
-                    labels.iter().any(|label| contains_self(label.ld_type))
-                }
-            };
-            args_has_self || ctor.cd_res.is_some_and(contains_self)
-        }),
-        super::decl::TypeKind::TypeRecord(labels, _) => {
-            labels.iter().any(|label| contains_self(label.ld_type))
-        }
-        super::decl::TypeKind::TypeAbstract => decl.type_manifest.is_some_and(contains_self),
-        super::decl::TypeKind::TypeOpen => false,
-    }
-}
-
-fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext, path: &Path) -> bool {
-    let Path::Pident(_) = path else {
-        return false;
-    };
-
-    is_recursive_local_type_for_identity(ctx, path)
-}
-
-/// Check if a type is a local TypeAbstract Pident. These are safe to return
-/// identity for in copy because they have no structural content (no variant
-/// constructors, no record fields). Includes both opaque types (`type t`) and
-/// type aliases (`type t = int`).
-fn is_local_abstract_type(ctx: &TypeContext, path: &Path) -> bool {
-    let Path::Pident(id) = path else {
-        return false;
-    };
-    if id.is_persistent() || id.stamp() == 0 {
-        return false;
-    }
-    let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) else {
-        return false;
-    };
-    matches!(decl.type_kind, super::decl::TypeKind::TypeAbstract)
 }
 
 /// Copy a type, creating fresh type variables for generic ones.
@@ -13115,7 +12906,7 @@ fn subst_identity_copy_rec(
 pub(crate) fn copy_type_cached(
     ctx: &TypeContext,
     ty: TypeExprRef,
-    cache: &mut CopyCache,
+    cache: &mut CopyCache<'_>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
@@ -13542,7 +13333,7 @@ fn copy_row_cached(
     fixed: bool,
     keep: bool,
     more: TypeExprRef,
-    cache: &mut CopyCache,
+    cache: &mut CopyCache<'_>,
 ) -> RowDesc {
     RowDesc {
         row_fields: row

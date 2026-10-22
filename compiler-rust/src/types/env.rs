@@ -50,21 +50,6 @@ fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
     result
 }
 
-fn predef_exception_ident(name: &str) -> Option<Ident> {
-    Some(match name {
-        "Match_failure" => super::predef::ident_match_failure(),
-        "Invalid_argument" => super::predef::ident_invalid_argument(),
-        "Failure" => super::predef::ident_failure(),
-        "JsExn" => super::predef::ident_js_exn(),
-        "Not_found" => super::predef::ident_not_found(),
-        "End_of_file" => super::predef::ident_end_of_file(),
-        "Division_by_zero" => super::predef::ident_division_by_zero(),
-        "Assert_failure" => super::predef::ident_assert_failure(),
-        "Undefined_recursive_module" => super::predef::ident_undefined_recursive_module(),
-        _ => return None,
-    })
-}
-
 fn free_vars_rec(
     ctx: &TypeContext,
     ty: TypeExprRef,
@@ -1839,30 +1824,6 @@ impl Env {
             Path::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             Path::Papply(_, _) => true,
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn add_opened_component_layers(
-        &mut self,
-        root: Path,
-        values: Vec<(Ident, ValueDescription, i32)>,
-        types: Vec<(Ident, Arc<TypeDeclaration>)>,
-        constructors: Vec<(Ident, ConstructorDescription)>,
-        labels: Vec<(Ident, LabelDescription)>,
-        modules: Vec<(Ident, ModuleDeclaration, i32)>,
-        module_components: Vec<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>,
-        modtypes: Vec<(Ident, ModtypeDeclaration)>,
-    ) {
-        let layers = OpenedLayers::build(
-            values,
-            types,
-            constructors,
-            labels,
-            modules,
-            module_components,
-            modtypes,
-        );
-        self.add_prebuilt_open_layers(root, &layers);
     }
 
     /// Open `layers` (the component tables of one signature) under `root`.
