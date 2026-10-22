@@ -166,17 +166,6 @@ const JSX_SPREAD_AFTER_PROP_MSG: &str =
 // Public API
 // ============================================================================
 
-/// Transform a structure, applying JSX PPX transformations
-pub fn transform_structure(
-    structure: Structure,
-    initial_version: i32,
-    initial_module: &str,
-    arena: &mut ParseArena,
-) -> Structure {
-    transform_structure_result(structure, initial_version, initial_module, arena)
-        .expect("JSX PPX transform failed")
-}
-
 /// Transform a structure, applying JSX PPX transformations.
 pub fn transform_structure_result(
     structure: Structure,
@@ -191,17 +180,6 @@ pub fn transform_structure_result(
         arena,
     )?;
     Ok(structure)
-}
-
-/// Transform a structure and collect JSX preprocessor warnings.
-pub fn transform_structure_with_warnings(
-    structure: Structure,
-    initial_version: i32,
-    initial_module: &str,
-    arena: &mut ParseArena,
-) -> (Structure, Vec<JsxPreprocessorWarning>) {
-    transform_structure_with_warnings_result(structure, initial_version, initial_module, arena)
-        .expect("JSX PPX transform failed")
 }
 
 /// Transform a structure and collect JSX preprocessor warnings.
@@ -260,17 +238,6 @@ pub fn transform_structure_collecting_warnings(
     (Ok(result), warnings)
 }
 
-/// Transform a signature, applying JSX PPX transformations
-pub fn transform_signature(
-    signature: Signature,
-    initial_version: i32,
-    initial_module: &str,
-    arena: &mut ParseArena,
-) -> Signature {
-    transform_signature_result(signature, initial_version, initial_module, arena)
-        .expect("JSX PPX transform failed")
-}
-
 /// Transform a signature, applying JSX PPX transformations.
 pub fn transform_signature_result(
     signature: Signature,
@@ -285,17 +252,6 @@ pub fn transform_signature_result(
         arena,
     )?;
     Ok(signature)
-}
-
-/// Transform a signature and collect JSX preprocessor warnings.
-pub fn transform_signature_with_warnings(
-    signature: Signature,
-    initial_version: i32,
-    initial_module: &str,
-    arena: &mut ParseArena,
-) -> (Signature, Vec<JsxPreprocessorWarning>) {
-    transform_signature_with_warnings_result(signature, initial_version, initial_module, arena)
-        .expect("JSX PPX transform failed")
 }
 
 /// Transform a signature and collect JSX preprocessor warnings.
@@ -2732,37 +2688,15 @@ fn get_fn_name_loc(pat: &Pattern) -> Location {
 }
 
 fn make_module_name(config: &JsxConfig, fn_name: &str) -> String {
-    // Build component name: file_name + nested_modules (in order, not reversed)
-    // If fn_name is not "make", append it to the nested modules
-    let file_name = &config.file_name;
-    let nested_modules = &config.nested_modules;
-
-    let parts: Vec<String> = match (file_name.is_empty(), fn_name == "make") {
-        (true, true) => {
-            // No file_name, fn_name is "make": just use nested_modules
-            nested_modules.clone()
-        }
-        (true, false) => {
-            // No file_name, fn_name is not "make": nested_modules + fn_name
-            let mut v = nested_modules.clone();
-            v.push(fn_name.to_string());
-            v
-        }
-        (false, true) => {
-            // Has file_name, fn_name is "make": file_name + nested_modules
-            let mut v = vec![file_name.clone()];
-            v.extend(nested_modules.iter().cloned());
-            v
-        }
-        (false, false) => {
-            // Has file_name, fn_name is not "make": file_name + nested_modules + fn_name
-            let mut v = vec![file_name.clone()];
-            v.extend(nested_modules.iter().cloned());
-            v.push(fn_name.to_string());
-            v
-        }
-    };
-
+    // Component name: file_name (if any) + nested_modules (in order) +
+    // fn_name (unless it is "make"), joined with '$'.
+    let file_name = (!config.file_name.is_empty()).then_some(config.file_name.as_str());
+    let fn_name = (fn_name != "make").then_some(fn_name);
+    let parts: Vec<&str> = file_name
+        .into_iter()
+        .chain(config.nested_modules.iter().map(String::as_str))
+        .chain(fn_name)
+        .collect();
     parts.join("$")
 }
 
@@ -5164,7 +5098,7 @@ fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<u8>) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::{JsxConfig, module_access_name, transform_structure};
+    use super::{JsxConfig, module_access_name, transform_structure_result};
     use crate::parser::{ExpressionDesc, Longident, Parser, StructureItemDesc, module, sexp_locs};
 
     #[test]
@@ -5200,7 +5134,8 @@ let make = (~value: string) => React.null
         let mut parser = Parser::new("test.res".to_string(), source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors());
-        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
+        let transformed =
+            transform_structure_result(structure, 4, "react", parser.arena_mut()).unwrap();
 
         let StructureItemDesc::Pstr_value(value) = &*transformed
             .last()
@@ -5241,7 +5176,8 @@ let make = (~priority as _, ~text="Test") => React.string(text)
         let mut parser = Parser::new("test.res".to_string(), source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors());
-        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
+        let transformed =
+            transform_structure_result(structure, 4, "react", parser.arena_mut()).unwrap();
 
         let mut output = Vec::new();
         sexp_locs::print_structure(&transformed, parser.arena(), &mut output);
@@ -5281,7 +5217,8 @@ module MakePreset = (Preset: { let value: int }) => {
             before
         );
 
-        let transformed = transform_structure(structure, 4, "react", parser.arena_mut());
+        let transformed =
+            transform_structure_result(structure, 4, "react", parser.arena_mut()).unwrap();
 
         let mut after = Vec::new();
         sexp_locs::print_structure(&transformed, parser.arena(), &mut after);
