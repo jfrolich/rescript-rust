@@ -562,7 +562,7 @@ impl IndexedLambdaContext {
         let root = self.current_root();
         let mut beta_diagnostics = BetaDiagnostics::default();
         let root = {
-            let (store, meta, beta_hash_bucket_count) = self.alias_parts_mut();
+            let (store, meta, beta_hash_bucket_count) = self.parts_mut();
             Simplifier {
                 store,
                 meta,

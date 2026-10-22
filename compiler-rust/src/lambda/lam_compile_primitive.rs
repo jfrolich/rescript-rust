@@ -5,13 +5,13 @@
 
 use super::js_exp_make::{
     bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
-    both_string_literals, compare_bigint_literals, compare_bool_literals, compare_int_literals,
-    compare_string_literals, comparison_to_binop, comparison_to_runtime_member,
-    compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
-    int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
-    int32_minus, int32_mul, int32_pow, is_nullish_literal, is_optional_block, is_type_number_expr,
-    is_type_object_expr, is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr,
-    runtime_compare_call_args, to_int32,
+    both_string_literals, compare_bigint_literals, compare_bool_literals, compare_string_literals,
+    comparison_to_binop, comparison_to_runtime_member, compile_int_equality,
+    compile_nullish_strict_comparison, compile_raw_comparison, int_bnot, int_expr, int_literal,
+    int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr, int32_minus, int32_mul,
+    int32_pow, is_nullish_literal, is_optional_block, is_type_number_expr, is_type_object_expr,
+    is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args,
+    to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
@@ -782,7 +782,7 @@ impl LambdaCompiler {
         right: Expression,
     ) -> Expression {
         if let (Some(lhs), Some(rhs)) = (int_literal(&left), int_literal(&right)) {
-            return Expression::bool(compare_int_literals(cmp, lhs, rhs));
+            return Expression::bool(cmp.cmp_int32(lhs, rhs));
         }
 
         // OCaml's Js_exp_make.int_comp strips Runtime.compare(..., ...) when

@@ -92,7 +92,7 @@ fn ident_hash(id: &Ident) -> u32 {
 }
 
 /// Reproduces `Hash_ident` bucket traversal, including retained resize capacity.
-fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Vec<usize> {
+pub(crate) fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Vec<usize> {
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); (*capacity).max(32).next_power_of_two()];
     for (entry, id) in params.iter().enumerate() {
         let bucket = (ident_hash(id) as usize) & (buckets.len() - 1);

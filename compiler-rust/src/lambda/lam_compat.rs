@@ -44,11 +44,6 @@ impl Comparison {
             Comparison::Ge => a >= b,
         }
     }
-
-    /// Compare two i32 values (same as cmp_int32)
-    pub fn cmp_int(self, a: i32, b: i32) -> bool {
-        self.cmp_int32(a, b)
-    }
 }
 
 /// Let binding kind

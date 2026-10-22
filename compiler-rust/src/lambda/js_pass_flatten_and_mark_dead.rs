@@ -863,15 +863,15 @@ fn is_simple_block_binding_item(expr: &Expression) -> bool {
     // `Self::compile_constant`) so it intentionally does NOT match
     // `Caml_block(Immutable, ...)` patterns elsewhere — and therefore does
     // NOT count as simple here either.
-    match &expr.desc {
+    matches!(
+        &expr.desc,
         ExpressionDesc::Var(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Undefined { .. } => true,
-        _ => false,
-    }
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Str(_)
+            | ExpressionDesc::TemplateLiteral(_)
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+    )
 }
 
 fn is_simple_substituted_index_value(expr: &Expression) -> bool {

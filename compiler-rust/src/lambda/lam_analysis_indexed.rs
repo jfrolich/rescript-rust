@@ -6,7 +6,7 @@ use ahash::AHashSet;
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_analysis::is_pure_primitive;
-use crate::lambda::lam_closure::{Position, StatsMap, VarStats};
+use crate::lambda::lam_closure::{BoundIdents, Position, StatsMap, VarStats, param_map_of_list};
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_primitive::Primitive;
 
@@ -121,8 +121,13 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
     }
 }
 
+/// Port of `Lam_closure.is_closed` (lam_closure.ml:154-156): every free
+/// variable must be a global identifier.
 pub(crate) fn is_closed(store: &IndexedLambda, node: NodeId) -> bool {
-    is_closed_with_map(store, &AHashSet::new(), &[], node).0
+    is_closed_with_map(store, &AHashSet::new(), &[], node)
+        .1
+        .keys()
+        .all(Ident::is_global)
 }
 
 pub(crate) fn is_closed_with_map(
@@ -131,12 +136,8 @@ pub(crate) fn is_closed_with_map(
     params: &[Ident],
     node: NodeId,
 ) -> (bool, StatsMap) {
-    let mut stats: StatsMap = params
-        .iter()
-        .cloned()
-        .map(|id| (id, VarStats::fresh()))
-        .collect();
-    let mut local = exports.clone();
+    let mut stats: StatsMap = param_map_of_list(params);
+    let mut local = BoundIdents::new(exports);
     fn after(store: &IndexedLambda, node: NodeId, position: Position) -> Position {
         if position != Position::Begin || no_side_effects(store, node) {
             position
@@ -149,7 +150,7 @@ pub(crate) fn is_closed_with_map(
         node: NodeId,
         position: Position,
         stats: &mut StatsMap,
-        local: &mut AHashSet<Ident>,
+        local: &mut BoundIdents<'_>,
     ) {
         match store.view(node) {
             NodeView::Var(id) => {
@@ -285,4 +286,23 @@ pub(crate) fn is_closed_with_map(
     }
     iter(store, node, Position::Begin, &mut stats, &mut local);
     (stats.len() == params.len(), stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::IdentFlags;
+    use crate::lambda::Lambda;
+
+    #[test]
+    fn is_closed_allows_only_global_free_variables() {
+        // lam_closure.ml:154-156: free globals do not make a term open.
+        let global = Ident::new("Global", 3, IdentFlags::GLOBAL);
+        let store = IndexedLambda::from_lambda(Lambda::Lvar(global));
+        assert!(is_closed(&store, store.root()));
+
+        let local = Ident::new("local", 4, IdentFlags::NONE);
+        let store = IndexedLambda::from_lambda(Lambda::Lvar(local));
+        assert!(!is_closed(&store, store.root()));
+    }
 }

@@ -20,6 +20,7 @@ use ahash::AHashMap as HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::no_side_effects;
+use crate::lambda::lam_beta_reduce_indexed::reference_fold_order;
 use crate::lambda::lam_closure::StatsMap;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::{IdKind, IdentTable};
@@ -51,35 +52,46 @@ struct ArgUsage {
 /// Returns `Some(reduced)` if reduction is possible, `None` otherwise.
 pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Option<Lambda> {
     // Build parameter -> argument mapping
-    let mut param_map: HashMap<Ident, ArgUsage> = HashMap::new();
-    for (param, arg) in params.iter().zip(args.iter()) {
-        param_map.insert(
-            *param,
-            ArgUsage {
-                lambda: arg.clone(),
-                used: false,
-            },
-        );
+    let indices: HashMap<Ident, usize> = params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| (*param, index))
+        .collect();
+    let mut usages: Vec<ArgUsage> = params
+        .iter()
+        .zip(args.iter())
+        .map(|(_, arg)| ArgUsage {
+            lambda: arg.clone(),
+            used: false,
+        })
+        .collect();
+
+    fn take_param(
+        indices: &HashMap<Ident, usize>,
+        usages: &mut [ArgUsage],
+        x: &Ident,
+    ) -> Option<Option<Lambda>> {
+        match indices.get(x).and_then(|index| usages.get_mut(*index)) {
+            Some(usage) if usage.used => None,
+            Some(usage) => {
+                usage.used = true;
+                Some(Some(usage.lambda.clone()))
+            }
+            None => Some(None),
+        }
     }
 
     // Try to substitute arguments in the body
     fn substitute_args(
         lams: &[Lambda],
-        param_map: &mut HashMap<Ident, ArgUsage>,
+        indices: &HashMap<Ident, usize>,
+        usages: &mut [ArgUsage],
     ) -> Option<Vec<Lambda>> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(lams.len());
         for lam in lams {
             match lam {
                 Lambda::Lvar(x) => {
-                    if let Some(usage) = param_map.get_mut(x) {
-                        if usage.used {
-                            return None;
-                        }
-                        usage.used = true;
-                        result.push(usage.lambda.clone());
-                    } else {
-                        result.push(lam.clone());
-                    }
+                    result.push(take_param(indices, usages, x)?.unwrap_or_else(|| lam.clone()));
                 }
                 Lambda::Lconst(_) => {
                     result.push(lam.clone());
@@ -93,23 +105,32 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
         Some(result)
     }
 
+    // OCaml folds the shared `param_hash` (lam_beta_reduce_util.ml:78-84,
+    // 112-116), so unused arguments are sequenced in `Hash_ident` bucket
+    // order. The tree path does not thread the retained table capacity, so
+    // it starts from the initial bucket count each call.
+    let wrap_unused = |usages: &[ArgUsage], mut result: Lambda| {
+        let mut capacity = 32;
+        for index in reference_fold_order(&params[..usages.len()], &mut capacity) {
+            let usage = &usages[index];
+            if !usage.used {
+                result = Lambda::seq(usage.lambda.clone(), result);
+            }
+        }
+        result
+    };
+
     match body {
         // Primitive application: (fun x y -> prim(x, y)) a b => prim(a, b)
         Lambda::Lprim(prim_info) => {
-            let new_args = substitute_args(&prim_info.args, &mut param_map)?;
+            let new_args = substitute_args(&prim_info.args, &indices, &mut usages)?;
 
             // lam_beta_reduce_util.ml:79-81 builds it through the folding
             // `Lambda.prim`.
-            let mut result = Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc);
+            let result = Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc);
 
             // Add sequences for unused arguments (preserve side effects)
-            for (_param, usage) in param_map.iter() {
-                if !usage.used {
-                    result = Lambda::seq(usage.lambda.clone(), result);
-                }
-            }
-
-            Some(result)
+            Some(wrap_unused(&usages, result))
         }
 
         // Function application: (fun x y -> f(x, y)) a b => f(a, b)
@@ -145,26 +166,17 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
                 return None;
             }
 
-            let new_args = substitute_args(&apply.ap_args, &mut param_map)?;
+            let new_args = substitute_args(&apply.ap_args, &indices, &mut usages)?;
 
             // Handle function substitution if it's a variable
             let new_func = match &*apply.ap_func {
-                Lambda::Lvar(fn_name) => {
-                    if let Some(usage) = param_map.get_mut(fn_name) {
-                        if usage.used {
-                            return None;
-                        }
-                        usage.used = true;
-                        usage.lambda.clone()
-                    } else {
-                        (*apply.ap_func).clone()
-                    }
-                }
+                Lambda::Lvar(fn_name) => take_param(&indices, &mut usages, fn_name)?
+                    .unwrap_or_else(|| (*apply.ap_func).clone()),
                 _ => (*apply.ap_func).clone(),
             };
 
             // Build the new application
-            let mut result = Lambda::Lapply(Box::new(Apply {
+            let result = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(new_func),
                 ap_args: new_args,
                 ap_info: apply.ap_info.clone(),
@@ -172,13 +184,7 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
             }));
 
             // Add sequences for unused arguments
-            for (_param, usage) in param_map.iter() {
-                if !usage.used {
-                    result = Lambda::seq(usage.lambda.clone(), result);
-                }
-            }
-
-            Some(result)
+            Some(wrap_unused(&usages, result))
         }
 
         _ => None,
@@ -213,6 +219,7 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
 /// Mirrors the OCaml signature change introduced by `Lam_beta_reduce` which takes
 /// `meta : Lam_stats.t`; the production call path uses
 /// [`propagate_beta_reduce_with_meta`] instead.
+#[cfg(test)]
 pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Lambda {
     let mut scratch = HashMap::new();
     propagate_beta_reduce_with_meta(&mut scratch, params, body, args)
@@ -227,6 +234,7 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
 /// see through the wrapper. Without this, `let X = {foo: funarg.foo}` stays
 /// alive as a dead binding after `simplify_alias` rewrites `X.foo` to
 /// `funarg.foo`.
+#[cfg(test)]
 pub fn propagate_beta_reduce_with_meta(
     ident_tbl: &mut IdentTable,
     params: &[Ident],
@@ -298,6 +306,7 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
 /// - Otherwise: bound to let variables
 ///
 /// Back-compat variant without meta threading — unit tests only.
+#[cfg(test)]
 pub fn propagate_beta_reduce_with_map(
     stats: &StatsMap,
     params: &[Ident],
@@ -313,6 +322,7 @@ pub fn propagate_beta_reduce_with_map(
 /// [`propagate_beta_reduce_with_meta`] — when a non-inlined argument is bound
 /// to a fresh variable, we register its shape in `ident_tbl` so later
 /// `simplify_alias` passes can continue to see through it.
+#[cfg(test)]
 pub fn propagate_beta_reduce_with_map_and_meta(
     ident_tbl: &mut IdentTable,
     stats: &StatsMap,
@@ -472,6 +482,7 @@ fn is_boxed_optional_binding(arg: &Lambda) -> bool {
     )
 }
 
+#[cfg(test)]
 fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
     let params_max = params
         .iter()

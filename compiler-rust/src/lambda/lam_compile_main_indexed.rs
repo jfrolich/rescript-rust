@@ -201,7 +201,7 @@ impl IndexedPreJsBackend {
                         fields.push(match element {
                             IndexedElement::Na => crate::lambda::lam_arity::Arity::na(),
                             IndexedElement::SimpleForm(root) => {
-                                let (store, metadata, _) = self.context.optimizer_parts_mut();
+                                let (store, metadata, _) = self.context.parts_mut();
                                 get_arity_external(store, metadata, root, external_arity)
                             }
                         });
@@ -219,7 +219,7 @@ impl IndexedPreJsBackend {
                         Some(fields) => {
                             let mut arities = Vec::with_capacity(fields.len());
                             for root in fields {
-                                let (store, metadata, _) = self.context.optimizer_parts_mut();
+                                let (store, metadata, _) = self.context.parts_mut();
                                 arities.push(get_arity_external(
                                     store,
                                     metadata,
@@ -663,10 +663,7 @@ fn coerce_and_group(
                 let source = *id;
                 let newid = original.rename(id_gen);
                 if let Some(kind) = context.metadata().ident_tbl.get(&source).cloned() {
-                    context
-                        .metadata_mut_for_backend()
-                        .ident_tbl
-                        .insert(newid, kind);
+                    context.metadata_mut().ident_tbl.insert(newid, kind);
                 }
                 export_list.push(newid);
                 export_map.push((newid, value));
@@ -675,7 +672,7 @@ fn coerce_and_group(
             _ => {
                 let newid = original.rename(id_gen);
                 let arity = {
-                    let (store, metadata, _) = context.optimizer_parts_mut();
+                    let (store, metadata, _) = context.parts_mut();
                     get_arity_external(store, metadata, value, external_arity)
                 };
                 if !arity.first_arity_na() {
@@ -685,7 +682,7 @@ fn coerce_and_group(
                     )
                     .then_some((value, RecFlag::NonRec));
                     context
-                        .metadata_mut_for_backend()
+                        .metadata_mut()
                         .ident_tbl
                         .insert(newid, IndexedIdKind::FunctionId { arity, lambda });
                 }
@@ -701,8 +698,8 @@ fn coerce_and_group(
     export_map.reverse();
     coercions.reverse();
 
-    context.metadata_mut_for_backend().exports = export_list.clone();
-    context.metadata_mut_for_backend().export_idents = export_set.clone();
+    context.metadata_mut().exports = export_list.clone();
+    context.metadata_mut().export_idents = export_set.clone();
 
     // OCaml folds the reversed input list, consing each group in front of
     // the coercions; export-map updates follow that reverse order.
@@ -925,8 +922,8 @@ fn add_hoisted_aliases(
     // reverse source order. Hoisted CMJ metadata keeps source order.
     for (id, root, path, name) in aliases {
         groups.push((Some(id), IndexedGroup::Single(LetKind::Alias, root)));
-        context.metadata_mut_for_backend().exports.push(id);
-        context.metadata_mut_for_backend().export_idents.insert(id);
+        context.metadata_mut().exports.push(id);
+        context.metadata_mut().export_idents.insert(id);
         export_map.push((id, root));
         metadata.insert(
             0,

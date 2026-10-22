@@ -103,6 +103,36 @@ impl Position {
 /// Type alias for variable statistics map.
 pub type StatsMap = HashMap<Ident, VarStats>;
 
+/// Identifiers bound while walking a closure body: the borrowed export set
+/// plus the locals introduced so far. OCaml threads the immutable export set
+/// and extends it persistently; borrowing it here avoids cloning the whole
+/// export set on every analysis.
+pub(crate) struct BoundIdents<'a> {
+    exports: &'a HashSet<Ident>,
+    local: HashSet<Ident>,
+}
+
+impl<'a> BoundIdents<'a> {
+    pub(crate) fn new(exports: &'a HashSet<Ident>) -> Self {
+        Self {
+            exports,
+            local: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn contains(&self, id: &Ident) -> bool {
+        self.local.contains(id) || self.exports.contains(id)
+    }
+
+    pub(crate) fn insert(&mut self, id: Ident) {
+        self.local.insert(id);
+    }
+
+    pub(crate) fn extend(&mut self, ids: impl IntoIterator<Item = Ident>) {
+        self.local.extend(ids);
+    }
+}
+
 /// Compute free variables with usage statistics.
 ///
 /// This is an enriched version of free variable analysis that also tracks
@@ -121,9 +151,9 @@ pub fn free_variables_with_stats(
     lam: &Lambda,
 ) -> StatsMap {
     let mut fv = params;
-    let mut local_set: HashSet<Ident> = exports.clone();
+    let mut local_set = BoundIdents::new(exports);
 
-    fn iter(lam: &Lambda, pos: Position, fv: &mut StatsMap, local_set: &mut HashSet<Ident>) {
+    fn iter(lam: &Lambda, pos: Position, fv: &mut StatsMap, local_set: &mut BoundIdents<'_>) {
         match lam {
             Lambda::Lvar(v) => {
                 if !local_set.contains(v) {
@@ -293,10 +323,7 @@ pub fn is_closed_with_map(
     params: &[Ident],
     body: &Lambda,
 ) -> (bool, StatsMap) {
-    // Create initial stats for each parameter
-    let param_map: StatsMap = params.iter().map(|p| (*p, VarStats::fresh())).collect();
-
-    let result_map = free_variables_with_stats(exports, param_map, body);
+    let result_map = free_variables_with_stats(exports, param_map_of_list(params), body);
 
     // Check if the result only contains the original parameters
     let is_closed = result_map.len() == params.len();
