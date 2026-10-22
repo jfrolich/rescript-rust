@@ -9003,16 +9003,9 @@ fn type_expect_with_recarg_unscoped<'a>(
             )
         }
 
-        ED::Pexp_jsx_element(jsx_element) => {
+        ED::Pexp_jsx_element(_) => {
             // JSX element - typically transformed before type checking
-            type_jsx_element(
-                tctx,
-                env,
-                loc,
-                jsx_element,
-                expected_ty,
-                &expr.pexp_attributes,
-            )
+            Err(TypeCoreError::JsxNotEnabled { loc })
         }
 
         ED::Pexp_inline_for(inner) => {
@@ -12648,8 +12641,8 @@ fn type_match(
     }
 
     // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
-    // INSIDE begin_def scope (line 3993), already handled by lines 5711-5720 in
-    // type_match_cases_batch_non_gadt. Do NOT directly unify pattern types with
+    // INSIDE begin_def scope (line 3993), already handled by the per-case
+    // `instance` in type_match_cases_batch_non_gadt. Do NOT directly unify pattern types with
     // typed_scrutinee.exp_type — that creates false node sharing between scrutinee
     // and pattern types (OCaml keeps them separate via fresh instances).
 
@@ -12910,13 +12903,6 @@ fn finalize_variant_in_pattern(
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
     }
 }
-
-/// Close variant rows in let binding patterns, matching OCaml's
-/// `Parmatch.pressure_variants env [pat]` call in type_let (typecore.ml:4120).
-/// For let bindings, variant patterns have no wildcard alternative at the same
-/// position, so all non-fixed variant rows on Tpat_variant nodes are closed.
-/// This matches OCaml's close_variant: sets unmatched Reither fields to Rabsent
-/// and marks the row as closed.
 
 fn pattern_contains_generalized_constructor(
     tctx: &mut TypeCheckContext<'_>,
@@ -13387,7 +13373,7 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
 
 fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let mut worklist = vec![ctx.repr(ty)];
-    let mut visited = HashSet::new();
+    let mut visited = TypeExprRefSet::new();
     while let Some(current) = worklist.pop() {
         let current = ctx.repr(current);
         if !visited.insert(current) {
@@ -13396,7 +13382,6 @@ fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
         if ctx.get_level(current) < crate::types::LOWEST_LEVEL {
             continue;
         }
-        let mut children = Vec::new();
         let desc = ctx.get_desc(current);
         if let TypeDesc::Tvariant(row) = &*desc {
             let row = crate::types::btype::row_repr(ctx, row);
@@ -13412,10 +13397,7 @@ fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
             }
         }
         drop(desc);
-        crate::types::iter_type_expr(ctx, current, |child| {
-            children.push(child);
-        });
-        worklist.extend(children);
+        crate::types::iter_type_expr(ctx, current, |child| worklist.push(child));
     }
     false
 }
@@ -20087,19 +20069,6 @@ fn type_pack(
     ))
 }
 
-/// Type check JSX element.
-fn type_jsx_element(
-    tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
-    loc: LocIdx,
-    _jsx_element: &crate::parser::ast::JsxElement,
-    expected_ty: TypeExprRef,
-    attributes: &[crate::parser::ast::Attribute],
-) -> TypeCoreResult<Expression> {
-    let _ = (tctx, expected_ty, attributes);
-    Err(TypeCoreError::JsxNotEnabled { loc })
-}
-
 /// The module type of `Pmod_unpack` on a module pattern variable, as typed
 /// by the `let module` that `wrap_unpacks` builds (typemod.ml:1357-1370).
 fn module_type_from_package_binding(
@@ -20338,24 +20307,8 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             fields,
             extended_expression,
             ..
-        } => {
-            fields
-                .iter()
-                .all(|(_, label, definition, _)| match definition {
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                        label.lbl_mut == crate::types::MutableFlag::Immutable
-                            && is_nonexpansive_expression(tctx, expr)
-                    }
-                    crate::types::typedtree::RecordLabelDefinition::Kept(_)
-                    | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
-                        true
-                    }
-                })
-                && extended_expression
-                    .as_deref()
-                    .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
         }
-        ExpressionDesc::Texp_record_sparse {
+        | ExpressionDesc::Texp_record_sparse {
             fields,
             extended_expression,
             ..
