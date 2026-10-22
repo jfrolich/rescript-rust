@@ -603,27 +603,16 @@ impl ModulePathResolver {
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
-        let mut candidate_stems = vec![module_name.to_string()];
-        if let Some(first) = module_name.chars().next() {
-            if first.is_ascii_uppercase() {
-                candidate_stems.push(format!(
-                    "{}{}",
-                    first.to_ascii_lowercase(),
-                    &module_name[first.len_utf8()..]
-                ));
-            }
-        }
-
-        for stem in candidate_stems {
-            for ext in ["res", "ml"] {
-                let candidate_name = format!("{stem}.{ext}");
-                if let Some(path) = entries.iter().find(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case(&candidate_name))
-                }) {
-                    return Some(path.clone());
-                }
+        // File names are matched case-insensitively, which also covers the
+        // lowercase-first-letter spelling of the module name.
+        for ext in ["res", "ml"] {
+            let candidate_name = format!("{module_name}.{ext}");
+            if let Some(path) = entries.iter().find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&candidate_name))
+            }) {
+                return Some(path.clone());
             }
         }
 
@@ -883,12 +872,12 @@ pub struct CallInfo {
     pub comment: Option<String>,
 }
 
-/// Function environment (for closures)
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct FunEnv {
-    /// Captured variables
-    pub captured: Vec<Ident>,
-}
+/// Function environment placeholder for OCaml's `Js_fun_env.t`.
+///
+/// The printer recomputes captured identifiers from the body, so nothing is
+/// stored here; it is zero-sized to keep `Fun` nodes allocation-free.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct FunEnv;
 
 /// Raw JavaScript code info
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -971,7 +960,7 @@ pub enum ExpressionDesc {
         is_method: bool,
         params: Vec<Ident>,
         body: Block,
-        env: Box<FunEnv>,
+        env: FunEnv,
         return_unit: bool,
         async_: bool,
         directive: Option<Box<String>>,
