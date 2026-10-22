@@ -11609,10 +11609,15 @@ fn report_unused_match_cases(
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) && !check_ambiguous {
         return;
     }
-    let parmatch_cases: Vec<ParmatchCase> = cases
+    if let [case] = cases
+        && unused_check_is_trivial(&case.c_lhs, case.c_guard.is_some())
+    {
+        return;
+    }
+    let check_cases: Vec<UnusedCheckCase<'_>> = cases
         .iter()
-        .map(|case| ParmatchCase {
-            lhs: case.c_lhs.clone(),
+        .map(|case| UnusedCheckCase {
+            lhs: &case.c_lhs,
             guarded: case.c_guard.is_some(),
             guard_idents: case.c_guard.as_ref().map(|guard| {
                 let mut ids = Vec::new();
@@ -11624,7 +11629,7 @@ fn report_unused_match_cases(
     register_unused_match_check(
         tctx,
         env,
-        parmatch_cases,
+        check_cases,
         delayed,
         level,
         ty_arg_check,
@@ -11642,84 +11647,137 @@ fn report_unused_match_pattern(
     level: i32,
     ty_arg_check: TypeExprRef,
 ) {
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch)
+        || unused_check_is_trivial(lhs, false)
+    {
         return;
     }
-    let case = ParmatchCase {
-        lhs: lhs.clone(),
+    let case = UnusedCheckCase {
+        lhs,
         guarded: false,
         guard_idents: None,
     };
     register_unused_match_check(tctx, env, vec![case], delayed, level, ty_arg_check, false);
 }
 
+/// `check_unused` of one unguarded case without or-patterns: with no
+/// earlier rows `every_satisfiables` answers `Used`, the refinement is
+/// skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
+/// guarded or-patterns, so nothing can be reported.
+fn unused_check_is_trivial(lhs: &Pattern, guarded: bool) -> bool {
+    !guarded && !pattern_contains_or(lhs)
+}
+
+/// A borrowed match case for the unused/ambiguous Parmatch checks.
+struct UnusedCheckCase<'a> {
+    lhs: &'a Pattern,
+    guarded: bool,
+    /// `all_rhs_idents` of the guard.
+    guard_idents: Option<std::collections::BTreeSet<Ident>>,
+}
+
 fn register_unused_match_check(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    parmatch_cases: Vec<ParmatchCase>,
+    cases: Vec<UnusedCheckCase<'_>>,
     delayed: bool,
     level: i32,
     ty_arg_check: TypeExprRef,
     check_ambiguous: bool,
 ) {
-    // `check_unused` of one unguarded case without or-patterns: with no
-    // earlier rows `every_satisfiables` answers `Used`, the refinement is
-    // skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
-    // guarded or-patterns, so nothing can be reported.
-    if let [case] = parmatch_cases.as_slice()
-        && !case.guarded
-        && !pattern_contains_or(&case.lhs)
-    {
-        return;
-    }
-    let check = DelayedUnusedCheck {
-        env: env.clone(),
-        level,
-        ty_arg_check,
-        cases: parmatch_cases,
-        warning_config: tctx.warning_config.clone(),
-        check_ambiguous,
-        seq: 0,
-    };
+    let warning_config = tctx.warning_config.clone();
     if delayed {
         let seq = tctx.next_delayed_check_seq();
-        tctx.delayed_unused_checks
-            .push(DelayedUnusedCheck { seq, ..check });
+        tctx.delayed_unused_checks.push(DelayedUnusedCheck {
+            env: env.clone(),
+            level,
+            ty_arg_check,
+            cases: cases
+                .into_iter()
+                .map(|case| ParmatchCase {
+                    lhs: case.lhs.clone(),
+                    guarded: case.guarded,
+                    guard_idents: case.guard_idents,
+                })
+                .collect(),
+            warning_config,
+            check_ambiguous,
+            seq,
+        });
     } else {
-        run_delayed_unused_check(tctx, check);
+        run_unused_check(
+            tctx,
+            env,
+            level,
+            ty_arg_check,
+            cases,
+            warning_config,
+            check_ambiguous,
+        );
     }
 }
 
 fn run_delayed_unused_check(tctx: &mut TypeCheckContext<'_>, check: DelayedUnusedCheck) {
-    tctx.drain_open_slot_uses();
-    let saved = std::mem::replace(&mut tctx.warning_config, check.warning_config);
-    let expected_ty = crate::types::instance(tctx.type_ctx, check.ty_arg_check);
-    let refs: Vec<_> = check
+    let cases = check
         .cases
         .iter()
-        .map(|case| crate::types::parmatch::CaseRef {
+        .map(|case| UnusedCheckCase {
             lhs: &case.lhs,
+            guarded: case.guarded,
+            guard_idents: if check.check_ambiguous {
+                case.guard_idents.clone()
+            } else {
+                None
+            },
+        })
+        .collect();
+    run_unused_check(
+        tctx,
+        &check.env,
+        check.level,
+        check.ty_arg_check,
+        cases,
+        check.warning_config,
+        check.check_ambiguous,
+    );
+}
+
+fn run_unused_check(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    level: i32,
+    ty_arg_check: TypeExprRef,
+    cases: Vec<UnusedCheckCase<'_>>,
+    warning_config: WarningConfig,
+    check_ambiguous: bool,
+) {
+    tctx.drain_open_slot_uses();
+    let saved = std::mem::replace(&mut tctx.warning_config, warning_config);
+    let expected_ty = crate::types::instance(tctx.type_ctx, ty_arg_check);
+    let refs: Vec<_> = cases
+        .iter()
+        .map(|case| crate::types::parmatch::CaseRef {
+            lhs: case.lhs,
             guarded: case.guarded,
         })
         .collect();
-    parmatch_check_unused(tctx, &check.env, check.level, expected_ty, &refs);
-    if check.check_ambiguous {
+    parmatch_check_unused(tctx, env, level, expected_ty, &refs);
+    if check_ambiguous {
         // Parmatch.check_ambiguous_bindings (typecore.ml:4486).
         let oracle = TypecoreParmatchOracle {
             tctx: &mut *tctx,
-            env: &check.env,
+            env,
             expected_ty,
-            level: check.level,
+            level,
             partial_explode: 0,
             none_type: None,
         };
         let mut pm = crate::types::parmatch::Parmatch::new(oracle);
-        let cases: Vec<_> = check
-            .cases
-            .iter()
+        let cases: Vec<_> = cases
+            .into_iter()
             .map(|case| crate::types::parmatch::AmbiguousCase {
-                lhs: &case.lhs,
-                guard_idents: case.guard_idents.clone(),
+                lhs: case.lhs,
+                guard_idents: case.guard_idents,
             })
             .collect();
         pm.check_ambiguous_bindings(&cases);
