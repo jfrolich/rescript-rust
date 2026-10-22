@@ -7611,9 +7611,7 @@ impl<'a> RawLambdaConverter<'a> {
         // individual arguments and use for_multiple_match, which can flatten
         // the tuple pattern matching without allocating a tuple.
         // (See OCaml's translcore.ml lines 1259-1260)
-        if !crate::debug_flags::skip_for_multiple_match()
-            && let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc
-        {
+        if let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
             return self.for_multiple_match_with_synced_stamps(loc, paraml, pat_act_list, partial);
         }

@@ -1,7 +1,8 @@
 //! Cached debug environment flags.
 //!
-//! These flags are process-level debugging toggles. Reading them through
-//! `OnceLock` avoids repeated process-environment probing in compiler hot paths.
+//! These flags are process-level tracing toggles; none of them changes
+//! compiler output. Reading them through `OnceLock` avoids repeated
+//! process-environment probing in compiler hot paths.
 
 use std::sync::OnceLock;
 
@@ -10,23 +11,11 @@ fn enabled(flag: &'static OnceLock<bool>, name: &'static str) -> bool {
 }
 
 static RAW_FALLBACK_TRACE: OnceLock<bool> = OnceLock::new();
-static SKIP_FOR_MULTIPLE_MATCH: OnceLock<bool> = OnceLock::new();
-static SKIP_PATTERN_LOWER: OnceLock<bool> = OnceLock::new();
 static DEBUG_OPEN_SIG_VALUES: OnceLock<bool> = OnceLock::new();
 
 /// Whether raw-lambda fallback tracing is enabled.
 pub fn raw_fallback_trace() -> bool {
     enabled(&RAW_FALLBACK_TRACE, "RUST_RAW_FALLBACK_TRACE")
-}
-
-/// Whether tuple-scrutinee multiple-match lowering should be skipped.
-pub fn skip_for_multiple_match() -> bool {
-    enabled(&SKIP_FOR_MULTIPLE_MATCH, "RUST_SKIP_FOR_MULTIPLE_MATCH")
-}
-
-/// Whether pattern-lowering propagation should be skipped.
-pub fn skip_pattern_lower() -> bool {
-    enabled(&SKIP_PATTERN_LOWER, "RUST_SKIP_PATTERN_LOWER")
 }
 
 /// Whether opened signature values should be traced.
