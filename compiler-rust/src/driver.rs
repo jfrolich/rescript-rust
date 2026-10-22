@@ -14715,29 +14715,27 @@ fn render_js_program(
     }
 }
 
-fn compile_js_program_for_output(
-    lowered_lambda: &crate::lambda::Lambda,
-    hoisted_functions: &[crate::lambda::HoistedFunction],
+type JsBackendOutput = (
+    DepsProgram,
+    ModulePathResolver,
+    ahash::AHashMap<String, CmjExportConstant>,
+    ahash::AHashMap<String, CmjExportArity>,
+    ahash::AHashMap<String, crate::lambda::Lambda>,
+);
+
+/// Build the `LambdaCompiler` for one JS output target: resolve local module
+/// path overrides for the possibly-required modules and install the hoisted
+/// functions.
+#[allow(clippy::too_many_arguments)]
+fn js_backend_compiler(
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
-    DepsProgram,
-    ModulePathResolver,
-    ahash::AHashMap<String, CmjExportConstant>,
-    ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
-    let _span = info_span!(
-        "compiler.js_backend",
-        module = options.module_name.as_deref().unwrap_or(""),
-        owned = false,
-        possible_required_modules = possible_required_modules.len()
-    )
-    .entered();
+) -> LambdaCompiler {
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         output_path,
@@ -14766,18 +14764,17 @@ fn compile_js_program_for_output(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
-    compiler.set_hoisted_functions(hoisted_functions.to_vec());
-    let program = compiler.compile_deps_program_with_possible_required_modules(
-        lowered_lambda,
-        possible_required_modules,
-    );
+    compiler.set_hoisted_functions(hoisted_functions);
+    compiler
+}
+
+fn finish_js_backend(mut compiler: LambdaCompiler, program: DepsProgram) -> JsBackendOutput {
     let module_path_resolver = compiler
         .take_module_path_resolver()
         .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
-
     (
         program,
         module_path_resolver,
@@ -14787,8 +14784,9 @@ fn compile_js_program_for_output(
     )
 }
 
-fn compile_js_program_for_output_owned(
-    lowered_lambda: crate::lambda::Lambda,
+#[allow(clippy::too_many_arguments)]
+fn compile_js_program_for_output(
+    lowered_lambda: &crate::lambda::Lambda,
     hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
@@ -14796,45 +14794,45 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
-    DepsProgram,
-    ModulePathResolver,
-    ahash::AHashMap<String, CmjExportConstant>,
-    ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
-    // The pre-JS result already collected the modules of this lowered lambda
-    // into `possible_required_modules` (see
-    // `compile_preprocessed_structure_in_process_until_js`).
-    let collected_possible_required_modules = possible_required_modules.clone();
-    compile_js_program_for_output_owned_with_collected_modules(
-        lowered_lambda,
-        hoisted_functions,
-        collected_possible_required_modules,
+) -> JsBackendOutput {
+    let _span = info_span!(
+        "compiler.js_backend",
+        module = options.module_name.as_deref().unwrap_or(""),
+        owned = false,
+        possible_required_modules = possible_required_modules.len()
+    )
+    .entered();
+    let mut compiler = js_backend_compiler(
+        hoisted_functions.to_vec(),
+        possible_required_modules,
         options,
         output_path,
         output_module_format,
         persistent_env,
         jsx_preserve,
-    )
+    );
+    let program = compiler.compile_deps_program_with_possible_required_modules(
+        lowered_lambda,
+        possible_required_modules,
+    );
+    finish_js_backend(compiler, program)
 }
 
-fn compile_js_program_for_output_owned_with_collected_modules(
+/// Single-target variant that consumes the lowered lambda. The pre-JS result
+/// already collected the modules of this lambda into
+/// `possible_required_modules` (see
+/// `compile_preprocessed_structure_in_process_until_js`).
+#[allow(clippy::too_many_arguments)]
+fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
-    hoisted_functions: &[crate::lambda::HoistedFunction],
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     possible_required_modules: AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
-    DepsProgram,
-    ModulePathResolver,
-    ahash::AHashMap<String, CmjExportConstant>,
-    ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
+) -> JsBackendOutput {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -14843,54 +14841,22 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         precomputed_possible_required_modules = true
     )
     .entered();
-    let mut module_path_resolver = ModulePathResolver::from_compile_options(
-        options.source_filename.as_deref(),
+    let mut compiler = js_backend_compiler(
+        hoisted_functions,
+        &possible_required_modules,
+        options,
         output_path,
         output_module_format,
-        options.package_name.as_deref(),
-        options.runtime_path.as_deref(),
         persistent_env,
-        options.make_runtime,
-    );
-    module_path_resolver.set_package_specs(&options.js_package_specs);
-    for module in &possible_required_modules {
-        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
-            if let Some(path) =
-                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
-            {
-                module_path_resolver.set_module_path_override(module.id.name(), path);
-            }
-        }
-    }
-    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-        Some(module_path_resolver),
         jsx_preserve,
-        options.check_div_by_zero,
-        options.cross_module_inline,
     );
-    compiler.set_source_map_enabled(
-        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
-    );
-    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
         possible_required_modules,
     );
-    let module_path_resolver = compiler
-        .take_module_path_resolver()
-        .expect("lambda compiler retained module path resolver");
-    let cmj_export_constants = compiler.take_cmj_export_constants();
-    let cmj_export_arities = compiler.take_cmj_export_arities();
-    let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
-
-    (
-        program,
-        module_path_resolver,
-        cmj_export_constants,
-        cmj_export_arities,
-        cmj_export_lambdas,
-    )
+    finish_js_backend(compiler, program)
 }
+
 pub fn compile_preprocessed_structure_in_process(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -15712,8 +15678,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
-                &pre_js.hoisted_functions,
-                &pre_js.possible_required_modules,
+                std::mem::take(&mut pre_js.hoisted_functions),
+                std::mem::take(&mut pre_js.possible_required_modules),
                 options,
                 primary_output_path,
                 primary_output_module_format,
