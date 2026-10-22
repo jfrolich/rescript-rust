@@ -206,8 +206,7 @@ fn is_simple_construct(expr: &Expression, arena: &ParseArena) -> bool {
             if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
                 let name = arena.get_string(*name_idx);
                 if name == "::" {
-                    let (_, is_complete) = collect_list_elements(expr, arena);
-                    return is_complete;
+                    return list_is_complete(expr, arena);
                 }
             }
             false
@@ -311,6 +310,31 @@ fn has_attribute(arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)], name:
 }
 
 /// Collect list elements from a cons pattern
+/// Whether a `::` spine ends in `[]` with no attributes along the way; the
+/// completeness flag of [`collect_list_elements`] without collecting.
+fn list_is_complete(expr: &Expression, arena: &ParseArena) -> bool {
+    let mut current = expr;
+    loop {
+        if !current.pexp_attributes.is_empty() {
+            return false;
+        }
+        let ExpressionDesc::Pexp_construct(lid, args) = &*current.pexp_desc else {
+            return false;
+        };
+        let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+            return false;
+        };
+        let name = arena.get_string(*name_idx);
+        if args.txt.is_empty() {
+            return name == "[]";
+        }
+        match args.txt.as_slice() {
+            [_, tail] if name == "::" => current = arena.get_expr(*tail),
+            _ => return false,
+        }
+    }
+}
+
 fn collect_list_elements<'a>(
     expr: &'a Expression,
     arena: &'a ParseArena,
@@ -2390,27 +2414,11 @@ fn jsx_tag_name_to_string(tag_name: &JsxTagName, arena: &ParseArena) -> String {
     match tag_name {
         JsxTagName::Lower(name) => name.clone(),
         JsxTagName::QualifiedLower { path, name } => {
-            let path_str = print_longident_to_string(arena.get_longident(*path), arena);
+            let path_str = arena.longident_to_string(arena.get_longident(*path));
             format!("{}.{}", path_str, name)
         }
-        JsxTagName::Upper(lident) => print_longident_to_string(arena.get_longident(*lident), arena),
+        JsxTagName::Upper(lident) => arena.longident_to_string(arena.get_longident(*lident)),
         JsxTagName::Invalid(name) => name.clone(),
-    }
-}
-
-fn print_longident_to_string(lid: &Longident, arena: &ParseArena) -> String {
-    match lid {
-        Longident::Lident(name_idx) => arena.get_string(*name_idx).to_string(),
-        Longident::Ldot(prefix, name_idx) => {
-            let prefix_str = print_longident_to_string(prefix.as_ref(), arena);
-            let name = arena.get_string(*name_idx);
-            format!("{}.{}", prefix_str, name)
-        }
-        Longident::Lapply(left, right) => {
-            let left_str = print_longident_to_string(left.as_ref(), arena);
-            let right_str = print_longident_to_string(right.as_ref(), arena);
-            format!("{}({})", left_str, right_str)
-        }
     }
 }
 
