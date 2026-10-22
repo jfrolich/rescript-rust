@@ -56,7 +56,7 @@ code, read the matching OCaml source first.
 | Interface driver | `compiler/core/js_implementation.ml`, `compiler/ml/typemod.ml` | `src/driver.rs` | OCaml interfaces parse as signatures, run signature PPX/config/warnings, typecheck, self-check, force delayed checks, and write `.cmi`/`.cmti`. Rust in-process mode publishes a registry signature; direct Rust helpers currently typecheck/dump but do not write OCaml-compatible interface artifacts. |
 | ReScript syntax parser | `compiler/syntax/`, `compiler/ml/parsetree.ml` | `src/parser/*`, `src/parse_arena.rs` | Rust parser uses arena indices instead of OCaml heap records, but output shape and locations must match. |
 | Frozen PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | `parsetree0` is a compatibility wire format. Do not evolve it for new syntax. |
-| Frontend and PPX rewrites | `compiler/frontend/*`, `compiler/core/cmd_ppx_apply.ml`, `compiler/frontend/ppx_entry.ml`, `compiler/frontend/ast_config.ml` | `src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, `src/parser/let_unwrap_ppx.rs`, `src/driver.rs`, `rewatch/src/build/parse.rs` | Order is observable through warnings, errors, AST dumps, and generated code. Rust has several mode-specific caveats listed below. |
+| Frontend and PPX rewrites | `compiler/frontend/*`, `compiler/core/cmd_ppx_apply.ml`, `compiler/frontend/ppx_entry.ml`, `compiler/frontend/ast_config.ml` | `src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, `src/driver.rs`, `rewatch/src/build/parse.rs` | Order is observable through warnings, errors, AST dumps, and generated code. Rust has several mode-specific caveats listed below. |
 | Initial environment | `compiler/core/res_compmisc.ml`, `compiler/ml/env.ml` | `src/types/predef.rs`, `src/types/env.rs`, `src/cmi/persistent_env.rs`, `src/driver.rs` | Pervasives/Stdlib loading and implicit opens must preserve OCaml lookup and force order. |
 | Persistent environment | `compiler/ml/env.ml`, `compiler/ml/cmi_format.ml`, `compiler/ml/cmi_format.mli`, `compiler/core/js_cmj_format.ml` | `src/cmi/persistent_env.rs`, `src/cmi/cmi_format.rs`, `src/cmi/sig_reader.rs`, `src/cmi/portable_types.rs` | Rust reads OCaml `.cmi`/`.cmj` data and has an in-memory registry mode. Disk writing of `.cmi`/`.cmj` is not currently equivalent to OCaml. |
 | Lazy module components | `compiler/ml/env.ml` (`EnvLazy` module), `compiler/ml/subst.ml` | `src/types/env_lazy.rs`, `src/types/env.rs`, `src/types/context.rs` | This is a high-risk parity area. Rust must preserve OCaml API boundaries such as `find_module_descr` versus `find_module`. |
@@ -455,8 +455,7 @@ Rust-specific diversion:
 The frontend rewrite layer runs between parsing and typechecking. In OCaml it is
 spread across `compiler/frontend/`, `compiler/syntax/`, `Cmd_ppx_apply`, and
 `Ppx_entry`. In Rust it is called from `src/driver.rs`,
-`src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, and
-`src/parser/let_unwrap_ppx.rs`.
+`src/binary_ast/ppx.rs`, and `src/parser/jsx_ppx.rs`.
 
 Direct source order in Rust:
 
