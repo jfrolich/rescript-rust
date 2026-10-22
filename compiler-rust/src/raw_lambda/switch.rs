@@ -278,12 +278,11 @@ enum TRet {
     No,
 }
 
-fn coupe(
-    cases: &[(i32, i32, usize)],
-    i: usize,
-) -> (i32, Vec<(i32, i32, usize)>, Vec<(i32, i32, usize)>) {
+type Cases<'a> = &'a [(i32, i32, usize)];
+
+fn coupe(cases: Cases<'_>, i: usize) -> (i32, Cases<'_>, Cases<'_>) {
     let (l, _, _) = cases[i];
-    (l, cases[..i].to_vec(), cases[i..].to_vec())
+    (l, &cases[..i], &cases[i..])
 }
 
 fn case_append(c1: &[(i32, i32, usize)], c2: &[(i32, i32, usize)]) -> Vec<(i32, i32, usize)> {
@@ -349,12 +348,12 @@ fn case_append(c1: &[(i32, i32, usize)], c2: &[(i32, i32, usize)]) -> Vec<(i32, 
 fn coupe_inter(
     i: usize,
     j: usize,
-    cases: &[(i32, i32, usize)],
-) -> (i32, i32, Vec<(i32, i32, usize)>, Vec<(i32, i32, usize)>) {
+    cases: Cases<'_>,
+) -> (i32, i32, Cases<'_>, Vec<(i32, i32, usize)>) {
     let lcases = cases.len();
     let (low, _, _) = cases[i];
     let (_, high, _) = cases[j];
-    let inside = cases[i..=j].to_vec();
+    let inside = &cases[i..=j];
     let outside = case_append(&cases[..i], &cases[j + 1..lcases]);
     (low, high, inside, outside)
 }
@@ -465,8 +464,8 @@ impl SwitchCompiler {
         let (_, left, right) = coupe(cases, m);
         let mut ci = CTests { n: 1, ni: 0 };
         let mut cm = CTests { n: 1, ni: 0 };
-        let (_, (cml, cleft)) = self.opt_count(&left);
-        let (_, (cmr, cright)) = self.opt_count(&right);
+        let (_, (cml, cleft)) = self.opt_count(left);
+        let (_, (cmr, cright)) = self.opt_count(right);
         add_test(&mut ci, cleft);
         add_test(&mut ci, cright);
         if less_tests(cml, cmr) {
@@ -485,7 +484,7 @@ impl SwitchCompiler {
             let (_, _, act1) = cases[lcases - 1];
             if act0 == act1 {
                 let (low, high, inside, outside) = coupe_inter(1, lcases - 2, cases);
-                let (_, (cmi, cinside)) = self.opt_count(&inside);
+                let (_, (cmi, cinside)) = self.opt_count(inside);
                 let (_, (cmo, coutside)) = self.opt_count(&outside);
                 let ni = if low == high { 0 } else { 1 };
                 let mut cmij = CTests { n: 1, ni };
@@ -521,8 +520,8 @@ impl SwitchCompiler {
             let (_, left, right) = coupe(cases, i);
             let mut ci = CTests { n: 1, ni: 0 };
             let mut cm = CTests { n: 1, ni: 0 };
-            let (_, (cml, cleft)) = self.opt_count(&left);
-            let (_, (cmr, cright)) = self.opt_count(&right);
+            let (_, (cml, cleft)) = self.opt_count(left);
+            let (_, (cmr, cright)) = self.opt_count(right);
             add_test(&mut ci, cleft);
             add_test(&mut ci, cright);
             if less_tests(cml, cmr) {
@@ -544,7 +543,7 @@ impl SwitchCompiler {
             for i in 1..lcases.saturating_sub(1) {
                 let (low, high, inside, outside) = coupe_inter(i, i, cases);
                 if low == high {
-                    let (_, (cmi, cinside)) = self.opt_count(&inside);
+                    let (_, (cmi, cinside)) = self.opt_count(inside);
                     let (_, (cmo, coutside)) = self.opt_count(&outside);
                     let mut cmij = CTests { n: 1, ni: 0 };
                     let mut cij = CTests { n: 1, ni: 0 };
@@ -566,7 +565,7 @@ impl SwitchCompiler {
             for i in 1..lcases.saturating_sub(1) {
                 for j in i..lcases.saturating_sub(1) {
                     let (low, high, inside, outside) = coupe_inter(i, j, cases);
-                    let (_, (cmi, cinside)) = self.opt_count(&inside);
+                    let (_, (cmi, cinside)) = self.opt_count(inside);
                     let (_, (cmo, coutside)) = self.opt_count(&outside);
                     let ni = if low == high { 0 } else { 1 };
                     let mut cmij = CTests { n: 1, ni };
@@ -599,8 +598,7 @@ impl SwitchCompiler {
     fn approx_count(&mut self, cases: &[(i32, i32, usize)], i: usize, j: usize) -> i32 {
         let l = j - i + 1;
         if l < CUT {
-            let sub = cases[i..=j].to_vec();
-            let (_, (_, ct)) = self.opt_count(&sub);
+            let (_, (_, ct)) = self.opt_count(&cases[i..=j]);
             ct.n
         } else {
             l as i32 - 1
@@ -670,46 +668,46 @@ impl SwitchCompiler {
             TRet::No => actions[cases[0].2].take(),
             TRet::Inter(i, j) => {
                 let (low, high, inside, outside) = coupe_inter(i as usize, j as usize, cases);
-                let (_, (cinside, _)) = self.opt_count(&inside);
+                let (_, (cinside, _)) = self.opt_count(inside);
                 let (_, (coutside, _)) = self.opt_count(&outside);
                 if low == high {
                     if less_tests(coutside, cinside) {
-                        let ifso = self.c_test(off, arg, &inside, actions);
+                        let ifso = self.c_test(off, arg, inside, actions);
                         let ifnot = self.c_test(off, arg, &outside, actions);
                         make_if_eq(arg, low + off, ifso, ifnot)
                     } else {
                         let ifso = self.c_test(off, arg, &outside, actions);
-                        let ifnot = self.c_test(off, arg, &inside, actions);
+                        let ifnot = self.c_test(off, arg, inside, actions);
                         make_if_ne(arg, low + off, ifso, ifnot)
                     }
                 } else if less_tests(coutside, cinside) {
                     // OCaml `make_if_in ctx (low + ctx.off) (high - low)`
                     // (switch.ml:535-536, 566-569).
-                    let ifso = self.c_test(off, arg, &inside, actions);
+                    let ifso = self.c_test(off, arg, inside, actions);
                     let ifno = self.c_test(off, arg, &outside, actions);
                     emit_if_in(-(low + off), high - low, arg, ifso, ifno)
                 } else {
                     let ifso = self.c_test(off, arg, &outside, actions);
-                    let ifno = self.c_test(off, arg, &inside, actions);
+                    let ifno = self.c_test(off, arg, inside, actions);
                     emit_if_out(-(low + off), high - low, arg, ifso, ifno)
                 }
             }
             TRet::Sep(i) => {
                 let (lim, left, right) = coupe(cases, i);
-                let (_, (cleft, _)) = self.opt_count(&left);
-                let (_, (cright, _)) = self.opt_count(&right);
+                let (_, (cleft, _)) = self.opt_count(left);
+                let (_, (cright, _)) = self.opt_count(right);
 
                 if i == 1 && lim + off == 1 && cases[0].0 + off == 0 {
-                    let ifso = self.c_test(off, arg, &right, actions);
-                    let ifnot = self.c_test(off, arg, &left, actions);
+                    let ifso = self.c_test(off, arg, right, actions);
+                    let ifnot = self.c_test(off, arg, left, actions);
                     make_if_ne(arg, 0, ifso, ifnot)
                 } else if less_tests(cright, cleft) {
-                    let ifso = self.c_test(off, arg, &left, actions);
-                    let ifnot = self.c_test(off, arg, &right, actions);
+                    let ifso = self.c_test(off, arg, left, actions);
+                    let ifnot = self.c_test(off, arg, right, actions);
                     make_if_lt(arg, lim + off, ifso, ifnot)
                 } else {
-                    let ifso = self.c_test(off, arg, &right, actions);
-                    let ifnot = self.c_test(off, arg, &left, actions);
+                    let ifso = self.c_test(off, arg, right, actions);
+                    let ifnot = self.c_test(off, arg, left, actions);
                     make_if_ge(arg, lim + off, ifso, ifnot)
                 }
             }
