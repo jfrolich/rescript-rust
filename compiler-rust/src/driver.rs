@@ -98,18 +98,7 @@ pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
 
-pub fn module_name_from_source_filename(path: &str) -> String {
-    let basename = std::path::Path::new(path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path);
-    let name = basename.split('.').next().unwrap_or(basename);
-    let mut chars = name.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
-    }
-}
+pub use crate::misc::module_name_from_source_filename;
 
 fn expression_has_string_literal(
     expr: &Expression,
@@ -765,6 +754,15 @@ impl Default for CompilerOptions {
 }
 
 impl CompilerOptions {
+    /// Whether the builtin spice mapper (`binary_ast::spice_ppx`) rewrites the
+    /// AST. The `bsc` CLI runs every configured `-ppx` executable as OCaml
+    /// does (cmd_ppx_apply.ml:97-110); the in-process build sets `spice_ppx`
+    /// instead of passing a configured spice PPX, so the builtin mapper
+    /// replaces a per-module subprocess.
+    pub fn builtin_spice(&self) -> bool {
+        self.spice_ppx
+    }
+
     /// `Env.get_unit_name ()`: js_implementation.ml:142-145 sets it to
     /// `Ext_filename.module_name outputprefix` (ext_filename.ml:71-79), the
     /// basename up to its last dot, so `hello.foo.res` is unit `Hello` even
@@ -1014,23 +1012,6 @@ fn run_external_ppxs(
     result
 }
 
-/// External PPXs the compiler implements itself: `@rescript/ppx-spice` style
-/// rewriters are covered by the builtin spice mapper (`binary_ast::spice_ppx`),
-/// which runs as part of the builtin PPX.
-impl CompilerOptions {
-    /// Whether the builtin spice mapper rewrites the AST. The `bsc` CLI runs
-    /// every configured `-ppx` executable as OCaml does (cmd_ppx_apply.ml:97-110);
-    /// the in-process build sets `spice_ppx` instead of passing a configured
-    /// spice PPX, so the builtin mapper replaces a per-module subprocess.
-    pub fn builtin_spice(&self) -> bool {
-        self.spice_ppx
-    }
-}
-
-fn external_ppxs_to_run(options: &CompilerOptions) -> Vec<String> {
-    options.external_ppxs.clone()
-}
-
 /// `Ast_mapper.ppx_context` (ast_mapper.ml:571-640): the
 /// `[@@@ocaml.ppx.context]` record the rewriters receive.
 fn ppx_context_attribute(
@@ -1124,7 +1105,7 @@ pub fn apply_external_structure_ppxs(
 ) -> Result<Structure> {
     use crate::binary_ast::parsetree0 as pt0;
     arena.set_builtin_spice(options.builtin_spice());
-    let ppxs = external_ppxs_to_run(options);
+    let ppxs = &options.external_ppxs;
     if ppxs.is_empty() {
         // The builtin spice mapper stands in for a configured spice PPX, and
         // OCaml hands that PPX the Parsetree0 form and reads it back
@@ -1148,7 +1129,7 @@ pub fn apply_external_structure_ppxs(
         },
     );
     let output = run_external_ppxs(
-        &ppxs,
+        ppxs,
         filename,
         |path| {
             crate::binary_ast::writer::write_external_ppx_input(
@@ -1187,7 +1168,7 @@ pub fn apply_external_signature_ppxs(
 ) -> Result<Signature> {
     use crate::binary_ast::parsetree0 as pt0;
     arena.set_builtin_spice(options.builtin_spice());
-    let ppxs = external_ppxs_to_run(options);
+    let ppxs = &options.external_ppxs;
     if ppxs.is_empty() {
         // See `apply_external_structure_ppxs` (cmd_ppx_apply.ml:112-125).
         if options.builtin_spice() {
@@ -1209,7 +1190,7 @@ pub fn apply_external_signature_ppxs(
         },
     );
     let output = run_external_ppxs(
-        &ppxs,
+        ppxs,
         filename,
         |path| {
             crate::binary_ast::writer::write_external_ppx_input(
@@ -4069,34 +4050,30 @@ fn type_mod_error_to_anyhow_styled(
 }
 
 fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> anyhow::Error {
-    if let PersistentEnvError::InterfaceRead { message } = error {
-        let mut output = String::new();
-        push_compiler_report_intro(&mut output, "We've found a bug for you!");
-        push_compiler_report_location(&mut output, filename);
-        output.push_str("  ");
-        output.push_str(&message);
-        output.push_str("\n\n");
-        return UserDiagnostic::new(output, 2).into();
-    }
-
     let message = match error {
-        PersistentEnvError::InterfaceRead { .. } => unreachable!(),
+        PersistentEnvError::InterfaceRead { message } => {
+            let mut output = String::new();
+            push_compiler_report_intro(&mut output, "We've found a bug for you!");
+            push_compiler_report_location(&mut output, filename);
+            output.push_str("  ");
+            output.push_str(&message);
+            output.push_str("\n\n");
+            return UserDiagnostic::new(output, 2).into();
+        }
         PersistentEnvError::IllegalRenaming {
             expected, actual, ..
         } => format!(
             "You referred to the module {expected}, but we've found one called {actual} instead.\nIs the name's casing right?"
         ),
+        // OCaml reports the stored persistent-structure filenames directly
+        // through `Location.print_filename` (compiler/ml/env.ml:2110-2119).
         PersistentEnvError::InconsistentImport {
             name,
             source1,
             source2,
-        } => {
-            let source1 = format_persistent_env_path(&source1);
-            let source2 = format_persistent_env_path(&source2);
-            format!(
-                "\x1b[1;33mIt's possible that your build is stale.\x1b[0m\nTry to clean the artifacts and build again?\n\n\x1b[1;33mHere's the original error message\x1b[0m\nThe files {source1}\nand {source2}\nmake inconsistent assumptions over interface {name}"
-            )
-        }
+        } => format!(
+            "\x1b[1;33mIt's possible that your build is stale.\x1b[0m\nTry to clean the artifacts and build again?\n\n\x1b[1;33mHere's the original error message\x1b[0m\nThe files {source1}\nand {source2}\nmake inconsistent assumptions over interface {name}"
+        ),
     };
     UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
 }
@@ -4133,12 +4110,6 @@ fn check_module_path_resolution_errors(
         }
     }
     Ok(())
-}
-
-fn format_persistent_env_path(path: &str) -> String {
-    // OCaml reports the stored persistent-structure filename directly through
-    // `Location.print_filename` in compiler/ml/env.ml:2110-2119.
-    path.to_string()
 }
 
 fn push_compiler_report_intro(output: &mut String, intro: &str) {
@@ -4549,7 +4520,10 @@ pub fn error_extension_to_anyhow(
             2,
         )
         .into(),
-        _ => UserDiagnostic::new(String::new(), 2).into(),
+        // OCaml's `Location.Already_displayed_error` sentinel: exit with the
+        // error status without printing a report.
+        TypeCoreError::ExtensionAlreadyDisplayed => UserDiagnostic::new(String::new(), 2).into(),
+        other => unreachable!("builtin_extension_error returned {other:?}"),
     }
 }
 

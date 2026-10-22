@@ -1936,27 +1936,14 @@ pub fn compunit_with_warnings(
     intf_sig: &Signature,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
-    fn module_name_from_source_filename(path: &str) -> String {
-        let basename = std::path::Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(path);
-        let name = basename.split('.').next().unwrap_or(basename);
-        let mut chars = name.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
-        }
-    }
-
     // OCaml compiler/ml/includemod.ml:468-475 starts compilation-unit
     // inclusion from `signatures`; Rust additionally carries the persisted
     // compilation-unit access path so Subst.add_* mappings can cover CMI paths
     // like `Unit.Nested.t` that no longer appear as local `Pident`s.
     let subst = InclusionSubst::default();
-    let access_path = Path::pident(Ident::create_persistent(module_name_from_source_filename(
-        impl_name,
-    )));
+    let access_path = Path::pident(Ident::create_persistent(
+        crate::misc::module_name_from_source_filename(impl_name),
+    ));
     signatures_with_subst(
         type_ctx,
         env,
