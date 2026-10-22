@@ -882,16 +882,20 @@ fn parse_type_constr_with_start(
     // OCaml `parse_atomic_typ_expr` reads the constructor with `parse_value_path`
     // (compiler/syntax/src/res_core.ml:742-776): a lowercase name ends the path
     // immediately; an uppercase head goes through `aux` + `next_unsafe`.
-    let path_parts: Vec<String> = match &p.token {
+    let lid = match &p.token {
         Token::Lident(name) => {
-            let name = name.to_string();
+            // `next` only touches the position arena, so interning first
+            // keeps the string table in the same order.
+            let name = name.clone();
+            let name_idx = p.arena_mut().push_interned_string(&name);
             p.next();
-            vec![name]
+            Longident::Lident(name_idx)
         }
-        _ => super::module::parse_value_path_for_type(p).0,
+        _ => {
+            let path_parts = super::module::parse_value_path_for_type(p).0;
+            super::core::build_longident(p.arena_mut(), &path_parts)
+        }
     };
-
-    let lid = super::core::build_longident(p.arena_mut(), &path_parts);
     let lid_idx = p.push_longident(lid);
 
     // Capture end position for identifier - use caching so it can be shared
