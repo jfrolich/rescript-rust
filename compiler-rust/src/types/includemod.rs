@@ -822,9 +822,9 @@ fn format_extension_constructor(
 
 #[derive(Clone, Default)]
 struct InclusionSubst {
-    type_paths: HashMap<Path, Path>,
-    module_paths: HashMap<Path, Path>,
-    modtype_paths: HashMap<Path, Path>,
+    type_paths: PathSubstMap,
+    module_paths: PathSubstMap,
+    modtype_paths: PathSubstMap,
 }
 
 impl InclusionSubst {
@@ -833,14 +833,76 @@ impl InclusionSubst {
     }
 }
 
-fn lookup_path_subst(map: &HashMap<Path, Path>, path: &Path) -> Option<Path> {
-    // OCaml compiler/ml/path.ml:27-35 defines `Path.compare` for PathMap and
-    // ignores the `Pdot` position hint, so substitution lookups must use
-    // `Path.same` rather than Rust's derived Eq/Hash which includes that field.
-    map.get(path).cloned().or_else(|| {
-        map.iter()
-            .find_map(|(key, value)| key.same(path).then(|| value.clone()))
-    })
+/// Path substitution table looked up with `Path.same` semantics.
+///
+/// OCaml compiler/ml/path.ml:27-35 defines `Path.compare` for PathMap and
+/// ignores the `Pdot` position hint, while Rust's derived `Eq` compares it.
+/// `Path`'s `Hash` already ignores the hint, so an exact `get` finds every key
+/// that is `==`; the remaining `same`-but-not-`==` keys can only exist when the
+/// key or the queried path carries a position hint. `any_pos_key` records
+/// whether any key has one so the common case needs no full-map scan.
+#[derive(Clone, Default)]
+struct PathSubstMap {
+    map: HashMap<Path, Path>,
+    any_pos_key: bool,
+}
+
+impl PathSubstMap {
+    fn insert(&mut self, key: Path, value: Path) {
+        self.any_pos_key |= path_has_pos_hint(&key);
+        self.map.insert(key, value);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn get(&self, path: &Path) -> Option<Path> {
+        if let Some(value) = self.map.get(path) {
+            return Some(value.clone());
+        }
+        if self.any_pos_key {
+            return self
+                .map
+                .iter()
+                .find_map(|(key, value)| key.same(path).then(|| value.clone()));
+        }
+        if !path_has_pos_hint(path) {
+            // No key and not the path carry a position hint, so `same`
+            // coincides with `==` and the exact lookup above was complete.
+            return None;
+        }
+        // Keys carry no position hints, so at most one key is `same` as
+        // `path`: the one equal to `path` with its hints cleared.
+        self.map.get(&strip_pos_hints(path)).cloned()
+    }
+}
+
+fn path_has_pos_hint(path: &Path) -> bool {
+    match path {
+        Path::Pident(_) => false,
+        Path::Pdot(parent, _, pos) => {
+            *pos != crate::types::path::NOPOS || path_has_pos_hint(parent)
+        }
+        Path::Papply(functor, argument) => {
+            path_has_pos_hint(functor) || path_has_pos_hint(argument)
+        }
+    }
+}
+
+fn strip_pos_hints(path: &Path) -> Path {
+    match path {
+        Path::Pident(_) => path.clone(),
+        Path::Pdot(parent, name, _) => Path::Pdot(
+            std::sync::Arc::new(strip_pos_hints(parent)),
+            *name,
+            crate::types::path::NOPOS,
+        ),
+        Path::Papply(functor, argument) => Path::Papply(
+            std::sync::Arc::new(strip_pos_hints(functor)),
+            std::sync::Arc::new(strip_pos_hints(argument)),
+        ),
+    }
 }
 
 // ============================================================================
@@ -2559,7 +2621,7 @@ fn substitute_extension_constructor_paths(
 }
 
 fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.type_paths, path) {
+    if let Some(replacement) = subst.type_paths.get(path) {
         return replacement;
     }
     match path {
@@ -2577,7 +2639,7 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
 }
 
 fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.module_paths, path) {
+    if let Some(replacement) = subst.module_paths.get(path) {
         return replacement;
     }
     match path {
@@ -2595,7 +2657,7 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
 }
 
 fn substitute_type_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.type_paths, path) {
+    if let Some(replacement) = subst.type_paths.get(path) {
         return replacement;
     }
     match path {
@@ -2613,7 +2675,7 @@ fn substitute_type_path(path: &Path, subst: &InclusionSubst) -> Path {
 }
 
 fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.modtype_paths, path) {
+    if let Some(replacement) = subst.modtype_paths.get(path) {
         return replacement;
     }
     match path {
@@ -2989,7 +3051,7 @@ pub(crate) fn type_declarations(
     let canonical_unboxed = |decl: &TypeDeclaration| {
         decl.type_representation == crate::types::TypeRepresentation::Unboxed
             || decl.variant_layout_ref().is_some_and(|layout_ref| {
-                type_ctx.variant_layout(layout_ref).configuration().unboxed
+                type_ctx.with_variant_layout(layout_ref, |layout| layout.configuration().unboxed)
             })
     };
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
@@ -3316,8 +3378,9 @@ fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
 }
 
 fn type_decl_tag_name(type_ctx: &TypeContext, decl: &TypeDeclaration) -> Option<String> {
-    decl.variant_layout_ref()
-        .and_then(|layout_ref| type_ctx.variant_layout(layout_ref).matching_facts.tag_name)
+    decl.variant_layout_ref().and_then(|layout_ref| {
+        type_ctx.with_variant_layout(layout_ref, |layout| layout.matching_facts.tag_name.clone())
+    })
 }
 
 fn private_flags(impl_decl: &TypeDeclaration, sig_decl: &TypeDeclaration) -> bool {
