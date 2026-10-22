@@ -3179,7 +3179,8 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             stack.push(DisposeItem::Expression(*func));
             push_expression_vec(args, stack);
         }
-        ExpressionDesc::TaggedTemplate(_tag, _quasi, expressions) => {
+        ExpressionDesc::TaggedTemplate(tag, _quasi, expressions) => {
+            stack.push(DisposeItem::Expression(*tag));
             push_expression_vec(expressions, stack);
         }
         ExpressionDesc::InterpolatedTemplate { values, .. } => push_expression_vec(values, stack),

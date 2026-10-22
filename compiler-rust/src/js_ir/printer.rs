@@ -3516,7 +3516,9 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(arg, stats);
             }
         }
-        ExpressionDesc::TaggedTemplate(_tag, _, values) => {
+        ExpressionDesc::TaggedTemplate(tag, _, values) => {
+            // js_record_iter.ml:104-106 visits the tag before the values.
+            collect_expression_idents(tag, stats);
             for value in values {
                 collect_expression_idents(value, stats);
             }
@@ -5004,6 +5006,53 @@ mod tests {
 
         assert!(rendered.contains("function foo(arg) {"));
         assert!(rendered.contains("return value + arg;"));
+    }
+
+    #[test]
+    fn test_print_function_scope_reserves_captured_tagged_template_tag() {
+        let outer = Ident::create_local("tag");
+        let foo = Ident::create_local("foo");
+        let param = Ident::create_local("arg");
+        let inner = Ident::create_local("tag");
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: outer,
+                value: Some(Expression::number(Number::int(1))),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: foo,
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: inner,
+                            value: Some(Expression::var(param)),
+                            property: crate::lambda::lam_compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                        Statement::return_(Expression::new(ExpressionDesc::TaggedTemplate(
+                            Box::new(Expression::var(outer)),
+                            vec!["a".to_string(), "b".to_string()],
+                            vec![Expression::var(inner)],
+                        ))),
+                    ],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        // The captured outer `tag` is reserved in `foo`'s scope, so the
+        // body-local `tag` must not shadow it.
+        assert!(rendered.contains("let tag$1 = arg;"), "{rendered}");
+        assert!(rendered.contains("return tag`a${tag$1}b`;"), "{rendered}");
     }
 
     #[test]
