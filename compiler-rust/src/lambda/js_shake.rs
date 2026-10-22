@@ -41,11 +41,8 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
     // the same semantics without cloning the full block.
     let (index, replacement, property) = {
         let flattened_refs = flatten_toplevel_block_refs(block);
-        let Some((index, initializer, property)) =
-            same_name_export_alias_binding_ref(&flattened_refs, target)
-        else {
-            return None;
-        };
+        let (index, initializer, property) =
+            same_name_export_alias_binding_ref(&flattened_refs, target)?;
         let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, initializer);
         // OCaml only substitutes Strict/Alias/StrictOpt simple bindings in
         // `compiler/core/lam_pass_lets_dce.ml:21-23` and
@@ -187,11 +184,8 @@ pub(crate) fn move_reused_same_name_export_binding_to_export_tail(
     // ownership of the block after the borrowed checks choose a mutation.
     let (index, reused, replacement, property) = {
         let flattened_refs = flatten_toplevel_block_refs(block);
-        let Some((index, reused, _initializer, property)) =
-            direct_reused_same_name_export_alias_binding_ref(&flattened_refs, export, value)
-        else {
-            return None;
-        };
+        let (index, reused, _initializer, property) =
+            direct_reused_same_name_export_alias_binding_ref(&flattened_refs, export, value)?;
         let replacement =
             resolve_tail_move_replacement_expression_ref(&flattened_refs, value, reused, false);
         let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, &replacement);

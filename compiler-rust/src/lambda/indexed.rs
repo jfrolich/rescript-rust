@@ -1476,7 +1476,7 @@ mod tests {
             assert_round_trip(leaf);
         }
         let info = ApInfo {
-            loc: loc,
+            loc,
             inlined: InlineAttribute::Always,
             status: ApplyStatus::InferFull,
         };
@@ -1502,7 +1502,7 @@ mod tests {
             Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![int(), var()],
-                loc: loc,
+                loc,
             })),
             Lambda::Lswitch(
                 Box::new(var()),

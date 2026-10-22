@@ -3,7 +3,6 @@
 //! Port of `js_exp_make.ml` — expression-level helpers used during
 //! Lambda-to-JS compilation.
 
-use crate::ident::Ident;
 use crate::js_ir::op::{Kind, Number};
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
@@ -11,7 +10,7 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{Lambda, SwitchCaseTag, TagInfo};
+use crate::lambda::{SwitchCaseTag, TagInfo};
 
 pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
     match &expr.desc {
@@ -206,14 +205,6 @@ pub(crate) fn runtime_member_for_eta_wrapped_primitive(
         Primitive::Pstringmax => Some(("Primitive_string", "max")),
         _ => None,
     }
-}
-
-pub(crate) fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
-    params.len() == args.len()
-        && params
-            .iter()
-            .zip(args)
-            .all(|(param, arg)| matches!(arg, Lambda::Lvar(id) if id.same(param)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -626,14 +617,6 @@ pub(crate) fn int32_band(left: Expression, right: Expression) -> Expression {
             int32_band(into_bin_left(left), right)
         }
         _ => Expression::bin(BinOp::Band, left, right),
-    }
-}
-
-pub(crate) fn int32_offset(expr: Expression, offset: i32) -> Expression {
-    if offset == 0 {
-        expr
-    } else {
-        int32_add(expr, int_expr(offset))
     }
 }
 
