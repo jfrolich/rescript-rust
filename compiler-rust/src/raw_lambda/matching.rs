@@ -3297,7 +3297,6 @@ where
 /// Equivalent to OCaml's `pm_free_variables`.
 pub fn pm_free_variables<'p>(pm: &PatternMatching<'p>) -> IdentSet {
     // OCaml uses IdentSet.union (free_variables act) r folded right over cases.
-    // We use raw_free_variables (HashSet-based) and convert to BTreeSet.
     pm.cases
         .iter()
         .rev()
@@ -3308,121 +3307,10 @@ pub fn pm_free_variables<'p>(pm: &PatternMatching<'p>) -> IdentSet {
         })
 }
 
-/// Compute free variables of a RawLambda expression.
-/// Local helper equivalent to Lambda.free_variables, matching
-/// the raw_free_variables in convert.rs.
+/// Free variables of a RawLambda expression (`Lambda.free_variables`).
 fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
-    fn collect(lam: &RawLambda, fv: &mut IdentSet) {
-        match lam {
-            RawLambda::Lshared(inner) => collect(inner, fv),
-            RawLambda::Lvar(id) => {
-                fv.insert(*id);
-            }
-            RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
-            RawLambda::Lapply(apply) => {
-                collect(&apply.ap_func, fv);
-                for arg in &apply.ap_args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::Lfunction(func) => {
-                collect(&func.body, fv);
-                for param in &func.params {
-                    fv.remove(param);
-                }
-            }
-            RawLambda::Llet(_, id, arg, body) => {
-                collect(arg, fv);
-                collect(body, fv);
-                fv.remove(id);
-            }
-            RawLambda::Lletrec(bindings, body) => {
-                collect(body, fv);
-                for (_, expr) in bindings {
-                    collect(expr, fv);
-                }
-                for (id, _) in bindings {
-                    fv.remove(id);
-                }
-            }
-            RawLambda::Lprim(info) => {
-                for arg in &info.args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::Lswitch(arg, sw) => {
-                collect(arg, fv);
-                for (_, lam) in &sw.sw_consts {
-                    collect(lam, fv);
-                }
-                for (_, lam) in &sw.sw_blocks {
-                    collect(lam, fv);
-                }
-                if let Some(fail) = &sw.sw_failaction {
-                    collect(fail, fv);
-                }
-            }
-            RawLambda::LstringSwitch(arg, cases, default) => {
-                collect(arg, fv);
-                for (_, lam) in cases {
-                    collect(lam, fv);
-                }
-                if let Some(default) = default {
-                    collect(default, fv);
-                }
-            }
-            RawLambda::LstaticRaise(_, args) => {
-                for arg in args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::LstaticCatch(body, (_, vars), handler) => {
-                collect(body, fv);
-                collect(handler, fv);
-                for var in vars {
-                    fv.remove(var);
-                }
-            }
-            RawLambda::LtryWith(body, exn, handler) => {
-                collect(body, fv);
-                collect(handler, fv);
-                fv.remove(exn);
-            }
-            RawLambda::LifThenElse(cond, then_br, else_br) => {
-                collect(cond, fv);
-                collect(then_br, fv);
-                collect(else_br, fv);
-            }
-            RawLambda::Lsequence(first, second) => {
-                collect(first, fv);
-                collect(second, fv);
-            }
-            RawLambda::Lwhile(cond, body) => {
-                collect(cond, fv);
-                collect(body, fv);
-            }
-            RawLambda::Lfor(id, lo, hi, _, body) => {
-                collect(lo, fv);
-                collect(hi, fv);
-                collect(body, fv);
-                fv.remove(id);
-            }
-            RawLambda::Lfor_of(id, iterable, body)
-            | RawLambda::Lfor_await_of(id, iterable, body) => {
-                collect(iterable, fv);
-                collect(body, fv);
-                fv.remove(id);
-            }
-            RawLambda::Lassign(id, expr) => {
-                fv.insert(*id);
-                collect(expr, fv);
-            }
-            RawLambda::Lbreak | RawLambda::Lcontinue => {}
-        }
-    }
-
-    let mut fv = BTreeSet::new();
-    collect(lam, &mut fv);
+    let mut fv = IdentSet::new();
+    crate::raw_lambda::collect_free_variables(lam, &mut fv);
     fv
 }
 
