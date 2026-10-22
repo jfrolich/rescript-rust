@@ -3410,15 +3410,20 @@ fn parse_poly_type_with_inline_context(
             .map(|idx| p.arena().get_string(*idx).to_string())
             .collect();
         p.current_type_name_path = Some(string_path);
-        p.inline_types_found = Some(ctx.borrow().found_inline_types.clone());
-        p.inline_types_params = ctx.borrow().params.clone();
+        // Lend the context's state to the parser for the duration of the
+        // call; every path that takes `inline_types_found` restores it.
+        {
+            let mut ctx = ctx.borrow_mut();
+            p.inline_types_found = Some(std::mem::take(&mut ctx.found_inline_types));
+            p.inline_types_params = std::mem::take(&mut ctx.params);
+        }
 
         let typ = typ::parse_poly_type_expr(p);
 
         if let Some(found) = p.inline_types_found.take() {
             let mut ctx = ctx.borrow_mut();
             ctx.found_inline_types = found;
-            ctx.params = p.inline_types_params.clone();
+            ctx.params = std::mem::take(&mut p.inline_types_params);
         }
 
         // Restore old parser fields
