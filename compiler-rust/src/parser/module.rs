@@ -329,18 +329,10 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             // Floating attribute or extension
             // Capture start_pos before consuming @ or @@ so attribute location includes it
             let attr_start_idx = p.start_pos_idx();
-            if p.token == Token::AtAt {
-                p.next();
-                let attr = parse_attribute_body(p, attr_start_idx);
-                parse_newline_or_semicolon_structure(p);
-                Some(StructureItemDesc::Pstr_attribute(Box::new(attr)))
-            } else {
-                // @ might be a doc comment or similar
-                p.next();
-                let attr = parse_attribute_body(p, attr_start_idx);
-                parse_newline_or_semicolon_structure(p);
-                Some(StructureItemDesc::Pstr_attribute(Box::new(attr)))
-            }
+            p.next();
+            let attr = parse_attribute_body(p, attr_start_idx);
+            parse_newline_or_semicolon_structure(p);
+            Some(StructureItemDesc::Pstr_attribute(Box::new(attr)))
         }
         Token::ModuleComment { content, .. } => {
             // Module-level doc comment (triple star /*** ... */) becomes a standalone res.doc attribute
@@ -828,17 +820,10 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::At | Token::AtAt => {
             // Capture start_pos before consuming @ or @@ so attribute location includes it
             let attr_start_idx = p.start_pos_idx();
-            if p.token == Token::AtAt {
-                p.next();
-                let attr = parse_attribute_body(p, attr_start_idx);
-                parse_newline_or_semicolon_signature(p);
-                Some(SignatureItemDesc::Psig_attribute(Box::new(attr)))
-            } else {
-                p.next();
-                let attr = parse_attribute_body(p, attr_start_idx);
-                parse_newline_or_semicolon_signature(p);
-                Some(SignatureItemDesc::Psig_attribute(Box::new(attr)))
-            }
+            p.next();
+            let attr = parse_attribute_body(p, attr_start_idx);
+            parse_newline_or_semicolon_signature(p);
+            Some(SignatureItemDesc::Psig_attribute(Box::new(attr)))
         }
         Token::ModuleComment { content, .. } => {
             // Module-level doc comment (triple star /*** ... */) becomes a standalone res.doc attribute

@@ -66,15 +66,10 @@ pub fn collect_ternary_parts<'a>(
     let mut parts = Vec::new();
     let mut current = expr;
 
-    loop {
-        match &*current.pexp_desc {
-            ExpressionDesc::Pexp_ternary(inner) => {
-                let (condition, consequent, alternate) = **inner;
-                parts.push((arena.get_expr(condition), arena.get_expr(consequent)));
-                current = arena.get_expr(alternate);
-            }
-            _ => break,
-        }
+    while let ExpressionDesc::Pexp_ternary(inner) = &*current.pexp_desc {
+        let (condition, consequent, alternate) = **inner;
+        parts.push((arena.get_expr(condition), arena.get_expr(consequent)));
+        current = arena.get_expr(alternate);
     }
 
     (parts, current)
@@ -432,13 +427,14 @@ fn is_multiline_text(txt: &str) -> bool {
 
 /// Check if an expression is "huggable" as a RHS (simpler than is_huggable_expression).
 pub fn is_huggable_rhs(expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    matches!(
+        &*expr.pexp_desc,
         ExpressionDesc::Pexp_array(_)
-        | ExpressionDesc::Pexp_tuple(_)
-        | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
-        _ => false,
-    }
+            | ExpressionDesc::Pexp_tuple(_)
+            | ExpressionDesc::Pexp_record(_)
+            | ExpressionDesc::Pexp_object_literal(_)
+            | ExpressionDesc::Pexp_braces(_)
+    )
 }
 
 /// Check if an expression is a unary expression.

@@ -373,13 +373,8 @@ fn print_leading_comment(comment: &Comment, next_comment: Option<&Comment>) -> D
             let next_loc = next.loc();
             let curr_loc = comment.loc();
             let diff = next_loc.loc_start.line - curr_loc.loc_end.line;
-            let next_single_line = next.is_single_line();
 
-            if single_line && next_single_line {
-                if diff > 1 {
-                    parts.push(Doc::hard_line());
-                }
-            } else if single_line && !next_single_line {
+            if single_line {
                 if diff > 1 {
                     parts.push(Doc::hard_line());
                 }
@@ -631,7 +626,7 @@ where
 
         if let Some(previous_loc) = previous_loc {
             let previous_end = arena.loc_end(previous_loc);
-            let separator = if start_pos.line as i32 - previous_end.line > 1 {
+            let separator = if start_pos.line - previous_end.line > 1 {
                 Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
             } else {
                 Doc::hard_line()
@@ -694,7 +689,7 @@ where
         };
 
         let prev_end = arena.loc_end(prev_loc);
-        let sep = if start_pos.line as i32 - prev_end.line > 1 && !ignore_empty_lines {
+        let sep = if start_pos.line - prev_end.line > 1 && !ignore_empty_lines {
             Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
         } else {
             Doc::line()
