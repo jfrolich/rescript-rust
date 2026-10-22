@@ -50,31 +50,36 @@ impl Sexp {
         Sexp::List(items)
     }
 
-    fn to_string_indent(&self, indent: usize) -> String {
-        let spaces: String = " ".repeat(indent * 2);
+    /// Append the rendering at nesting depth `indent` to `out`. Lists of two
+    /// or more items put each item after the first on its own line,
+    /// indented two spaces per level past the opening parenthesis.
+    fn write_indent(&self, out: &mut String, indent: usize) {
         match self {
-            Sexp::Atom(s) => s.clone(),
-            Sexp::List(items) if items.is_empty() => "()".to_string(),
-            Sexp::List(items) if items.len() == 1 => {
-                if let Sexp::Atom(s) = &items[0] {
-                    format!("({})", s)
-                } else {
-                    format!("({})", items[0].to_string_indent(indent))
-                }
-            }
+            Sexp::Atom(s) => out.push_str(s),
             Sexp::List(items) => {
-                let inner: Vec<String> = items
-                    .iter()
-                    .map(|item| item.to_string_indent(indent + 1))
-                    .collect();
-                let sep = format!("\n{}  ", spaces);
-                format!("({})", inner.join(&sep))
+                out.push('(');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push('\n');
+                        for _ in 0..indent + 1 {
+                            out.push_str("  ");
+                        }
+                    }
+                    // A one-item list keeps its item at the same depth.
+                    let depth = if items.len() == 1 { indent } else { indent + 1 };
+                    item.write_indent(out, depth);
+                }
+                out.push(')');
             }
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.to_string_indent(0)
+impl std::fmt::Display for Sexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = String::new();
+        self.write_indent(&mut out, 0);
+        f.write_str(&out)
     }
 }
 
@@ -2639,4 +2644,25 @@ pub fn print_typed_signature_with_locs<W: Write>(
 ) -> std::io::Result<()> {
     let sexp = sexp_typed_signature(arena, ctx, true, sig);
     write_latin1_line(out, &sexp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sexp;
+
+    #[test]
+    fn sexp_rendering_layout() {
+        let a = |s: &str| Sexp::atom(s);
+        assert_eq!(Sexp::list(vec![]).to_string(), "()");
+        assert_eq!(Sexp::list(vec![a("x")]).to_string(), "(x)");
+        let nested = Sexp::list(vec![
+            a("f"),
+            Sexp::list(vec![Sexp::list(vec![a("p"), a("q")])]),
+            Sexp::list(vec![a("g"), Sexp::list(vec![a("h"), a("i")])]),
+        ]);
+        assert_eq!(
+            nested.to_string(),
+            "(f\n  ((p\n    q))\n  (g\n    (h\n      i)))"
+        );
+    }
 }
