@@ -337,6 +337,20 @@ pub(crate) struct ExtractedExports {
     pub(crate) values: Vec<Expression>,
 }
 
+/// Whether `extract_toplevel_exports` succeeds on `expr`: the right spine of
+/// `Seq`s ends in a module-export block.
+fn ends_in_module_export(mut expr: &Expression) -> bool {
+    loop {
+        match &expr.desc {
+            ExpressionDesc::CamlBlock(_, _, tag) => {
+                return matches!(**tag, TagInfo::ModuleExport(_));
+            }
+            ExpressionDesc::Seq(_, right) => expr = right,
+            _ => return false,
+        }
+    }
+}
+
 pub(crate) fn extract_toplevel_exports(
     expr: Expression,
     block: &mut Block,
@@ -360,11 +374,9 @@ pub(crate) fn extract_toplevel_exports(
         }
         ExpressionDesc::Undefined { .. } => None,
         ExpressionDesc::Seq(left, right) => {
-            let mut right_block = Vec::new();
-            if let Some(exports) = extract_toplevel_exports((*right).clone(), &mut right_block) {
+            if ends_in_module_export(&right) {
                 push_effect_expression(block, *left);
-                block.extend(right_block);
-                Some(exports)
+                extract_toplevel_exports(*right, block)
             } else {
                 push_effect_expression(
                     block,
