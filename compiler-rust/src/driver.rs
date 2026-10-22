@@ -8650,6 +8650,12 @@ fn append_extra_type_clash_help(
     append_simple_conversion_help(type_ctx, arena, source, loc, trace, message);
 }
 
+// ANSI styles used by the error-message help builders below.
+const INFO: &str = "\x1b[1;33m";
+const RESET: &str = "\x1b[0m";
+const ERROR: &str = "\x1b[1;31m";
+const DIM: &str = "\x1b[2m";
+
 fn type_clash_escape_constructor_path(
     type_ctx: &TypeContext,
     trace: &[(TypeExprRef, TypeExprRef)],
@@ -8799,8 +8805,6 @@ fn append_math_operator_help(
     context: &Option<TypeClashContext>,
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some(TypeClashContext::MathOperator {
         for_float,
@@ -8930,8 +8934,6 @@ fn append_let_unwrap_return_help(
     context: &Option<TypeClashContext>,
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     if !matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
         return false;
@@ -9198,8 +9200,6 @@ fn append_optional_record_field_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some(TypeClashContext::RecordField {
         field_name,
@@ -9270,8 +9270,6 @@ fn append_optional_function_argument_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some(TypeClashContext::FunctionArgument { optional: true, .. }) = context else {
         return false;
@@ -9319,8 +9317,6 @@ fn append_runtime_coercion_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some(rewrite) = runtime_coercion_suggestion(type_ctx, arena, source, loc, trace) else {
         return false;
@@ -9624,8 +9620,6 @@ fn append_string_to_polyvariant_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some(row) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
@@ -9669,8 +9663,6 @@ fn append_string_to_variant_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((constructors, layout)) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
@@ -9834,9 +9826,6 @@ fn append_object_literal_record_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let has_object_record_mismatch = [
         bottom_type_clash_aliases(trace),
@@ -9887,8 +9876,6 @@ fn append_braced_ident_record_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     if !matches!(context, Some(TypeClashContext::BracedIdent)) {
         return false;
@@ -9992,8 +9979,6 @@ fn append_jsx_element_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((actual, _expected)) = jsx_element_type_clash_pair(type_ctx, trace) else {
         return false;
@@ -10138,8 +10123,6 @@ fn append_incompatible_type_parts(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
 
     let reports = super_trace_reports(type_ctx, trace);
     if reports.is_empty() {
@@ -10185,8 +10168,6 @@ fn append_type_expansion_report(
     color: &str,
     message: &mut String,
 ) {
-    const DIM: &str = "\x1b[2m";
-    const RESET: &str = "\x1b[0m";
 
     message.push_str(color);
     message.push_str(&format_type_expr(type_ctx, ty));
@@ -10381,9 +10362,6 @@ fn append_polyvariant_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((actual_ty, expected_ty)) = polyvariant_diagnostic_type_pair(type_ctx, trace) else {
         return false;
@@ -10620,9 +10598,6 @@ fn append_object_field_mismatch_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((field_name, actual_ty, expected_ty)) = trace
         .iter()
@@ -10662,8 +10637,6 @@ fn append_object_field_missing_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((first_object, field_name, field_ty)) = trace
         .iter()
@@ -10775,8 +10748,6 @@ fn append_dict_literal_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let has_dict_literal_mismatch = [
         bottom_type_clash_aliases(trace),
@@ -10877,8 +10848,6 @@ fn append_simple_conversion_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((actual_name, expected_name, converter)) =
         simple_conversion_candidate(type_ctx, trace)
@@ -11046,9 +11015,6 @@ fn format_function_arity_mismatch_report(
     actual_arity: i32,
     expected_arity: i32,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let mut message = String::new();
     message.push_str("This function is expected to have ");
@@ -11291,9 +11257,6 @@ fn format_uncurried_arity_mismatch_report(
     provided_args: &[crate::parser::ast::ArgLabel],
     arity_suggestion: Option<&str>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let args_from_type = collect_function_arg_labels(type_ctx, function_type);
     let args_from_type_unlabelled = args_from_type
@@ -11452,8 +11415,6 @@ fn format_constructor_arity_mismatch_report(
     expected: usize,
     provided: usize,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
 
     let name = format_longident_for_report(arena, name);
     let message = if is_inline_record && expected == 1 {
