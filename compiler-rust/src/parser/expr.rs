@@ -4375,7 +4375,7 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             let unit_pat = super::pattern::make_unit_construct_pattern(p, loc);
-            let pat = super::pattern::parse_alias_pattern(p, unit_pat, vec![]);
+            let pat = super::pattern::parse_alias_pattern(p, unit_pat, &[]);
             (pat, false)
         } else {
             // Could be:
@@ -4389,7 +4389,7 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
                 // Tuple pattern: for (a, b, ...) in ...
                 p.next();
                 let tuple_pat = super::pattern::parse_tuple_pattern(p, lparen_pos_idx, pat, vec![]);
-                let aliased = super::pattern::parse_alias_pattern(p, tuple_pat, vec![]);
+                let aliased = super::pattern::parse_alias_pattern(p, tuple_pat, &[]);
                 (aliased, false)
             } else {
                 // Pattern with outer paren: for (pattern in ...)

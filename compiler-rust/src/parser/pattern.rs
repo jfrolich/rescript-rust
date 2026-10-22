@@ -118,7 +118,7 @@ pub fn parse_pattern(p: &mut Parser<'_>) -> Pattern {
 fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
     let attrs = parse_attributes(p);
-    let token = p.token.clone().into_owned();
+    let token = p.token.clone();
     let pattern = match token {
         Token::True | Token::False => {
             let end_pos = p.end_pos_idx();
@@ -322,7 +322,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
         }
     };
     let pattern = if alias {
-        parse_alias_pattern(p, pattern, attrs.as_slice().to_vec())
+        parse_alias_pattern(p, pattern, attrs.as_slice())
     } else {
         pattern
     };
@@ -334,7 +334,8 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
 }
 
 /// OCaml `parse_alias_pattern ~attrs` (res_core.ml:1377-1386).
-pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: Vec<Attribute>) -> Pattern {
+/// The attributes are only copied once an `as` alias is actually parsed.
+pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: &[Attribute]) -> Pattern {
     if p.token != Token::As {
         return pattern;
     }
@@ -346,7 +347,7 @@ pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: Vec<Attr
     pat(
         PatternDesc::Ppat_alias(pattern_idx, with_loc(name_idx, name_loc)),
         loc,
-        Attributes::from_vec(attrs),
+        Attributes::from_vec(attrs.to_vec()),
     )
 }
 
