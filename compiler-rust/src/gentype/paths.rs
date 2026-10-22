@@ -40,14 +40,9 @@ pub fn handle_namespace(cmt: &str) -> String {
 
 pub fn remove_path_prefix(prefix: &str, path: &str) -> String {
     let normalized_prefix = concat(prefix, "");
-    let prefix_len = normalized_prefix.len();
-    let path_len = path.len();
-    let is_prefix = prefix_len <= path_len && path[..prefix_len] == normalized_prefix;
-    if is_prefix {
-        path[prefix_len..].to_string()
-    } else {
-        path.to_string()
-    }
+    path.strip_prefix(normalized_prefix.as_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 pub fn append_suffix(config: &crate::gentype::config::T, source_path: &str) -> String {
