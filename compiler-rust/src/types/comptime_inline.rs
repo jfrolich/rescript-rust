@@ -33,8 +33,7 @@ pub fn evaluate_js(source: &str) -> InlineEvalResult {
 
     match result {
         Ok(val) => {
-            if val.is_string() {
-                let js_str = val.to_string(&mut ctx).unwrap();
+            if let Some(js_str) = val.as_string() {
                 let s = js_str.to_std_string().unwrap_or_default();
                 InlineEvalResult::Value(ComptimeValue::String(s))
             } else if val.is_number() {
@@ -61,18 +60,6 @@ pub fn evaluate_js(_source: &str) -> InlineEvalResult {
     InlineEvalResult::Error(
         "@comptime.inline not available: compile with --features comptime-inline".to_string(),
     )
-}
-
-/// Format a ComptimeValue as a JS literal (for argument serialization).
-pub fn comptime_value_to_js_literal(val: &ComptimeValue) -> Option<String> {
-    match val {
-        ComptimeValue::Int(n) => Some(n.to_string()),
-        ComptimeValue::Float(f) => Some(f.to_string()),
-        ComptimeValue::String(s) => Some(format!("{:?}", s)),
-        ComptimeValue::Bool(b) => Some(b.to_string()),
-        ComptimeValue::Unit => Some("undefined".to_string()),
-        _ => None,
-    }
 }
 
 /// Translate a simple ReScript parse-tree expression to JavaScript source.
