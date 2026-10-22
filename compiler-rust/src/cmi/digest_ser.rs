@@ -49,8 +49,10 @@ impl<'h, H: Hasher> Canonical<'h, H> {
     }
 
     pub fn hash<T: Serialize + ?Sized>(&mut self, value: &T) {
-        // Hashing cannot fail: every serializer method below succeeds.
-        let _ = value.serialize(&mut *self);
+        // Hashing cannot fail: every serializer method below succeeds, and
+        // identifier stamps are always integers.
+        let result = value.serialize(&mut *self);
+        debug_assert!(result.is_ok(), "canonical hashing failed: {result:?}");
     }
 
     fn tag(&mut self, tag: u8) {
