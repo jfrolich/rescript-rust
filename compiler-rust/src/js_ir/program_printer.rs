@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-impl JsPrinter {
+impl JsPrinter<'_> {
     /// Print a program
     pub fn print_program(&mut self, program: &Program) {
         self.at_least_two_lines();
@@ -102,7 +102,6 @@ impl JsPrinter {
 
     fn current_module_format(&self) -> ModuleFormat {
         self.module_path_resolver
-            .as_ref()
             .map(ModulePathResolver::module_format)
             .unwrap_or(ModuleFormat::EsModule)
     }
@@ -120,7 +119,6 @@ impl JsPrinter {
 
             let path = self
                 .module_path_resolver
-                .as_ref()
                 .and_then(|resolver| resolver.resolve_module_path(module));
             let Some(path) = path else {
                 continue;

@@ -40,10 +40,13 @@ struct FunctionPrintContext<'a> {
     async_: bool,
     directive: Option<&'a str>,
     function_ident: Option<&'a Ident>,
+    /// `function_reserved_idents` for this function, when the caller already
+    /// computed it.
+    reserved_idents: Option<&'a [Ident]>,
 }
 
 /// JavaScript printer state
-pub struct JsPrinter {
+pub struct JsPrinter<'r> {
     /// Output buffer
     output: String,
     /// Current indentation level
@@ -55,7 +58,7 @@ pub struct JsPrinter {
     /// Assigned printable names for identifiers in the active lexical scopes.
     name_scopes: Vec<NameScope>,
     /// Module-path resolver used for printing import declarations.
-    pub(super) module_path_resolver: Option<ModulePathResolver>,
+    pub(super) module_path_resolver: Option<&'r ModulePathResolver>,
     /// Matches OCaml's `!Js_config.debug` toggle in the dumper.
     debug: bool,
     /// Matches OCaml's `!Js_config.jsx_preserve` guard in the dumper.
@@ -69,13 +72,13 @@ pub struct JsPrinter {
     generated_column: usize,
 }
 
-impl Default for JsPrinter {
+impl Default for JsPrinter<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl JsPrinter {
+impl<'r> JsPrinter<'r> {
     /// Create a new printer
     pub fn new() -> Self {
         Self {
@@ -102,13 +105,13 @@ impl JsPrinter {
     }
 
     /// Create a new printer with module import resolution context.
-    pub fn with_module_path_resolver(module_path_resolver: Option<&ModulePathResolver>) -> Self {
+    pub fn with_module_path_resolver(module_path_resolver: Option<&'r ModulePathResolver>) -> Self {
         Self::with_module_path_resolver_and_options(module_path_resolver, false, false)
     }
 
     /// Create a new printer with module import resolution context and debug mode.
     pub fn with_module_path_resolver_and_debug(
-        module_path_resolver: Option<&ModulePathResolver>,
+        module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
     ) -> Self {
         Self::with_module_path_resolver_and_options(module_path_resolver, debug, false)
@@ -116,31 +119,40 @@ impl JsPrinter {
 
     /// Create a new printer with module import resolution context and dumper options.
     pub fn with_module_path_resolver_and_options(
-        module_path_resolver: Option<&ModulePathResolver>,
+        module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
         jsx_preserve: bool,
     ) -> Self {
         let mut printer = Self::with_capacity(0);
-        printer.module_path_resolver = module_path_resolver.cloned();
+        printer.module_path_resolver = module_path_resolver;
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
         printer
     }
 
     pub(crate) fn with_module_path_resolver_options_and_capacity(
-        module_path_resolver: Option<&ModulePathResolver>,
+        module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
         jsx_preserve: bool,
         capacity: usize,
     ) -> Self {
         let mut printer = Self::with_capacity(capacity);
-        printer.module_path_resolver = module_path_resolver.cloned();
+        printer.module_path_resolver = module_path_resolver;
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
         printer
     }
 
     pub(crate) fn set_source_map_builder(&mut self, builder: SourceMapBuilder) {
+        // Generated positions are only tracked while a builder is installed;
+        // catch up on anything already printed.
+        if self.source_map.is_none() {
+            self.generated_line = 0;
+            self.generated_column = 0;
+            let output = std::mem::take(&mut self.output);
+            self.advance_generated_position(&output);
+            self.output = output;
+        }
         self.source_map = Some(builder);
     }
 
@@ -178,7 +190,9 @@ impl JsPrinter {
     /// Write a string
     pub(super) fn write(&mut self, s: &str) {
         self.output.push_str(s);
-        self.advance_generated_position(s);
+        if self.source_map.is_some() {
+            self.advance_generated_position(s);
+        }
         self.last_new_line = false;
     }
 
@@ -189,7 +203,7 @@ impl JsPrinter {
             last_new_line: false,
             indent_str: self.indent_str,
             name_scopes: self.name_scopes.clone(),
-            module_path_resolver: self.module_path_resolver.clone(),
+            module_path_resolver: self.module_path_resolver,
             debug: self.debug,
             jsx_preserve: self.jsx_preserve,
             suppress_member_target_call_arg_group_indent: self
@@ -236,18 +250,22 @@ impl JsPrinter {
     /// Write a character
     pub(super) fn write_char(&mut self, c: char) {
         self.output.push(c);
-        if c == '\n' {
-            self.generated_line += 1;
-            self.generated_column = 0;
-        } else {
-            self.generated_column += c.len_utf16();
+        if self.source_map.is_some() {
+            if c == '\n' {
+                self.generated_line += 1;
+                self.generated_column = 0;
+            } else {
+                self.generated_column += c.len_utf16();
+            }
         }
         self.last_new_line = false;
     }
 
     fn append_positioned(&mut self, text: &str) {
         self.output.push_str(text);
-        self.advance_generated_position(text);
+        if self.source_map.is_some() {
+            self.advance_generated_position(text);
+        }
     }
 
     /// Write a newline with current indentation
@@ -892,7 +910,7 @@ impl JsPrinter {
             }
         }
 
-        if let Some(Expression {
+        let reserved_idents = if let Some(Expression {
             desc: ExpressionDesc::Fun { params, body, .. },
             ..
         }) = &decl.value
@@ -900,9 +918,12 @@ impl JsPrinter {
             // OCaml reserves the unbounded function environment plus the
             // Name_non_top binding before printing it; see
             // compiler/core/js_dump.ml:337-345 and 411-414.
-            let reserved_idents = function_reserved_idents(params, body, Some(&decl.ident));
-            self.reserve_idents_in_current_scope(&reserved_idents);
-        }
+            let reserved = function_reserved_idents(params, body, Some(&decl.ident));
+            self.reserve_idents_in_current_scope(&reserved);
+            Some(reserved)
+        } else {
+            None
+        };
 
         let var_name = self.ident_name(&decl.ident);
         self.write("let ");
@@ -937,6 +958,7 @@ impl JsPrinter {
                         async_: *async_,
                         directive: directive.as_deref().map(|x| x.as_str()),
                         function_ident: Some(&decl.ident),
+                        reserved_idents: reserved_idents.as_deref(),
                     });
                 } else {
                     self.print_expression(value, 1);
@@ -955,10 +977,19 @@ impl JsPrinter {
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let reserved_idents = function_reserved_idents(params, body, function_ident);
+        self.with_reserved_ident_scope(&reserved_idents, f)
+    }
 
+    /// Like `with_function_ident_scope`, for callers that already computed
+    /// `function_reserved_idents` for the same function.
+    fn with_reserved_ident_scope<T>(
+        &mut self,
+        reserved_idents: &[Ident],
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let mut scope = NameScope::default();
         for ident in reserved_idents {
-            let printed = self.ident_name(&ident);
+            let printed = self.ident_name(ident);
             let (base, next_suffix) = printed_name_base_and_next_suffix(&printed);
             // OCaml's Ext_pp_scope.sub_scope copies the whole stamp map for a
             // captured mangled name, not just the one captured identifier
@@ -988,7 +1019,16 @@ impl JsPrinter {
             async_,
             directive,
             function_ident,
+            reserved_idents,
         } = context;
+        let computed_reserved_idents;
+        let reserved_idents = match reserved_idents {
+            Some(reserved_idents) => reserved_idents,
+            None => {
+                computed_reserved_idents = function_reserved_idents(params, body, function_ident);
+                &computed_reserved_idents
+            }
+        };
 
         // compiler/core/js_dump.ml:342-344 - when a function expression's body is
         // `[ Return (Call (Var v, args, _)) ]` with each
@@ -998,14 +1038,14 @@ impl JsPrinter {
         // `optimize len ~p cxt f v` -> `vident` for the clean
         // `arity = Full, call_info = Call_ml | Call_builtin_runtime` case.
         if let Some(target) = eta_reduce_function_body(is_method, params, body) {
-            self.with_function_ident_scope(params, body, function_ident, |this| {
+            self.with_reserved_ident_scope(reserved_idents, |this| {
                 this.print_vident(target);
             });
             return;
         }
 
         let use_arrow = !is_method;
-        self.with_function_ident_scope(params, body, function_ident, |this| {
+        self.with_reserved_ident_scope(reserved_idents, |this| {
             let (this_binding, param_names) =
                 this.method_params_and_binding(is_method, params, body);
 
@@ -1125,7 +1165,7 @@ impl JsPrinter {
         self.write("function ");
         let fn_name = self.ident_name(ident);
         self.write(&fn_name);
-        self.with_function_ident_scope(params, body, Some(ident), |this| {
+        self.with_reserved_ident_scope(&reserved_idents, |this| {
             let (this_binding, rendered_params) =
                 this.method_params_and_binding(is_method, params, body);
             this.write_char('(');
@@ -2080,6 +2120,7 @@ impl JsPrinter {
                     async_: *async_,
                     directive: directive.as_deref().map(|x| x.as_str()),
                     function_ident: None,
+                    reserved_idents: None,
                 });
             }
 
