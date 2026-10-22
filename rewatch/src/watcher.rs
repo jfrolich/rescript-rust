@@ -6,16 +6,14 @@ use crate::config::{self, SourceMapCommand};
 use crate::helpers;
 use crate::helpers::StrippedVerbatimPath;
 use crate::lock::LockKind;
-use crate::queue::FifoQueue;
-use crate::queue::*;
 use anyhow::{Context, Result};
 use console::Term;
-use futures_timer::Delay;
 use notify::event::ModifyKind;
-use notify::{Config, Error, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -60,8 +58,8 @@ fn is_in_build_path(path_buf: &Path) -> bool {
 fn matches_filter(path_buf: &Path, filter: &Option<regex::Regex>) -> bool {
     let name = path_buf
         .file_name()
-        .map(|x| x.to_string_lossy().to_string())
-        .unwrap_or("".to_string());
+        .map(|x| x.to_string_lossy())
+        .unwrap_or_default();
     filter.as_ref().map(|re| !re.is_match(&name)).unwrap_or(true)
 }
 
@@ -212,7 +210,6 @@ fn carry_forward_compile_state(previous: &BuildCommandState, next: &mut BuildCom
                     }
                 }
             }
-            (SourceType::MlMap(_), SourceType::MlMap(_)) => (),
             _ => (),
         }
     }
@@ -250,11 +247,11 @@ fn cleanup_before_watch_exit(
     build::with_build_lock(path, || clean::cleanup_after_build(build_state));
 }
 
-struct AsyncWatchArgs<'a> {
+struct WatchArgs<'a> {
     watcher: &'a mut RecommendedWatcher,
     current_watch_paths: Vec<(PathBuf, RecursiveMode)>,
     initial_build_state: BuildCommandState,
-    q: Arc<FifoQueue<Result<Event, Error>>>,
+    events: Receiver<notify::Result<Event>>,
     ctrlc_pressed: Arc<AtomicBool>,
     path: &'a Path,
     show_progress: bool,
@@ -293,12 +290,12 @@ fn serve_tooling_requests(
     }
 }
 
-async fn async_watch(
-    AsyncWatchArgs {
+fn watch_loop(
+    WatchArgs {
         watcher,
         mut current_watch_paths,
         initial_build_state,
-        q,
+        events: event_receiver,
         ctrlc_pressed,
         path,
         show_progress,
@@ -309,7 +306,7 @@ async fn async_watch(
         prod,
         features,
         tooling_requests,
-    }: AsyncWatchArgs<'_>,
+    }: WatchArgs<'_>,
 ) -> Result<()> {
     let mut build_state = initial_build_state;
     let mut needs_compile_type = CompileType::None;
@@ -320,13 +317,15 @@ async fn async_watch(
             break Ok(());
         }
         let mut events: Vec<Event> = vec![];
-        if !q.is_empty() {
+        let mut pending = event_receiver.try_iter().peekable();
+        if pending.peek().is_some() {
             // Wait for events to settle
-            Delay::new(Duration::from_millis(50)).await;
+            std::thread::sleep(Duration::from_millis(50));
         }
-        while !q.is_empty() {
-            if let Ok(event) = q.pop() {
-                events.push(event)
+        for result in pending {
+            match result {
+                Ok(event) => events.push(event),
+                Err(error) => log::debug!("file watcher error: {error}"),
             }
         }
 
@@ -406,48 +405,37 @@ async fn async_watch(
                             .canonicalize()
                             .map(StrippedVerbatimPath::to_stripped_verbatim_path)
                         {
-                            // Collect package names first to avoid borrow checker issues
-                            let module_package_pairs = build_state.module_name_package_pairs();
+                            let build::build_types::BuildState { modules, packages, .. } =
+                                &mut build_state.build_state;
+                            for module in modules.values_mut() {
+                                let package = packages.get(&module.package_name).expect("Package not found");
+                                let SourceType::SourceFile(ref mut source_file) = module.source_type else {
+                                    continue;
+                                };
 
-                            for (module_name, package_name) in module_package_pairs {
-                                let package = build_state
-                                    .build_state
-                                    .packages
-                                    .get(&package_name)
-                                    .expect("Package not found");
+                                let canonicalized_implementation_file =
+                                    package.path.join(&source_file.implementation.path);
+                                if canonicalized_path_buf == canonicalized_implementation_file {
+                                    if let Ok(modified) =
+                                        canonicalized_path_buf.metadata().and_then(|x| x.modified())
+                                    {
+                                        source_file.implementation.last_modified = modified;
+                                    };
+                                    source_file.implementation.parse_dirty = true;
+                                    break;
+                                }
 
-                                if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
-                                    match module.source_type {
-                                        SourceType::SourceFile(ref mut source_file) => {
-                                        let canonicalized_implementation_file =
-                                            package.path.join(&source_file.implementation.path);
-                                        if canonicalized_path_buf == canonicalized_implementation_file {
-                                            if let Ok(modified) =
-                                                canonicalized_path_buf.metadata().and_then(|x| x.modified())
-                                            {
-                                                source_file.implementation.last_modified = modified;
-                                            };
-                                            source_file.implementation.parse_dirty = true;
-                                            break;
+                                // mark the interface file dirty
+                                if let Some(ref mut interface) = source_file.interface {
+                                    let canonicalized_interface_file = package.path.join(&interface.path);
+                                    if canonicalized_path_buf == canonicalized_interface_file {
+                                        if let Ok(modified) =
+                                            canonicalized_path_buf.metadata().and_then(|x| x.modified())
+                                        {
+                                            interface.last_modified = modified;
                                         }
-
-                                        // mark the interface file dirty
-                                        if let Some(ref mut interface) = source_file.interface {
-                                            let canonicalized_interface_file =
-                                                package.path.join(&interface.path);
-                                            if canonicalized_path_buf == canonicalized_interface_file {
-                                                if let Ok(modified) = canonicalized_path_buf
-                                                    .metadata()
-                                                    .and_then(|x| x.modified())
-                                                {
-                                                    interface.last_modified = modified;
-                                                }
-                                                interface.parse_dirty = true;
-                                                break;
-                                            }
-                                        }
-                                        }
-                                        SourceType::MlMap(_) => (),
+                                        interface.parse_dirty = true;
+                                        break;
                                     }
                                 }
                             }
@@ -603,7 +591,7 @@ async fn async_watch(
                             serve_tooling_request(&build_state, request);
                         }
                     }
-                    None => Delay::new(Duration::from_millis(50)).await,
+                    None => std::thread::sleep(Duration::from_millis(50)),
                 }
             }
         }
@@ -624,120 +612,114 @@ pub fn start(
     prod: bool,
     features: Option<Vec<String>>,
 ) -> Result<()> {
-    futures::executor::block_on(async {
-        let queue = Arc::new(FifoQueue::<Result<Event, Error>>::new());
-        let producer = queue.clone();
-        let consumer = queue.clone();
+    let (event_sender, event_receiver) = std::sync::mpsc::channel();
+    let mut watcher =
+        RecommendedWatcher::new(event_sender, Config::default()).expect("Could not create watcher");
 
-        let mut watcher = RecommendedWatcher::new(move |res| producer.push(res), Config::default())
-            .expect("Could not create watcher");
+    let path = Path::new(folder);
 
-        let path = Path::new(folder);
+    let ctrlc_pressed = Arc::new(AtomicBool::new(false));
+    let ctrlc_pressed_for_handler = Arc::clone(&ctrlc_pressed);
+    ctrlc::set_handler(move || {
+        ctrlc_pressed_for_handler.store(true, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
 
-        let ctrlc_pressed = Arc::new(AtomicBool::new(false));
-        let ctrlc_pressed_for_handler = Arc::clone(&ctrlc_pressed);
-        ctrlc::set_handler(move || {
-            ctrlc_pressed_for_handler.store(true, Ordering::SeqCst);
-        })
-        .expect("Error setting Ctrl-C handler");
+    // In-process builds write no typed artifacts: editor tooling asks the
+    // watcher, which compiles them on demand.
+    let (tooling_server, tooling_requests) = match build_mode.is_in_process() {
+        true => match crate::tooling_server::start(path) {
+            Ok((server, requests)) => (Some(server), Some(requests)),
+            Err(err) => {
+                log::warn!("Could not start the editor tooling server: {err}");
+                (None, None)
+            }
+        },
+        false => (None, None),
+    };
 
-        // In-process builds write no typed artifacts: editor tooling asks the
-        // watcher, which compiles them on demand.
-        let (tooling_server, tooling_requests) = match build_mode.is_in_process() {
-            true => match crate::tooling_server::start(path) {
-                Ok((server, requests)) => (Some(server), Some(requests)),
-                Err(err) => {
-                    log::warn!("Could not start the editor tooling server: {err}");
-                    (None, None)
-                }
-            },
-            false => (None, None),
-        };
-
-        // Initialization can clean previous build artifacts, so it has to be serialized
-        // with the initial compile too.
-        let (build_state, current_watch_paths, initial_compile_result): StartupBuildResult =
-            build::with_build_lock(path, || {
-                let mut build_state = build::initialize_build(
-                    None,
-                    filter,
-                    show_progress,
-                    path,
-                    plain_output,
-                    warn_error.clone(),
-                    build_mode,
-                    dump_typed_sexp,
-                    prod,
-                    features.clone(),
-                    SourceMapCommand::Watch,
-                )
-                .with_context(|| "Could not initialize build")?;
-
-                // Compute and register targeted watches based on source folders.
-                let current_watch_paths = compute_watch_paths(&build_state, path);
-                register_watches(&mut watcher, &current_watch_paths);
-
-                let timing_total = Instant::now();
-                let initial_compile_result = build::incremental_build_without_lock(
-                    &mut build_state,
-                    None,
-                    true,
-                    show_progress,
-                    false,
-                    plain_output,
-                )
-                .ok()
-                .map(|result| (timing_total, result));
-
-                Ok::<StartupBuildResult, anyhow::Error>((
-                    build_state,
-                    current_watch_paths,
-                    initial_compile_result,
-                ))
-            })?;
-
-        if ctrlc_pressed.load(Ordering::SeqCst) {
-            cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
-            return Ok(());
-        }
-
-        // The initial build has published the interfaces typed artifacts are
-        // compiled against: announce the tooling server.
-        if let Some(server) = &tooling_server
-            && let Err(err) = server.publish()
-        {
-            log::warn!("Could not publish the editor tooling server: {err}");
-        }
-
-        // Run after-build outside build.lock. Hooks may invoke ReScript commands that need the same lock.
-        if let Some((timing_total, result)) = initial_compile_result {
-            finish_successful_watch_compile(
-                after_build.clone(),
-                timing_total,
+    // Initialization can clean previous build artifacts, so it has to be serialized
+    // with the initial compile too.
+    let (build_state, current_watch_paths, initial_compile_result): StartupBuildResult =
+        build::with_build_lock(path, || {
+            let mut build_state = build::initialize_build(
+                None,
+                filter,
                 show_progress,
+                path,
                 plain_output,
-                "Finished initial compilation",
-                Some("initial"),
-                result,
-            );
-        }
-        async_watch(AsyncWatchArgs {
-            watcher: &mut watcher,
-            current_watch_paths,
-            initial_build_state: build_state,
-            q: consumer,
-            ctrlc_pressed,
-            path,
+                warn_error.clone(),
+                build_mode,
+                dump_typed_sexp,
+                prod,
+                features.clone(),
+                SourceMapCommand::Watch,
+            )
+            .with_context(|| "Could not initialize build")?;
+
+            // Compute and register targeted watches based on source folders.
+            let current_watch_paths = compute_watch_paths(&build_state, path);
+            register_watches(&mut watcher, &current_watch_paths);
+
+            let timing_total = Instant::now();
+            let initial_compile_result = build::incremental_build_without_lock(
+                &mut build_state,
+                None,
+                true,
+                show_progress,
+                false,
+                plain_output,
+            )
+            .ok()
+            .map(|result| (timing_total, result));
+
+            Ok::<StartupBuildResult, anyhow::Error>((
+                build_state,
+                current_watch_paths,
+                initial_compile_result,
+            ))
+        })?;
+
+    if ctrlc_pressed.load(Ordering::SeqCst) {
+        cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
+        return Ok(());
+    }
+
+    // The initial build has published the interfaces typed artifacts are
+    // compiled against: announce the tooling server.
+    if let Some(server) = &tooling_server
+        && let Err(err) = server.publish()
+    {
+        log::warn!("Could not publish the editor tooling server: {err}");
+    }
+
+    // Run after-build outside build.lock. Hooks may invoke ReScript commands that need the same lock.
+    if let Some((timing_total, result)) = initial_compile_result {
+        finish_successful_watch_compile(
+            after_build.clone(),
+            timing_total,
             show_progress,
-            filter,
-            after_build,
             plain_output,
-            clear_screen,
-            prod,
-            features,
-            tooling_requests,
-        })
-        .await
+            "Finished initial compilation",
+            Some("initial"),
+            result,
+        );
+    }
+    watch_loop(WatchArgs {
+        watcher: &mut watcher,
+        current_watch_paths,
+        initial_build_state: build_state,
+        events: event_receiver,
+        ctrlc_pressed,
+        path,
+        show_progress,
+        filter,
+        after_build,
+        plain_output,
+        clear_screen,
+        prod,
+        features,
+        tooling_requests,
     })
 }
 
