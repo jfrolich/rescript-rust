@@ -14,7 +14,7 @@
 //!    the portable graph, allocates fresh `TypeExprRef`s in the current arena,
 //!    and produces a valid `PersStruct`.
 
-use std::collections::HashMap;
+use crate::fast_hash::AHashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -676,12 +676,12 @@ fn serialize_signature(
         ctx,
         arena,
         entries: Vec::new(),
-        cache: HashMap::new(),
+        cache: AHashMap::new(),
         variant_layouts: Vec::new(),
-        variant_layout_cache: HashMap::new(),
-        file_name_cache: HashMap::new(),
+        variant_layout_cache: AHashMap::new(),
+        file_name_cache: AHashMap::new(),
         mutabilities: Vec::new(),
-        mutability_cache: HashMap::new(),
+        mutability_cache: AHashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
@@ -698,13 +698,13 @@ struct TypeGraphSerializer<'a> {
     ctx: &'a TypeContext,
     arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
-    cache: HashMap<TypeExprRef, usize>,
+    cache: AHashMap<TypeExprRef, usize>,
     variant_layouts: Vec<crate::types::VariantLayout>,
-    variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
+    variant_layout_cache: AHashMap<crate::types::VariantLayoutRef, usize>,
     /// Source-arena file names re-interned as synthetic CMI names.
-    file_name_cache: HashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
+    file_name_cache: AHashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
     mutabilities: Vec<crate::types::asttypes::MutableFlag>,
-    mutability_cache: HashMap<MutabilityRef, usize>,
+    mutability_cache: AHashMap<MutabilityRef, usize>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
@@ -1298,11 +1298,11 @@ fn remap_signature_file_names(
     names: &[(u32, String)],
     intern: &dyn Fn(&str) -> crate::intern::StrIdx,
 ) {
-    let names: HashMap<u32, &str> = names
+    let names: AHashMap<u32, &str> = names
         .iter()
         .map(|(raw, name)| (*raw, name.as_str()))
         .collect();
-    let mut fresh: HashMap<u32, crate::intern::StrIdx> = HashMap::new();
+    let mut fresh: AHashMap<u32, crate::intern::StrIdx> = AHashMap::new();
     crate::types::decl::for_each_signature_location(sig, &mut |loc| {
         for pos in [&mut loc.loc_start, &mut loc.loc_end] {
             let raw = pos.file_name.raw();
@@ -1663,12 +1663,12 @@ mod type_arg_tests {
             ctx: &ctx,
             arena: None,
             entries: Vec::new(),
-            cache: HashMap::new(),
+            cache: AHashMap::new(),
             variant_layouts: Vec::new(),
-            variant_layout_cache: HashMap::new(),
-            file_name_cache: HashMap::new(),
+            variant_layout_cache: AHashMap::new(),
+            file_name_cache: AHashMap::new(),
             mutabilities: Vec::new(),
-            mutability_cache: HashMap::new(),
+            mutability_cache: AHashMap::new(),
         };
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {
