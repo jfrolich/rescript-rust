@@ -2744,6 +2744,13 @@ pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommand
     register_source_fallback_paths(build_state);
 }
 
+/// Whether `RESCRIPT_MODULE_TIMINGS` is set; read once per process rather
+/// than on every module compile.
+fn module_timings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some())
+}
+
 /// Run the runtime pre-compilation `work` on a dedicated large-stack thread
 /// in `scope`; join it with [`join_runtime_precompile`].
 pub(crate) fn spawn_runtime_precompile<'scope>(
@@ -2961,8 +2968,8 @@ pub(crate) fn pre_compile_runtime_modules(
     runtime_root: &Path,
 ) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
-    let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
-        || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let runtime_timing_enabled =
+        std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some() || module_timings_enabled();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
     let runtime_config = packages::read_config(runtime_root)
@@ -3679,7 +3686,7 @@ fn compile_module_in_process_to_js_boundary(
         package = %package.name
     )
     .entered();
-    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_enabled = module_timings_enabled();
     let module_timing_start = module_timing_enabled.then(Instant::now);
     let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
     let _counter_guard = rescript_compiler::perf_counters::ModuleCounterGuard::start(module_name);
@@ -4083,7 +4090,7 @@ fn finish_in_process_js_inner(
         is_clean: _,
         registry_only,
     } = pre_js_msg;
-    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_enabled = module_timings_enabled();
     let module_timing_start = module_timing_enabled.then(Instant::now);
     let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
     let module = build_state.get_module(&module_name).unwrap();
