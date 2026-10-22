@@ -13269,27 +13269,6 @@ fn duplicate_ident_types_for_gadt_cases(
     copied_env
 }
 
-fn shallow_copy_pattern_binding_type(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    copy_nullary: bool,
-) -> TypeExprRef {
-    let repr = ctx.repr(ty);
-    let desc = ctx.get_desc(repr);
-    let (path, args) = match &*desc {
-        TypeDesc::Tconstr { path, args, .. } if copy_nullary || !args.is_empty() => {
-            (path.clone(), args.clone())
-        }
-        _ => return ty,
-    };
-    let level = ctx.get_level(repr);
-    drop(desc);
-
-    let copied = ctx.new_constr(path, args.to_vec());
-    ctx.set_level(copied, level);
-    copied
-}
-
 fn is_simple_variable_pattern(arena: &ParseArena, pat: &ParsedPattern) -> bool {
     match &*pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any
@@ -14903,34 +14882,6 @@ fn type_construct(
     ))
 }
 
-fn is_active_recursive_value_ident(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    lid: &Located<LidentIdx>,
-) -> bool {
-    if tctx.active_recursive_value_ids.is_empty() {
-        return false;
-    }
-
-    let longident = tctx.arena.get_longident(lid.txt);
-    let Ok((path, _)) = env.lookup_value_by_lid(
-        longident,
-        tctx.arena,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-    ) else {
-        return false;
-    };
-
-    match path {
-        Path::Pident(id) => tctx
-            .active_recursive_value_ids
-            .iter()
-            .any(|active| active == &id),
-        _ => false,
-    }
-}
-
 /// Type check polymorphic variant.
 fn type_variant(
     tctx: &mut TypeCheckContext<'_>,
@@ -15120,16 +15071,6 @@ impl RecordLabelDescriptionsInfo {
             field_names.len() == self.labels.len()
         }
     }
-}
-
-fn find_record_label_description_by_name(
-    labels: Option<&[crate::types::LabelDescription]>,
-    label_name: &str,
-) -> Option<crate::types::LabelDescription> {
-    labels?
-        .iter()
-        .find(|label| label.lbl_name == label_name)
-        .cloned()
 }
 
 fn qualified_record_label_from_info(
@@ -19071,16 +19012,6 @@ fn apply_letmodule_local_path_cleanup(
     }
 }
 
-fn expression_result_loc(expr: &Expression) -> LocIdx {
-    match &expr.exp_desc {
-        ExpressionDesc::Texp_let(_, _, body)
-        | ExpressionDesc::Texp_letmodule(_, _, _, body)
-        | ExpressionDesc::Texp_letexception(_, body)
-        | ExpressionDesc::Texp_sequence(_, body) => expression_result_loc(body),
-        _ => expr.exp_loc,
-    }
-}
-
 fn unbound_value_error(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -19521,83 +19452,6 @@ fn type_letmodule(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    fn path_root_is_module(path: &Path, module_id: &Ident) -> bool {
-        match path {
-            Path::Pident(id) => id.same(module_id),
-            Path::Pdot(prefix, _, _) => path_root_is_module(prefix, module_id),
-            Path::Papply(_, _) => false,
-        }
-    }
-
-    fn replace_module_root_path(path: &Path, module_id: &Ident, alias_root: &Path) -> Path {
-        match path {
-            Path::Pident(id) => {
-                if id.same(module_id) {
-                    alias_root.clone()
-                } else {
-                    path.clone()
-                }
-            }
-            Path::Pdot(prefix, name, _) => {
-                let rewritten_prefix = replace_module_root_path(prefix, module_id, alias_root);
-                if rewritten_prefix == **prefix {
-                    path.clone()
-                } else {
-                    Path::pdot(rewritten_prefix, *name)
-                }
-            }
-            Path::Papply(_, _) => path.clone(),
-        }
-    }
-
-    fn resolve_alias_root_from_module_type(
-        env: &Env,
-        mty: &crate::types::decl::ModuleType,
-        visited: &mut HashSet<String>,
-    ) -> Option<Path> {
-        use crate::types::decl::ModuleType as DeclMty;
-
-        match mty {
-            DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
-            DeclMty::MtyIdent(path) => match path {
-                Path::Pident(id) => {
-                    let name = id.name().to_string();
-                    if !visited.insert(name.clone()) {
-                        return None;
-                    }
-
-                    if let Ok(mtd) = env.find_modtype(&name) {
-                        if let Some(inner_mty) = &mtd.mtd_type {
-                            if let Some(alias_root) =
-                                resolve_alias_root_from_module_type(env, inner_mty, visited)
-                            {
-                                return Some(alias_root);
-                            }
-                        }
-                    }
-
-                    if let Ok(md) = env.find_module(&name) {
-                        if let Some(alias_root) =
-                            resolve_alias_root_from_module_type(env, &md.md_type, visited)
-                        {
-                            return Some(alias_root);
-                        }
-                    }
-
-                    None
-                }
-                _ => Some(path.clone()),
-            },
-            _ => None,
-        }
-    }
-
-    fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
-        let md = env.find_module(module_id.name()).ok()?;
-        let mut visited = HashSet::new();
-        resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
-    }
-
     fn register_module_type_type_decls_by_stamp(
         ctx: &TypeContext,
         mty: &crate::types::decl::ModuleType,
@@ -19636,59 +19490,6 @@ fn type_letmodule(
             }
             DeclMty::MtyAlias(_, _) | DeclMty::MtyIdent(_) => {}
         }
-    }
-
-    fn replace_letmodule_local_paths(
-        ctx: &TypeContext,
-        env: &Env,
-        ty: TypeExprRef,
-        module_id: &Ident,
-        seen: &mut HashSet<TypeExprRef>,
-    ) {
-        let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
-            return;
-        }
-
-        let local_constr = match &*ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, args, .. } if path_root_is_module(path, module_id) => {
-                Some((path.clone(), args.clone()))
-            }
-            _ => None,
-        };
-
-        if let Some((local_path, local_args)) = local_constr {
-            // Match OCaml `Ctype.nondep_type`: for local module-rooted paths,
-            // first try one-step abbreviation expansion.
-            if let Some(expanded) = crate::types::ctype::expand_head_once(ctx, env, ty) {
-                let expanded = ctx.repr(expanded);
-                if expanded != ty {
-                    crate::types::link_type(ctx, ty, expanded);
-                    replace_letmodule_local_paths(ctx, env, expanded, module_id, seen);
-                    return;
-                }
-            }
-
-            // If expansion is unavailable, try replacing the local root module
-            // with its underlying alias root path (`MS.t` -> `Belt_MapString.t`).
-            if let Some(alias_root) = resolve_letmodule_alias_root(env, module_id) {
-                let rewritten_path = replace_module_root_path(&local_path, module_id, &alias_root);
-                if rewritten_path != local_path {
-                    let rewritten_ty = ctx.new_constr(rewritten_path, local_args.to_vec());
-                    crate::types::link_type(ctx, ty, rewritten_ty);
-                    replace_letmodule_local_paths(ctx, env, rewritten_ty, module_id, seen);
-                    return;
-                }
-            }
-
-            // OCaml keeps truly local abstract types visible here so the
-            // scoping check can report that the type constructor would escape.
-            return;
-        }
-
-        crate::types::iter_type_expr(ctx, ty, |child| {
-            replace_letmodule_local_paths(ctx, env, child, module_id, seen);
-        });
     }
 
     let arena = tctx.arena;
@@ -20324,33 +20125,6 @@ fn module_type_from_package_binding(
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)))
 }
 
-fn typed_module_type_for_unpack(
-    arena: &ParseArena,
-    loc: LocIdx,
-    module_type: &crate::types::decl::ModuleType,
-) -> crate::types::typedtree::ModuleType {
-    use crate::types::decl::ModuleType as DeclMty;
-    use crate::types::typedtree::ModuleTypeDesc;
-
-    match module_type {
-        DeclMty::MtyIdent(path) => crate::types::typedtree::ModuleType {
-            mty_desc: ModuleTypeDesc::Tmty_ident(path.clone(), arena.placeholder_located(loc)),
-            mty_type: module_type.clone(),
-            mty_env: EnvRef(0),
-            mty_loc: loc,
-            mty_attributes: Attributes::new(),
-        },
-        DeclMty::MtyAlias(_, path) => crate::types::typedtree::ModuleType {
-            mty_desc: ModuleTypeDesc::Tmty_alias(path.clone(), arena.placeholder_located(loc)),
-            mty_type: module_type.clone(),
-            mty_env: EnvRef(0),
-            mty_loc: loc,
-            mty_attributes: Attributes::new(),
-        },
-        _ => crate::types::typedtree::ModuleType::placeholder(),
-    }
-}
-
 fn type_expect_with_module_unpacks(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -20503,31 +20277,6 @@ fn type_expect_with_module_unpacks(
         tctx.type_ctx.store_typed_env(env),
         modulepat_attrs.into(),
     ))
-}
-
-fn extract_recursive_binding_name(
-    pat: &crate::parser::ast::Pattern,
-    arena: &ParseArena,
-) -> Option<crate::parser::ast::StringLoc> {
-    match &*pat.ppat_desc {
-        crate::parser::ast::PatternDesc::Ppat_var(name) => Some(*name),
-        crate::parser::ast::PatternDesc::Ppat_constraint(inner) => {
-            let (inner_pat, _) = &**inner;
-            extract_recursive_binding_name(arena.get_pat(*inner_pat), arena)
-        }
-        crate::parser::ast::PatternDesc::Ppat_alias(inner, alias_name) => {
-            let inner_pat = arena.get_pat(*inner);
-            if matches!(
-                &*inner_pat.ppat_desc,
-                crate::parser::ast::PatternDesc::Ppat_any
-            ) {
-                Some(*alias_name)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
 }
 
 fn has_internal_expansive_attribute(
