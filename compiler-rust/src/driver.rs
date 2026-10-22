@@ -2226,6 +2226,16 @@ fn format_reparse_warnings(type_ctx: &TypeContext) -> String {
     output
 }
 
+/// The typed environment recorded for an error, or an empty one when none
+/// was captured. Error printers only read the environment.
+fn typed_env_or_empty(
+    type_ctx: &TypeContext,
+    env: Option<crate::types::typedtree::EnvRef>,
+) -> std::sync::Arc<crate::types::Env> {
+    env.and_then(|env| type_ctx.get_typed_env(env))
+        .unwrap_or_else(|| std::sync::Arc::new(crate::types::Env::empty()))
+}
+
 fn type_mod_error_to_anyhow_styled(
     err: TypeModError,
     type_ctx: &TypeContext,
@@ -2234,17 +2244,20 @@ fn type_mod_error_to_anyhow_styled(
     filename: &str,
     suppress_info_style: bool,
 ) -> anyhow::Error {
-    match &err {
+    let err = match err {
         TypeModError::CoreError(TypeCoreError::ModuleError(module_error)) => {
-            type_mod_error_to_anyhow(
-                (**module_error).clone(),
+            return type_mod_error_to_anyhow(
+                *module_error,
                 type_ctx,
                 arena,
                 source,
                 filename,
                 suppress_info_style,
-            )
+            );
         }
+        err => err,
+    };
+    match &err {
         TypeModError::CoreError(TypeCoreError::UncurriedArityMismatch {
             loc,
             function_type,
@@ -2330,10 +2343,7 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
+            let env = typed_env_or_empty(type_ctx, *env);
             let message = type_clash::render_error_message(|ppf| {
                 type_clash::print_or_pattern_type_clash(ppf, type_ctx, &env, id.name(), trace)
             });
@@ -2847,10 +2857,7 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
+            let env = typed_env_or_empty(type_ctx, *env);
             let message = type_clash::render_error_message(|ppf| {
                 type_clash::print_pattern_type_clash(ppf, type_ctx, &env, trace)
             });
@@ -2900,10 +2907,7 @@ fn type_mod_error_to_anyhow_styled(
             context,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
+            let env = typed_env_or_empty(type_ctx, *env);
             let message = type_clash::render_error_message(|ppf| {
                 type_clash::print_not_subtype(ppf, type_ctx, &env, trace, trace2, context.as_ref())
             });
@@ -2917,10 +2921,7 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
+            let env = typed_env_or_empty(type_ctx, *env);
             let message = type_clash::render_error_message(|ppf| {
                 type_clash::print_less_general(ppf, type_ctx, &env, kind, trace)
             });
