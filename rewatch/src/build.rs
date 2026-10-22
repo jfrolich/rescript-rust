@@ -92,7 +92,7 @@ pub enum CompilationOutcome {
 }
 
 fn has_output(output: &str) -> bool {
-    helpers::contains_ascii_characters(output)
+    helpers::has_ascii_alphanumeric(output)
 }
 
 fn has_config_warnings(build_state: &BuildCommandState) -> bool {

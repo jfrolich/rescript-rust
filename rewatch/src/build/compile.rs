@@ -4575,7 +4575,7 @@ fn in_process_compile_error(module_name: &str, err: anyhow::Error) -> anyhow::Er
 }
 
 fn visible_compiler_warnings(stderr: &str, is_local_dep: bool) -> Option<String> {
-    if !helpers::contains_ascii_characters(stderr) {
+    if !helpers::has_ascii_alphanumeric(stderr) {
         return None;
     }
     if is_local_dep {

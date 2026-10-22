@@ -712,7 +712,8 @@ fn generate_ast(
     let parser_args = if use_rust_parser {
         Vec::new()
     } else {
-        let contents = helpers::read_file(&file_path).expect("Error reading file");
+        let contents = helpers::read_file(&file_path)
+            .with_context(|| format!("Error reading file {}", file_path.display()))?;
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
             &package.config,
@@ -733,7 +734,8 @@ fn generate_ast(
     // generate the dir of the ast_path (it mirrors the source file dir)
     if !in_process {
         let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
-        helpers::create_path(&ast_parent_path);
+        helpers::create_path(&ast_parent_path)
+            .with_context(|| format!("Could not create {}", ast_parent_path.display()))?;
     }
 
     /* Create .ast */
@@ -756,51 +758,37 @@ fn generate_ast(
             deps,
         })
     } else {
-        match Some(
-            Command::new(&build_state.compiler_info.bsc_path)
-                .current_dir(&build_path_abs)
-                .args(parser_args)
-                .output()
-                .map_err(|e| {
-                    anyhow!(
-                        "Error running bsc for parsing {}: {}",
-                        filename.to_string_lossy(),
-                        e
-                    )
-                })?,
-        ) {
-            Some(res_to_ast) => {
-                let stderr = String::from_utf8_lossy(&res_to_ast.stderr).to_string();
+        let res_to_ast = Command::new(&build_state.compiler_info.bsc_path)
+            .current_dir(&build_path_abs)
+            .args(parser_args)
+            .output()
+            .map_err(|e| {
+                anyhow!(
+                    "Error running bsc for parsing {}: {}",
+                    filename.to_string_lossy(),
+                    e
+                )
+            })?;
+        let stderr = String::from_utf8_lossy(&res_to_ast.stderr).into_owned();
 
-                if helpers::contains_ascii_characters(&stderr) {
-                    if res_to_ast.status.success() {
-                        Ok(GeneratedAst {
-                            path: ast_path.clone(),
-                            stderr: Some(stderr.to_string()),
-                            stored_ast: None,
-                            deps: None,
-                        })
-                    } else {
-                        Err(anyhow!("Error in {}:\n{}", package.name, stderr))
-                    }
-                } else {
-                    Ok(GeneratedAst {
-                        path: ast_path.clone(),
-                        stderr: None,
-                        stored_ast: None,
-                        deps: None,
-                    })
-                }
+        if helpers::has_ascii_alphanumeric(&stderr) {
+            if res_to_ast.status.success() {
+                Ok(GeneratedAst {
+                    path: ast_path.clone(),
+                    stderr: Some(stderr),
+                    stored_ast: None,
+                    deps: None,
+                })
+            } else {
+                Err(anyhow!("Error in {}:\n{}", package.name, stderr))
             }
-            _ => {
-                log::info!("Parsing file {}...", filename.display());
-
-                Err(anyhow!(
-                    "Could not find canonicalize_string_path for file {} in package {}",
-                    filename.display(),
-                    package.name
-                ))
-            }
+        } else {
+            Ok(GeneratedAst {
+                path: ast_path.clone(),
+                stderr: None,
+                stored_ast: None,
+                deps: None,
+            })
         }
     };
     if !in_process && let Ok(GeneratedAst { path: ast_path, .. }) = &result {
