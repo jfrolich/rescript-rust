@@ -1,12 +1,14 @@
-//! Minimal Rust bsc replacement.
+//! The Rust `bsc` command line.
 //!
-//! This is a lightweight CLI that supports:
-//! - `-bs-ast` parsing (produces a simple .ast file)
-//! - compiling a .res/.resi (or .ast) file to JS using the Rust pipeline
-//! - `-bs-package-output` for determining output directories
-//! - `-bs-ns` for namespace suffix in module names
+//! It mirrors the OCaml `bsc` driver (rescript_compiler_main.ml):
+//! - `-bs-ast` runs the frontend and writes the binary `.ast` file
+//! - otherwise it compiles a .res/.resi (or .ast) file through the Rust
+//!   pipeline, writing JS (`-o` or `-bs-package-output`) and any requested
+//!   `-d*` dumps
+//! - `-bs-ns`, `-bs-package-name`, include paths, warnings, PPX and genType
+//!   flags configure that pipeline
 //!
-//! All other flags are accepted and ignored.
+//! Unrecognized flags are ignored.
 
 use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
@@ -265,6 +267,8 @@ fn run() -> Result<()> {
                     }
                 }
                 "-bs-ns" => {
+                    // js_packages_state.ml:38-42: OCaml's `-bs-ns` also sets
+                    // `dont_record_crc_unit`.
                     if let Some(val) = args.next() {
                         opts.namespace = Some(val);
                     }
@@ -451,9 +455,9 @@ fn run() -> Result<()> {
                 }
                 "-make-runtime" => opts.make_runtime = true,
                 "-nopervasives" => opts.nopervasives = true,
-                _ => {
-                    // Unknown flag: ignore, but if it looks like a value flag, try to skip.
-                }
+                // Unknown flags are ignored; a value that follows one is
+                // taken as the input file.
+                _ => {}
             }
         } else {
             opts.input = Some(PathBuf::from(arg));
@@ -559,7 +563,6 @@ fn run() -> Result<()> {
         external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
-        // js_packages_state.ml:38-42: `-bs-ns` sets `dont_record_crc_unit`.
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
@@ -1007,9 +1010,6 @@ fn parse_module_format(module_system: &str) -> Option<ModuleFormat> {
     }
 }
 
-// compiler/core/lam_compile_main.ml:484-492 uses the output-prefix basename,
-// not the capitalized module identity. Ext_namespace.change_ext_ns_suffix
-// (compiler/ext/ext_namespace.ml:33-35) strips only the last namespace suffix.
 /// ext_path.ml:91-106 `absolute_cwd_path`: join with the working directory and
 /// drop `.`/`..` components lexically.
 fn absolute_cwd_path(path: &Path) -> PathBuf {
@@ -1031,6 +1031,10 @@ fn absolute_cwd_path(path: &Path) -> PathBuf {
 /// `Ext_path.package_dir () // path // basename`, where `package_dir` is the
 /// `-bs-project-root` directory. Without a project root (which OCaml rejects)
 /// the directory stays relative to the working directory.
+///
+/// lam_compile_main.ml:484-492 uses the output-prefix basename, not the
+/// capitalized module identity. `Ext_namespace.change_ext_ns_suffix`
+/// (ext_namespace.ml:33-35) strips only the last namespace suffix.
 fn package_output_path(
     project_root: &str,
     source_path: &Path,

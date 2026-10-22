@@ -309,13 +309,9 @@ impl Processor<'_> {
         signature: &[SignatureItem],
     ) -> Structure {
         let mut exported = Exported::default();
-        let mut items = Vec::new();
-        // `List.fold_right`: the last item first.
-        for item in signature.iter().rev() {
-            let mut new_items = self.for_type_signature_item(env, &mut exported, item);
-            new_items.append(&mut items);
-            items = new_items;
-        }
+        let items = fold_right_items(signature, |item| {
+            self.for_type_signature_item(env, &mut exported, item)
+        });
         Structure {
             name: name.to_string(),
             docstring: Vec::new(),
@@ -488,6 +484,30 @@ impl Processor<'_> {
             .collect()
     }
 
+    /// The `Tsig_module` case of `for_signature_item`.
+    fn for_module_declaration(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        md: &tt::TypedModuleDeclaration,
+    ) -> ModuleItem {
+        let name = self.ctx.located(&md.md_name);
+        let item =
+            self.for_type_module(&name.txt, &env.add_module(&name.txt), &md.md_type.mty_type);
+        let stamps = &mut self.stamps;
+        let declared = add_declared(
+            name,
+            Loc::of_idx(self.ctx.arena, md.md_loc),
+            md.md_id.binding_time(),
+            env,
+            item,
+            Attrs::Parsed(md.md_attributes.as_slice(), self.ctx.arena),
+            Some((exported, ExportedKind::Module)),
+            |stamp, d| stamps.add_module(stamp, d),
+        );
+        module_item_of(&declared)
+    }
+
     /// `for_signature_item`.
     fn for_signature_item(
         &mut self,
@@ -517,34 +537,11 @@ impl Processor<'_> {
                 self.type_declarations(env, exported, rec_flag, decls)
             }
             tt::TypedSignatureItemDesc::Tsig_module(md) => {
-                let name = self.ctx.located(&md.md_name);
-                let item = self.for_type_module(
-                    &name.txt,
-                    &env.add_module(&name.txt),
-                    &md.md_type.mty_type,
-                );
-                let stamps = &mut self.stamps;
-                let declared = add_declared(
-                    name,
-                    Loc::of_idx(self.ctx.arena, md.md_loc),
-                    md.md_id.binding_time(),
-                    env,
-                    item,
-                    Attrs::Parsed(md.md_attributes.as_slice(), self.ctx.arena),
-                    Some((exported, ExportedKind::Module)),
-                    |stamp, d| stamps.add_module(stamp, d),
-                );
-                vec![module_item_of(&declared)]
+                vec![self.for_module_declaration(env, exported, md)]
             }
             tt::TypedSignatureItemDesc::Tsig_recmodule(mds) => mds
                 .iter()
-                .flat_map(|md| {
-                    self.for_signature_item(
-                        env,
-                        exported,
-                        &tt::TypedSignatureItemDesc::Tsig_module(md.clone()),
-                    )
-                })
+                .map(|md| self.for_module_declaration(env, exported, md))
                 .collect(),
             tt::TypedSignatureItemDesc::Tsig_include(incl) => {
                 let env = match &incl.incl_mod.mty_desc {
@@ -557,13 +554,9 @@ impl Processor<'_> {
                     },
                     _ => env.clone(),
                 };
-                let mut items = Vec::new();
-                for item in incl.incl_type.iter().rev() {
-                    let mut new_items = self.for_type_signature_item(&env, exported, item);
-                    new_items.append(&mut items);
-                    items = new_items;
-                }
-                items
+                fold_right_items(incl.incl_type.iter(), |item| {
+                    self.for_type_signature_item(&env, exported, item)
+                })
             }
             _ => Vec::new(),
         }
@@ -715,31 +708,13 @@ impl Processor<'_> {
                 items
             }
             // %%private generates a dummy module called local_...
-            tt::StructureItemDesc::Tstr_module(mb) if !mb.mb_name.txt.starts_with("local_") => {
-                let name = self.ctx.located(&mb.mb_name);
-                let item = self.for_module(env, &mb.mb_expr.mod_desc, &name.txt);
-                let stamps = &mut self.stamps;
-                let declared = add_declared(
-                    name,
-                    Loc::of_idx(self.ctx.arena, mb.mb_loc),
-                    mb.mb_id.binding_time(),
-                    env,
-                    item,
-                    Attrs::Parsed(mb.mb_attributes.as_slice(), self.ctx.arena),
-                    Some((exported, ExportedKind::Module)),
-                    |stamp, d| stamps.add_module(stamp, d),
-                );
-                vec![module_item_of(&declared)]
+            tt::StructureItemDesc::Tstr_module(mb) if !is_private_module(mb) => {
+                vec![self.for_module_binding(env, exported, mb)]
             }
             tt::StructureItemDesc::Tstr_recmodule(mbs) => mbs
                 .iter()
-                .flat_map(|mb| {
-                    self.for_structure_item(
-                        env,
-                        exported,
-                        &tt::StructureItemDesc::Tstr_module(mb.clone()),
-                    )
-                })
+                .filter(|mb| !is_private_module(mb))
+                .map(|mb| self.for_module_binding(env, exported, mb))
                 .collect(),
             tt::StructureItemDesc::Tstr_modtype(mtd) => {
                 let Some(mtd_type) = &mtd.mtd_type else {
@@ -771,13 +746,9 @@ impl Processor<'_> {
                     },
                     None => env.clone(),
                 };
-                let mut items = Vec::new();
-                for item in incl.incl_type.iter().rev() {
-                    let mut new_items = self.for_type_signature_item(&env, exported, item);
-                    new_items.append(&mut items);
-                    items = new_items;
-                }
-                items
+                fold_right_items(incl.incl_type.iter(), |item| {
+                    self.for_type_signature_item(&env, exported, item)
+                })
             }
             tt::StructureItemDesc::Tstr_primitive(vd) if !self.primitive_is_fragment(vd) => {
                 let stamps = &mut self.stamps;
@@ -798,6 +769,29 @@ impl Processor<'_> {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The `Tstr_module` case of `for_structure_item`.
+    fn for_module_binding(
+        &mut self,
+        env: &ProcessEnv,
+        exported: &mut Exported,
+        mb: &tt::ModuleBinding,
+    ) -> ModuleItem {
+        let name = self.ctx.located(&mb.mb_name);
+        let item = self.for_module(env, &mb.mb_expr.mod_desc, &name.txt);
+        let stamps = &mut self.stamps;
+        let declared = add_declared(
+            name,
+            Loc::of_idx(self.ctx.arena, mb.mb_loc),
+            mb.mb_id.binding_time(),
+            env,
+            item,
+            Attrs::Parsed(mb.mb_attributes.as_slice(), self.ctx.arena),
+            Some((exported, ExportedKind::Module)),
+            |stamp, d| stamps.add_module(stamp, d),
+        );
+        module_item_of(&declared)
     }
 
     /// `Jsx_hacks.primitive_is_fragment`.
@@ -947,13 +941,9 @@ impl Processor<'_> {
         str_items: &[tt::StructureItem],
     ) -> Structure {
         let mut exported = Exported::default();
-        let mut items = Vec::new();
-        // `List.fold_right`: the last item first.
-        for item in str_items.iter().rev() {
-            let mut new_items = self.for_structure_item(env, &mut exported, &item.str_desc);
-            new_items.append(&mut items);
-            items = new_items;
-        }
+        let items = fold_right_items(str_items, |item| {
+            self.for_structure_item(env, &mut exported, &item.str_desc)
+        });
         let attributes: Vec<crate::parser::ast::Attribute> = str_items
             .iter()
             .filter_map(|item| match &item.str_desc {
@@ -1020,4 +1010,20 @@ pub fn file_for_annots(
         structure: Arc::new(structure),
         module,
     }
+}
+
+/// `%%private` generates a dummy module called `local_...`.
+fn is_private_module(mb: &tt::ModuleBinding) -> bool {
+    mb.mb_name.txt.starts_with("local_")
+}
+
+/// `List.fold_right` concatenating each item's module items: `f` runs on the
+/// last item first, and the results keep source order.
+fn fold_right_items<'i, I: 'i>(
+    items: impl IntoIterator<Item = &'i I, IntoIter: DoubleEndedIterator>,
+    mut f: impl FnMut(&'i I) -> Vec<ModuleItem>,
+) -> Vec<ModuleItem> {
+    let mut chunks: Vec<Vec<ModuleItem>> = items.into_iter().rev().map(&mut f).collect();
+    chunks.reverse();
+    chunks.into_iter().flatten().collect()
 }

@@ -1,6 +1,6 @@
 //! Port of the string-literal helpers of `compiler/ml/ast_payload.ml`.
 
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::{Constant, Expression, ExpressionDesc, Payload, StructureItemDesc};
 
 /// OCaml `Ast_payload.json_literal_outside_external_message`.
@@ -14,18 +14,24 @@ pub fn unwrap_braces<'a>(arena: &'a ParseArena, expression: &'a Expression) -> &
 }
 
 /// The expression of a single-expression payload `PStr [Pstr_eval (e, _)]`,
+/// braces kept.
+pub fn payload_expression(payload: &Payload) -> Option<ExprIdx> {
+    if let Payload::PStr(items) = payload
+        && let [item] = items.as_slice()
+        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+    {
+        return Some(eval.0);
+    }
+    None
+}
+
+/// The expression of a single-expression payload `PStr [Pstr_eval (e, _)]`,
 /// under any explicit braces (OCaml `Ast_payload.unwrap_payload_expression`).
 pub fn unwrapped_payload_expression<'a>(
     arena: &'a ParseArena,
     payload: &Payload,
 ) -> Option<&'a Expression> {
-    if let Payload::PStr(items) = payload
-        && let [item] = items.as_slice()
-        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
-    {
-        return Some(unwrap_braces(arena, arena.get_expr(eval.0)));
-    }
-    None
+    payload_expression(payload).map(|e| unwrap_braces(arena, arena.get_expr(e)))
 }
 
 /// An error raised by these helpers (OCaml `Location.raise_errorf ~loc`).
@@ -66,19 +72,30 @@ pub fn semantic_string_of_expression(
             Constant::String(payload) => Ok(Some(payload.semantic().to_string())),
             _ => Ok(None),
         },
-        ExpressionDesc::Pexp_template(template)
-            if template.source_segments.len() == 1 && template.values.is_empty() =>
-        {
-            let source = arena.get_string(template.source_segments[0].txt);
-            match crate::string_literal::decode_js_template_escapes(source) {
-                Some(semantic) => Ok(Some(semantic)),
-                None => Err(PayloadError {
-                    loc: expression.pexp_loc,
-                    message: "Invalid string escape sequence",
-                }),
-            }
-        }
+        ExpressionDesc::Pexp_template(_) => template_semantic(arena, expression),
         _ => Ok(None),
+    }
+}
+
+/// The decoded value of a non-interpolated backquoted string; `Ok(None)`
+/// for any other template.
+fn template_semantic(
+    arena: &ParseArena,
+    expression: &Expression,
+) -> Result<Option<String>, PayloadError> {
+    let ExpressionDesc::Pexp_template(template) = &*expression.pexp_desc else {
+        return Ok(None);
+    };
+    if template.source_segments.len() != 1 || !template.values.is_empty() {
+        return Ok(None);
+    }
+    let source = arena.get_string(template.source_segments[0].txt);
+    match crate::string_literal::decode_js_template_escapes(source) {
+        Some(semantic) => Ok(Some(semantic)),
+        None => Err(PayloadError {
+            loc: expression.pexp_loc,
+            message: "Invalid string escape sequence",
+        }),
     }
 }
 
@@ -87,19 +104,10 @@ pub fn semantic_string_of_payload(
     arena: &ParseArena,
     payload: &Payload,
 ) -> Result<Option<String>, PayloadError> {
-    if let Payload::PStr(items) = payload
-        && let [item] = items.as_slice()
-        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
-    {
-        return semantic_string_of_expression(arena, arena.get_expr(eval.0));
+    match payload_expression(payload) {
+        Some(e) => semantic_string_of_expression(arena, arena.get_expr(e)),
+        None => Ok(None),
     }
-    Ok(None)
-}
-
-/// The single expression of a `PStr [Pstr_eval (e, _)]` payload, under any
-/// explicit braces (`unwrap_payload_expression`).
-fn single_expression<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<&'a Expression> {
-    unwrapped_payload_expression(arena, payload)
 }
 
 /// OCaml `Ast_payload.string_literal_of_expression`: the string literal an
@@ -115,18 +123,8 @@ pub fn string_literal_of_expression(
             Constant::String(payload) => Ok(Some(payload.clone())),
             _ => Ok(None),
         },
-        ExpressionDesc::Pexp_template(template)
-            if template.source_segments.len() == 1 && template.values.is_empty() =>
-        {
-            let source = arena.get_string(template.source_segments[0].txt);
-            match crate::string_literal::decode_js_template_escapes(source) {
-                Some(semantic) => Ok(Some(crate::string_literal::string_from_semantic(&semantic))),
-                None => Err(PayloadError {
-                    loc: expression.pexp_loc,
-                    message: "Invalid string escape sequence",
-                }),
-            }
-        }
+        ExpressionDesc::Pexp_template(_) => Ok(template_semantic(arena, expression)?
+            .map(|semantic| crate::string_literal::string_from_semantic(&semantic))),
         _ => Ok(None),
     }
 }
@@ -136,14 +134,14 @@ pub fn string_literal_of_payload(
     arena: &ParseArena,
     payload: &Payload,
 ) -> Result<Option<crate::string_literal::StringLiteral>, PayloadError> {
-    match single_expression(arena, payload) {
+    match unwrapped_payload_expression(arena, payload) {
         Some(expression) => string_literal_of_expression(arena, expression),
         None => Ok(None),
     }
 }
 
 fn single_constant<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<&'a Constant> {
-    match &*single_expression(arena, payload)?.pexp_desc {
+    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => Some(constant),
         _ => None,
     }
@@ -176,7 +174,7 @@ fn is_single_bigint(arena: &ParseArena, payload: &Payload) -> Option<String> {
 
 /// OCaml `Ast_payload.is_single_bool`.
 fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
-    match &*single_expression(arena, payload)?.pexp_desc {
+    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, _) => match arena.get_longident(lid.txt) {
             crate::parser::longident::Longident::Lident(name) => match arena.get_string(*name) {
                 "true" => Some(true),
@@ -192,7 +190,7 @@ fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
 /// OCaml `Ast_payload.is_single_ident`, as the name of a simple identifier
 /// (`Some(None)` for any other identifier path).
 fn is_single_ident<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<Option<&'a str>> {
-    match &*single_expression(arena, payload)?.pexp_desc {
+    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
             crate::parser::longident::Longident::Lident(name) => {
                 Some(Some(arena.get_string(*name)))

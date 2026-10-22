@@ -2,6 +2,8 @@
 //! (runtime/hash.c), so iteration order matches the OCaml analysis, whose
 //! output order often follows a table's traversal.
 
+use std::borrow::Borrow;
+
 /// `Hashtbl.hash` of a key.
 pub trait OcamlHash {
     fn ocaml_hash(&self) -> u32;
@@ -33,18 +35,23 @@ fn mix_intnat(h: u32, d: i64) -> u32 {
 
 /// `caml_hash_mix_string` over the bytes a string stands for (source text
 /// holds bytes as Latin-1 characters).
-fn mix_string(mut h: u32, s: &str) -> u32 {
-    let bytes: Vec<u8> = s
-        .chars()
-        .flat_map(|c| {
-            if (c as u32) <= 0xFF {
-                vec![c as u8]
-            } else {
-                let mut buf = [0u8; 4];
-                c.encode_utf8(&mut buf).as_bytes().to_vec()
-            }
-        })
-        .collect();
+fn mix_string(h: u32, s: &str) -> u32 {
+    if s.is_ascii() {
+        return mix_bytes(h, s.as_bytes());
+    }
+    let mut bytes = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if (c as u32) <= 0xFF {
+            bytes.push(c as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    mix_bytes(h, &bytes)
+}
+
+fn mix_bytes(mut h: u32, bytes: &[u8]) -> u32 {
     let len = bytes.len();
     let mut i = 0;
     while i + 4 <= len {
@@ -76,14 +83,20 @@ impl OcamlHash for i32 {
     }
 }
 
-impl OcamlHash for String {
+impl OcamlHash for str {
     fn ocaml_hash(&self) -> u32 {
         final_mix(mix_string(0, self)) & 0x3fff_ffff
     }
 }
 
+impl OcamlHash for String {
+    fn ocaml_hash(&self) -> u32 {
+        self.as_str().ocaml_hash()
+    }
+}
+
 /// A `Hashtbl.t`. Each bucket keeps its head first.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Hashtbl<K, V> {
     buckets: Vec<Vec<(K, V)>>,
     size: usize,
@@ -102,7 +115,7 @@ impl<K: OcamlHash + Eq, V> Hashtbl<K, V> {
         }
     }
 
-    fn index(&self, key: &K) -> usize {
+    fn index<Q: OcamlHash + ?Sized>(&self, key: &Q) -> usize {
         key.ocaml_hash() as usize & (self.buckets.len() - 1)
     }
 
@@ -137,49 +150,35 @@ impl<K: OcamlHash + Eq, V> Hashtbl<K, V> {
     }
 
     /// `Hashtbl.find_opt`: the most recent binding.
-    pub fn find(&self, key: &K) -> Option<&V> {
+    pub fn find<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: OcamlHash + Eq + ?Sized,
+    {
         self.buckets[self.index(key)]
             .iter()
-            .find(|(k, _)| k == key)
+            .find(|(k, _)| k.borrow() == key)
             .map(|(_, v)| v)
     }
 
-    pub fn find_mut(&mut self, key: &K) -> Option<&mut V> {
+    pub fn find_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: OcamlHash + Eq + ?Sized,
+    {
         let i = self.index(key);
         self.buckets[i]
             .iter_mut()
-            .find(|(k, _)| k == key)
+            .find(|(k, _)| k.borrow() == key)
             .map(|(_, v)| v)
     }
 
-    /// `Hashtbl.find_all`: most recent first.
-    pub fn find_all(&self, key: &K) -> Vec<&V> {
-        self.buckets[self.index(key)]
-            .iter()
-            .filter(|(k, _)| k == key)
-            .map(|(_, v)| v)
-            .collect()
-    }
-
-    pub fn mem(&self, key: &K) -> bool {
+    pub fn mem<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: OcamlHash + Eq + ?Sized,
+    {
         self.find(key).is_some()
-    }
-
-    /// `Hashtbl.remove`: the most recent binding.
-    pub fn remove(&mut self, key: &K) {
-        let i = self.index(key);
-        if let Some(pos) = self.buckets[i].iter().position(|(k, _)| k == key) {
-            self.buckets[i].remove(pos);
-            self.size -= 1;
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.size
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.size == 0
     }
 
     /// The bindings in `Hashtbl.iter`/`Hashtbl.fold` order.

@@ -183,8 +183,7 @@ impl Session for ProjectSession<'_> {
     }
 
     fn file_for_module(&self, module_name: &str) -> Option<&File> {
-        let paths = self.project.paths_for_module(module_name)?;
-        self.load(module_name, paths.interface.is_some())
+        self.full_from_module(module_name)
             .map(|loaded| &loaded.file)
     }
 }

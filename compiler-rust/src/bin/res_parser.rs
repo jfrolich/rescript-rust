@@ -19,6 +19,7 @@
 
 use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
+use rescript_compiler::location::Position;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
     Comment, Parser, ParserWarning, Scanner, SignatureItem, Structure, code_frame, jsx_ppx,
@@ -222,8 +223,7 @@ fn run() {
                 let mut writer = StringWriter::new();
                 ml_printer::print_signature_ml(&signature, parser.arena(), &mut writer);
                 let output = writer.into_string();
-                let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
-                let _ = io::stdout().write_all(&bytes);
+                let _ = io::stdout().write_all(&latin1_bytes(&output));
             }
             "res" => print_signature_res(
                 &signature,
@@ -256,7 +256,7 @@ fn run() {
             "ast" => print_signature_ast(&signature, &mut io::stdout()),
             "binary" => {
                 // OCaml -print binary format (current parsetree):
-                // 1. Magic: "Caml1999N022" (raw string, not marshaled) for interfaces
+                // 1. Magic: "ResIntf01311" (raw string, not marshaled) for interfaces
                 // 2. Marshaled filename (using output_value)
                 // 3. Marshaled signature (using output_value)
 
@@ -358,8 +358,7 @@ fn run() {
                 let mut writer = StringWriter::new();
                 ml_printer::print_structure_ml(&structure, parser.arena(), &mut writer);
                 let output = writer.into_string();
-                let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
-                let _ = io::stdout().write_all(&bytes);
+                let _ = io::stdout().write_all(&latin1_bytes(&output));
             }
             "res" => {
                 let output = printer::print_structure_with_comments(
@@ -369,8 +368,7 @@ fn run() {
                 );
                 if !output.is_empty() {
                     // Convert Latin-1 chars back to bytes to preserve original file encoding
-                    let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
-                    let _ = io::stdout().write_all(&bytes);
+                    let _ = io::stdout().write_all(&latin1_bytes(&output));
                 }
             }
             "sexp" => sexp::print_structure(parser.arena(), &structure, &mut io::stdout()),
@@ -401,7 +399,7 @@ fn run() {
             "ast" => print_structure_ast(&structure, &mut io::stdout()),
             "binary" => {
                 // OCaml -print binary format (current parsetree):
-                // 1. Magic: "Caml1999M022" (raw string, not marshaled) for implementations
+                // 1. Magic: "ResImpl01311" (raw string, not marshaled) for implementations
                 // 2. Marshaled filename (using output_value)
                 // 3. Marshaled structure (using output_value)
 
@@ -477,18 +475,55 @@ fn print_parser_warning(
     warning: &ParserWarning,
     out: &mut impl Write,
 ) {
+    print_warning_frame(
+        source,
+        filename,
+        warning.number(),
+        &warning.start_pos,
+        &warning.end_pos,
+        warning.message(),
+        out,
+    );
+}
+
+fn print_jsx_preprocessor_warnings(
+    source: &str,
+    filename: &str,
+    warnings: &[jsx_ppx::JsxPreprocessorWarning],
+    out: &mut impl Write,
+) {
+    for warning in warnings {
+        print_warning_frame(
+            source,
+            filename,
+            22,
+            &warning.start_pos,
+            &warning.end_pos,
+            &warning.message,
+            out,
+        );
+    }
+}
+
+/// A warning with its location and code frame, as `Location.prerr_warning`
+/// prints it.
+fn print_warning_frame(
+    source: &str,
+    filename: &str,
+    number: impl std::fmt::Display,
+    start_pos: &Position,
+    end_pos: &Position,
+    message: impl std::fmt::Display,
+    out: &mut impl Write,
+) {
     let use_color = code_frame::should_enable_color();
     let _ = writeln!(out);
     if use_color {
-        let _ = writeln!(
-            out,
-            "  \x1b[1;33mWarning number {}\x1b[0m",
-            warning.number()
-        );
+        let _ = writeln!(out, "  \x1b[1;33mWarning number {number}\x1b[0m");
     } else {
-        let _ = writeln!(out, "  Warning number {}", warning.number());
+        let _ = writeln!(out, "  Warning number {number}");
     }
-    let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
+    let location = code_frame::format_location(filename, start_pos, end_pos);
     let location = if use_color {
         code_frame::colorize_location(&location)
     } else {
@@ -499,42 +534,16 @@ fn print_parser_warning(
     let _ = writeln!(
         out,
         "{}",
-        code_frame::print_warning(source, &warning.start_pos, &warning.end_pos)
+        code_frame::print_warning(source, start_pos, end_pos)
     );
-    let _ = writeln!(out, "  {}", warning.message());
+    let _ = writeln!(out, "  {message}");
     let _ = writeln!(out);
 }
 
-fn print_jsx_preprocessor_warnings(
-    source: &str,
-    filename: &str,
-    warnings: &[jsx_ppx::JsxPreprocessorWarning],
-    out: &mut impl Write,
-) {
-    let use_color = code_frame::should_enable_color();
-    for warning in warnings {
-        let _ = writeln!(out);
-        if use_color {
-            let _ = writeln!(out, "  \x1b[1;33mWarning number 22\x1b[0m");
-        } else {
-            let _ = writeln!(out, "  Warning number 22");
-        }
-        let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
-        let location = if use_color {
-            code_frame::colorize_location(&location)
-        } else {
-            location
-        };
-        let _ = writeln!(out, "  {}", location);
-        let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "{}",
-            code_frame::print_warning(source, &warning.start_pos, &warning.end_pos)
-        );
-        let _ = writeln!(out, "  {}", warning.message);
-        let _ = writeln!(out);
-    }
+/// Printer output holds the source bytes as Latin-1 characters; write each
+/// character back as one byte.
+fn latin1_bytes(output: &str) -> Vec<u8> {
+    output.chars().map(|c| c as u8).collect()
 }
 
 /// Print comments from parser
@@ -583,13 +592,9 @@ fn print_signature_res(
     let output = printer::print_signature_with_comments(signature, comments, arena);
     if !output.is_empty() {
         // Convert Latin-1 chars back to bytes to preserve original file encoding
-        let bytes: Vec<u8> = output.chars().map(|c| c as u8).collect();
-        let _ = out.write_all(&bytes);
+        let _ = out.write_all(&latin1_bytes(&output));
     }
 }
-
-// NOTE: S-expression printer moved to src/parser/sexp.rs for byte-for-byte
-// parity with OCaml res_ast_debugger.ml output
 
 // ============================================================================
 // AST Debug Printer

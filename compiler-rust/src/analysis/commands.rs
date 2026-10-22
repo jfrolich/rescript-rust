@@ -223,11 +223,11 @@ pub fn rename(
         edits_by_uri
             .entry(style.to_string(&r.uri))
             .or_default()
-            .insert(0, edit);
+            .push(edit);
     }
     let text_document_edits = edits_by_uri.into_iter().rev().map(|(uri, edits)| {
         Json::assoc([
-            ("edits", Json::List(edits)),
+            ("edits", Json::List(edits.into_iter().rev().collect())),
             (
                 "textDocument",
                 Json::assoc([

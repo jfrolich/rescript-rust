@@ -12,7 +12,6 @@ use crate::parser::ast::{
     Expression, ExpressionDesc, LabelDeclaration, MutableFlag, Payload, StructureItem,
     StructureItemDesc,
 };
-use crate::string_literal::StringLiteral;
 
 /// OCaml raises from inside `Type.field`/`Type.constructor` when a backquoted
 /// payload holds an invalid escape; the error surfaces with the next ppx
@@ -131,8 +130,6 @@ fn constant_expression(loc: LocIdx, constant: Constant) -> Expression {
     }
 }
 
-/// `(Location.mkloc "as" loc, PStr [Str.eval ~loc expression])`, put back
-/// among `attrs` after every attribute written no later than it.
 /// Where the rebuilt `@as` payload expression is stored: printers only hold
 /// a shared arena, while attributes that become part of the AST go into the
 /// ordinary expression storage.
@@ -157,6 +154,8 @@ impl PayloadArena<'_> {
     }
 }
 
+/// `(Location.mkloc "as" loc, PStr [Str.eval ~loc expression])`, put back
+/// among `attrs` after every attribute written no later than it.
 fn put_back_as(
     mut target: PayloadArena<'_>,
     attrs: &Attributes,
@@ -263,10 +262,4 @@ fn field_attributes_in(target: PayloadArena<'_>, ld: &LabelDeclaration) -> Attri
     let loc = name.loc;
     let expression = constant_expression(loc, Constant::String(name.txt.clone()));
     put_back_as(target, &ld.pld_attributes, loc, expression)
-}
-
-/// The semantic value of a field's runtime name
-/// (`String_literal.string_semantic`).
-pub fn runtime_name_semantic(name: &Located<StringLiteral>) -> &str {
-    name.txt.semantic()
 }
