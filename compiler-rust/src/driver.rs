@@ -13357,13 +13357,7 @@ pub fn load_pervasives(
             // not a root `Pervasives` module binding. Keep the raw signature
             // registered for ps_comps-style descriptor lookup without changing
             // source module lookup shape.
-            if !pers_env.is_in_process_mode() {
-                if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
-                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Pervasives", sig.clone());
-                    }
-                }
-            }
+            register_opened_raw_sig(pers_env, ctx, "Pervasives");
         }
 
         // Try to load and open Stdlib
@@ -13371,13 +13365,7 @@ pub fn load_pervasives(
             env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
             // but let explicit module lookup use the persistent registry.
-            if !pers_env.is_in_process_mode() {
-                if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
-                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Stdlib", sig.clone());
-                    }
-                }
-            }
+            register_opened_raw_sig(pers_env, ctx, "Stdlib");
         }
     }
 
@@ -13395,13 +13383,20 @@ pub fn load_pervasives(
             // opened components but does not install a root module binding, so
             // later Env.normalize_path can still reach the persistent-root
             // force path through env.ml:903-914.
-            if !pers_env.is_in_process_mode() {
-                if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig(module_name, sig.clone());
-                    }
-                }
-            }
+            register_opened_raw_sig(pers_env, ctx, module_name);
+        }
+    }
+}
+
+/// Keep an opened module's raw signature registered for ps_comps-style
+/// descriptor lookup (disk mode only).
+fn register_opened_raw_sig(pers_env: &mut PersistentEnv, ctx: &TypeContext, name: &str) {
+    if pers_env.is_in_process_mode() {
+        return;
+    }
+    if let Some(md) = pers_env.get_module_declaration(name, ctx) {
+        if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+            ctx.register_raw_module_sig(name, sig.clone());
         }
     }
 }
