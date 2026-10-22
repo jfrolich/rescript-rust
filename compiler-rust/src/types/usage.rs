@@ -316,8 +316,14 @@ impl UsageTables {
     /// `Env.mark_type_used` (env.ml:1130-1133) without the implicit-coercion
     /// guard, which callers apply.
     pub fn mark_type_used(&mut self, name: &str, loc: Location) {
-        let Some(callback) = self.type_declarations.get(&NameLoc(name, loc)).cloned() else {
-            return;
+        let callback = match self.type_declarations.get(&NameLoc(name, loc)) {
+            None => return,
+            // The common case needs only the cell; avoid cloning the chain.
+            Some(TypeCallback::SetUsed(cell)) => {
+                self.cells[cell.0 as usize] = true;
+                return;
+            }
+            Some(callback) => callback.clone(),
         };
         self.run_type_callback(callback);
     }

@@ -120,7 +120,6 @@ impl std::ops::Deref for SigTypeBatch {
     }
 }
 
-/// Shared dependency state for one worker thread.
 /// Store-built label descriptions of one record type, their summary, and the
 /// replay record of building them.
 pub(crate) type SharedRecordLabels = (
@@ -129,6 +128,7 @@ pub(crate) type SharedRecordLabels = (
     Arc<crate::types::context::StorePiece>,
 );
 
+/// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
     types: TypeArena,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
@@ -167,7 +167,6 @@ pub(crate) struct ThreadTypeStore {
             ),
         >,
     >,
-    /// Synthetic longident component names used by store `Tpackage` nodes.
     /// Label descriptions of large regular records of dependency types,
     /// built as store builds (see `typecore::build_record_label_descriptions_info`).
     record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
@@ -338,10 +337,6 @@ impl ThreadTypeStore {
         piece: Arc<crate::types::context::StorePiece>,
     ) {
         self.initial_env.borrow_mut().get_or_insert((env, piece));
-    }
-
-    pub(crate) fn pers_struct_count(&self) -> usize {
-        self.pers.borrow().len()
     }
 
     /// Intern a longident component name for a store node. Names live in

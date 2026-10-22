@@ -124,14 +124,9 @@ pub fn format_finished_compilation_message(
 
 #[instrument(name = "rewatch.compiler_args", skip_all, fields(file_path = %rescript_file_path.display()))]
 pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
-    let _span = info_span!(
-        "rewatch.compiler_args",
-        file_path = %rescript_file_path.display()
-    )
-    .entered();
     let filename = &helpers::get_abs_path(rescript_file_path);
     let current_package = helpers::get_abs_path(
-        &helpers::get_nearest_config(rescript_file_path).expect("Couldn't find package root"),
+        &helpers::get_nearest_config(rescript_file_path).context("Couldn't find package root")?,
     );
     let project_context = ProjectContext::new(&current_package)?;
 
@@ -143,10 +138,16 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     };
 
     // make PathBuf from package root and get the relative path for filename
-    let relative_filename = filename.strip_prefix(PathBuf::from(&current_package)).unwrap();
+    let relative_filename = filename.strip_prefix(&current_package).with_context(|| {
+        format!(
+            "{} is not inside package {}",
+            filename.display(),
+            current_package.display()
+        )
+    })?;
 
-    let file_path = PathBuf::from(&current_package).join(filename);
-    let contents = helpers::read_file(&file_path).expect("Error reading file");
+    let file_path = current_package.join(filename);
+    let contents = helpers::read_file(&file_path).context("Error reading file")?;
 
     let (ast_path, parser_args) = parser_args(
         &project_context,
@@ -527,33 +528,18 @@ pub fn incremental_build_without_lock(
         let registry = std::mem::take(&mut build_state.module_registry);
         let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("rewatch-runtime-precompile".to_string())
-                .stack_size(256 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
-                    phase_mark("runtime-precompile-done");
-                    result
-                });
+            let handle = compile::spawn_runtime_precompile(scope, || {
+                let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
+                phase_mark("runtime-precompile-done");
+                result
+            });
             let result_asts = if incremental {
                 incremental::parse_and_plan(build_state, || pb.inc(1))
             } else {
                 parse::generate_asts(build_state, || pb.inc(1))
             };
             phase_mark("parse-asts-done");
-            let precompile_result = match handle {
-                Ok(handle) => handle.join().unwrap_or_else(|panic| {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-                }),
-                Err(err) => Err(anyhow!("failed to spawn runtime pre-compilation thread: {err}")),
-            };
+            let precompile_result = handle.and_then(compile::join_runtime_precompile);
             (result_asts, precompile_result)
         });
         build_state.module_registry = registry;

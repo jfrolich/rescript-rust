@@ -29,23 +29,23 @@ impl Collector<'_> {
             if !self.seen.insert(ty) {
                 continue;
             }
-            let mut paths: Vec<(Path, Kind)> = Vec::new();
             {
                 let desc = self.ctx.borrow_desc(ty);
                 match &*desc {
-                    TypeDesc::Tconstr { path, .. } => paths.push((path.clone(), Kind::Type)),
-                    TypeDesc::Tpackage { path, .. } => paths.push((path.clone(), Kind::Modtype)),
+                    TypeDesc::Tconstr { path, .. } => {
+                        read_of_path(path, Kind::Type, None, &mut self.out)
+                    }
+                    TypeDesc::Tpackage { path, .. } => {
+                        read_of_path(path, Kind::Modtype, None, &mut self.out)
+                    }
                     TypeDesc::Tvariant(row) => {
                         // `iter_type_expr` visits the row fields.
                         if let Some((path, _)) = &row.row_name {
-                            paths.push((path.clone(), Kind::Type));
+                            read_of_path(path, Kind::Type, None, &mut self.out);
                         }
                     }
                     _ => {}
                 }
-            }
-            for (path, kind) in paths {
-                self.path(&path, kind);
             }
             super::btype::iter_type_expr(self.ctx, ty, |child| stack.push(child));
         }

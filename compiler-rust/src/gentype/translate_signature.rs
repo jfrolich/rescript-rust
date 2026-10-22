@@ -99,7 +99,6 @@ pub fn translate_module_declaration(
         ModuleTypeDesc::Tmty_with(_, _) => not_implemented("Tmty_with"),
         ModuleTypeDesc::Tmty_typeof(_) => not_implemented("Tmty_typeof"),
         ModuleTypeDesc::Tmty_alias(_, _) => not_implemented("Tmty_alias"),
-        ModuleTypeDesc::Tmty_placeholder => crate::gentype::translation::empty(),
     }
 }
 
@@ -150,7 +149,6 @@ pub fn translate_module_type_declaration(
             ModuleTypeDesc::Tmty_with(_, _) => not_implemented("Tmty_with"),
             ModuleTypeDesc::Tmty_typeof(_) => not_implemented("Tmty_typeof"),
             ModuleTypeDesc::Tmty_alias(_, _) => not_implemented("Tmty_alias"),
-            ModuleTypeDesc::Tmty_placeholder => crate::gentype::translation::empty(),
         },
     }
 }

@@ -13156,11 +13156,7 @@ pub(crate) fn decl_signature_from_typed_signature(
 pub(crate) fn decl_module_type_from_typed(
     mty: &ModuleType,
 ) -> Option<crate::types::decl::ModuleType> {
-    use crate::types::typedtree::ModuleTypeDesc;
-    match &mty.mty_desc {
-        ModuleTypeDesc::Tmty_placeholder => None,
-        _ => Some(mty.mty_type.clone()),
-    }
+    Some(mty.mty_type.clone())
 }
 
 pub(crate) fn extract_module_type_from_mod_expr_with_ctx(

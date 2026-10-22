@@ -351,7 +351,6 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
         });
 }
 
-/// The output files each package's last recorded build listed.
 /// Remove the outputs the recorded build had that this one no longer
 /// produces (see [`remove_obsolete_outputs`]) now, rather than when the build
 /// is recorded: a watcher records its builds only before it reinitializes and
@@ -370,6 +369,7 @@ pub fn remove_obsolete_outputs_of_build(build_state: &BuildCommandState) {
         });
 }
 
+/// The output files each package's last recorded build listed.
 pub fn recorded_outputs(packages: &AHashMap<String, Package>) -> AHashMap<String, AHashSet<String>> {
     packages
         .par_iter()
@@ -399,12 +399,8 @@ fn remove_obsolete_outputs(package: &Package, previous: Option<&AHashSet<String>
             continue;
         }
         let file = package.path.join(output);
-        if output.contains(".gen.") {
-            let generated = std::fs::read_to_string(&file)
-                .is_ok_and(|content| content.starts_with("/* TypeScript file generated from"));
-            if !generated {
-                continue;
-            }
+        if output.contains(".gen.") && !written_by_gentype(&file) {
+            continue;
         }
         let _ = std::fs::remove_file(&file);
         let mut map_file = file.into_os_string();
@@ -413,10 +409,15 @@ fn remove_obsolete_outputs(package: &Package, previous: Option<&AHashSet<String>
     }
 }
 
-/// Read the previous in-process build's records and remove the outputs of
-/// sources it compiled that no longer exist: the JS output and any typed
-/// artifacts in `lib/bs` and `lib/ocaml`. Returns (removed sources, recorded
-/// sources).
+/// Whether `file` starts with the header genType writes, i.e. genType owns it.
+fn written_by_gentype(file: &Path) -> bool {
+    const HEADER: &[u8] = b"/* TypeScript file generated from";
+    let mut prefix = [0u8; HEADER.len()];
+    std::fs::File::open(file)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut prefix))
+        .is_ok_and(|()| prefix == HEADER)
+}
+
 /// Remove the genType output of a removed source file, when genType wrote it.
 fn remove_gentype_file(package: &Package, source: &Path) {
     let Some(gentype) = package.config.gentype_config.as_ref() else {
@@ -428,13 +429,15 @@ fn remove_gentype_file(package: &Package, source: &Path) {
         return;
     };
     let file = dir.join(format!("{}{extension}", stem.to_string_lossy()));
-    let generated = std::fs::read_to_string(&file)
-        .is_ok_and(|content| content.starts_with("/* TypeScript file generated from"));
-    if generated {
+    if written_by_gentype(&file) {
         let _ = std::fs::remove_file(file);
     }
 }
 
+/// Read the previous in-process build's records and remove the outputs of
+/// sources it compiled that no longer exist: the JS output and any typed
+/// artifacts in `lib/bs` and `lib/ocaml`. Returns (removed sources, recorded
+/// sources).
 pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> (usize, usize) {
     let root_config = build_state.get_root_config();
     let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
