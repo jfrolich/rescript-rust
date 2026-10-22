@@ -1453,11 +1453,15 @@ pub fn emit_parser_warnings(
 
 fn write_stderr(output: &str) {
     if !output.is_empty() {
-        let output = crate::source_text::decode_internal_utf8_runs(output);
-        let mut stderr = std::io::stderr();
-        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
-        let _ = std::io::Write::flush(&mut stderr);
+        write_stderr_raw(&crate::source_text::decode_internal_utf8_runs(output));
     }
+}
+
+/// Write `output` to stderr as is. Failures to write diagnostics are ignored.
+fn write_stderr_raw(output: &str) {
+    let mut stderr = std::io::stderr();
+    let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+    let _ = std::io::Write::flush(&mut stderr);
 }
 
 /// Like [`emit_parser_warnings`], appending the reports to `out`.
@@ -5454,10 +5458,7 @@ fn emit_type_warnings(
         return;
     }
 
-    let mut stderr = std::io::stderr();
-    let output = format_type_warnings(arena, source, filename, warnings);
-    let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
-    let _ = std::io::Write::flush(&mut stderr);
+    write_stderr_raw(&format_type_warnings(arena, source, filename, warnings));
 }
 
 /// [`format_type_warnings`], reading the source only when there is a
