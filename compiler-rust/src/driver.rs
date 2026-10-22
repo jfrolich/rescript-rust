@@ -14617,8 +14617,13 @@ pub fn compile_source_in_process(
     let structure = frontend.structure;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    let mut effective_options = options.clone();
-    effective_options.experimental_let_unwrap = experimental_let_unwrap;
+    let effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
+        std::borrow::Cow::Borrowed(options)
+    } else {
+        let mut options = options.clone();
+        options.experimental_let_unwrap = experimental_let_unwrap;
+        std::borrow::Cow::Owned(options)
+    };
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let result = compile_preprocessed_structure_in_process(
@@ -15215,7 +15220,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     tctx.drain_open_slot_uses();
     // Debugging aid: `RESCRIPT_DUMP_TYPED_SEXP=<Module>` prints the
     // in-process typed tree of that module like `bsc -dtyped-sexp`.
-    if std::env::var("RESCRIPT_DUMP_TYPED_SEXP").is_ok_and(|name| name == module_name) {
+    static DUMP_TYPED_SEXP_MODULE: std::sync::OnceLock<Option<String>> =
+        std::sync::OnceLock::new();
+    if DUMP_TYPED_SEXP_MODULE
+        .get_or_init(|| std::env::var("RESCRIPT_DUMP_TYPED_SEXP").ok())
+        .as_deref()
+        == Some(module_name)
+    {
         let _ = print_typed_structure(arena, &type_ctx, &typed_structure, &mut std::io::stderr());
     }
 
