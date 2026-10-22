@@ -49,7 +49,7 @@ pub mod color {
         format!("\u{1b}[{codes}m")
     }
 
-    pub const reset_lit: &str = "\u{1b}[0m";
+    pub const RESET_LIT: &str = "\u{1b}[0m";
 
     pub fn setup() {
         // OCaml installs formatter tag functions here. Rust logging can apply
@@ -57,11 +57,11 @@ pub mod color {
     }
 
     pub fn error(s: &str) -> String {
-        format!("{}{}{}", ansi_of_stag("error"), s, reset_lit)
+        format!("{}{}{}", ansi_of_stag("error"), s, RESET_LIT)
     }
 
     pub fn info(s: &str) -> String {
-        format!("{}{}{}", ansi_of_stag("info"), s, reset_lit)
+        format!("{}{}{}", ansi_of_stag("info"), s, RESET_LIT)
     }
 }
 

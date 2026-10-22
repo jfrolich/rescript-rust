@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 
 pub type T = String;
 
-pub const curry: &str = "Curry";
-pub const rescript_pervasives: &str = "RescriptPervasives";
+pub const CURRY: &str = "Curry";
+pub const RESCRIPT_PERVASIVES: &str = "RescriptPervasives";
 
 pub fn sanitize_id(s: &str) -> String {
     let s = if s.contains('.') || s.contains('[') || s.contains(']') {

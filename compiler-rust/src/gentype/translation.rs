@@ -81,7 +81,7 @@ pub fn dep_to_import_type(
                 config,
                 output_file_relative,
                 resolver,
-                &crate::gentype::module_name::rescript_pervasives.to_string(),
+                &crate::gentype::module_name::RESCRIPT_PERVASIVES.to_string(),
             ),
         }],
         Dep::External(_) => vec![],

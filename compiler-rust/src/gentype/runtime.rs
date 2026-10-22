@@ -47,4 +47,4 @@ pub fn js_variant_value(polymorphic: bool) -> String {
     }
 }
 
-pub const default: &str = "$$default";
+pub const DEFAULT: &str = "$$default";

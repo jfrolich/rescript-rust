@@ -381,7 +381,7 @@ pub fn emit_code_item(
             );
 
             let value_name_not_default = match value_name.as_str() {
-                "default" => crate::gentype::runtime::default.to_string(),
+                "default" => crate::gentype::runtime::DEFAULT.to_string(),
                 _ => value_name.clone(),
             };
             let cast_line = crate::gentype::emit_type::emit_type_cast(
@@ -437,7 +437,7 @@ pub fn emit_code_item(
             let default = "default";
             let make = "make";
             let name = match original_name == default {
-                true => crate::gentype::runtime::default.to_string(),
+                true => crate::gentype::runtime::DEFAULT.to_string(),
                 false => resolved_name_str,
             };
 
@@ -556,7 +556,7 @@ pub fn emit_code_item(
             let emitters = match original_name == default {
                 true => crate::gentype::emit_type::emit_export_default(
                     emitters,
-                    crate::gentype::runtime::default,
+                    crate::gentype::runtime::DEFAULT,
                 ),
                 false => emitters,
             };
@@ -1083,7 +1083,7 @@ pub fn emit_translation_as_string(
             true,
             env,
             crate::gentype::import_path::bs_curry_path(config),
-            &crate::gentype::module_name::curry.to_string(),
+            &crate::gentype::module_name::CURRY.to_string(),
         ),
         false => env,
     };

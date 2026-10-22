@@ -343,16 +343,16 @@ pub mod node_filename {
     use super::{MAIN_SEPARATOR, Path};
 
     // Force "/" separator.
-    pub const dir_sep: &str = "/";
+    pub const DIR_SEP: &str = "/";
 
     pub mod path {
-        use super::{MAIN_SEPARATOR, dir_sep};
+        use super::{DIR_SEP, MAIN_SEPARATOR};
 
         pub type T = String;
 
         pub fn normalize(path: &str) -> T {
             match MAIN_SEPARATOR == '\\' {
-                true => path.split('\\').collect::<Vec<_>>().join(dir_sep),
+                true => path.split('\\').collect::<Vec<_>>().join(DIR_SEP),
                 false => path.to_string(),
             }
         }
@@ -367,7 +367,7 @@ pub mod node_filename {
             if l == 0 || is_dir_sep(dirname, l - 1) {
                 format!("{dirname}{filename}")
             } else {
-                format!("{dirname}{dir_sep}{filename}")
+                format!("{dirname}{DIR_SEP}{filename}")
             }
         }
 
