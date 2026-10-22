@@ -3760,14 +3760,18 @@ fn compile_module_in_process_to_js_boundary(
                     &local_registry,
                 )
             }
-            Some(StoredAst::Structure(_)) => panic!(
-                "in-process invariant violated: expected signature AST for {}, found structure AST",
-                intf_source_abs.display()
-            ),
-            None => panic!(
-                "in-process invariant violated: missing stored signature AST for {}",
-                intf_source_abs.display()
-            ),
+            Some(StoredAst::Structure(_)) => {
+                return Err(anyhow!(
+                    "in-process invariant violated: expected signature AST for {}, found structure AST",
+                    intf_source_abs.display()
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "in-process invariant violated: missing stored signature AST for {}",
+                    intf_source_abs.display()
+                ));
+            }
         }
         .map_err(
             |e| match e.downcast::<rescript_compiler::driver::UserDiagnostic>() {
