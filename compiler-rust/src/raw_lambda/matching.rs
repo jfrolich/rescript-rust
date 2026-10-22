@@ -22,6 +22,7 @@ use crate::lambda::{Comparison, FieldDbgInfo, Primitive, TagInfo};
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
+use crate::raw_lambda::switch::Shared;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
     type_cannot_contain_undefined_no_env,
@@ -320,7 +321,7 @@ fn owned_pats(ps: &[&Pattern]) -> Vec<Pattern> {
     ps.iter().map(|p| (*p).clone()).collect()
 }
 
-fn bump_raise_count(next_raise_count: &mut i32, _label: &str) -> i32 {
+fn bump_raise_count(next_raise_count: &mut i32) -> i32 {
     *next_raise_count += 1;
     *next_raise_count
 }
@@ -2454,30 +2455,21 @@ fn write_synthetic_ident_key_with_global(
 // ============================================================================
 // Ported from OCaml's Switch.Store, specialized for lambda/RawLambda.
 
-/// Whether an action should be shared or is a singleton.
-#[derive(Debug, Clone)]
-pub enum SharedAction {
-    Shared(RawLambda),
-    Single(RawLambda),
-}
-
 /// Action store for deduplicating lambda actions.
 /// Equivalent to OCaml's `StoreExp` (Switch.Store specialized for lambda).
 ///
 /// Uses string keys (from `make_key` normalization) for comparison,
 /// since RawLambda doesn't implement PartialEq/Ord.
 pub struct StoreExp {
-    /// Map from normalized key string -> (shared, index).
+    /// Map from normalized key string -> action index.
     ///
     /// OCaml uses `AMap` for lookup in `Switch.Store.store`
     /// (`compiler/ml/switch.ml:55-65`) and iterates it only to mark shared
     /// action slots (`compiler/ml/switch.ml:67-76`). That iteration order does
-    /// not feed the generated lambda, so Rust can keep the same semantics with
-    /// a hash map and avoid tree rotations/comparisons in the hot store path.
-    map: HashMap<String, (bool, usize)>,
-    /// Next index to assign.
-    next: usize,
-    /// Accumulated actions in reverse order: (must_share, action).
+    /// not feed the generated lambda, so Rust records the shared flag directly
+    /// on the action slot when a key hits and keeps the map for lookup only.
+    map: HashMap<String, usize>,
+    /// Accumulated actions in index order: (shared, action).
     acts: Vec<(bool, RawLambda)>,
 }
 
@@ -2487,31 +2479,26 @@ impl StoreExp {
     pub fn mk_store() -> Self {
         StoreExp {
             map: HashMap::new(),
-            next: 0,
             acts: Vec::new(),
         }
     }
 
     /// Internal: add an action unconditionally (no dedup).
     fn add(&mut self, must_share: bool, act: RawLambda) -> usize {
-        let i = self.next;
         self.acts.push((must_share, act));
-        self.next = i + 1;
-        i
+        self.acts.len() - 1
     }
 
     /// Internal: store an action, deduplicating if possible.
     fn store(&mut self, must_share: bool, act: RawLambda) -> usize {
         match make_key_string(&act) {
             Some(key) => {
-                if let Some(&(shared, i)) = self.map.get(&key) {
-                    if !shared {
-                        self.map.insert(key, (true, i));
-                    }
+                if let Some(&i) = self.map.get(&key) {
+                    self.acts[i].0 = true;
                     i
                 } else {
                     let i = self.add(must_share, act);
-                    self.map.insert(key, (must_share, i));
+                    self.map.insert(key, i);
                     i
                 }
             }
@@ -2535,30 +2522,18 @@ impl StoreExp {
     /// Actions that were stored multiple times or marked as must-share
     /// are wrapped in `Shared`; others are `Single`.
     /// Equivalent to OCaml's `act_get_shared`.
-    pub fn act_get_shared(self) -> Vec<SharedAction> {
+    pub fn act_get_shared(self) -> Vec<Shared<RawLambda>> {
         // OCaml's store closes over the action list and returns those actions
         // directly when `act_get_shared` is called (compiler/ml/switch.ml:55-67).
         // Rust callers consume the store at the same point, so move the raw
         // lambda actions into the result instead of recursively cloning them.
-        let StoreExp { map, acts, .. } = self;
-        let mut share_flags: Vec<bool> = acts.iter().map(|(shared, _)| *shared).collect();
-
-        // Mark any action that was found in the map as shared (even if not must_share)
-        for (_, (shared, i)) in map {
-            if shared {
-                if let Some(flag) = share_flags.get_mut(i) {
-                    *flag = true;
-                }
-            }
-        }
-
-        acts.into_iter()
-            .zip(share_flags)
-            .map(|((_, act), shared)| {
+        self.acts
+            .into_iter()
+            .map(|(shared, act)| {
                 if shared {
-                    SharedAction::Shared(act)
+                    Shared::Shared(act)
                 } else {
-                    SharedAction::Single(act)
+                    Shared::Single(act)
                 }
             })
             .collect()
@@ -2614,7 +2589,7 @@ pub fn make_catch(
     match d.peel() {
         RawLambda::LstaticRaise(_, args) if args.is_empty() => k(d),
         _ => {
-            let e = bump_raise_count(next_raise_count, "matching::make_catch");
+            let e = bump_raise_count(next_raise_count);
             RawLambda::LstaticCatch(Box::new(k(make_exit(e))), (e, Vec::new()), Box::new(d))
         }
     }
@@ -2654,7 +2629,7 @@ pub fn make_catch_delayed(
     match as_simple_exit(&handler) {
         Some(i) => (i, Box::new(|act| act)),
         None => {
-            let i = bump_raise_count(next_raise_count, "matching::make_catch_delayed");
+            let i = bump_raise_count(next_raise_count);
             (
                 i,
                 Box::new(move |body: RawLambda| match body.peel() {
@@ -3887,7 +3862,7 @@ fn cons_next_or<'p>(
             def,
             next_raise,
         );
-        let idef = bump_raise_count(next_raise, "matching::cons_next_or");
+        let idef = bump_raise_count(next_raise);
         let PmHalfCompiledInfo {
             me: next,
             matrix,
@@ -3981,7 +3956,7 @@ fn split_exc<'p>(
                         k,
                         next_raise,
                     );
-                    let idef = bump_raise_count(next_raise, "matching::split_exc:constructor");
+                    let idef = bump_raise_count(next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
                         matrix,
@@ -4016,7 +3991,7 @@ fn split_exc<'p>(
                     k,
                     next_raise,
                 );
-                let idef = bump_raise_count(next_raise, "matching::split_exc:nonconstructor");
+                let idef = bump_raise_count(next_raise);
                 let PmHalfCompiledInfo {
                     me: next,
                     matrix,
@@ -4073,7 +4048,7 @@ fn split_noexc<'p>(
                     k,
                     next_raise,
                 );
-                let idef = bump_raise_count(next_raise, "matching::split_noexc");
+                let idef = bump_raise_count(next_raise);
                 let PmHalfCompiledInfo {
                     me: next,
                     matrix,
@@ -4215,7 +4190,7 @@ fn split_ex<'p>(
                             k,
                             next_raise,
                         );
-                        let idef = bump_raise_count(next_raise, "matching::split_ex");
+                        let idef = bump_raise_count(next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
                             matrix,
@@ -4287,7 +4262,7 @@ fn split_noex<'p>(
                         k,
                         next_raise,
                     );
-                    let idef = bump_raise_count(next_raise, "matching::split_noex");
+                    let idef = bump_raise_count(next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
                         matrix,
@@ -4549,7 +4524,7 @@ fn do_cases_or_deque<'p>(
                         orp_vars.intersection(&pm_fv).cloned().collect()
                     };
 
-                    let or_num = bump_raise_count(next_raise, "matching::do_cases_or");
+                    let or_num = bump_raise_count(next_raise);
                     let new_patl = omegas(patl.len());
 
                     let mk_new_action = |vs: &[Ident]| -> RawLambda {
@@ -4781,9 +4756,7 @@ fn get_key_constant(caller: &str, p: &Pattern) -> Constant {
     match &p.pat_desc {
         PatternDesc::Tpat_constant(cst) => cst.clone(),
         _ => {
-            eprintln!("BAD: {}", caller);
-            // pretty_pat p; -- omitted
-            panic!("get_key_constant: not a constant pattern");
+            panic!("get_key_constant ({caller}): not a constant pattern");
         }
     }
 }
@@ -6020,8 +5993,8 @@ fn share_actions_tree(
     let resolved_acts: Vec<RawLambda> = acts
         .into_iter()
         .map(|act| match act {
-            SharedAction::Single(a) => a,
-            SharedAction::Shared(a) => {
+            Shared::Single(a) => a,
+            Shared::Shared(a) => {
                 let (i, h) = make_catch_delayed(a, next_raise_count);
                 handlers.push((i, h));
                 make_exit(i)
@@ -6406,8 +6379,8 @@ pub fn share_actions_sw(
     let resolved_acts: Vec<RawLambda> = acts
         .into_iter()
         .map(|act| match act {
-            SharedAction::Single(a) => a,
-            SharedAction::Shared(a) => {
+            Shared::Single(a) => a,
+            Shared::Shared(a) => {
                 let (i, h) = make_catch_delayed(a, next_raise_count);
                 // Extract handler body from the wrapper function
                 let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
@@ -6737,24 +6710,16 @@ pub fn call_switcher(
     low: i32,
     high: i32,
     int_lambda_list: Vec<(i32, RawLambda)>,
-    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
 
     // Pass the existing action array through without re-storing it. The cases
     // above already contain indices into this exact array.
-    let acts = store
-        .act_get_shared()
-        .into_iter()
-        .map(|act| match act {
-            SharedAction::Single(a) => crate::raw_lambda::switch::Shared::Single(a),
-            SharedAction::Shared(a) => crate::raw_lambda::switch::Shared::Shared(a),
-        })
-        .collect();
+    let acts = store.act_get_shared();
 
     crate::raw_lambda::switch::zyva_with_shared_actions(edges, arg, &cases, acts, &mut || {
-        bump_raise_count(next_raise_count, "matching::call_switcher")
+        bump_raise_count(next_raise_count)
     })
 }
 
@@ -7146,8 +7111,8 @@ fn share_actions_tree_string(
     let resolved_acts: Vec<RawLambda> = acts
         .into_iter()
         .map(|act| match act {
-            SharedAction::Single(a) => a,
-            SharedAction::Shared(a) => {
+            Shared::Single(a) => a,
+            Shared::Shared(a) => {
                 let (i, h) = make_catch_delayed(a, next_raise_count);
                 handlers.push((i, h));
                 make_exit(i)
@@ -7173,7 +7138,6 @@ fn share_actions_tree_string(
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
 fn combine_constant<'p>(
-    names: Option<crate::lambda::SwitchDispatch>,
     loc: Location,
     arg: RawLambda,
     cst: &Constant,
@@ -7200,7 +7164,6 @@ fn combine_constant<'p>(
                 i32::MIN,
                 i32::MAX,
                 int_lambda_list,
-                names,
                 next_raise_count,
             )
         }
@@ -7212,15 +7175,7 @@ fn combine_constant<'p>(
                     _ => panic!("combine_constant: expected Const_char"),
                 })
                 .collect();
-            call_switcher(
-                fail,
-                arg,
-                0,
-                i32::MAX,
-                int_lambda_list,
-                names,
-                next_raise_count,
-            )
+            call_switcher(fail, arg, 0, i32::MAX, int_lambda_list, next_raise_count)
         }
         Constant::String(_) => {
             let const_lambda_list = sort_lambda_list(const_lambda_list);
@@ -7949,7 +7904,6 @@ fn combine_variant<'p>(
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array<'p>(
     ctx_ref: &TypeContext,
-    names: Option<crate::lambda::SwitchDispatch>,
     loc: Location,
     arg: RawLambda,
     partial: &Partial,
@@ -7972,7 +7926,6 @@ fn combine_array<'p>(
             0,
             i32::MAX,
             int_lambda_list,
-            names,
             next_raise_count,
         );
         bind(
@@ -8565,7 +8518,6 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_constant(cst) => {
-                    let names: Option<crate::lambda::SwitchDispatch> = None;
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let cst_clone = cst.clone();
@@ -8577,7 +8529,6 @@ fn do_compile_matching<'p>(
                         &|ctx, pm| divide_constant(pa, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
-                                names.clone(),
                                 loc,
                                 arg_clone.clone(),
                                 &cst_clone,
@@ -8625,7 +8576,6 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_array(_) => {
-                    let names: Option<crate::lambda::SwitchDispatch> = None;
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     compile_test_wrapper(
@@ -8637,7 +8587,6 @@ fn do_compile_matching<'p>(
                         &|ctx, def, c_div, nrc| {
                             combine_array(
                                 ctx_ref,
-                                names.clone(),
                                 loc,
                                 arg_clone.clone(),
                                 partial,
@@ -9147,7 +9096,7 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
 
     // Expand through links, Tconstr, and row_more to find the variant row
     let mut current = ctx_ref.repr(ty);
-    'outer: for _ in 0..20 {
+    for _ in 0..20 {
         enum Action {
             ReturnRow(RowDesc),
             ExpandConstr(i32, String),
@@ -9367,7 +9316,7 @@ fn compile_matching_unresolved<'p>(
     let partial = check_partial_single(&pat_act_list, partial);
     match partial {
         Partial::Partial => {
-            let raise_num = bump_raise_count(next_raise_count, "matching::compile_matching");
+            let raise_num = bump_raise_count(next_raise_count);
             let pm = PatternMatching {
                 cases: pat_act_list
                     .into_iter()
@@ -9593,7 +9542,7 @@ fn for_tupled_function_unresolved<'p>(
         .map(|(pats, act)| (pats, MatchAction::from_case(act)))
         .collect();
     let partial = check_partial_list(&pats_act_list, partial);
-    let raise_num = bump_raise_count(next_raise_count, "matching::for_tupled_function");
+    let raise_num = bump_raise_count(next_raise_count);
     let omegas_row: Vec<Vec<&'p Pattern>> = vec![omegas(paraml.len())];
     let pm = PatternMatching {
         cases: pats_act_list,
@@ -9820,7 +9769,7 @@ pub fn do_for_multiple_match<'p>(
     }));
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
-            let raise_num = bump_raise_count(next_raise_count, "matching::do_for_multiple_match");
+            let raise_num = bump_raise_count(next_raise_count);
             (
                 raise_num,
                 PatternMatching {
