@@ -166,8 +166,6 @@ pub enum Token<'a> {
     Comma,
     /// End of file
     Eof,
-    /// `\` (backslash)
-    Backslash,
     /// `/`
     Forwardslash,
     /// `/.`
@@ -408,45 +406,10 @@ impl<'a> Token<'a> {
 
     /// Check if a string is a keyword.
     pub fn is_keyword_txt(s: &str) -> bool {
-        matches!(
-            s,
-            "and"
-                | "as"
-                | "assert"
-                | "await"
-                | "break"
-                | "constraint"
-                | "continue"
-                | "else"
-                | "exception"
-                | "external"
-                | "false"
-                | "for"
-                | "if"
-                | "in"
-                | "include"
-                | "let?"
-                | "let"
-                | "list{"
-                | "dict{"
-                | "module"
-                | "mutable"
-                | "of"
-                | "open"
-                | "private"
-                | "rec"
-                | "switch"
-                | "true"
-                | "try"
-                | "type"
-                | "when"
-                | "while"
+        !matches!(
+            Token::lookup_keyword(s),
+            Token::Lident(_) | Token::Uident(_)
         )
-    }
-
-    /// The special "catch" identifier (not a keyword).
-    pub fn catch() -> Token<'a> {
-        Token::Lident(Cow::Borrowed("catch"))
     }
 
     /// Convert this token into an owned version with `'static` lifetime.
@@ -523,7 +486,6 @@ impl<'a> Token<'a> {
             Token::Colon => Token::Colon,
             Token::Comma => Token::Comma,
             Token::Eof => Token::Eof,
-            Token::Backslash => Token::Backslash,
             Token::Forwardslash => Token::Forwardslash,
             Token::ForwardslashDot => Token::ForwardslashDot,
             Token::Asterisk => Token::Asterisk,
@@ -633,7 +595,6 @@ impl<'a> std::fmt::Display for Token<'a> {
             Token::PlusDot => write!(f, "+."),
             Token::PlusPlus => write!(f, "++"),
             Token::PlusEqual => write!(f, "+="),
-            Token::Backslash => write!(f, "\\"),
             Token::Regex { pattern, flags } => write!(f, "regex: /{}/{}", pattern, flags),
             Token::Forwardslash => write!(f, "/"),
             Token::ForwardslashDot => write!(f, "/."),
@@ -759,11 +720,6 @@ mod tests {
             ),
             "int 42"
         );
-    }
-
-    #[test]
-    fn test_catch() {
-        assert_eq!(Token::catch(), Token::Lident(Cow::Borrowed("catch")));
     }
 
     #[test]
