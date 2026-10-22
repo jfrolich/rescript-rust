@@ -11021,29 +11021,6 @@ fn format_function_arity_mismatch_report(
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
-fn count_arrow_args(type_ctx: &TypeContext, ty: TypeExprRef, mut count: usize) -> usize {
-    let mut current = ty;
-    let mut seen = AHashSet::new();
-
-    loop {
-        let repr = type_ctx.repr(current);
-        if !seen.insert(repr) {
-            return count;
-        }
-
-        match &*type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { args, ret } => {
-                count += args.len();
-                current = *ret;
-            }
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-                current = *next;
-            }
-            _ => return count,
-        }
-    }
-}
-
 fn format_apply_non_function_report(
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -11595,15 +11572,6 @@ impl<'a> TypeExprPrinter<'a> {
         } else {
             self.printtyp.type_expr(ty)
         }
-    }
-}
-
-fn generated_type_var_name(idx: usize) -> String {
-    let letter = (b'a' + (idx % 26) as u8) as char;
-    if idx < 26 {
-        format!("'{letter}")
-    } else {
-        format!("'{letter}{}", idx / 26)
     }
 }
 
@@ -14339,7 +14307,7 @@ fn rename_saved_module_type_idents(type_ctx: &TypeContext, mty: &crate::types::d
         } => {
             // Subst.modtype renames the functor binder before traversing its
             // argument and result module types (compiler/ml/subst.ml:345-348).
-            drop(type_ctx.rename_ident(param));
+            type_ctx.rename_ident(param);
             if let Some(param_type) = param_type {
                 rename_saved_module_type_idents(type_ctx, param_type);
             }
@@ -14365,7 +14333,7 @@ fn rename_saved_signature_idents(
             | SignatureItem::SigModtype(id, _)
             | SignatureItem::SigValue(id, _)
             | SignatureItem::SigTypext(id, _, _) => {
-                drop(type_ctx.rename_ident(id));
+                type_ctx.rename_ident(id);
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
