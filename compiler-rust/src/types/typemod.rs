@@ -11682,7 +11682,7 @@ fn rewrite_functor_param_type_paths_in_type(
     manifests: &HashMap<String, TypeExprRef>,
     ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
-    manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+    manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
 
@@ -11713,32 +11713,31 @@ fn rewrite_functor_param_type_paths_in_type(
                             // Cache manifest substitution results so all occurrences of
                             // the same functor parameter type (e.g. S.elt) map to the
                             // SAME substituted node, matching OCaml's Subst.typexp sharing.
-                            let manifest_copy = if let Some(&cached) =
-                                manifest_subst_cache.get(type_name.as_str())
-                            {
-                                cached
-                            } else {
-                                let mut manifest_copy_cache = HashMap::new();
-                                let old_level = ctx.current_level();
-                                ctx.set_current_level(crate::types::type_expr::GENERIC_LEVEL);
-                                let copy = crate::types::ctype::copy_type_deep(
-                                    ctx,
-                                    *manifest_ty,
-                                    &mut manifest_copy_cache,
-                                );
-                                ctx.set_current_level(old_level);
-                                let mut manifest_visited = HashSet::new();
-                                rewrite_functor_param_type_paths_in_type(
-                                    copy,
-                                    param_name,
-                                    manifests,
-                                    ctx,
-                                    &mut manifest_visited,
-                                    manifest_subst_cache,
-                                );
-                                manifest_subst_cache.insert(type_name.to_string(), copy);
-                                copy
-                            };
+                            let manifest_copy =
+                                if let Some(&cached) = manifest_subst_cache.get(&type_name) {
+                                    cached
+                                } else {
+                                    let mut manifest_copy_cache = HashMap::new();
+                                    let old_level = ctx.current_level();
+                                    ctx.set_current_level(crate::types::type_expr::GENERIC_LEVEL);
+                                    let copy = crate::types::ctype::copy_type_deep(
+                                        ctx,
+                                        *manifest_ty,
+                                        &mut manifest_copy_cache,
+                                    );
+                                    ctx.set_current_level(old_level);
+                                    let mut manifest_visited = HashSet::new();
+                                    rewrite_functor_param_type_paths_in_type(
+                                        copy,
+                                        param_name,
+                                        manifests,
+                                        ctx,
+                                        &mut manifest_visited,
+                                        manifest_subst_cache,
+                                    );
+                                    manifest_subst_cache.insert(type_name, copy);
+                                    copy
+                                };
                             ctx.set_desc(ty, TypeDesc::Tlink(manifest_copy));
                         }
                     }
@@ -11906,7 +11905,7 @@ fn copy_and_specialize_functor_arg_type(
     manifests: &HashMap<String, TypeExprRef>,
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
-    manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+    manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
 ) -> TypeExprRef {
     // Same rationale as copy_and_rewrite_module_prefix_type: result-signature
     // specialization must not capture ambient non-generic levels.
@@ -11938,7 +11937,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
-        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
     ) -> crate::types::decl::LabelDeclaration {
         let mut specialized = label.clone();
         specialized.ld_type = copy_and_specialize_functor_arg_type(
@@ -11958,7 +11957,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
-        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
     ) -> crate::types::decl::ConstructorArguments {
         match args {
             crate::types::decl::ConstructorArguments::CstrTuple(types) => {
@@ -12004,7 +12003,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
-        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
     ) -> crate::types::decl::TypeKind {
         match kind {
             crate::types::decl::TypeKind::TypeAbstract => {
@@ -12068,7 +12067,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
-        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
     ) -> crate::types::decl::TypeInlinedType {
         match inlined {
             crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
@@ -12098,7 +12097,7 @@ fn specialize_functor_result_value_types(
         manifests: &HashMap<String, TypeExprRef>,
         ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
-        manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
+        manifest_subst_cache: &mut HashMap<crate::name::Name, TypeExprRef>,
     ) -> crate::types::decl::ModuleType {
         use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
