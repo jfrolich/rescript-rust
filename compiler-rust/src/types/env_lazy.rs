@@ -360,7 +360,7 @@ fn build_type_constructors(
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
                             for arg in &args {
-                                crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix_pub(
+                                crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     *arg,
                                     &old_prefix,
                                     &new_prefix,

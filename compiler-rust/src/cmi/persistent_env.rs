@@ -472,10 +472,6 @@ impl ModuleRegistry {
         snapshot
     }
 
-    pub fn alias_rewrite_len(&self) -> usize {
-        self.alias_rewrites.len() + self.local_alias_rewrites.len()
-    }
-
     pub fn has_cached_module(&self, name: &str) -> bool {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
@@ -705,7 +701,7 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
-        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(
+        let fingerprint = portable_types::compute_type_graph_fingerprint(
             &portable_types::HashGraph {
                 entries: &[],
                 layouts: &[],
@@ -1212,16 +1208,13 @@ impl PersistentEnv {
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
-    /// PersStruct and any new alias rewrites that weren't in the original
-    /// registry. Used to update the shared ModuleRegistry after compilation.
-    /// Extract the diff produced by this compilation: the newly-registered
     /// PersStruct (serialized to portable form) and any new alias rewrites.
     /// Must be called while the TypeContext is still alive so the type graph
-    /// can be serialized.
+    /// can be serialized. Used to update the shared ModuleRegistry after
+    /// compilation.
     pub fn extract_module_update(
         &self,
         module_name: &str,
-        _original_alias_count: usize,
         ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
@@ -1287,7 +1280,6 @@ impl PersistentEnv {
         self.outside_load_path_memo = OutsideLoadPathMemo::default();
     }
 
-    /// Whether `name` is a registered unit of a package outside the load path.
     /// Whether this compilation can see the persistent unit `name`: it is
     /// neither hidden nor in a package outside its load path (OCaml finds a
     /// unit only through the compilation's load path, env.ml:669-678).
@@ -2331,11 +2323,7 @@ impl PersistentEnv {
         Some(Arc::new(sig_ctx.read_signature(&cmi.cmi_sign)))
     }
 
-    /// Read a module's signature from CMI without applying path substitution.
-    /// Used for interface constraint propagation (moregen) where we need raw
-    /// Pident paths that match the implementation's local paths.
-    /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
-    /// lazily in components_of_module_maker, not on ps_sig.
+    /// Owned copy of [`Self::read_raw_sig_shared`].
     pub fn read_raw_sig(&mut self, name: &str, ctx: &TypeContext) -> Option<Signature> {
         self.read_raw_sig_shared(name, ctx)
             .map(|sig| (*sig).clone())
@@ -2375,8 +2363,6 @@ impl PersistentEnv {
         None
     }
 
-    /// Open a module's signature into the environment.
-    /// This adds all the module's exported bindings to the environment.
     /// Get the renamed signature for a module, cached.
     /// Matches OCaml's `ps_sig = lazy (Subst.signature Subst.identity sign)`.
     /// In OCaml, accessing a module's components cascades into forcing ps_sig
@@ -5011,29 +4997,6 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
 }
 
 /// Recursively walk a type expression and substitute Tconstr paths.
-/// Public wrapper for substitute_type_expr_path.
-pub(crate) fn substitute_type_expr_path_pub(
-    ty_ref: TypeExprRef,
-    type_stamp_map: &HashMap<i32, Path>,
-    type_name_map: &HashMap<String, Path>,
-    module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
-    protected_module_head: Option<&(i32, String)>,
-    ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
-) {
-    substitute_type_expr_path(
-        ty_ref,
-        type_stamp_map,
-        type_name_map,
-        module_stamp_map,
-        module_name_map,
-        protected_module_head,
-        ctx,
-        visited,
-    );
-}
-
 fn substitute_type_expr_path(
     initial_ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
@@ -5393,7 +5356,7 @@ pub fn substitute_type_paths_in_value_with_maps(
             // contain the flattened persistent backing path for that same
             // component type, so rewrite only the current component's direct
             // type binders at the Env substitution boundary.
-            rewrite_type_expr_by_path_prefix_pub(desc.val_type, &old_path, &new_path, ctx);
+            rewrite_type_expr_by_path_prefix(desc.val_type, &old_path, &new_path, ctx);
         }
     }
 }
@@ -6248,7 +6211,7 @@ pub fn rewrite_sig_paths_by_path_prefix_shallow(
 /// that have `old_prefix` as a path prefix, replacing it with `new_prefix`.
 /// Used for module alias resolution: `module J = Js.Json` rewrites
 /// `Js.Json.Kind.t` → `J.Kind.t` in all types.
-fn rewrite_type_expr_by_path_prefix(
+fn rewrite_type_expr_by_path_prefix_in(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
     new_prefix: &Path,
@@ -6270,38 +6233,38 @@ fn rewrite_type_expr_by_path_prefix(
                 ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
-                rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
             for arg in args {
-                rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(arg.typ, old_prefix, new_prefix, ctx, visited);
             }
-            rewrite_type_expr_by_path_prefix(*ret, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*ret, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
             for &t in types {
-                rewrite_type_expr_by_path_prefix(t, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(t, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tlink(t) => {
-            rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*t, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tsubst(t) => {
-            rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*t, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tpoly { body, vars } => {
-            rewrite_type_expr_by_path_prefix(*body, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*body, old_prefix, new_prefix, ctx, visited);
             for &v in vars {
-                rewrite_type_expr_by_path_prefix(v, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(v, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tobject { fields, .. } => {
-            rewrite_type_expr_by_path_prefix(*fields, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*fields, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_type_expr_by_path_prefix(*typ, old_prefix, new_prefix, ctx, visited);
-            rewrite_type_expr_by_path_prefix(*rest, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*typ, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*rest, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
             if let Some((path, _)) = &row.row_name
@@ -6317,18 +6280,20 @@ fn rewrite_type_expr_by_path_prefix(
             }
             if let Some((_, args)) = &row.row_name {
                 for &arg in args {
-                    rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                    rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
                 }
             }
-            rewrite_type_expr_by_path_prefix(row.row_more, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(row.row_more, old_prefix, new_prefix, ctx, visited);
             for field in &row.row_fields {
                 match &field.1 {
                     crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                        rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+                        rewrite_type_expr_by_path_prefix_in(
+                            *t, old_prefix, new_prefix, ctx, visited,
+                        );
                     }
                     crate::types::type_expr::RowField::Reither { types, .. } => {
                         for &t in types {
-                            rewrite_type_expr_by_path_prefix(
+                            rewrite_type_expr_by_path_prefix_in(
                                 t, old_prefix, new_prefix, ctx, visited,
                             );
                         }
@@ -6346,21 +6311,22 @@ fn rewrite_type_expr_by_path_prefix(
                 ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
-                rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
 }
 
-pub fn rewrite_type_expr_by_path_prefix_pub(
+/// [`rewrite_type_expr_by_path_prefix_in`] with a fresh visited set.
+pub fn rewrite_type_expr_by_path_prefix(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
     new_prefix: &Path,
     ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
-    rewrite_type_expr_by_path_prefix(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
+    rewrite_type_expr_by_path_prefix_in(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
 }
 
 fn rewrite_type_expr_by_path_prefixes(
@@ -6476,7 +6442,7 @@ pub fn rewrite_sig_by_path_prefix(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                rewrite_type_expr_by_path_prefix(
+                rewrite_type_expr_by_path_prefix_in(
                     desc.val_type,
                     old_prefix,
                     new_prefix,
@@ -6486,7 +6452,7 @@ pub fn rewrite_sig_by_path_prefix(
             }
             SignatureItem::SigType(_id, decl, _) => {
                 for &param in &decl.type_params {
-                    rewrite_type_expr_by_path_prefix(
+                    rewrite_type_expr_by_path_prefix_in(
                         param,
                         old_prefix,
                         new_prefix,
@@ -6495,7 +6461,7 @@ pub fn rewrite_sig_by_path_prefix(
                     );
                 }
                 if let Some(manifest) = decl.type_manifest {
-                    rewrite_type_expr_by_path_prefix(
+                    rewrite_type_expr_by_path_prefix_in(
                         manifest,
                         old_prefix,
                         new_prefix,
@@ -6509,7 +6475,7 @@ pub fn rewrite_sig_by_path_prefix(
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
-                                        rewrite_type_expr_by_path_prefix(
+                                        rewrite_type_expr_by_path_prefix_in(
                                             arg,
                                             old_prefix,
                                             new_prefix,
@@ -6520,7 +6486,7 @@ pub fn rewrite_sig_by_path_prefix(
                                 }
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     for lbl in labels {
-                                        rewrite_type_expr_by_path_prefix(
+                                        rewrite_type_expr_by_path_prefix_in(
                                             lbl.ld_type,
                                             old_prefix,
                                             new_prefix,
@@ -6531,7 +6497,7 @@ pub fn rewrite_sig_by_path_prefix(
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                rewrite_type_expr_by_path_prefix(
+                                rewrite_type_expr_by_path_prefix_in(
                                     res,
                                     old_prefix,
                                     new_prefix,
@@ -6543,7 +6509,7 @@ pub fn rewrite_sig_by_path_prefix(
                     }
                     TypeKind::TypeRecord(labels, _) => {
                         for lbl in labels {
-                            rewrite_type_expr_by_path_prefix(
+                            rewrite_type_expr_by_path_prefix_in(
                                 lbl.ld_type,
                                 old_prefix,
                                 new_prefix,
@@ -6656,20 +6622,15 @@ fn rewrite_sig_by_path_prefix_index(
     }
 }
 
-/// Public wrapper for substitute_submodule_paths.
-pub fn substitute_submodule_paths_pub(
-    sig_items: &[SignatureItem],
-    module_path: &Path,
-    ctx: &TypeContext,
-) {
-    substitute_submodule_paths(sig_items, module_path, ctx);
-}
-
 /// Recursively substitute type paths in sub-module signatures.
 /// For a module like Belt with sub-modules Array, Map, etc.,
 /// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"
 /// instead of Pident "t".
-fn substitute_submodule_paths(sig_items: &[SignatureItem], module_path: &Path, ctx: &TypeContext) {
+pub fn substitute_submodule_paths(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
     // Match OCaml `prefix_idents`/`Subst` behavior: when descending into a
     // submodule, keep parent substitutions visible so child signatures can
     // reference parent-defined types through qualified paths.

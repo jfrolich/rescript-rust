@@ -200,11 +200,7 @@ impl std::ops::Deref for HashGraph<'_> {
     }
 }
 
-pub fn compute_type_graph_fingerprint_pub(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
-    compute_type_graph_fingerprint(entries, sig)
-}
-
-fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
+pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
     // Deterministic within a build (fixed seeds); the fingerprint only lives
     // in the in-memory interface registry.
     use std::hash::BuildHasher;
@@ -401,11 +397,7 @@ fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &HashGraph
 }
 
 /// The fingerprint contribution of one signature item.
-pub fn hash_sig_item_pub(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
-    hash_sig_item(hasher, item, entries)
-}
-
-fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
+pub fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
     std::mem::discriminant(item).hash(hasher);
     match item {
         SignatureItem::SigValue(ident, vd) => {

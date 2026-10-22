@@ -15902,7 +15902,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         js_targets = options.js_output_targets.len()
     )
     .entered();
-    let original_alias_count = registry.alias_rewrite_len();
     let (file_directives, debug, jsx_preserve) = {
         let _phase = info_span!("compiler.directives").entered();
         (
@@ -16155,12 +16154,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let (pers_struct, new_alias_rewrites) = if options.publish_in_process_signature {
-            internal_env.extract_module_update(
-                module_name,
-                original_alias_count,
-                &type_ctx,
-                Some(arena),
-            )
+            internal_env.extract_module_update(module_name, &type_ctx, Some(arena))
         } else {
             (None, ahash::AHashMap::new())
         };
@@ -16694,7 +16688,6 @@ pub fn typecheck_preprocessed_signature_in_process(
         file = %filename
     )
     .entered();
-    let original_alias_count = registry.alias_rewrite_len();
     let file_config = extract_file_config_from_signature(signature, arena);
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
@@ -16893,12 +16886,8 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
-    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
-        module_name,
-        original_alias_count,
-        &type_ctx,
-        Some(arena),
-    );
+    let (pers_struct, new_alias_rewrites) =
+        internal_env.extract_module_update(module_name, &type_ctx, Some(arena));
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,
@@ -16924,8 +16913,6 @@ pub fn typecheck_implementation_in_process(
     registry: &ModuleRegistry,
     has_interface: bool,
 ) -> Result<InProcessInterfaceResult> {
-    let original_alias_count = registry.alias_rewrite_len();
-
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     if parser.has_errors() {
@@ -17005,12 +16992,8 @@ pub fn typecheck_implementation_in_process(
         &type_ctx,
     );
 
-    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
-        module_name,
-        original_alias_count,
-        &type_ctx,
-        Some(parser.arena()),
-    );
+    let (pers_struct, new_alias_rewrites) =
+        internal_env.extract_module_update(module_name, &type_ctx, Some(parser.arena()));
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

@@ -4381,7 +4381,7 @@ impl TypeContext {
         // `Subst.signature` stamps instead of special-casing one module family.
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &module_path);
-        crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, &module_path, self);
+        crate::cmi::persistent_env::substitute_submodule_paths(&sig, &module_path, self);
         Some(Arc::new(sig))
     }
 

@@ -157,7 +157,7 @@ pub fn item_digests(
             if let Some(previous) = digests.get(&key) {
                 previous.hash(&mut hasher);
             }
-            super::portable_types::hash_sig_item_pub(&mut hasher, item, &graph);
+            super::portable_types::hash_sig_item(&mut hasher, item, &graph);
             // The JS metadata dependents' code generation reads for the item,
             // without locations and identifier stamps (see `digest_ser`).
             if let (Some(info), Some(name)) =
