@@ -798,20 +798,37 @@ fn apply_warning_specs_to_config(
     warning_specs: &[String],
     warning_error_specs: &[String],
 ) {
-    for spec in warning_specs {
-        let _ = config.parse(spec);
-    }
-    for spec in warning_error_specs {
-        let _ = config.parse_as_error(spec);
+    apply_warning_ops_to_config(
+        config,
+        warning_specs
+            .iter()
+            .map(|spec| (false, spec.as_str()))
+            .chain(warning_error_specs.iter().map(|spec| (true, spec.as_str()))),
+    );
+}
+
+/// Apply `(as_error, spec)` warning operations in order. Malformed specs are
+/// skipped, leaving the configuration unchanged for them.
+fn apply_warning_ops_to_config<'a>(
+    config: &mut WarningConfig,
+    ops: impl IntoIterator<Item = (bool, &'a str)>,
+) {
+    for (as_error, spec) in ops {
+        let _ = if as_error {
+            config.parse_as_error(spec)
+        } else {
+            config.parse(spec)
+        };
     }
 }
 
-fn apply_file_config_warning_options(
+/// Apply `(as_error, spec)` warning operations to the type checker's state.
+fn apply_warning_ops<'a>(
     tctx: &mut TypeCheckContext<'_>,
-    config: &FileConfigOverrides,
+    ops: impl IntoIterator<Item = (bool, &'a str)>,
 ) {
-    for (as_error, spec) in &config.warning_ops {
-        if *as_error {
+    for (as_error, spec) in ops {
+        if as_error {
             tctx.apply_warning_error_spec(spec);
         } else {
             tctx.apply_warning_spec(spec);
@@ -819,17 +836,29 @@ fn apply_file_config_warning_options(
     }
 }
 
+fn apply_file_config_warning_options(
+    tctx: &mut TypeCheckContext<'_>,
+    config: &FileConfigOverrides,
+) {
+    apply_warning_ops(tctx, file_config_warning_ops(config));
+}
+
 fn apply_leading_warning_attribute_options(
     tctx: &mut TypeCheckContext<'_>,
     specs: &[ppx::WarningAttributeSpec],
 ) {
-    for spec in specs {
-        if spec.as_error {
-            tctx.apply_warning_error_spec(&spec.spec);
-        } else {
-            tctx.apply_warning_spec(&spec.spec);
-        }
-    }
+    apply_warning_ops(tctx, leading_warning_ops(specs));
+}
+
+fn file_config_warning_ops(config: &FileConfigOverrides) -> impl Iterator<Item = (bool, &str)> {
+    config
+        .warning_ops
+        .iter()
+        .map(|(as_error, spec)| (*as_error, spec.as_str()))
+}
+
+fn leading_warning_ops(specs: &[ppx::WarningAttributeSpec]) -> impl Iterator<Item = (bool, &str)> {
+    specs.iter().map(|spec| (spec.as_error, spec.spec.as_str()))
 }
 
 fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
@@ -850,13 +879,7 @@ fn warning_config_for_options_and_leading_attrs(
     leading_specs: &[ppx::WarningAttributeSpec],
 ) -> WarningConfig {
     let mut config = warning_config_for_options(options);
-    for spec in leading_specs {
-        if spec.as_error {
-            let _ = config.parse_as_error(&spec.spec);
-        } else {
-            let _ = config.parse(&spec.spec);
-        }
-    }
+    apply_warning_ops_to_config(&mut config, leading_warning_ops(leading_specs));
     config
 }
 
@@ -865,30 +888,17 @@ fn warning_config_for_options_file_config_and_leading_attrs(
     file_config: &FileConfigOverrides,
     leading_specs: &[ppx::WarningAttributeSpec],
 ) -> WarningConfig {
-    let mut config = warning_config_for_options(options);
     // OCaml compiler/frontend/ppx_entry.ml:28-47 calls
     // Bs_ast_invariant.iter_warnings_on_stru/sigi before builtin PPX
     // rewriting; those leading attributes mutate Warnings.current before
     // @deriving and external warnings are emitted.
-    for spec in leading_specs {
-        if spec.as_error {
-            let _ = config.parse_as_error(&spec.spec);
-        } else {
-            let _ = config.parse(&spec.spec);
-        }
-    }
+    let mut config = warning_config_for_options_and_leading_attrs(options, leading_specs);
     apply_file_config_warning_ops(&mut config, file_config);
     config
 }
 
 fn apply_file_config_warning_ops(config: &mut WarningConfig, file_config: &FileConfigOverrides) {
-    for (as_error, spec) in &file_config.warning_ops {
-        if *as_error {
-            let _ = config.parse_as_error(spec);
-        } else {
-            let _ = config.parse(spec);
-        }
-    }
+    apply_warning_ops_to_config(config, file_config_warning_ops(file_config));
 }
 
 fn shell_quote_path(path: &std::path::Path) -> String {
