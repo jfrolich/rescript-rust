@@ -104,15 +104,20 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
     }
 }
 
-fn sig_item_key(item: &SignatureItem) -> Option<String> {
+/// The kind and name of a top-level item, `None` for class items.
+fn sig_item_kind_name(item: &SignatureItem) -> Option<(Kind, &'static str)> {
     Some(match item {
-        SignatureItem::SigValue(id, _) => item_key(Kind::Value, id.name()),
-        SignatureItem::SigType(id, _, _) => item_key(Kind::Type, id.name()),
-        SignatureItem::SigTypext(id, _, _) => item_key(Kind::Extension, id.name()),
-        SignatureItem::SigModule(id, _, _) => item_key(Kind::Module, id.name()),
-        SignatureItem::SigModtype(id, _) => item_key(Kind::Modtype, id.name()),
+        SignatureItem::SigValue(id, _) => (Kind::Value, id.name()),
+        SignatureItem::SigType(id, _, _) => (Kind::Type, id.name()),
+        SignatureItem::SigTypext(id, _, _) => (Kind::Extension, id.name()),
+        SignatureItem::SigModule(id, _, _) => (Kind::Module, id.name()),
+        SignatureItem::SigModtype(id, _) => (Kind::Modtype, id.name()),
         SignatureItem::SigClass | SignatureItem::SigClassType => return None,
     })
+}
+
+fn sig_item_key(item: &SignatureItem) -> Option<String> {
+    sig_item_kind_name(item).map(|(kind, name)| item_key(kind, name))
 }
 
 fn hash_one(value: &impl Hash) -> u64 {
@@ -130,6 +135,20 @@ pub fn item_digests(
     let mut digests: BTreeMap<String, u64> = BTreeMap::new();
     if let Some(ps) = ps {
         let graph = super::portable_types::HashGraph::of(&ps.type_graph);
+        // Hoisted exports grouped by their top-level name, in their original
+        // relative order.
+        let mut hoisted_by_name: ahash::AHashMap<&str, Vec<&crate::lambda::HoistedExport>> =
+            ahash::AHashMap::new();
+        if let Some(info) = info {
+            for hoisted in info.cmj_hoisted_exports.iter() {
+                if let Some(first) = hoisted.path.first() {
+                    hoisted_by_name
+                        .entry(first.as_str())
+                        .or_default()
+                        .push(hoisted);
+                }
+            }
+        }
         for item in &ps.ps_sig {
             let Some(key) = sig_item_key(item) else {
                 continue;
@@ -148,10 +167,8 @@ pub fn item_digests(
                 canonical.hash(&info.cmj_export_constants.get(name));
                 canonical.hash(&info.cmj_export_arities.get(name));
                 canonical.hash(&info.cmj_export_lambdas.get(name));
-                for hoisted in info.cmj_hoisted_exports.iter() {
-                    if hoisted.path.first().map(String::as_str) == Some(name) {
-                        canonical.hash(hoisted);
-                    }
+                for hoisted in hoisted_by_name.get(name).into_iter().flatten() {
+                    canonical.hash(*hoisted);
                 }
             }
             digests.insert(key, hasher.finish());
@@ -181,9 +198,11 @@ struct RefWalker<'a> {
     /// The unit's top-level item keys: a local identifier that names none of
     /// them is predefined (`int`, `option`) or bound inside the item being
     /// walked (a functor parameter, a sibling in a submodule).
-    own_keys: &'a std::collections::HashSet<String>,
+    own_keys: &'a ahash::AHashSet<(Kind, &'static str)>,
     entries: &'a [PortableTypeEntry],
-    seen: Vec<bool>,
+    /// `seen[idx] == epoch` when entry `idx` was walked for the current item.
+    seen: Vec<u32>,
+    epoch: u32,
     out: Vec<UnitRead>,
 }
 
@@ -203,7 +222,7 @@ impl RefWalker<'_> {
                     } else {
                         read.kind
                     };
-                    own_keys.contains(&item_key(first_kind, first))
+                    own_keys.contains(&(first_kind, first.as_str()))
                 });
             if keep {
                 index += 1;
@@ -214,10 +233,10 @@ impl RefWalker<'_> {
     }
 
     fn ty(&mut self, idx: usize) {
-        if idx >= self.entries.len() || self.seen[idx] {
+        if idx >= self.entries.len() || self.seen[idx] == self.epoch {
             return;
         }
-        self.seen[idx] = true;
+        self.seen[idx] = self.epoch;
         match &self.entries[idx].desc {
             PortableTypeDesc::Tvar(_) | PortableTypeDesc::Tunivar(_) | PortableTypeDesc::Tnil => {}
             PortableTypeDesc::Tarrow { args, ret } => {
@@ -375,30 +394,31 @@ impl RefWalker<'_> {
 pub struct UnitRefs {
     /// Item key to the references of its declaration(s) and inlinable
     /// lambda.
-    pub refs: std::collections::HashMap<String, Vec<UnitRead>>,
+    pub refs: ahash::AHashMap<String, Vec<UnitRead>>,
     /// The module aliases among the items: key to alias targets.
-    pub aliases: std::collections::HashMap<String, Vec<UnitRead>>,
+    pub aliases: ahash::AHashMap<String, Vec<UnitRead>>,
 }
 
 /// The references of every item of `ps`.
 pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -> UnitRefs {
-    let own_keys: std::collections::HashSet<String> =
-        ps.ps_sig.iter().filter_map(sig_item_key).collect();
-    let mut refs: std::collections::HashMap<String, Vec<UnitRead>> =
-        std::collections::HashMap::new();
-    let mut aliases: std::collections::HashMap<String, Vec<UnitRead>> =
-        std::collections::HashMap::new();
+    let own_keys: ahash::AHashSet<(Kind, &'static str)> =
+        ps.ps_sig.iter().filter_map(sig_item_kind_name).collect();
+    let mut refs: ahash::AHashMap<String, Vec<UnitRead>> = ahash::AHashMap::new();
+    let mut aliases: ahash::AHashMap<String, Vec<UnitRead>> = ahash::AHashMap::new();
+    // One `seen` buffer for all items; each item's walk uses a fresh epoch.
+    let mut walker = RefWalker {
+        unit,
+        own_keys: &own_keys,
+        entries: &ps.type_graph.entries,
+        seen: vec![0; ps.type_graph.entries.len()],
+        epoch: 0,
+        out: Vec::new(),
+    };
     for item in &ps.ps_sig {
         let Some(key) = sig_item_key(item) else {
             continue;
         };
-        let mut walker = RefWalker {
-            unit,
-            own_keys: &own_keys,
-            entries: &ps.type_graph.entries,
-            seen: vec![false; ps.type_graph.entries.len()],
-            out: Vec::new(),
-        };
+        walker.epoch += 1;
         // A top-level module alias reads its target only through a path
         // into it (see `aliases`); its digest covers the target's name.
         let is_alias = matches!(
@@ -408,7 +428,7 @@ pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -
         if !is_alias {
             walker.item(item);
         }
-        let mut out = walker.out;
+        let mut out = std::mem::take(&mut walker.out);
         match item {
             SignatureItem::SigValue(id, _) | SignatureItem::SigModule(id, _, _) => {
                 for lambda_unit in source.lambda_units(unit, id.name()) {
