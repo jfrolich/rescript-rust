@@ -358,13 +358,13 @@ impl PartialEq for Ident {
 impl Eq for Ident {}
 
 impl Hash for Ident {
+    /// Consistent with `Eq` (`same`): a stamped ident is identified by its
+    /// stamp alone, an unstamped one by its name. Flags never take part.
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash based on first character and stamp for efficiency
-        // This matches the OCaml implementation
-        if let Some(c) = self.name.chars().next() {
-            (c as u32 ^ self.stamp as u32).hash(state);
-        } else {
+        if self.stamp != 0 {
             self.stamp.hash(state);
+        } else {
+            self.name.hash(state);
         }
     }
 }
@@ -539,5 +539,34 @@ mod tests {
         // All stamps should be unique
         let stamps: std::collections::HashSet<i32> = all_ids.iter().map(|id| id.stamp()).collect();
         assert_eq!(stamps.len(), all_ids.len());
+    }
+}
+
+#[cfg(test)]
+mod hash_contract_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    fn hash_of(id: &Ident) -> u64 {
+        let mut h = DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn idents_equal_under_same_hash_alike() {
+        for (a, b) in [
+            (
+                Ident::new("nonzero", 7, IdentFlags::GLOBAL),
+                Ident::new("different", 7, IdentFlags::NONE),
+            ),
+            (
+                Ident::new("stampzero", 0, IdentFlags::PREDEF_EXN),
+                Ident::new("stampzero", 0, IdentFlags::NONE),
+            ),
+        ] {
+            assert_eq!(a, b);
+            assert_eq!(hash_of(&a), hash_of(&b));
+        }
     }
 }
