@@ -689,28 +689,44 @@ fn get_field_types(
     type_env: &crate::gentype::type_env::T,
     type_expr: &TypeExprRef,
 ) -> (ClosedFlag, Vec<(String, Mutable, Translation)>) {
-    match type_expr_desc(ctx, type_expr) {
-        TypeDesc::Tfield {
-            name,
-            mutability,
-            typ,
-            rest,
-        } => {
-            let (closed_flag, mut fields) =
-                get_field_types(ctx, config, type_vars_gen, type_env, &rest);
-            let mutable_ = match ctx.mutability_repr(mutability) {
-                crate::types::asttypes::MutableFlag::Mutable => Mutable::Mutable,
-                crate::types::asttypes::MutableFlag::Immutable => Mutable::Immutable,
-            };
-            let translation =
-                translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
-            fields.insert(0, (name, mutable_, translation));
-            (closed_flag, fields)
+    // Mirrors compiler/gentype/translate_type_expr_from_types.ml:502-517:
+    // each field's rest is translated before the field itself. Fields are
+    // pushed innermost-first, so the list is reversed once at the end.
+    fn go(
+        ctx: &TypeContext,
+        config: &crate::gentype::config::T,
+        type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
+        type_env: &crate::gentype::type_env::T,
+        type_expr: &TypeExprRef,
+        fields: &mut Vec<(String, Mutable, Translation)>,
+    ) -> ClosedFlag {
+        match type_expr_desc(ctx, type_expr) {
+            TypeDesc::Tfield {
+                name,
+                mutability,
+                typ,
+                rest,
+            } => {
+                let closed_flag = go(ctx, config, type_vars_gen, type_env, &rest, fields);
+                let mutable_ = match ctx.mutability_repr(mutability) {
+                    crate::types::asttypes::MutableFlag::Mutable => Mutable::Mutable,
+                    crate::types::asttypes::MutableFlag::Immutable => Mutable::Immutable,
+                };
+                let translation =
+                    translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
+                fields.push((name, mutable_, translation));
+                closed_flag
+            }
+            TypeDesc::Tlink(te) => go(ctx, config, type_vars_gen, type_env, &te, fields),
+            TypeDesc::Tvar(None) => ClosedFlag::Open,
+            _ => ClosedFlag::Closed,
         }
-        TypeDesc::Tlink(te) => get_field_types(ctx, config, type_vars_gen, type_env, &te),
-        TypeDesc::Tvar(None) => (ClosedFlag::Open, vec![]),
-        _ => (ClosedFlag::Closed, vec![]),
     }
+
+    let mut fields = Vec::new();
+    let closed_flag = go(ctx, config, type_vars_gen, type_env, type_expr, &mut fields);
+    fields.reverse();
+    (closed_flag, fields)
 }
 
 fn translate_variant(
