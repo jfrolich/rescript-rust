@@ -377,26 +377,23 @@ pub fn add_module_path(type_env: &T, name: &str) -> crate::gentype::resolved_nam
 }
 
 pub fn get_module_equations(type_env: &T) -> Vec<crate::gentype::resolved_name::Eq> {
-    // Mirrors compiler/gentype/TypeEnv.ml:175-190.
-    let sub_equations = type_env
-        .borrow()
-        .map
-        .values()
-        .flat_map(|entry| match entry {
-            Entry::Module(te) => get_module_equations(te),
-            Entry::Type(_) => Vec::new(),
-        })
-        .collect::<Vec<_>>();
-
-    match (
-        type_env.borrow().module_equation.clone(),
-        type_env.borrow().parent.clone(),
-    ) {
+    // Mirrors compiler/gentype/type_env.ml:176-191. The sub-module equations
+    // are only used when this env has no equation of its own, and computing
+    // them has no side effects, so they are collected only in that case.
+    let type_env_ref = type_env.borrow();
+    match (&type_env_ref.module_equation, &type_env_ref.parent) {
         (Some(ModuleEquation { dep, .. }), Some(parent)) => vec![(
-            dep_to_resolved_name(&dep),
-            add_module_path(&parent, &type_env.borrow().name),
+            dep_to_resolved_name(dep),
+            add_module_path(parent, &type_env_ref.name),
         )],
-        _ => sub_equations,
+        _ => type_env_ref
+            .map
+            .values()
+            .flat_map(|entry| match entry {
+                Entry::Module(te) => get_module_equations(te),
+                Entry::Type(_) => Vec::new(),
+            })
+            .collect(),
     }
 }
 
