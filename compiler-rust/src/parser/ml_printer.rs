@@ -206,8 +206,7 @@ fn is_simple_construct(expr: &Expression, arena: &ParseArena) -> bool {
             if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
                 let name = arena.get_string(*name_idx);
                 if name == "::" {
-                    let (_, is_complete) = collect_list_elements(expr, arena);
-                    return is_complete;
+                    return list_is_complete(expr, arena);
                 }
             }
             false
@@ -311,6 +310,31 @@ fn has_attribute(arena: &ParseArena, attrs: &[(Located<StrIdx>, Payload)], name:
 }
 
 /// Collect list elements from a cons pattern
+/// Whether a `::` spine ends in `[]` with no attributes along the way; the
+/// completeness flag of [`collect_list_elements`] without collecting.
+fn list_is_complete(expr: &Expression, arena: &ParseArena) -> bool {
+    let mut current = expr;
+    loop {
+        if !current.pexp_attributes.is_empty() {
+            return false;
+        }
+        let ExpressionDesc::Pexp_construct(lid, args) = &*current.pexp_desc else {
+            return false;
+        };
+        let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+            return false;
+        };
+        let name = arena.get_string(*name_idx);
+        if args.txt.is_empty() {
+            return name == "[]";
+        }
+        match args.txt.as_slice() {
+            [_, tail] if name == "::" => current = arena.get_expr(*tail),
+            _ => return false,
+        }
+    }
+}
+
 fn collect_list_elements<'a>(
     expr: &'a Expression,
     arena: &'a ParseArena,
@@ -855,12 +879,7 @@ fn print_value_binding<W: Write>(
             f.string(")");
             f.space(); // @ between ) and next
             // Continue collecting newtypes and print arity when we hit a fun
-            let body = print_remaining_inline_params_with_arity(
-                f,
-                arena,
-                arena.get_expr(*inner_idx),
-                true,
-            );
+            let body = print_remaining_inline_params(f, arena, arena.get_expr(*inner_idx));
             // OCaml: pp f "=@;%a" (expression ctxt) x
             f.string("=");
             f.space();
@@ -1037,14 +1056,6 @@ fn print_label_exp_with_break<W: Write>(
     }
 }
 
-fn print_remaining_inline_params<'a, W: Write>(
-    f: &mut Formatter<W>,
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> &'a Expression {
-    print_remaining_inline_params_with_arity(f, arena, expr, false)
-}
-
 /// One `Pexp_fun` step of OCaml `pp_print_pexp_function` (pprintast.ml:1069-1086):
 /// "%s%a%s%a" async_str pp_newtypes newtypes arity_str pp_params params.
 fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, inner: &PexpFun) {
@@ -1085,12 +1096,11 @@ fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, 
     }
 }
 
-/// Helper to print remaining inline params, optionally printing arity on first Pexp_fun
-fn print_remaining_inline_params_with_arity<'a, W: Write>(
+/// Helper to print the remaining inline params (`fun` heads and newtypes).
+fn print_remaining_inline_params<'a, W: Write>(
     f: &mut Formatter<W>,
     arena: &'a ParseArena,
     expr: &'a Expression,
-    need_arity: bool,
 ) -> &'a Expression {
     if !expr.pexp_attributes.is_empty() {
         return expr;
@@ -1099,7 +1109,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             print_pexp_function_head(f, arena, inner);
-            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(inner.rhs), false)
+            print_remaining_inline_params(f, arena, arena.get_expr(inner.rhs))
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref inner_idx) = **inner;
@@ -1109,12 +1119,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
             f.string(arena.get_string(name.txt));
             f.string(")");
             f.space(); // @ between ) and next
-            print_remaining_inline_params_with_arity(
-                f,
-                arena,
-                arena.get_expr(*inner_idx),
-                need_arity,
-            )
+            print_remaining_inline_params(f, arena, arena.get_expr(*inner_idx))
         }
         _ => expr,
     }
@@ -2390,27 +2395,11 @@ fn jsx_tag_name_to_string(tag_name: &JsxTagName, arena: &ParseArena) -> String {
     match tag_name {
         JsxTagName::Lower(name) => name.clone(),
         JsxTagName::QualifiedLower { path, name } => {
-            let path_str = print_longident_to_string(arena.get_longident(*path), arena);
+            let path_str = arena.longident_to_string(arena.get_longident(*path));
             format!("{}.{}", path_str, name)
         }
-        JsxTagName::Upper(lident) => print_longident_to_string(arena.get_longident(*lident), arena),
+        JsxTagName::Upper(lident) => arena.longident_to_string(arena.get_longident(*lident)),
         JsxTagName::Invalid(name) => name.clone(),
-    }
-}
-
-fn print_longident_to_string(lid: &Longident, arena: &ParseArena) -> String {
-    match lid {
-        Longident::Lident(name_idx) => arena.get_string(*name_idx).to_string(),
-        Longident::Ldot(prefix, name_idx) => {
-            let prefix_str = print_longident_to_string(prefix.as_ref(), arena);
-            let name = arena.get_string(*name_idx);
-            format!("{}.{}", prefix_str, name)
-        }
-        Longident::Lapply(left, right) => {
-            let left_str = print_longident_to_string(left.as_ref(), arena);
-            let right_str = print_longident_to_string(right.as_ref(), arena);
-            format!("{}({})", left_str, right_str)
-        }
     }
 }
 

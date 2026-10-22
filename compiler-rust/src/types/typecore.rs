@@ -2086,23 +2086,7 @@ impl<'a> TypeCheckContext<'a> {
     /// Get the full dotted name of a Longident as a string.
     /// For `Lident("int")` returns `"int"`, for `Ldot(Lident("Foo"), "bar")` returns `"Foo.bar"`.
     pub fn longident_to_string(&self, lid: &Longident) -> String {
-        match lid {
-            Longident::Lident(idx) => self.arena.get_string(*idx).to_string(),
-            Longident::Ldot(prefix, idx) => {
-                format!(
-                    "{}.{}",
-                    self.longident_to_string(prefix),
-                    self.arena.get_string(*idx)
-                )
-            }
-            Longident::Lapply(a, b) => {
-                format!(
-                    "{}({})",
-                    self.longident_to_string(a),
-                    self.longident_to_string(b)
-                )
-            }
-        }
+        self.arena.longident_to_string(lid)
     }
 
     /// Convert a Located<LidentIdx> to Located<Longident> by cloning the longident.
@@ -23854,20 +23838,7 @@ impl Env {
 
     /// Convert a longident to a human-readable string for error messages.
     fn longident_to_string(lid: &Longident, arena: &crate::parse_arena::ParseArena) -> String {
-        match lid {
-            Longident::Lident(idx) => arena.get_string(*idx).to_string(),
-            Longident::Ldot(prefix, idx) => {
-                let prefix_str = Self::longident_to_string(prefix, arena);
-                format!("{}.{}", prefix_str, arena.get_string(*idx))
-            }
-            Longident::Lapply(f, a) => {
-                format!(
-                    "{}({})",
-                    Self::longident_to_string(f, arena),
-                    Self::longident_to_string(a, arena)
-                )
-            }
-        }
+        arena.longident_to_string(lid)
     }
 
     /// Resolve a module longident to its signature and path.

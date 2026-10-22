@@ -1661,6 +1661,29 @@ impl ParseArena {
         idx
     }
 
+    /// Render a longident as `A.b` / `F(X)` text (OCaml `Longident` printing).
+    pub fn longident_to_string(&self, lid: &Longident) -> String {
+        fn write(arena: &ParseArena, lid: &Longident, out: &mut String) {
+            match lid {
+                Longident::Lident(idx) => out.push_str(arena.get_string(*idx)),
+                Longident::Ldot(prefix, idx) => {
+                    write(arena, prefix, out);
+                    out.push('.');
+                    out.push_str(arena.get_string(*idx));
+                }
+                Longident::Lapply(f, a) => {
+                    write(arena, f, out);
+                    out.push('(');
+                    write(arena, a, out);
+                    out.push(')');
+                }
+            }
+        }
+        let mut out = String::new();
+        write(self, lid, &mut out);
+        out
+    }
+
     /// Look up a longident by index.
     pub fn get_longident(&self, idx: LidentIdx) -> &Longident {
         let raw = idx.to_u32();

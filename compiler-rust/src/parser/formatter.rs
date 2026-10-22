@@ -28,6 +28,9 @@ pub const DEFAULT_MARGIN: usize = 78;
 /// Large value for default token size (matching OCaml's pp_infinity)
 const PP_INFINITY: i32 = 1000000010;
 
+/// Scan-stack sentinel queue index; never matches a real queue position.
+const SENTINEL_QUEUE_INDEX: usize = usize::MAX;
+
 /// Box types matching OCaml's Format module
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoxKind {
@@ -176,15 +179,15 @@ impl<W: Write> Formatter<W> {
         let _ = self.out.write_all(b"\n");
     }
 
+    /// Write `n` spaces (OCaml's `pp_out_spaces` / `pp_out_indent`, which
+    /// both default to `display_blanks`).
     fn pp_output_spaces(&mut self, n: i32) {
-        for _ in 0..n {
-            let _ = self.out.write_all(b" ");
-        }
-    }
-
-    fn pp_output_indent(&mut self, n: i32) {
-        for _ in 0..n {
-            let _ = self.out.write_all(b" ");
+        const BLANKS: [u8; 80] = [b' '; 80];
+        let mut n = n.max(0) as usize;
+        while n > 0 {
+            let chunk = n.min(BLANKS.len());
+            let _ = self.out.write_all(&BLANKS[..chunk]);
+            n -= chunk;
         }
     }
 
@@ -207,7 +210,7 @@ impl<W: Write> Formatter<W> {
         let real_indent = indent.min(self.max_indent).max(0);
         self.current_indent = real_indent;
         self.space_left = self.margin - self.current_indent;
-        self.pp_output_indent(self.current_indent);
+        self.pp_output_spaces(self.current_indent);
     }
 
     /// Break line (no offset)
@@ -350,27 +353,19 @@ impl<W: Write> Formatter<W> {
     /// Initialize scan stack with sentinel
     fn initialize_scan_stack(&mut self) {
         self.scan_stack.clear();
-        let queue_elem = QueueElem {
-            size: -1, // Size.unknown
-            token: PpToken::Text(String::new()),
-            length: 0,
-        };
-        // Push sentinel with left_total = -1
-        // The sentinel queue elem doesn't go in the main queue
-        // We use a special index that won't match any real queue position
+        // OCaml pushes a sentinel with left_total = -1 pointing at an
+        // unknown-size text element; that element is never in the queue, so
+        // Rust represents it with an index no real queue position can match.
         self.scan_stack.push(ScanElem {
             left_total: -1,
-            queue_index: usize::MAX,
+            queue_index: SENTINEL_QUEUE_INDEX,
         });
-        // Store the sentinel element - we don't actually need it in the queue
-        // since it's only used as a guard in set_size
-        let _ = queue_elem;
     }
 
     /// Get queue element by absolute index
     fn queue_get(&self, abs_index: usize) -> Option<&QueueElem> {
-        if abs_index == usize::MAX {
-            return None; // sentinel
+        if abs_index == SENTINEL_QUEUE_INDEX {
+            return None;
         }
         if abs_index >= self.queue_offset {
             self.queue.get(abs_index - self.queue_offset)
@@ -381,8 +376,8 @@ impl<W: Write> Formatter<W> {
 
     /// Get mutable queue element by absolute index
     fn queue_get_mut(&mut self, abs_index: usize) -> Option<&mut QueueElem> {
-        if abs_index == usize::MAX {
-            return None; // sentinel
+        if abs_index == SENTINEL_QUEUE_INDEX {
+            return None;
         }
         if abs_index >= self.queue_offset {
             self.queue.get_mut(abs_index - self.queue_offset)
@@ -451,25 +446,25 @@ impl<W: Write> Formatter<W> {
     /// Process tokens from the queue front (matching OCaml's advance_left)
     fn advance_left(&mut self) {
         loop {
-            let (size, token, length) = match self.queue.front() {
-                None => return,
-                Some(elem) => {
-                    let size = elem.size;
-                    let pending_count = self.right_total - self.left_total;
-                    if size >= 0 || pending_count >= self.space_left {
-                        (size, elem.token.clone(), elem.length)
-                    } else {
-                        return;
-                    }
-                }
+            let Some(front) = self.queue.front() else {
+                return;
             };
-
-            self.queue.pop_front();
+            let pending_count = self.right_total - self.left_total;
+            if front.size < 0 && pending_count < self.space_left {
+                return;
+            }
+            let Some(elem) = self.queue.pop_front() else {
+                return;
+            };
             self.queue_offset += 1;
 
-            let actual_size = if size >= 0 { size } else { PP_INFINITY };
-            self.format_pp_token(actual_size, &token);
-            self.left_total += length;
+            let actual_size = if elem.size >= 0 {
+                elem.size
+            } else {
+                PP_INFINITY
+            };
+            self.format_pp_token(actual_size, &elem.token);
+            self.left_total += elem.length;
         }
     }
 
@@ -563,9 +558,10 @@ impl<W: Write> Formatter<W> {
     // Public API - Content
     // ========================================================================
 
-    /// Print a string
+    /// Print a string. Width is the byte length, matching OCaml's
+    /// `pp_print_string state s = pp_print_as state (String.length s) s`.
     pub fn string(&mut self, s: &str) {
-        let len = s.chars().count() as i32;
+        let len = s.len() as i32;
         self.enqueue_string_as(len, s.to_string());
     }
 
@@ -634,18 +630,15 @@ impl<W: Write> Formatter<W> {
 // Convenience macros
 // ============================================================================
 
-/// Print formatted content to a Formatter
+/// Print formatted content to a Formatter (test helper).
 ///
 /// Usage: `pp!(f, "let {} = {}", name, value)`
-#[macro_export]
+#[cfg(test)]
 macro_rules! pp {
     ($f:expr, $($arg:tt)*) => {
         $f.print(format_args!($($arg)*))
     };
 }
-
-/// Re-export for use in other modules
-pub use pp;
 
 // ============================================================================
 // Tests
@@ -819,5 +812,20 @@ mod tests {
             pp!(f, "let {} = {}", name, value);
         });
         assert_eq!(result, "let x = 42");
+    }
+
+    #[test]
+    fn test_string_width_is_byte_length() {
+        // OCaml: `Format.set_margin 10; printf "@[<hov 0>ééééé@ ab@]@."`
+        // prints "ééééé\nab" because "ééééé" is 10 bytes wide.
+        let result = format_to_string(|f| {
+            f.set_margin(10);
+            f.open_hovbox(0);
+            f.string("ééééé");
+            f.space();
+            f.string("ab");
+            f.close_box();
+        });
+        assert_eq!(result, "ééééé\nab");
     }
 }
