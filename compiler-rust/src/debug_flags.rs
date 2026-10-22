@@ -10,13 +10,6 @@ fn enabled(flag: &'static OnceLock<bool>, name: &'static str) -> bool {
     *flag.get_or_init(|| std::env::var_os(name).is_some())
 }
 
-static RAW_FALLBACK_TRACE: OnceLock<bool> = OnceLock::new();
-
-/// Whether raw-lambda fallback tracing is enabled.
-pub fn raw_fallback_trace() -> bool {
-    enabled(&RAW_FALLBACK_TRACE, "RUST_RAW_FALLBACK_TRACE")
-}
-
 static DEBUG_PERS_STRUCT: OnceLock<bool> = OnceLock::new();
 static DEBUG_PERSISTENT_SOURCE_FALLBACK: OnceLock<bool> = OnceLock::new();
 
