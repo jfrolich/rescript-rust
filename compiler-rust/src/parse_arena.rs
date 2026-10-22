@@ -715,15 +715,15 @@ impl Default for ParseArena {
 
         // Pre-allocate external primitive empty strings.
         // These model literal "" values coming from distinct OCaml compilation units.
-        let prim_empty_external_ffi = strings.push(String::new());
-        let prim_empty_js_mapper = strings.push(String::new());
-        let prim_raw_expr = strings.push("#raw_expr".to_string());
-        let prim_raw_stmt = strings.push("#raw_stmt".to_string());
-        let ppx_eq_str = strings.push("==".to_string());
-        let ppx_js_str = strings.push("Js".to_string());
-        let ppx_empty_str = strings.push(String::new());
-        let ppx_undefined_str = strings.push("undefined".to_string());
-        let template_concat_str = strings.push("++".to_string());
+        let prim_empty_external_ffi = strings.push_interned("");
+        let prim_empty_js_mapper = strings.push_interned("");
+        let prim_raw_expr = strings.push_interned("#raw_expr");
+        let prim_raw_stmt = strings.push_interned("#raw_stmt");
+        let ppx_eq_str = strings.push_interned("==");
+        let ppx_js_str = strings.push_interned("Js");
+        let ppx_empty_str = strings.push_interned("");
+        let ppx_undefined_str = strings.push_interned("undefined");
+        let template_concat_str = strings.push_interned("++");
         let static_optional_default_opt_str = strings.intern("*opt*");
         let static_optional_default_sth_str = strings.intern("*sth*");
         let static_default_attr_str = strings.intern("#default");
@@ -755,8 +755,8 @@ impl Default for ParseArena {
         // strings must be distinct objects in the marshal output.
         // Pattern context: use fresh (non-interned) strings so they marshal as
         // separate objects from the expression context strings.
-        let pat_nil_str = strings.push("[]".to_string());
-        let pat_cons_str = strings.push("::".to_string());
+        let pat_nil_str = strings.push_interned("[]");
+        let pat_cons_str = strings.push_interned("::");
         let pat_nil = longidents.push(Longident::Lident(pat_nil_str));
         let pat_cons = longidents.push(Longident::Lident(pat_cons_str));
         // Expression context: use interned strings (these will also be found by
@@ -1068,7 +1068,7 @@ impl ParseArena {
         let none_loc = InternedLocation::new(pos_idx, pos_idx, true);
         arena.locations.push(none_loc);
         // Pre-allocate dummy location with line 0 for internal PPX nodes
-        let dummy_file_idx = arena.strings.push("_none_".to_string());
+        let dummy_file_idx = arena.strings.push_interned("_none_");
         arena.position_file_names.insert(dummy_file_idx);
         let dummy_pos = Position::new(dummy_file_idx, 0, 0, -1);
         let dummy_pos_idx = arena.positions.push(dummy_pos);
@@ -2083,8 +2083,8 @@ impl ParseArena {
     }
 
     /// Push a string without deduplication (for dynamic user-input strings).
-    pub fn push_string(&mut self, s: impl Into<String>) -> StrIdx {
-        self.strings.push(s.into())
+    pub fn push_string(&mut self, s: impl AsRef<str>) -> StrIdx {
+        self.strings.push_interned(s.as_ref())
     }
 
     /// Push a string with a unique StrIdx.

@@ -9,9 +9,10 @@
 //!
 //! # String Storage
 //!
-//! Strings are stored as `Box<str>` for minimal overhead (one pointer + one
-//! length, no refcount). `push_interned()` always allocates a fresh `Box<str>`
-//! and returns a unique StrIdx — this gives unique indices for marshal identity.
+//! All strings live back to back in one `String` buffer; each `StrIdx` maps
+//! to a byte span in it, so storing a string never allocates on its own.
+//! `push_interned()` appends a new span and returns a unique StrIdx — this
+//! gives unique indices for marshal identity.
 //!
 //! # Example
 //!
@@ -67,11 +68,11 @@ impl StrIdx {
 ///
 /// For parser identifiers that need unique StrIdx values (for marshal
 /// identity-based sharing), use `push_interned()` which returns a fresh
-/// StrIdx with its own `Box<str>` allocation.
+/// StrIdx with its own span in the shared buffer.
 #[derive(Debug)]
 pub struct Interner {
     /// `StrIdx` of each string deduplicated by `intern()`, keyed by content.
-    /// Only `intern()`/`intern_owned()` read or write this table.
+    /// Only `intern()` reads or write this table.
     table: hashbrown::HashTable<StrIdx>,
     hasher: ahash::RandomState,
     /// All strings back to back; `spans[idx]` is the byte range of `idx`.
@@ -149,30 +150,12 @@ impl Interner {
         idx
     }
 
-    /// Intern an owned string, returning its index.
-    pub fn intern_owned(&mut self, s: String) -> StrIdx {
-        self.intern(&s)
-    }
-
-    /// Push a string without deduplication, always creating a new entry.
+    /// Push a string without deduplication, always returning a NEW StrIdx
+    /// (unique for marshal identity).
     ///
-    /// Use this for dynamic strings (from user input/tokens) that should NOT
-    /// be shared during marshalling. Each call returns a unique index.
-    ///
-    /// For static strings that should be shared, use `intern()` instead.
-    /// For dynamic strings that should have unique indices, use `push_interned()`.
-    pub fn push(&mut self, s: String) -> StrIdx {
-        // Not added to the table, so this string won't be found by intern().
-        self.push_str(&s)
-    }
-
-    /// Push a string with a unique StrIdx.
-    ///
-    /// Like `push()`, this always returns a NEW StrIdx (unique for marshal
-    /// identity).
-    ///
-    /// Use this for parser identifiers where each occurrence needs a unique
-    /// StrIdx (for marshal parity).
+    /// The string is not added to the dedup table, so `intern()` will not
+    /// find it. Use this for parser identifiers where each occurrence needs a
+    /// unique StrIdx (for marshal parity); use `intern()` for shared strings.
     #[inline]
     pub fn push_interned(&mut self, s: &str) -> StrIdx {
         self.push_str(s)
@@ -201,7 +184,8 @@ impl Interner {
         self.spans.len()
     }
 
-    /// Reserve storage for additional strings without changing existing indices.
+    /// Reserve index slots for `additional` strings without changing existing
+    /// indices. String bytes still grow on demand.
     pub fn reserve(&mut self, additional: usize) {
         self.spans.reserve(additional);
     }
@@ -260,14 +244,6 @@ mod tests {
         let mut interner = Interner::new();
         let idx = interner.intern("hello");
         assert_eq!(interner.get(idx), "hello");
-    }
-
-    #[test]
-    fn test_intern_owned() {
-        let mut interner = Interner::new();
-        let idx1 = interner.intern_owned("hello".to_string());
-        let idx2 = interner.intern("hello");
-        assert_eq!(idx1, idx2);
     }
 
     #[test]
