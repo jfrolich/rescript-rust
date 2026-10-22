@@ -25724,11 +25724,8 @@ fn lookup_label_by_expected_type(
         }
     }
 
-    let Some((concrete_path, _actual_args, type_decl)) =
-        extract_concrete_record_type_info(record_ty, env, pers_env, ctx)
-    else {
-        return None;
-    };
+    let (concrete_path, _actual_args, type_decl) =
+        extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     // `lookup_from_type` marks the type used (typecore.ml:852-854).
     mark_type_used(ctx, env, concrete_path.last(), type_decl.type_loc);
     let (labels, repr) = match &type_decl.type_kind {
@@ -26659,9 +26656,7 @@ fn lookup_constructor_by_expected_type(
     }
 
     // Look up the type declaration.
-    let Some(concrete_type_decl) = lookup_type_decl_for_path(&type_path, env, pers_env, ctx) else {
-        return None;
-    };
+    let concrete_type_decl = lookup_type_decl_for_path(&type_path, env, pers_env, ctx)?;
     // Prefer declaration-carried canonical path (e.g. opened `t` -> `J.t`)
     // so constructor result heads match OCaml's qualified paths.
     let concrete_type_path = concrete_type_decl
