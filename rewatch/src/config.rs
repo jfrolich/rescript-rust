@@ -822,9 +822,9 @@ impl Config {
     }
 
     pub fn get_jsx_args(&self) -> Vec<String> {
-        match self.jsx.to_owned() {
-            Some(jsx) => match jsx.version {
-                Some(version) if version == 4 => {
+        match &self.jsx {
+            Some(jsx) => match &jsx.version {
+                Some(version) if *version == 4 => {
                     vec!["-bs-jsx".to_string(), version.to_string()]
                 }
                 Some(version) => panic!("JSX version {version} is unsupported"),
@@ -835,8 +835,8 @@ impl Config {
     }
 
     pub fn get_jsx_mode_args(&self) -> Vec<String> {
-        match self.jsx.to_owned() {
-            Some(jsx) => match jsx.mode {
+        match &self.jsx {
+            Some(jsx) => match &jsx.mode {
                 Some(JsxMode::Classic) => {
                     vec!["-bs-jsx-mode".to_string(), "classic".to_string()]
                 }
@@ -851,13 +851,13 @@ impl Config {
     }
 
     pub fn get_jsx_module_args(&self) -> Vec<String> {
-        match self.jsx.to_owned() {
-            Some(jsx) => match jsx.module {
+        match &self.jsx {
+            Some(jsx) => match &jsx.module {
                 Some(JsxModule::React) => {
                     vec!["-bs-jsx-module".to_string(), "react".to_string()]
                 }
                 Some(JsxModule::Other(module)) => {
-                    vec!["-bs-jsx-module".to_string(), module]
+                    vec!["-bs-jsx-module".to_string(), module.clone()]
                 }
                 None => vec![],
             },
@@ -866,8 +866,8 @@ impl Config {
     }
 
     pub fn get_jsx_preserve_args(&self) -> Vec<String> {
-        match self.jsx.to_owned() {
-            Some(jsx) => match jsx.preserve {
+        match &self.jsx {
+            Some(jsx) => match &jsx.preserve {
                 Some(true) => vec!["-bs-jsx-preserve".to_string()],
                 _ => vec![],
             },
