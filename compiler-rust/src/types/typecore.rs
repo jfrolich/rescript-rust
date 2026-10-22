@@ -11655,8 +11655,7 @@ fn report_unused_match_pattern(
     level: i32,
     ty_arg_check: TypeExprRef,
 ) {
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch)
-        || unused_check_is_trivial(lhs, false)
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch) || unused_check_is_trivial(lhs, false)
     {
         return;
     }
@@ -18896,12 +18895,12 @@ fn resolve_alias_root_from_module_type(
         DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
         DeclMty::MtyIdent(path) => match path {
             Path::Pident(id) => {
-                let name = id.name().to_string();
-                if !visited.insert(name.clone()) {
+                let name = id.name();
+                if !visited.insert(name.to_string()) {
                     return None;
                 }
 
-                if let Ok(mtd) = env.find_modtype(&name) {
+                if let Ok(mtd) = env.find_modtype(name) {
                     if let Some(inner_mty) = &mtd.mtd_type {
                         if let Some(alias_root) =
                             resolve_alias_root_from_module_type(env, inner_mty, visited)
@@ -18911,7 +18910,7 @@ fn resolve_alias_root_from_module_type(
                     }
                 }
 
-                if let Ok(md) = env.find_module(&name) {
+                if let Ok(md) = env.find_module(name) {
                     if let Some(alias_root) =
                         resolve_alias_root_from_module_type(env, &md.md_type, visited)
                     {
@@ -18936,7 +18935,6 @@ fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
 fn replace_letmodule_local_paths(
     ctx: &TypeContext,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
     module_id: &Ident,
     seen: &mut HashSet<TypeExprRef>,
@@ -18960,7 +18958,7 @@ fn replace_letmodule_local_paths(
             let expanded = ctx.repr(expanded);
             if expanded != ty {
                 crate::types::link_type(ctx, ty, expanded);
-                replace_letmodule_local_paths(ctx, env, pers_env, expanded, module_id, seen);
+                replace_letmodule_local_paths(ctx, env, expanded, module_id, seen);
                 return;
             }
         }
@@ -18973,7 +18971,7 @@ fn replace_letmodule_local_paths(
             if rewritten_path != local_path {
                 let rewritten_ty = ctx.new_constr(rewritten_path, local_args.to_vec());
                 crate::types::link_type(ctx, ty, rewritten_ty);
-                replace_letmodule_local_paths(ctx, env, pers_env, rewritten_ty, module_id, seen);
+                replace_letmodule_local_paths(ctx, env, rewritten_ty, module_id, seen);
                 return;
             }
         }
@@ -18984,31 +18982,23 @@ fn replace_letmodule_local_paths(
     }
 
     crate::types::iter_type_expr(ctx, ty, |child| {
-        replace_letmodule_local_paths(ctx, env, pers_env, child, module_id, seen);
+        replace_letmodule_local_paths(ctx, env, child, module_id, seen);
     });
 }
 
 fn apply_letmodule_local_path_cleanup(
     ctx: &TypeContext,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     body_env: &Env,
     module_id: &Ident,
     rewritten_ty: TypeExprRef,
     expected_ty: TypeExprRef,
 ) {
     let mut seen: HashSet<TypeExprRef> = HashSet::new();
-    replace_letmodule_local_paths(ctx, body_env, pers_env, rewritten_ty, module_id, &mut seen);
-    replace_letmodule_local_paths(ctx, body_env, pers_env, expected_ty, module_id, &mut seen);
+    replace_letmodule_local_paths(ctx, body_env, rewritten_ty, module_id, &mut seen);
+    replace_letmodule_local_paths(ctx, body_env, expected_ty, module_id, &mut seen);
     for (_id, value_desc) in env.iter_values() {
-        replace_letmodule_local_paths(
-            ctx,
-            body_env,
-            pers_env,
-            value_desc.val_type,
-            module_id,
-            &mut seen,
-        );
+        replace_letmodule_local_paths(ctx, body_env, value_desc.val_type, module_id, &mut seen);
     }
 }
 
@@ -19296,7 +19286,11 @@ fn unbound_constructor_alternatives(
             crate::types::decl::SignatureItem::SigType(_, decl, _) => {
                 if let crate::types::decl::TypeKind::TypeVariant(constructors, _) = &decl.type_kind
                 {
-                    names.extend(constructors.iter().map(|cstr| cstr.cd_id.name().to_string()));
+                    names.extend(
+                        constructors
+                            .iter()
+                            .map(|cstr| cstr.cd_id.name().to_string()),
+                    );
                 }
             }
             crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
@@ -19602,8 +19596,7 @@ fn type_letmodule(
         apply_letmodule_local_path_cleanup(
             ctx,
             env,
-            &mut tctx.persistent_env,
-            &body_env,
+                        &body_env,
             &mod_id,
             rewritten_ty,
             expected_ty,
@@ -20172,7 +20165,6 @@ fn type_expect_with_module_unpacks(
     apply_letmodule_local_path_cleanup(
         tctx.type_ctx,
         env,
-        &mut tctx.persistent_env,
         &body_env,
         &letmod_id,
         typed_body.exp_type,
