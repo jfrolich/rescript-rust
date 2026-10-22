@@ -906,6 +906,9 @@ pub struct PersistentEnv {
     /// `imported_units` with their recorded CRCs (env.ml:612-646): the
     /// units this compilation found and the units their CRC lists name.
     imported_units: Arc<Mutex<ImportedUnits>>,
+    /// Decoded `.cmj` files by path, so the per-kind disk queries
+    /// (`module_cmj_*`) read and unmarshal each file once per compilation.
+    cmj_values: Arc<Mutex<HashMap<PathBuf, Option<OcamlValue>>>>,
     view: Arc<ResolutionView>,
 }
 
@@ -996,6 +999,7 @@ impl PersistentEnv {
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             imported_units: Arc::default(),
+            cmj_values: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::new(),
                 compiling_module: None,
@@ -1032,6 +1036,7 @@ impl PersistentEnv {
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             imported_units: Arc::default(),
+            cmj_values: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                     registry.alias_rewrites.clone(),
@@ -1782,7 +1787,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        let metadata = read_cmj_module_metadata(&path)?;
+        let metadata = decode_cmj_module_metadata(&self.cmj_value(&path)?)?;
         let package_path = path.parent()?.parent()?.parent()?.to_path_buf();
         Some(CmjModuleImportInfo {
             package_path,
@@ -1805,6 +1810,19 @@ impl PersistentEnv {
         self.find_in_path_uncap(filename).is_some()
     }
 
+    /// The decoded `.cmj` at `path`, read from disk on first use.
+    fn cmj_value(&self, path: &FsPath) -> Option<OcamlValue> {
+        if let Some(value) = self.cmj_values.lock().unwrap().get(path) {
+            return value.clone();
+        }
+        let value = read_marshaled_cmj(path);
+        self.cmj_values
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), value.clone());
+        value
+    }
+
     /// Resolve a module name to its companion `.cmj` path when present.
     pub fn resolve_module_cmj_path(&self, name: &str) -> Option<PathBuf> {
         let cmj_filename = format!("{name}.cmj");
@@ -1825,7 +1843,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_pure(&path)
+        decode_cmj_pure(&self.cmj_value(&path)?)
     }
 
     /// Read closed constant exports recorded in a module's `.cmj` metadata.
@@ -1851,7 +1869,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_constants(&path).map(Arc::new)
+        decode_cmj_export_constants(&self.cmj_value(&path)?).map(Arc::new)
     }
 
     /// Read arity metadata recorded in a module's companion `.cmj`.
@@ -1875,7 +1893,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_arities(&path).map(Arc::new)
+        decode_cmj_export_arities(&self.cmj_value(&path)?).map(Arc::new)
     }
 
     /// Resolve a nested source path to its flat hoisted JS export.
@@ -1892,7 +1910,7 @@ impl PersistentEnv {
             return None;
         }
         let cmj_path = self.resolve_module_cmj_path(name)?;
-        read_cmj_hoisted_exports(&cmj_path)?
+        decode_cmj_hoisted_exports(&self.cmj_value(&cmj_path)?)?
             .into_iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.export_name)
@@ -1916,7 +1934,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_lambdas(&path).map(Arc::new)
+        decode_cmj_export_lambdas(&self.cmj_value(&path)?).map(Arc::new)
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
@@ -1981,6 +1999,7 @@ impl PersistentEnv {
             crc_units: self.crc_units.clone(),
             // A unit compiled from source has its own imports.
             imported_units: Arc::default(),
+            cmj_values: self.cmj_values.clone(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: self.view.alias_prefix_rewrites.clone(),
                 compiling_module: self.view.compiling_module.clone(),
@@ -2798,30 +2817,19 @@ fn read_marshaled_cmj(path: &FsPath) -> Option<OcamlValue> {
     reader.read_from_bytes(marshaled).ok()
 }
 
-pub fn read_cmj_module_metadata(path: &FsPath) -> Option<CmjModuleMetadata> {
-    let value = read_marshaled_cmj(path)?;
+fn decode_cmj_module_metadata(value: &OcamlValue) -> Option<CmjModuleMetadata> {
     Some(CmjModuleMetadata {
-        is_pure: decode_cmj_pure(&value)?,
-        export_constants: decode_cmj_export_constants(&value)?,
-        hoisted_exports: decode_cmj_hoisted_exports(&value)?,
-        package_spec: decode_cmj_package_spec(&value)?,
-        file_case: decode_cmj_file_case(&value)?,
+        is_pure: decode_cmj_pure(value)?,
+        export_constants: decode_cmj_export_constants(value)?,
+        hoisted_exports: decode_cmj_hoisted_exports(value)?,
+        package_spec: decode_cmj_package_spec(value)?,
+        file_case: decode_cmj_file_case(value)?,
     })
-}
-
-fn read_cmj_pure(path: &FsPath) -> Option<bool> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_pure(&value)
 }
 
 fn decode_cmj_pure(value: &OcamlValue) -> Option<bool> {
     let (_, fields) = value.as_block_opt()?;
     fields.get(2).map(|field| field.as_bool())
-}
-
-fn read_cmj_hoisted_exports(path: &FsPath) -> Option<Vec<crate::lambda::HoistedExport>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_hoisted_exports(&value)
 }
 
 fn decode_cmj_hoisted_exports(value: &OcamlValue) -> Option<Vec<crate::lambda::HoistedExport>> {
@@ -2837,21 +2845,6 @@ fn decode_cmj_hoisted_exports(value: &OcamlValue) -> Option<Vec<crate::lambda::H
             })
         })
         .collect()
-}
-
-fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportConstant>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_export_constants(&value)
-}
-
-fn read_cmj_export_arities(path: &FsPath) -> Option<HashMap<String, CmjExportArity>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_export_arities(&value)
-}
-
-fn read_cmj_export_lambdas(path: &FsPath) -> Option<HashMap<String, Lambda>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_export_lambdas(&value)
 }
 
 fn decode_cmj_export_constants(value: &OcamlValue) -> Option<HashMap<String, CmjExportConstant>> {
