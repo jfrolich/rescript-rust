@@ -100,8 +100,6 @@ impl TypeArena {
 /// `TypeContext::shared_pages` (`Ref::map`), so every borrow is a `Ref`.
 pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
 
-/// Cloned snapshot of a type descriptor, for cases where the caller
-/// needs to hold the desc while also mutating the same type node.
 /// `Cmt_utils.deprecated_used_context`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeprecatedContext {
@@ -120,6 +118,8 @@ pub struct DeprecatedUse {
     pub context: Option<DeprecatedContext>,
 }
 
+/// Cloned snapshot of a type descriptor, for cases where the caller
+/// needs to hold the desc while also mutating the same type node.
 pub struct TypeDescSnapshot(TypeDesc);
 
 impl TypeDescSnapshot {
@@ -221,6 +221,19 @@ enum TypeMutation {
     NongenLevel(i32),
     GlobalLevel(i32),
     SavedLevels(Vec<(i32, i32)>),
+}
+
+/// The type-declaration maps fed lazily from `type_decl_log`.
+#[derive(Clone, Copy)]
+enum TypeDeclMap {
+    Name,
+    Stamp,
+    Path,
+    Exact,
+}
+
+impl TypeDeclMap {
+    const COUNT: usize = 4;
 }
 
 #[derive(Default)]
@@ -542,7 +555,7 @@ pub struct TypeContext {
     /// `full_expand` results recorded when a top-level unification fails,
     /// OCaml's `expand_trace` (ctype.ml:1601-1605, 2589-2594). Error reports
     /// print "(defined as ...)" from these.
-    trace_expansions: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+    trace_expansions: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeExprRef>>,
 
     /// State of the `used_slot`/`shadowed` refs captured by
     /// `Env.open_signature`'s `using` callbacks (env.ml:1835-1864), indexed
@@ -613,8 +626,8 @@ pub struct TypeContext {
     /// register every type of every loaded dependency but read these maps
     /// rarely, and most registrations come as one shared batch per signature.
     type_decl_log: RefCell<Vec<TypeDeclRegistration>>,
-    /// Log position each map has been replayed to: name, stamp, path, exact.
-    type_decl_log_replayed: [Cell<usize>; 4],
+    /// Log position each map has been replayed to, indexed by `TypeDeclMap`.
+    type_decl_log_replayed: [Cell<usize>; TypeDeclMap::COUNT],
     type_item_by_path:
         RefCell<crate::fast_hash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
     missing_type_item_by_path: RefCell<crate::fast_hash::AHashSet<String>>,
@@ -710,7 +723,11 @@ pub struct TypeContext {
     /// Outcome of expanding a `Pdot`-headed constructor, per module scope
     /// (see `ctype::PdotExpansion`).
     pdot_expansions: RefCell<
-        hashbrown::HashMap<PdotExpansionKey, super::ctype::PdotExpansion, ahash::RandomState>,
+        hashbrown::HashMap<
+            PdotExpansionKey,
+            super::ctype::PdotExpansion,
+            crate::fast_hash::FastState,
+        >,
     >,
 
     /// Cached forward-only (unification) normalize_path results, keyed like
@@ -1086,7 +1103,7 @@ impl TypeContext {
                 RefCell::new(AbbrevMemo::Mnil),
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
-            trace_expansions: RefCell::new(ahash::AHashMap::new()),
+            trace_expansions: RefCell::new(crate::fast_hash::AHashMap::new()),
             open_slots: RefCell::new(Vec::new()),
             open_slot_events: RefCell::new(Vec::new()),
             usage: RefCell::new(super::usage::UsageTables::default()),
@@ -1417,11 +1434,10 @@ impl TypeContext {
             .push(TypeDeclRegistration::Batch(registrations.clone()));
     }
 
-    /// Bring map `map` (0 name, 1 stamp, 2 path, 3 exact) up to date with the
-    /// registration log.
-    fn replay_type_decl_log(&self, map: usize) {
+    /// Bring `map` up to date with the registration log.
+    fn replay_type_decl_log(&self, map: TypeDeclMap) {
         let log = self.type_decl_log.borrow();
-        let start = self.type_decl_log_replayed[map].get();
+        let start = self.type_decl_log_replayed[map as usize].get();
         if start == log.len() {
             return;
         }
@@ -1436,7 +1452,7 @@ impl TypeContext {
             })
             .sum();
         match map {
-            0 => {
+            TypeDeclMap::Name => {
                 let mut by_name = self.type_decl_store.borrow_mut();
                 by_name.reserve(additional);
                 for entry in pending {
@@ -1454,7 +1470,7 @@ impl TypeContext {
                     }
                 }
             }
-            1 => {
+            TypeDeclMap::Stamp => {
                 let mut by_stamp = self.type_decl_by_stamp.borrow_mut();
                 by_stamp.reserve(additional);
                 for entry in pending {
@@ -1473,7 +1489,7 @@ impl TypeContext {
                     }
                 }
             }
-            2 => {
+            TypeDeclMap::Path => {
                 let mut by_path = self.type_decl_by_path.borrow_mut();
                 by_path.reserve(additional);
                 for entry in pending {
@@ -1493,7 +1509,7 @@ impl TypeContext {
                     }
                 }
             }
-            _ => {
+            TypeDeclMap::Exact => {
                 let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
                 let mut batches = self.exact_path_batches.borrow_mut();
                 for (offset, entry) in pending.iter().enumerate() {
@@ -1510,7 +1526,7 @@ impl TypeContext {
                 }
             }
         }
-        self.type_decl_log_replayed[map].set(log.len());
+        self.type_decl_log_replayed[map as usize].set(log.len());
     }
 
     /// Register a type declaration by ident stamp for alias expansion.
@@ -1553,15 +1569,11 @@ impl TypeContext {
         &self,
         name: &str,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(0);
-        let store = self.type_decl_store.borrow();
-        if store.contains_key(name) {
-            Some(std::cell::Ref::map(store, |s| {
-                s.get(name).unwrap().as_ref()
-            }))
-        } else {
-            None
-        }
+        self.replay_type_decl_log(TypeDeclMap::Name);
+        std::cell::Ref::filter_map(self.type_decl_store.borrow(), |s| {
+            s.get(name).map(AsRef::as_ref)
+        })
+        .ok()
     }
 
     /// Look up a type declaration by stamp from the global store.
@@ -1569,7 +1581,7 @@ impl TypeContext {
         &self,
         stamp: i32,
     ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(1);
+        self.replay_type_decl_log(TypeDeclMap::Stamp);
         self.type_decl_by_stamp.borrow().get(&stamp).cloned()
     }
 
@@ -1577,15 +1589,11 @@ impl TypeContext {
         &self,
         stamp: i32,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(1);
-        let store = self.type_decl_by_stamp.borrow();
-        if store.contains_key(&stamp) {
-            Some(std::cell::Ref::map(store, |s| {
-                s.get(&stamp).unwrap().as_ref()
-            }))
-        } else {
-            None
-        }
+        self.replay_type_decl_log(TypeDeclMap::Stamp);
+        std::cell::Ref::filter_map(self.type_decl_by_stamp.borrow(), |s| {
+            s.get(&stamp).map(AsRef::as_ref)
+        })
+        .ok()
     }
 
     /// Register a type declaration by full qualified path string for alias expansion.
@@ -2343,15 +2351,11 @@ impl TypeContext {
         &self,
         path: &str,
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(2);
-        let store = self.type_decl_by_path.borrow();
-        if store.contains_key(path) {
-            Some(std::cell::Ref::map(store, |s| {
-                s.get(path).unwrap().as_ref()
-            }))
-        } else {
-            None
-        }
+        self.replay_type_decl_log(TypeDeclMap::Path);
+        std::cell::Ref::filter_map(self.type_decl_by_path.borrow(), |s| {
+            s.get(path).map(AsRef::as_ref)
+        })
+        .ok()
     }
 
     /// Look up a qualified declaration by exact Path identity.
@@ -2360,7 +2364,7 @@ impl TypeContext {
         &self,
         path: &Path,
     ) -> Option<Arc<super::decl::TypeDeclaration>> {
-        self.replay_type_decl_log(3);
+        self.replay_type_decl_log(TypeDeclMap::Exact);
         let log_len = self.type_decl_log.borrow().len();
         {
             let mut memo = self.exact_path_memo.borrow_mut();
@@ -2537,8 +2541,7 @@ impl TypeContext {
         self.get_or_create_predef(&self.predef_bigint, super::predef::path_bigint())
     }
 
-    /// Get the cached generic option constructor scheme types.
-    /// Returns (`'a`, `option('a)`), both allocated once at generic level.
+    /// The cached runtime layout of the predef `option` constructors.
     pub fn predef_option_layout(&self) -> super::variant_runtime::LayoutRef {
         if let Some(layout) = self.predef_option_layout.get() {
             layout
@@ -2552,6 +2555,8 @@ impl TypeContext {
         }
     }
 
+    /// Get the cached generic option constructor scheme types.
+    /// Returns (`'a`, `option('a)`), both allocated once at generic level.
     pub fn predef_option_scheme(&self) -> (TypeExprRef, TypeExprRef) {
         match (
             self.predef_option_inner.get(),
@@ -2872,7 +2877,7 @@ impl TypeContext {
             .push(LookupEvent::ModuleDeprecated(deprecation));
     }
 
-    /// Take the recorded `using` calls in call order.
+    /// Queue parser warnings produced while re-parsing source.
     pub(crate) fn push_reparse_warnings(&self, warnings: &[crate::parser::ParserWarning]) {
         self.reparse_warnings
             .borrow_mut()
@@ -4039,12 +4044,8 @@ impl TypeContext {
         self.raw_module_sigs.borrow().contains_key(name)
     }
 
-    pub(crate) fn find_raw_module_sig(&self, name: &str) -> Option<super::decl::Signature> {
-        self.raw_module_sigs
-            .borrow()
-            .get(name)
-            .cloned()
-            .map(|sig| (*sig).clone())
+    pub(crate) fn find_raw_module_sig(&self, name: &str) -> Option<Arc<super::decl::Signature>> {
+        self.raw_module_sigs.borrow().get(name).cloned()
     }
 
     pub(crate) fn with_raw_module_sig<T>(
@@ -4259,13 +4260,12 @@ impl TypeContext {
         }
     }
 
-    /// Whether `r` is a store node created by the current store build.
-    #[inline]
     /// Whether `r` was allocated by the store build in progress. Such nodes
     /// are written straight into the store and outlive any type snapshot
     /// taken before the build, so the undo journal must not record (and
     /// later roll back) their writes, just as it skips nodes created after
     /// the snapshot.
+    #[inline]
     fn store_build_owns(&self, r: TypeExprRef) -> bool {
         r.is_store()
             && self.in_store_build()
@@ -4371,11 +4371,6 @@ impl TypeContext {
         }
     }
 
-    /// Run `build` with every type-graph allocation going to the worker
-    /// store, so its result can be shared with later compilations on this
-    /// worker. Returns the replay record to publish with the result, or
-    /// `None` when the build read compilation-local state (the result is
-    /// then only valid in this compilation).
     pub(crate) fn local_stored_components(
         &self,
         id: u64,
@@ -4393,6 +4388,11 @@ impl TypeContext {
             .insert(id, components);
     }
 
+    /// Run `build` with every type-graph allocation going to the worker
+    /// store, so its result can be shared with later compilations on this
+    /// worker. Returns the replay record to publish with the result, or
+    /// `None` when the build read compilation-local state (the result is
+    /// then only valid in this compilation).
     pub(crate) fn build_in_store<R>(
         &self,
         build: impl FnOnce() -> R,
