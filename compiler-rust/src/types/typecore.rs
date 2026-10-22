@@ -1268,9 +1268,6 @@ pub struct TypeCheckContext<'a> {
     /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
     pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
     pub monomorph_cache: crate::types::comptime::MonomorphCache,
-    /// Comptime let bindings whose body is a type builder — to be evaluated
-    /// at end of type_structure and emitted as type declarations.
-    pub pending_type_builders: Vec<(String, crate::parse_arena::ExprIdx)>,
 }
 
 /// A diagnostic from type checking.
@@ -1400,7 +1397,6 @@ impl<'a> TypeCheckContext<'a> {
             comptime_functions: HashMap::new(),
             comptime_bindings: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),
-            pending_type_builders: Vec::new(),
         }
     }
 
