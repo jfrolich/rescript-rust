@@ -8805,7 +8805,6 @@ fn append_math_operator_help(
     context: &Option<TypeClashContext>,
     message: &mut String,
 ) -> bool {
-
     let Some(TypeClashContext::MathOperator {
         for_float,
         operator,
@@ -8934,7 +8933,6 @@ fn append_let_unwrap_return_help(
     context: &Option<TypeClashContext>,
     message: &mut String,
 ) -> bool {
-
     if !matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
         return false;
     }
@@ -9200,7 +9198,6 @@ fn append_optional_record_field_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some(TypeClashContext::RecordField {
         field_name,
         optional: true,
@@ -9270,7 +9267,6 @@ fn append_optional_function_argument_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some(TypeClashContext::FunctionArgument { optional: true, .. }) = context else {
         return false;
     };
@@ -9317,7 +9313,6 @@ fn append_runtime_coercion_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some(rewrite) = runtime_coercion_suggestion(type_ctx, arena, source, loc, trace) else {
         return false;
     };
@@ -9620,7 +9615,6 @@ fn append_string_to_polyvariant_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some(row) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
             .then(|| polyvariant_row(type_ctx, expected))
@@ -9663,7 +9657,6 @@ fn append_string_to_variant_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some((constructors, layout)) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
             .then(|| concrete_variant_constructors(type_ctx, expected))
@@ -9826,7 +9819,6 @@ fn append_object_literal_record_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let has_object_record_mismatch = [
         bottom_type_clash_aliases(trace),
         nested_type_clash_pair(type_ctx, trace),
@@ -9876,7 +9868,6 @@ fn append_braced_ident_record_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     if !matches!(context, Some(TypeClashContext::BracedIdent)) {
         return false;
     }
@@ -9979,7 +9970,6 @@ fn append_jsx_element_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some((actual, _expected)) = jsx_element_type_clash_pair(type_ctx, trace) else {
         return false;
     };
@@ -10123,7 +10113,6 @@ fn append_incompatible_type_parts(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-
     let reports = super_trace_reports(type_ctx, trace);
     if reports.is_empty() {
         return;
@@ -10168,7 +10157,6 @@ fn append_type_expansion_report(
     color: &str,
     message: &mut String,
 ) {
-
     message.push_str(color);
     message.push_str(&format_type_expr(type_ctx, ty));
     message.push_str(RESET);
@@ -10362,7 +10350,6 @@ fn append_polyvariant_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some((actual_ty, expected_ty)) = polyvariant_diagnostic_type_pair(type_ctx, trace) else {
         return false;
     };
@@ -10598,7 +10585,6 @@ fn append_object_field_mismatch_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some((field_name, actual_ty, expected_ty)) = trace
         .iter()
         .find_map(|(actual, expected)| object_field_mismatch_pair(type_ctx, *actual, *expected))
@@ -10637,7 +10623,6 @@ fn append_object_field_missing_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-
     let Some((first_object, field_name, field_ty)) = trace
         .iter()
         .find_map(|(actual, expected)| object_field_missing_pair(type_ctx, *actual, *expected))
@@ -10748,7 +10733,6 @@ fn append_dict_literal_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-
     let has_dict_literal_mismatch = [
         bottom_type_clash_aliases(trace),
         nested_type_clash_pair(type_ctx, trace),
@@ -10848,7 +10832,6 @@ fn append_simple_conversion_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-
     let Some((actual_name, expected_name, converter)) =
         simple_conversion_candidate(type_ctx, trace)
     else {
@@ -11015,7 +10998,6 @@ fn format_function_arity_mismatch_report(
     actual_arity: i32,
     expected_arity: i32,
 ) -> String {
-
     let mut message = String::new();
     message.push_str("This function is expected to have ");
     message.push_str(INFO);
@@ -11257,7 +11239,6 @@ fn format_uncurried_arity_mismatch_report(
     provided_args: &[crate::parser::ast::ArgLabel],
     arity_suggestion: Option<&str>,
 ) -> String {
-
     let args_from_type = collect_function_arg_labels(type_ctx, function_type);
     let args_from_type_unlabelled = args_from_type
         .iter()
@@ -11415,7 +11396,6 @@ fn format_constructor_arity_mismatch_report(
     expected: usize,
     provided: usize,
 ) -> String {
-
     let name = format_longident_for_report(arena, name);
     let message = if is_inline_record && expected == 1 {
         let suffix = if provided == 0 {
@@ -11907,12 +11887,7 @@ fn compile_source_to_js_with_options_inner(
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -12016,13 +11991,7 @@ fn compile_source_to_js_with_options_inner(
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(
-        &mut tctx,
-        &type_ctx,
-        &typed_structure,
-        options,
-        has_resi,
-    );
+    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, has_resi);
     check_compunit_inclusion_for_errors(
         &mut tctx,
         &type_ctx,
@@ -12985,12 +12954,7 @@ pub fn typecheck_interface_source(
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -14911,11 +14875,21 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
 }
 
+/// A fresh type context with the stamp counter where OCaml's starts.
+fn fresh_type_context() -> TypeContext {
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+    // at module initialization, consuming stamp 1000 before any compilation.
+    let _ = id_gen.next_stamp();
+    TypeContext::new(std::sync::Arc::new(id_gen))
+}
+
 /// The type-checking context and initial environment an in-process
-/// implementation is typed in: the registry's units are the persistent
+/// implementation or interface is typed in: the registry's units are the persistent
 /// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
 /// does (res_compmisc.ml:56-62).
-fn in_process_structure_type_check_context<'a>(
+fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
     arena: &'a crate::parse_arena::ParseArena,
     options: &CompilerOptions,
@@ -14987,12 +14961,9 @@ pub fn typecheck_structure_for_tooling(
     let file_config = extract_file_config_from_structure(structure, arena);
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     let typed = {
-        let (mut tctx, env) = in_process_structure_type_check_context(
+        let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
             arena,
             options,
@@ -15033,39 +15004,17 @@ pub fn typecheck_signature_for_tooling(
     let file_config = extract_file_config_from_signature(signature, arena);
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     let typed = {
-        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-        tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-        tctx.transparent_modules = options.transparent_modules;
-        apply_warning_options(&mut tctx, options);
-        if !options.frontend_already_reported {
-            apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-        }
-        apply_file_config_warning_options(&mut tctx, &file_config);
-        let mut env = initial_env(&type_ctx);
-        let mut pers_env = PersistentEnv::from_registry(registry);
-        pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-        let (load_path, load_path_display) = shared_load_path_with_display(options);
-        type_ctx.set_load_paths_shared(load_path.clone());
-        pers_env.set_load_path_shared(load_path, load_path_display);
-        pers_env.set_open_modules(options.open_modules.clone());
-        pers_env.set_jsx_version(options.jsx_version);
-        pers_env.set_jsx_module(options.jsx_module.clone());
-        pers_env.set_nopervasives(options.nopervasives);
-        pers_env.set_compiling_module(Some(module_name.to_string()));
-        load_pervasives(
-            &mut pers_env,
-            &mut env,
+        let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
-            &options.open_modules,
-            options.nopervasives,
-            Some(module_name),
+            arena,
+            options,
+            registry,
+            module_name,
+            &file_config,
+            &frontend_warning_specs,
         );
-        tctx.set_persistent_env(pers_env);
         match transl_signature(&mut tctx, &env, arena, signature) {
             Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
@@ -15124,11 +15073,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     );
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    let (mut tctx, env) = in_process_structure_type_check_context(
+    let type_ctx = fresh_type_context();
+    let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
         options,
@@ -15186,8 +15132,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     tctx.drain_open_slot_uses();
     // Debugging aid: `RESCRIPT_DUMP_TYPED_SEXP=<Module>` prints the
     // in-process typed tree of that module like `bsc -dtyped-sexp`.
-    static DUMP_TYPED_SEXP_MODULE: std::sync::OnceLock<Option<String>> =
-        std::sync::OnceLock::new();
+    static DUMP_TYPED_SEXP_MODULE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     if DUMP_TYPED_SEXP_MODULE
         .get_or_init(|| std::env::var("RESCRIPT_DUMP_TYPED_SEXP").ok())
         .as_deref()
@@ -15835,42 +15780,16 @@ pub fn typecheck_preprocessed_signature_in_process(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
 
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path, load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
+    let type_ctx = fresh_type_context();
+    let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        Some(module_name),
+        arena,
+        options,
+        registry,
+        module_name,
+        &file_config,
+        &frontend_warning_specs,
     );
-
-    tctx.set_persistent_env(pers_env);
 
     // Diagnostics are reported against the source file, read only when
     // there is something to report.
