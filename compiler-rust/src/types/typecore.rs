@@ -8,7 +8,6 @@
 //! Type checking is performed in a context that contains:
 //! - A [`TypeContext`] for allocating type expressions
 //! - An [`Env`] for looking up bindings
-//! - A [`DiagnosticsContext`] for collecting errors
 //!
 //! The main entry points are:
 //! - [`type_expression`] - type check a top-level expression
@@ -12310,7 +12309,7 @@ fn type_match_cases_batch_non_gadt<'a>(
             propagate_result?;
         }
 
-        if propagate && !crate::debug_flags::skip_pattern_lower() {
+        if propagate {
             // Match OCaml type_cases:
             //   List.iter (iter_pattern (fun {pat_type=t} -> unify_var env t (newvar ()))) patl;
             // before end_def/generalize.

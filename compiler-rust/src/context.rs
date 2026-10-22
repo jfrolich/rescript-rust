@@ -1,33 +1,12 @@
 //! Compilation context types.
 //!
-//! This module provides the context types that replace global mutable state
-//! in the OCaml compiler. Each compilation unit gets its own context,
-//! enabling concurrent compilation.
-//!
-//! # Context Hierarchy
-//!
-//! ```text
-//! CompilerConfig (immutable, shared)
-//!        │
-//!        ▼
-//! CompilationContext (per-compilation)
-//!        │
-//!        ├── IdGenerator (thread-safe stamp generation)
-//!        ├── SourceContext (current file info)
-//!        └── DiagnosticsContext (warnings/errors)
-//!        │
-//!        ▼
-//! TypeContext (per-type-checking, future)
-//! ```
+//! [`IdGenerator`] replaces OCaml's global `Ident.currentstamp`: each
+//! compilation owns one (shared with its `TypeContext`), so independent
+//! compilations can run concurrently.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::config::CompilerConfig;
-use crate::diagnostics::DiagnosticsContext;
 use crate::ident::{Ident, IdentFlags};
-use crate::location::Location;
-
 /// Thread-safe identifier and type ID generator.
 ///
 /// This replaces the global `Ident.currentstamp` from the OCaml implementation.
@@ -50,8 +29,6 @@ pub struct IdGenerator {
     current_stamp: AtomicI32,
     /// Next ID for type expressions.
     next_type_id: AtomicI32,
-    /// Reinit level for reset functionality (-1 means not set).
-    reinit_level: AtomicI32,
 }
 
 impl IdGenerator {
@@ -60,7 +37,6 @@ impl IdGenerator {
         Self {
             current_stamp: AtomicI32::new(0),
             next_type_id: AtomicI32::new(1),
-            reinit_level: AtomicI32::new(-1),
         }
     }
 
@@ -71,7 +47,6 @@ impl IdGenerator {
         Self {
             current_stamp: AtomicI32::new(start.max(0)),
             next_type_id: AtomicI32::new(1),
-            reinit_level: AtomicI32::new(-1),
         }
     }
 
@@ -133,37 +108,11 @@ impl IdGenerator {
         self.current_stamp.store(stamp.max(0), Ordering::Relaxed);
     }
 
-    /// Initialize the reinit level if not already set.
-    pub fn init_reinit_level(&self) {
-        let current = self.reinit_level.load(Ordering::Relaxed);
-        if current < 0 {
-            let stamp = self.current_stamp.load(Ordering::Relaxed);
-            self.reinit_level.store(stamp, Ordering::Relaxed);
-        }
-    }
-
-    /// Reset the stamp counter to the reinit level.
-    ///
-    /// Does nothing if reinit level was never initialized.
-    pub fn reinit(&self) {
-        let level = self.reinit_level.load(Ordering::Relaxed);
-        if level >= 0 {
-            self.current_stamp.store(level, Ordering::Relaxed);
-        }
-    }
-
     /// Create a new local identifier.
     #[inline]
     pub fn create(&self, name: &str) -> Ident {
         let stamp = self.next_stamp();
         Ident::new(name, stamp, IdentFlags::NONE)
-    }
-
-    /// Create a new predefined exception identifier.
-    #[inline]
-    pub fn create_predef_exn(&self, name: &str) -> Ident {
-        let stamp = self.next_stamp();
-        Ident::new(name, stamp, IdentFlags::PREDEF_EXN)
     }
 }
 
@@ -182,211 +131,14 @@ impl Clone for IdGenerator {
         Self {
             current_stamp: AtomicI32::new(self.current_stamp.load(Ordering::Relaxed)),
             next_type_id: AtomicI32::new(self.next_type_id.load(Ordering::Relaxed)),
-            reinit_level: AtomicI32::new(self.reinit_level.load(Ordering::Relaxed)),
         }
-    }
-}
-
-/// Source file context for the current compilation.
-///
-/// This replaces `Location.input_name` from the OCaml implementation.
-#[derive(Debug, Clone)]
-pub struct SourceContext {
-    /// The input file name.
-    pub input_name: String,
-    /// The module name derived from the file.
-    pub module_name: String,
-    /// The output prefix for generated files.
-    pub output_prefix: String,
-}
-
-impl SourceContext {
-    /// Create a new source context for a file.
-    pub fn new(input_name: impl Into<String>) -> Self {
-        let input_name = input_name.into();
-        let module_name = derive_module_name(&input_name);
-        let output_prefix = derive_output_prefix(&input_name);
-        Self {
-            input_name,
-            module_name,
-            output_prefix,
-        }
-    }
-
-    /// Create a dummy context for testing.
-    pub fn dummy() -> Self {
-        Self {
-            input_name: "_none_".into(),
-            module_name: "".into(),
-            output_prefix: "".into(),
-        }
-    }
-
-    /// Create a location in this source file.
-    /// Note: Uses placeholder StrIdx for file name since SourceContext doesn't have arena access.
-    pub fn location(&self, start: usize, end: usize) -> Location {
-        Location::new_for_error(&self.input_name, start, end)
-    }
-}
-
-impl Default for SourceContext {
-    fn default() -> Self {
-        Self::dummy()
-    }
-}
-
-/// Derive module name from file path.
-fn derive_module_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| {
-            // Capitalize first letter
-            let mut chars = s.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        })
-        .unwrap_or_default()
-}
-
-/// Derive output prefix from file path.
-fn derive_output_prefix(path: &str) -> String {
-    std::path::Path::new(path)
-        .with_extension("")
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// Per-compilation context.
-///
-/// This is the main context passed through the compilation pipeline.
-/// Each compilation unit (file) gets its own `CompilationContext`.
-///
-/// # Thread Safety
-///
-/// `CompilationContext` is designed to be used by a single thread,
-/// but multiple contexts can be used concurrently. The `IdGenerator`
-/// is thread-safe if you need to share it across contexts.
-///
-/// # Example
-///
-/// ```rust
-/// use rescript_compiler::{CompilationContext, CompilerConfig};
-/// use std::sync::Arc;
-///
-/// let config = Arc::new(CompilerConfig::default());
-/// let ctx = CompilationContext::new(config, "src/MyModule.res");
-///
-/// let id = ctx.create_ident("x");
-/// assert_eq!(id.name(), "x");
-/// ```
-#[cfg(feature = "native")]
-#[derive(Debug)]
-pub struct CompilationContext {
-    /// Compiler configuration (immutable, shared).
-    config: Arc<CompilerConfig>,
-    /// ID generator for this compilation.
-    id_gen: IdGenerator,
-    /// Source file information.
-    source: SourceContext,
-    /// Diagnostics collector.
-    diagnostics: DiagnosticsContext,
-}
-
-#[cfg(feature = "native")]
-impl CompilationContext {
-    /// Create a new compilation context for a source file.
-    pub fn new(config: Arc<CompilerConfig>, input_file: impl Into<String>) -> Self {
-        Self {
-            config,
-            id_gen: IdGenerator::new(),
-            source: SourceContext::new(input_file),
-            diagnostics: DiagnosticsContext::new(),
-        }
-    }
-
-    /// Create a context with a specific ID generator.
-    ///
-    /// Useful when you need to control stamp generation.
-    pub fn with_id_gen(
-        config: Arc<CompilerConfig>,
-        id_gen: IdGenerator,
-        input_file: impl Into<String>,
-    ) -> Self {
-        Self {
-            config,
-            id_gen,
-            source: SourceContext::new(input_file),
-            diagnostics: DiagnosticsContext::new(),
-        }
-    }
-
-    /// Get the compiler configuration.
-    #[inline]
-    pub fn config(&self) -> &CompilerConfig {
-        &self.config
-    }
-
-    /// Get the ID generator.
-    #[inline]
-    pub fn id_gen(&self) -> &IdGenerator {
-        &self.id_gen
-    }
-
-    /// Get the source context.
-    #[inline]
-    pub fn source(&self) -> &SourceContext {
-        &self.source
-    }
-
-    /// Get the diagnostics context.
-    #[inline]
-    pub fn diagnostics(&self) -> &DiagnosticsContext {
-        &self.diagnostics
-    }
-
-    /// Get mutable access to the diagnostics context.
-    #[inline]
-    pub fn diagnostics_mut(&mut self) -> &mut DiagnosticsContext {
-        &mut self.diagnostics
-    }
-
-    /// Get the input file name.
-    #[inline]
-    pub fn input_name(&self) -> &str {
-        &self.source.input_name
-    }
-
-    /// Get the module name.
-    #[inline]
-    pub fn module_name(&self) -> &str {
-        &self.source.module_name
-    }
-
-    /// Create a new identifier.
-    #[inline]
-    pub fn create_ident(&self, name: &str) -> Ident {
-        self.id_gen.create(name)
-    }
-
-    /// Create a persistent identifier.
-    #[inline]
-    pub fn create_persistent_ident(name: &str) -> Ident {
-        Ident::create_persistent(name)
-    }
-
-    /// Check if we're in debug mode.
-    #[inline]
-    pub fn debug(&self) -> bool {
-        self.config.debug
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_id_generator_sequential() {
@@ -421,26 +173,5 @@ mod tests {
         // All stamps should be unique
         let unique: std::collections::HashSet<_> = all_stamps.iter().collect();
         assert_eq!(unique.len(), all_stamps.len());
-    }
-
-    #[test]
-    fn test_source_context() {
-        let ctx = SourceContext::new("src/MyModule.res");
-        assert_eq!(ctx.input_name, "src/MyModule.res");
-        assert_eq!(ctx.module_name, "MyModule");
-        assert_eq!(ctx.output_prefix, "src/MyModule");
-    }
-
-    #[test]
-    #[cfg(feature = "native")]
-    fn test_compilation_context() {
-        let config = Arc::new(CompilerConfig::default());
-        let ctx = CompilationContext::new(config, "test.res");
-
-        let id1 = ctx.create_ident("x");
-        let id2 = ctx.create_ident("y");
-
-        assert_ne!(id1.stamp(), id2.stamp());
-        assert_eq!(ctx.module_name(), "Test");
     }
 }

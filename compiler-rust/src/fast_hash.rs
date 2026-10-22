@@ -49,8 +49,7 @@ where
     V: serde::Deserialize<'de>,
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let map = std::collections::HashMap::<K, V>::deserialize(deserializer)?;
-        Ok(AHashMap(map.into_iter().collect()))
+        std::collections::HashMap::<K, V, FastState>::deserialize(deserializer).map(AHashMap)
     }
 }
 

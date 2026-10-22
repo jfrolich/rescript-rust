@@ -293,12 +293,6 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
-                // Mirrors compiler/bsc/rescript_compiler_main.ml:266-270.
-                "-bs-project-root" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.project_root = val;
-                    }
-                }
                 "-bs-package-name" => {
                     if let Some(val) = args.next() {
                         opts.package_name = Some(val);
@@ -343,70 +337,9 @@ fn run() -> Result<()> {
                 // when a project selects the Spice PPX (used for profiling).
                 "-bs-builtin-spice-ppx" => opts.builtin_spice_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
-                // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343.
-                "-bs-gentype-module" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.module_flag =
-                            rescript_compiler::gentype::config::module_of_string(&val);
-                    }
-                }
-                "-bs-gentype-module-resolution" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.module_resolution_flag =
-                            rescript_compiler::gentype::config::module_resolution_of_string(&val);
-                    }
-                }
-                "-bs-gentype-export-interfaces" => {
-                    opts.gentype_flags.export_interfaces_flag = true;
-                }
-                "-bs-gentype-generated-extension" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.generated_file_extension_flag = Some(val);
-                    }
-                }
-                "-bs-gentype-suffix" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.suffix_flag = Some(val);
-                    }
-                }
-                "-bs-gentype-shim" => {
-                    if let Some(val) = args.next()
-                        && let Some((from_module, to_module)) = val.split_once('=')
-                    {
-                        opts.gentype_flags
-                            .shims
-                            .insert(0, (from_module.to_string(), to_module.to_string()));
-                    }
-                }
-                "-bs-gentype-debug" => {
-                    if let Some(val) = args.next() {
-                        rescript_compiler::gentype::debug::set_item(&val);
-                    }
-                }
-                "-bs-gentype-dep" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.bs_dependencies_flag.insert(0, val);
-                    }
-                }
-                "-bs-gentype-source-dir" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.source_dirs_flag.insert(0, val);
-                    }
-                }
-                "-bs-gentype-dep-path" => {
-                    if let Some(val) = args.next()
-                        && let Some((name, path)) = val.split_once('=')
-                    {
-                        opts.gentype_flags
-                            .dep_paths_flag
-                            .insert(0, (name.to_string(), path.to_string()));
-                    }
-                }
-                "-bs-gentype-bsb-project-root" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.bsb_project_root = val;
-                    }
-                }
+                // -bs-project-root and the -bs-gentype-* flags, mirroring
+                // compiler/bsc/rescript_compiler_main.ml:266-270 and :300-343.
+                flag if opts.gentype_flags.apply(flag, || args.next()) => {}
                 "-w" => {
                     if let Some(val) = args.next() {
                         opts.warning_specs.push(val);

@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Paths.ml:1-88.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use std::path::{Path, PathBuf};
 
@@ -39,28 +38,11 @@ pub fn handle_namespace(cmt: &str) -> String {
     }
 }
 
-pub fn find_name_space(cmt: &str) -> Option<String> {
-    fn keep_after_dash(s: &str) -> Option<String> {
-        s.find('-').map(|n| s[n + 1..].to_string())
-    }
-
-    let basename = Path::new(cmt)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(cmt);
-    keep_after_dash(&chop_extension(basename))
-}
-
 pub fn remove_path_prefix(prefix: &str, path: &str) -> String {
     let normalized_prefix = concat(prefix, "");
-    let prefix_len = normalized_prefix.len();
-    let path_len = path.len();
-    let is_prefix = prefix_len <= path_len && path[..prefix_len] == normalized_prefix;
-    if is_prefix {
-        path[prefix_len..].to_string()
-    } else {
-        path.to_string()
-    }
+    path.strip_prefix(normalized_prefix.as_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 pub fn append_suffix(config: &crate::gentype::config::T, source_path: &str) -> String {
@@ -146,17 +128,4 @@ pub fn get_cmt_file_from_cwd_with_exists(
     };
 
     cmt_file.to_string_lossy().to_string()
-}
-
-pub fn get_cmt_file_with_exists(cmt: &str, exists: impl Fn(&Path) -> bool) -> String {
-    let cwd = crate::process_cwd::current_dir().unwrap_or_else(|_| PathBuf::new());
-    get_cmt_file_from_cwd_with_exists(&cwd, cmt, exists)
-}
-
-pub fn get_cmt_file(cmt: &str) -> String {
-    get_cmt_file_with_exists(cmt, |path| path.exists())
-}
-
-pub fn read_config(namespace: Option<String>) -> crate::gentype::config::T {
-    crate::gentype::config::build_config(namespace)
 }

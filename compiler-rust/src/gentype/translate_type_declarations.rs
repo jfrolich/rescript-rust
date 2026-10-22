@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateTypeDeclarations.ml:1-373.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{
@@ -8,7 +7,7 @@ use crate::gentype::gen_type_common::{
 };
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
-use crate::parser::ast::{Attribute, Attributes};
+use crate::parser::ast::Attributes;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::MutableFlag;
 use crate::types::decl::{
@@ -741,10 +740,6 @@ fn translate_label_declarations(
         dependencies,
         type_,
     }
-}
-
-fn attributes_from_vec(attributes: &[Attribute]) -> Attributes {
-    Attributes::from_vec(attributes.to_vec())
 }
 
 fn longident_is_lident(arena: &ParseArena, longident: &Longident, expected: &str) -> bool {

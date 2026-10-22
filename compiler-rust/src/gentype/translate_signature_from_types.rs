@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateSignatureFromTypes.ml:1-110.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::parse_arena::ParseArena;
 use crate::types::decl::{ModuleType, SignatureItem, TypeKind};
@@ -76,7 +75,7 @@ pub fn translate_module_declaration_from_types(
     match &module_declaration.md_type {
         ModuleType::MtySignature(signature) => {
             let name = id.name();
-            crate::gentype::translation::combine(&translate_signature_from_types(
+            crate::gentype::translation::combine(translate_signature_from_types(
                 ctx,
                 arena,
                 config,

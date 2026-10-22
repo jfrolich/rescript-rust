@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Converter.ml:1-89.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{

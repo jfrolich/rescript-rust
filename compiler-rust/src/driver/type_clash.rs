@@ -1284,11 +1284,7 @@ pub(super) fn print_expr_type_clash(
     context: &Option<TypeClashContext>,
 ) {
     let tr = expand_trace(ctx, raw_trace);
-    let mut printer = Printtyp::new(ctx);
-    let lookup_env = env.clone();
-    printer.set_printing_env(Box::new(move |name| {
-        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
-    }));
+    let mut printer = printer_with_env(ctx, env);
     ppf.open_box(BoxKind::V, 0);
     let bottom = bottom_aliases(&tr);
     let missing_arguments = bottom.and_then(|(a, e)| collect_missing_arguments(ctx, env, a, e));
@@ -1429,11 +1425,7 @@ pub(super) fn print_not_subtype(
 ) {
     let tr1 = expand_trace(ctx, raw_trace1);
     let tr2 = expand_trace(ctx, raw_trace2);
-    let mut printer = Printtyp::new(ctx);
-    let lookup_env = env.clone();
-    printer.set_printing_env(Box::new(move |name| {
-        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
-    }));
+    let mut printer = printer_with_env(ctx, env);
     printer.report_subtyping_error(ppf, &tr1, "is not a subtype of", &tr2, context);
 }
 
