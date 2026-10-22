@@ -646,8 +646,13 @@ pub struct TypeContext {
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache:
-        RefCell<crate::fast_hash::AHashMap<SamePathKey, Arc<super::decl::TypeDeclaration>>>,
+    resolved_pdot_type_cache: RefCell<
+        hashbrown::HashMap<
+            SamePathKey,
+            Arc<super::decl::TypeDeclaration>,
+            crate::fast_hash::FastState,
+        >,
+    >,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
@@ -700,8 +705,7 @@ pub struct TypeContext {
     /// never change under an existing path, but Rust's Env is mutated in
     /// place (`add_module`) and must invalidate these derived entries.
     resolved_module_type_cache: RefCell<
-        crate::fast_hash::AHashMap<
-            (u64, Path),
+        ScopedPathMap<
             crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
         >,
     >,
@@ -722,11 +726,15 @@ pub struct TypeContext {
     /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
     /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
     resolved_type_item_cache: RefCell<
-        crate::fast_hash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
+        hashbrown::HashMap<
+            (u64, Path, bool),
+            (Ident, Arc<super::decl::TypeDeclaration>),
+            crate::fast_hash::FastState,
+        >,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
-    normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
+    normalized_path_full_cache: RefCell<ScopedPathMap<Path>>,
     /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
     /// is lowered (`None` outside that phase): the types no longer change.
     typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
@@ -742,22 +750,23 @@ pub struct TypeContext {
 
     /// Cached forward-only (unification) normalize_path results, keyed like
     /// `normalized_path_full_cache`.
-    normalized_path_forward_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
+    normalized_path_forward_cache: RefCell<ScopedPathMap<Path>>,
 
     /// `occur_univar` argument masks per (scope, constructor path): bit `i`
     /// is set when argument `i` has a may-positive or may-negative variance;
     /// `None` when the declaration is not found (every argument is visited).
-    occur_variance_masks: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<u64>>>,
+    occur_variance_masks: RefCell<ScopedPathMap<Option<u64>>>,
 
     /// `Ctype.get_level` declaration levels per (scope, type path): the
     /// `type_newtype_level` of the declaration `Env.find_type` returns.
-    type_newtype_levels: RefCell<crate::fast_hash::AHashMap<(u64, Path), Option<i32>>>,
+    type_newtype_levels: RefCell<ScopedPathMap<Option<i32>>>,
 
     /// Cached side-effectful normalize_path results keyed by environment identity.
-    forced_normalized_path_full_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path), Path>>,
+    forced_normalized_path_full_cache: RefCell<ScopedPathMap<Path>>,
 
     /// Cached side-effectful type-path comparisons keyed by environment identity.
-    forced_type_path_compare_cache: RefCell<crate::fast_hash::AHashMap<(u64, Path, Path), bool>>,
+    forced_type_path_compare_cache:
+        RefCell<hashbrown::HashMap<(u64, Path, Path), bool, crate::fast_hash::FastState>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Arc<Vec<std::path::PathBuf>>>,
@@ -974,32 +983,49 @@ impl PartialEq for SamePathKey {
 
 impl Eq for SamePathKey {}
 
-impl std::hash::Hash for SamePathKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        fn hash_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
-            match path {
-                Path::Pident(id) => {
-                    if id.stamp() != 0 {
-                        state.write_u8(0);
-                        state.write_i32(id.stamp());
-                    } else {
-                        state.write_u8(1);
-                        std::hash::Hash::hash(&id.name_atom(), state);
-                    }
-                }
-                Path::Pdot(parent, name, _) => {
-                    state.write_u8(2);
-                    std::hash::Hash::hash(name, state);
-                    hash_path(parent, state);
-                }
-                Path::Papply(functor, argument) => {
-                    state.write_u8(3);
-                    hash_path(functor, state);
-                    hash_path(argument, state);
-                }
+/// Hash consistent with `Path::same`: `Pdot` positions are ignored.
+fn hash_same_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
+    match path {
+        Path::Pident(id) => {
+            if id.stamp() != 0 {
+                state.write_u8(0);
+                state.write_i32(id.stamp());
+            } else {
+                state.write_u8(1);
+                std::hash::Hash::hash(&id.name_atom(), state);
             }
         }
-        hash_path(&self.0, state);
+        Path::Pdot(parent, name, _) => {
+            state.write_u8(2);
+            std::hash::Hash::hash(name, state);
+            hash_same_path(parent, state);
+        }
+        Path::Papply(functor, argument) => {
+            state.write_u8(3);
+            hash_same_path(functor, state);
+            hash_same_path(argument, state);
+        }
+    }
+}
+
+impl std::hash::Hash for SamePathKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        hash_same_path(&self.0, state);
+    }
+}
+
+/// Borrowed form of [`SamePathKey`], so lookups do not clone the path.
+struct SamePathRef<'a>(&'a Path);
+
+impl std::hash::Hash for SamePathRef<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        hash_same_path(self.0, state);
+    }
+}
+
+impl hashbrown::Equivalent<SamePathKey> for SamePathRef<'_> {
+    fn equivalent(&self, key: &SamePathKey) -> bool {
+        self.0.same(&key.0)
     }
 }
 
@@ -1028,6 +1054,41 @@ impl hashbrown::Equivalent<PdotExpansionKey> for PdotExpansionKeyRef<'_> {
             && self.mode == key.mode
             && self.arity == key.arity
             && *self.path == key.path
+    }
+}
+
+/// Cache keyed by a scope/environment id and a path. Lookup-only (never
+/// iterated); probed with [`ScopedPathRef`] so lookups do not clone the path.
+type ScopedPathMap<V> = hashbrown::HashMap<(u64, Path), V, crate::fast_hash::FastState>;
+
+/// Borrowed form of a `(u64, Path)` key. A tuple struct hashes its fields in
+/// order exactly like the owned tuple.
+#[derive(Hash)]
+struct ScopedPathRef<'a>(u64, &'a Path);
+
+impl hashbrown::Equivalent<(u64, Path)> for ScopedPathRef<'_> {
+    fn equivalent(&self, key: &(u64, Path)) -> bool {
+        self.0 == key.0 && *self.1 == key.1
+    }
+}
+
+/// Borrowed form of a `(u64, Path, bool)` key.
+#[derive(Hash)]
+struct ScopedPathFlagRef<'a>(u64, &'a Path, bool);
+
+impl hashbrown::Equivalent<(u64, Path, bool)> for ScopedPathFlagRef<'_> {
+    fn equivalent(&self, key: &(u64, Path, bool)) -> bool {
+        self.0 == key.0 && self.2 == key.2 && *self.1 == key.1
+    }
+}
+
+/// Borrowed form of a `(u64, Path, Path)` key.
+#[derive(Hash)]
+struct ScopedPathPairRef<'a>(u64, &'a Path, &'a Path);
+
+impl hashbrown::Equivalent<(u64, Path, Path)> for ScopedPathPairRef<'_> {
+    fn equivalent(&self, key: &(u64, Path, Path)) -> bool {
+        self.0 == key.0 && *self.1 == key.1 && *self.2 == key.2
     }
 }
 
@@ -1115,25 +1176,25 @@ impl TypeContext {
             type_decl_log_replayed: Default::default(),
             type_item_by_path: RefCell::new(crate::fast_hash::AHashMap::new()),
             missing_type_item_by_path: RefCell::new(crate::fast_hash::AHashSet::new()),
-            resolved_pdot_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_pdot_type_cache: RefCell::new(hashbrown::HashMap::default()),
             resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
             signature_indexes: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_paths_by_alias_source: RefCell::new(crate::fast_hash::AHashMap::new()),
             resolved_module_value_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            resolved_module_type_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_module_type_cache: RefCell::new(ScopedPathMap::default()),
             resolved_child_module_path_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_decl_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            resolved_type_item_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            resolved_type_item_cache: RefCell::new(hashbrown::HashMap::default()),
+            normalized_path_full_cache: RefCell::new(ScopedPathMap::default()),
             pdot_expansions: RefCell::new(hashbrown::HashMap::default()),
             typeopt_answers: RefCell::new(None),
-            normalized_path_forward_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            occur_variance_masks: RefCell::new(crate::fast_hash::AHashMap::new()),
-            type_newtype_levels: RefCell::new(crate::fast_hash::AHashMap::new()),
-            forced_normalized_path_full_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            forced_type_path_compare_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            normalized_path_forward_cache: RefCell::new(ScopedPathMap::default()),
+            occur_variance_masks: RefCell::new(ScopedPathMap::default()),
+            type_newtype_levels: RefCell::new(ScopedPathMap::default()),
+            forced_normalized_path_full_cache: RefCell::new(ScopedPathMap::default()),
+            forced_type_path_compare_cache: RefCell::new(hashbrown::HashMap::default()),
             load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -1680,7 +1741,7 @@ impl TypeContext {
     ) -> Option<Arc<super::decl::TypeDeclaration>> {
         self.resolved_pdot_type_cache
             .borrow()
-            .get(&SamePathKey(path.clone()))
+            .get(&SamePathRef(path))
             .cloned()
     }
 
@@ -2054,7 +2115,7 @@ impl TypeContext {
     ) -> Option<(Ident, Arc<super::decl::TypeDeclaration>)> {
         self.resolved_type_item_cache
             .borrow()
-            .get(&(scope_id, path.clone(), strengthen_alias_types))
+            .get(&ScopedPathFlagRef(scope_id, path, strengthen_alias_types))
             .cloned()
     }
 
@@ -2079,7 +2140,7 @@ impl TypeContext {
     ) -> Option<(Path, Ident, Arc<super::decl::TypeDeclaration>)> {
         self.resolved_module_type_cache
             .borrow()
-            .get(&(env_id, module_path.clone()))
+            .get(&ScopedPathRef(env_id, module_path))
             .and_then(|types| types.get(type_name))
             .cloned()
     }
@@ -2183,7 +2244,7 @@ impl TypeContext {
     ) -> Option<Option<i32>> {
         self.type_newtype_levels
             .borrow()
-            .get(&(scope_id, path.clone()))
+            .get(&ScopedPathRef(scope_id, path))
             .copied()
     }
 
@@ -2205,7 +2266,7 @@ impl TypeContext {
     ) -> Option<Option<u64>> {
         self.occur_variance_masks
             .borrow()
-            .get(&(scope_id, path.clone()))
+            .get(&ScopedPathRef(scope_id, path))
             .copied()
     }
 
@@ -2238,7 +2299,7 @@ impl TypeContext {
     ) -> Option<Path> {
         self.normalized_path_forward_cache
             .borrow()
-            .get(&(env_id, original_path.clone()))
+            .get(&ScopedPathRef(env_id, original_path))
             .cloned()
     }
 
@@ -2250,7 +2311,7 @@ impl TypeContext {
     ) -> Option<Path> {
         self.normalized_path_full_cache
             .borrow()
-            .get(&(env_id, original_path.clone()))
+            .get(&ScopedPathRef(env_id, original_path))
             .cloned()
     }
 
@@ -2275,7 +2336,7 @@ impl TypeContext {
     ) -> Option<Path> {
         self.forced_normalized_path_full_cache
             .borrow()
-            .get(&(env_id, original_path.clone()))
+            .get(&ScopedPathRef(env_id, original_path))
             .cloned()
     }
 
@@ -2303,7 +2364,7 @@ impl TypeContext {
     ) -> Option<bool> {
         self.forced_type_path_compare_cache
             .borrow()
-            .get(&(env_id, left.clone(), right.clone()))
+            .get(&ScopedPathPairRef(env_id, left, right))
             .copied()
     }
 
@@ -4783,6 +4844,45 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn borrowed_path_keys_find_owned_cache_entries() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let module = Path::pdot(super::super::predef::path_int(), "M");
+        let ty = Path::pdot_pos(module.clone(), "t", 3);
+        ctx.register_type_newtype_level(7, &ty, Some(2));
+        assert_eq!(ctx.find_type_newtype_level(7, &ty), Some(Some(2)));
+        assert_eq!(ctx.find_type_newtype_level(8, &ty), None);
+        ctx.register_forced_type_path_compare(7, &module, &ty, true);
+        assert_eq!(
+            ctx.find_forced_type_path_compare(7, &ty, &module),
+            Some(true)
+        );
+        assert_eq!(ctx.find_forced_type_path_compare(7, &ty, &ty), None);
+
+        // `SamePathKey` ignores `Pdot` positions; so must its borrowed probe.
+        let decl = std::sync::Arc::new(super::super::decl::TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: super::super::TypeKind::TypeAbstract,
+            type_private: PrivateFlag::Public,
+            type_manifest: None,
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: crate::location::Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_representation: super::super::TypeRepresentation::Boxed,
+            type_inlined_types: vec![],
+            type_path: None,
+        });
+        ctx.register_resolved_pdot_type(&ty, decl.clone());
+        let repositioned = Path::pdot_pos(module, "t", 9);
+        assert!(
+            ctx.find_resolved_pdot_type(&repositioned)
+                .is_some_and(|found| std::sync::Arc::ptr_eq(&found, &decl))
+        );
+    }
 
     #[test]
     fn shared_node_writes_stay_in_the_writing_compilation() {
