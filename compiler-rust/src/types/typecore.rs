@@ -19202,29 +19202,53 @@ fn narrowed_module_lookup_error(
     module_structure_lookup_error(tctx, env, loc, lid, &module_path)
 }
 
-fn unbound_module_alternatives(
-    tctx: &mut TypeCheckContext<'_>,
+/// Spelling-hint candidates for an unbound name: the local env table for
+/// `Lident`, or the matching items of the prefix module's signature in
+/// `Tbl.fold` order for `Ldot`.
+fn unbound_name_alternatives(
+    arena: &ParseArena,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &TypeContext,
     lid: &Longident,
+    local_names: impl FnOnce(&Env) -> Vec<String>,
+    mut item_names: impl FnMut(&crate::types::decl::SignatureItem, &mut Vec<String>),
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env.fold_module_names(),
+        Longident::Lident(_) => local_names(env),
         Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+            env.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
                 .map(|(_, sig)| {
-                    sig.iter()
-                        .filter_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                                Some(id.name().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect()
+                    let mut names = Vec::new();
+                    for item in sig.iter() {
+                        item_names(item, &mut names);
+                    }
+                    names
                 })
                 .unwrap_or_default(),
         ),
         Longident::Lapply(_, _) => Vec::new(),
     }
+}
+
+fn unbound_module_alternatives(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Vec<String> {
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_module_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 /// The name list a `Tbl.fold` over a structure's components builds by consing
@@ -19241,24 +19265,19 @@ fn unbound_type_constructor_alternatives(
     env: &Env,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_type_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-                .map(|(_, sig)| {
-                    sig.iter()
-                        .filter_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigType(id, _, _) => {
-                                Some(id.name().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_type_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigType(id, _, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 fn unbound_constructor_alternatives(
@@ -19266,50 +19285,26 @@ fn unbound_constructor_alternatives(
     env: &Env,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_constructor_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-                .map(|(_, sig)| {
-                    sig.iter()
-                        .flat_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigType(_, decl, _) => {
-                                match &decl.type_kind {
-                                    crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
-                                        constructors
-                                            .iter()
-                                            .map(|cstr| cstr.cd_id.name().to_string())
-                                            .collect::<Vec<_>>()
-                                    }
-                                    _ => Vec::new(),
-                                }
-                            }
-                            crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
-                                vec![id.name().to_string()]
-                            }
-                            _ => Vec::new(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
-}
-
-fn label_names_from_signature(sig: &crate::types::decl::Signature) -> Vec<String> {
-    sig.iter()
-        .flat_map(|item| match item {
-            crate::types::decl::SignatureItem::SigType(_, decl, _) => match &decl.type_kind {
-                crate::types::decl::TypeKind::TypeRecord(labels, _) => labels
-                    .iter()
-                    .map(|label| label.ld_id.name().to_string())
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        })
-        .collect()
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_constructor_names,
+        |item, names| match item {
+            crate::types::decl::SignatureItem::SigType(_, decl, _) => {
+                if let crate::types::decl::TypeKind::TypeVariant(constructors, _) = &decl.type_kind
+                {
+                    names.extend(constructors.iter().map(|cstr| cstr.cd_id.name().to_string()));
+                }
+            }
+            crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
+                names.push(id.name().to_string());
+            }
+            _ => {}
+        },
+    )
 }
 
 fn unbound_label_alternatives(
@@ -19319,15 +19314,21 @@ fn unbound_label_alternatives(
     ctx: &TypeContext,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_label_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
-                .map(|(_, sig)| label_names_from_signature(&sig))
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
+    unbound_name_alternatives(
+        arena,
+        env,
+        pers_env,
+        ctx,
+        lid,
+        Env::fold_label_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigType(_, decl, _) = item
+                && let crate::types::decl::TypeKind::TypeRecord(labels, _) = &decl.type_kind
+            {
+                names.extend(labels.iter().map(|label| label.ld_id.name().to_string()));
+            }
+        },
+    )
 }
 
 fn module_structure_lookup_error(
@@ -19363,24 +19364,19 @@ fn unbound_value_alternatives(
     env: &Env,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_value_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-                .map(|(_, sig)| {
-                    sig.iter()
-                        .filter_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigValue(id, _) => {
-                                Some(id.name().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_value_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigValue(id, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 fn check_inlined_record_escape(
