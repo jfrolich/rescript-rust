@@ -7418,9 +7418,6 @@ fn append_math_operator_help(
     context: &Option<TypeClashContext>,
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some(TypeClashContext::MathOperator {
         for_float,
         operator,
@@ -7549,9 +7546,6 @@ fn append_let_unwrap_return_help(
     context: &Option<TypeClashContext>,
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     if !matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
         return false;
     }
@@ -7817,9 +7811,6 @@ fn append_optional_record_field_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some(TypeClashContext::RecordField {
         field_name,
         optional: true,
@@ -7889,9 +7880,6 @@ fn append_optional_function_argument_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some(TypeClashContext::FunctionArgument { optional: true, .. }) = context else {
         return false;
     };
@@ -7938,9 +7926,6 @@ fn append_runtime_coercion_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some(rewrite) = runtime_coercion_suggestion(type_ctx, arena, source, loc, trace) else {
         return false;
     };
@@ -8243,9 +8228,6 @@ fn append_string_to_polyvariant_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some(row) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
             .then(|| polyvariant_row(type_ctx, expected))
@@ -8288,9 +8270,6 @@ fn append_string_to_variant_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some((constructors, layout)) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
             .then(|| concrete_variant_constructors(type_ctx, expected))
@@ -8376,20 +8355,30 @@ fn type_decl_for_path(
     type_ctx: &TypeContext,
     path: &crate::types::Path,
 ) -> Option<crate::types::TypeDeclaration> {
+    with_type_decl_for_path(type_ctx, path, |decl| decl.clone())
+}
+
+/// Look up the declaration for `path` (by stamp, then printed path, then head
+/// name) and apply `f` to it without cloning.
+fn with_type_decl_for_path<R>(
+    type_ctx: &TypeContext,
+    path: &crate::types::Path,
+    f: impl FnOnce(&crate::types::TypeDeclaration) -> R,
+) -> Option<R> {
     if let crate::types::Path::Pident(id) = path
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
     {
-        return Some(decl.clone());
+        return Some(f(&decl));
     }
 
     if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
-        return Some(decl.clone());
+        return Some(f(&decl));
     }
 
     type_ctx
         .find_type_decl(path.head_name())
-        .map(|decl| decl.clone())
+        .map(|decl| f(&decl))
 }
 
 fn variant_constructor_string_runtime_repr(
@@ -8443,10 +8432,6 @@ fn append_object_literal_record_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     let has_object_record_mismatch = [
         bottom_type_clash_aliases(trace),
         nested_type_clash_pair(type_ctx, trace),
@@ -8496,9 +8481,6 @@ fn append_braced_ident_record_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     if !matches!(context, Some(TypeClashContext::BracedIdent)) {
         return false;
     }
@@ -8601,9 +8583,6 @@ fn append_jsx_element_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some((actual, _expected)) = jsx_element_type_clash_pair(type_ctx, trace) else {
         return false;
     };
@@ -8747,9 +8726,6 @@ fn append_incompatible_type_parts(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-
     let reports = super_trace_reports(type_ctx, trace);
     if reports.is_empty() {
         return;
@@ -8794,9 +8770,6 @@ fn append_type_expansion_report(
     color: &str,
     message: &mut String,
 ) {
-    const DIM: &str = "\x1b[2m";
-    const RESET: &str = "\x1b[0m";
-
     message.push_str(color);
     message.push_str(&format_type_expr(type_ctx, ty));
     message.push_str(RESET);
@@ -8990,10 +8963,6 @@ fn append_polyvariant_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     let Some((actual_ty, expected_ty)) = polyvariant_diagnostic_type_pair(type_ctx, trace) else {
         return false;
     };
@@ -9229,10 +9198,6 @@ fn append_object_field_mismatch_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     let Some((field_name, actual_ty, expected_ty)) = trace
         .iter()
         .find_map(|(actual, expected)| object_field_mismatch_pair(type_ctx, *actual, *expected))
@@ -9271,9 +9236,6 @@ fn append_object_field_missing_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) -> bool {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some((first_object, field_name, field_ty)) = trace
         .iter()
         .find_map(|(actual, expected)| object_field_missing_pair(type_ctx, *actual, *expected))
@@ -9384,9 +9346,6 @@ fn append_dict_literal_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let has_dict_literal_mismatch = [
         bottom_type_clash_aliases(trace),
         nested_type_clash_pair(type_ctx, trace),
@@ -9424,31 +9383,13 @@ fn type_is_record(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
 }
 
 fn type_path_is_record(type_ctx: &TypeContext, path: &crate::types::Path) -> bool {
-    if let crate::types::Path::Pident(id) = path
-        && id.stamp() != 0
-        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
-    {
-        return matches!(
+    with_type_decl_for_path(type_ctx, path, |decl| {
+        matches!(
             &decl.type_kind,
             crate::types::decl::TypeKind::TypeRecord(_, _)
-        );
-    }
-
-    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
-        return matches!(
-            &decl.type_kind,
-            crate::types::decl::TypeKind::TypeRecord(_, _)
-        );
-    }
-
-    type_ctx
-        .find_type_decl(path.head_name())
-        .is_some_and(|decl| {
-            matches!(
-                &decl.type_kind,
-                crate::types::decl::TypeKind::TypeRecord(_, _)
-            )
-        })
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
@@ -9504,9 +9445,6 @@ fn append_simple_conversion_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let Some((actual_name, expected_name, converter)) =
         simple_conversion_candidate(type_ctx, trace)
     else {
@@ -9673,10 +9611,6 @@ fn format_function_arity_mismatch_report(
     actual_arity: i32,
     expected_arity: i32,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     let mut message = String::new();
     message.push_str("This function is expected to have ");
     message.push_str(INFO);
@@ -9698,29 +9632,6 @@ fn format_function_arity_mismatch_report(
     message.push_str(RESET);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
-fn count_arrow_args(type_ctx: &TypeContext, ty: TypeExprRef, mut count: usize) -> usize {
-    let mut current = ty;
-    let mut seen = AHashSet::new();
-
-    loop {
-        let repr = type_ctx.repr(current);
-        if !seen.insert(repr) {
-            return count;
-        }
-
-        match &*type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { args, ret } => {
-                count += args.len();
-                current = *ret;
-            }
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-                current = *next;
-            }
-            _ => return count,
-        }
-    }
 }
 
 fn format_apply_non_function_report(
@@ -9912,10 +9823,6 @@ fn format_uncurried_arity_mismatch_report(
     provided_args: &[crate::parser::ast::ArgLabel],
     arity_suggestion: Option<&str>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     let args_from_type = collect_function_arg_labels(type_ctx, function_type);
     let args_from_type_unlabelled = args_from_type
         .iter()
@@ -10073,9 +9980,6 @@ fn format_constructor_arity_mismatch_report(
     expected: usize,
     provided: usize,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let name = format_longident_for_report(arena, name);
     let message = if is_inline_record && expected == 1 {
         let suffix = if provided == 0 {
@@ -10275,15 +10179,6 @@ impl<'a> TypeExprPrinter<'a> {
         } else {
             self.printtyp.type_expr(ty)
         }
-    }
-}
-
-fn generated_type_var_name(idx: usize) -> String {
-    let letter = (b'a' + (idx % 26) as u8) as char;
-    if idx < 26 {
-        format!("'{letter}")
-    } else {
-        format!("'{letter}{}", idx / 26)
     }
 }
 
@@ -10567,12 +10462,7 @@ fn compile_source_to_js_with_options_inner(
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -10676,13 +10566,7 @@ fn compile_source_to_js_with_options_inner(
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(
-        &mut tctx,
-        &type_ctx,
-        &typed_structure,
-        options,
-        Some(has_resi),
-    );
+    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, has_resi);
     check_compunit_inclusion_for_errors(
         &mut tctx,
         &type_ctx,
@@ -10828,10 +10712,6 @@ fn compile_source_to_js_with_options_inner(
 
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
-    let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
-    if options.dump_lambda && raw_trace {
-        eprintln!("[drawlambda-stage] start");
-    }
     let unit_name = options.current_unit_name().unwrap_or_default();
     let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
         compute_raw_implementation_coercion(
@@ -10840,7 +10720,7 @@ fn compile_source_to_js_with_options_inner(
             &env,
             &typed_structure,
             options,
-            Some(has_resi),
+            has_resi,
         )
     });
     let mut raw_converter =
@@ -10859,9 +10739,6 @@ fn compile_source_to_js_with_options_inner(
     raw_converter.set_warning_config(tctx.warning_config.clone());
     if let Some(persistent_env) = tctx.persistent_env.clone() {
         raw_converter.set_persistent_env(persistent_env);
-    }
-    if options.dump_lambda && raw_trace {
-        eprintln!("[drawlambda-stage] before-convert");
     }
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
@@ -10892,26 +10769,16 @@ fn compile_source_to_js_with_options_inner(
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
     if options.dump_lambda {
-        if raw_trace {
-            eprintln!("[drawlambda-stage] after-convert");
-            eprintln!("[drawlambda-stage] before-print");
-        }
         use std::io::Write;
         let mut stderr = std::io::stderr();
         let mut raw_buf = Vec::new();
         crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
         raw_buf.push(b'\n');
         let _ = stderr.write_all(&raw_buf);
-        if raw_trace {
-            eprintln!("[drawlambda-stage] after-print");
-        }
-        let raw_only = std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some();
-        if !raw_only {
-            let _ = stderr.flush();
-        }
-        if raw_only {
+        if std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some() {
             std::process::exit(0);
         }
+        let _ = stderr.flush();
     }
 
     #[cfg(test)]
@@ -11159,15 +11026,15 @@ fn build_name_based_coercion(
     // position, then advances only for runtime components. That lets primitive
     // implementations satisfy regular interface values via Tcoerce_primitive.
     // See compiler/ml/includemod.ml:313-342 and 381-390.
-    let mut impl_name_to_component: std::collections::HashMap<String, (usize, &SignatureItem)> =
-        std::collections::HashMap::new();
+    let mut impl_name_to_component: ahash::AHashMap<&str, (usize, &SignatureItem)> =
+        ahash::AHashMap::new();
     let mut runtime_pos = 0usize;
     for item in impl_sig {
         match item {
             SignatureItem::SigValue(id, _)
             | SignatureItem::SigModule(id, _, _)
             | SignatureItem::SigTypext(id, _, _) => {
-                impl_name_to_component.insert(id.name().to_string(), (runtime_pos, item));
+                impl_name_to_component.insert(id.name(), (runtime_pos, item));
             }
             _ => {}
         }
@@ -11189,10 +11056,10 @@ fn build_name_based_coercion(
         let name = match item {
             SignatureItem::SigValue(id, _)
             | SignatureItem::SigModule(id, _, _)
-            | SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+            | SignatureItem::SigTypext(id, _, _) => id.name(),
             _ => continue,
         };
-        if let Some(&(pos, impl_item)) = impl_name_to_component.get(&name) {
+        if let Some(&(pos, impl_item)) = impl_name_to_component.get(name) {
             let coercion = match (item, impl_item) {
                 (
                     SignatureItem::SigValue(_, sig_desc),
@@ -11220,7 +11087,7 @@ fn build_name_based_coercion(
                 _ => ModuleCoercion::Tcoerce_none,
             };
             coercions.push((pos, coercion));
-            runtime_fields.push(name);
+            runtime_fields.push(name.to_string());
         }
     }
 
@@ -11322,7 +11189,6 @@ fn format_compunit_mismatch_report(
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The result of checking an implementation against its interface: OCaml's
 /// one `Includemod.compunit` call gives both the coercion Translmod uses and
 /// the inclusion warnings (typemod.ml:1742-1758).
@@ -11331,6 +11197,7 @@ struct CompunitInclusion {
     warnings: Vec<crate::diagnostics::Warning>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_compunit_inclusion_for_errors(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -11356,14 +11223,7 @@ fn check_compunit_inclusion_for_errors(
     let Some(pers) = &mut tctx.persistent_env else {
         return Ok(None);
     };
-    let source_dir = std::path::Path::new(source_file)
-        .parent()
-        .map(|d| d.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    if !pers.load_path_contains(&source_dir) {
-        pers.add_load_path(source_dir);
-    }
-    let _ = pers.find_pers_struct(&module_name, type_ctx);
+    load_interface_unit(pers, source_file, &module_name, type_ctx);
     // In-process, the interface was saved without a `.cmi`; its raw `ps_sig`
     // travels with the registered portable structure.
     let raw_in_process_sig = if pers.is_in_process_mode() {
@@ -11435,7 +11295,7 @@ fn compute_raw_implementation_coercion(
     env: &Env,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
-    known_has_interface: Option<bool>,
+    has_resi: bool,
 ) -> crate::types::typedtree::ModuleCoercion {
     let Some(source_file) = &options.source_filename else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
@@ -11445,8 +11305,6 @@ fn compute_raw_implementation_coercion(
     }
 
     let impl_sig = &typed_structure.str_type;
-    let has_resi = known_has_interface
-        .unwrap_or_else(|| std::path::Path::new(&format!("{source_file}i")).exists());
     if !has_resi {
         // The no-interface coercion is computed at the Typemod boundary before
         // signature normalization and passed through to Lambda translation.
@@ -11460,14 +11318,7 @@ fn compute_raw_implementation_coercion(
     let Some(pers) = &mut tctx.persistent_env else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     };
-    let source_dir = std::path::Path::new(source_file)
-        .parent()
-        .map(|d| d.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    if !pers.load_path_contains(&source_dir) {
-        pers.add_load_path(source_dir);
-    }
-    let _ = pers.find_pers_struct(&module_name, type_ctx);
+    load_interface_unit(pers, source_file, &module_name, type_ctx);
     let target_sig = match pers.read_raw_sig_shared(&module_name, type_ctx) {
         Some(sig) => sig,
         None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
@@ -11485,23 +11336,31 @@ fn compute_raw_implementation_coercion(
     );
     report_compunit_inclusion_warnings(tctx, inclusion_warnings);
 
-    match inclusion_result {
-        Ok(cc) => cc,
-        Err(_) if has_resi => {
-            // compunit can fail when the OCaml-built CMI has different type stamps
-            // than what Rust's type-checker produces. In that case, fall back to a
-            // name-based structural coercion that at least filters the export block
-            // to match the interface's set of exported items. This ensures functors
-            // and other implementation-only items are excluded from the module export
-            // block, matching OCaml's behavior.
-            build_name_based_coercion(impl_sig, &target_sig)
-        }
-        Err(_) => crate::types::typedtree::ModuleCoercion::Tcoerce_none,
-    }
+    // If compunit fails, fall back to a name-based structural coercion that at
+    // least filters the export block to the interface's exported items, so
+    // functors and other implementation-only items stay out of the module
+    // export block.
+    inclusion_result.unwrap_or_else(|_| build_name_based_coercion(impl_sig, &target_sig))
 }
 
-/// Type-check an interface file and dump typed sexp if requested.
-/// Interface files (.resi) don't produce JS output, only .cmi files.
+/// Make the unit's own interface loadable: add the source directory to the
+/// load path and load its persistent structure.
+fn load_interface_unit(
+    pers: &mut PersistentEnv,
+    source_file: &str,
+    module_name: &str,
+    type_ctx: &TypeContext,
+) {
+    let source_dir = std::path::Path::new(source_file)
+        .parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if !pers.load_path_contains(&source_dir) {
+        pers.add_load_path(source_dir);
+    }
+    let _ = pers.find_pers_struct(module_name, type_ctx);
+}
+
 /// Output of [`run_interface_frontend`].
 pub struct InterfaceFrontend {
     pub signature: Signature,
@@ -11670,12 +11529,7 @@ pub fn typecheck_interface_source(
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -11995,13 +11849,7 @@ pub fn load_pervasives(
             // not a root `Pervasives` module binding. Keep the raw signature
             // registered for ps_comps-style descriptor lookup without changing
             // source module lookup shape.
-            if !pers_env.is_in_process_mode() {
-                if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
-                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Pervasives", sig.clone());
-                    }
-                }
-            }
+            register_opened_raw_sig(pers_env, ctx, "Pervasives");
         }
 
         // Try to load and open Stdlib
@@ -12009,13 +11857,7 @@ pub fn load_pervasives(
             env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
             // but let explicit module lookup use the persistent registry.
-            if !pers_env.is_in_process_mode() {
-                if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
-                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Stdlib", sig.clone());
-                    }
-                }
-            }
+            register_opened_raw_sig(pers_env, ctx, "Stdlib");
         }
     }
 
@@ -12033,318 +11875,25 @@ pub fn load_pervasives(
             // opened components but does not install a root module binding, so
             // later Env.normalize_path can still reach the persistent-root
             // force path through env.ml:903-914.
-            if !pers_env.is_in_process_mode() {
-                if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig(module_name, sig.clone());
-                    }
-                }
-            }
+            register_opened_raw_sig(pers_env, ctx, module_name);
+        }
+    }
+}
+
+/// Keep an opened module's raw signature registered for ps_comps-style
+/// descriptor lookup (disk mode only).
+fn register_opened_raw_sig(pers_env: &mut PersistentEnv, ctx: &TypeContext, name: &str) {
+    if pers_env.is_in_process_mode() {
+        return;
+    }
+    if let Some(md) = pers_env.get_module_declaration(name, ctx) {
+        if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+            ctx.register_raw_module_sig(name, sig.clone());
         }
     }
 }
 
 use crate::types::env::Env;
-
-/// Type-check a ReScript source file and write the typed tree as sexp to a writer.
-/// This reuses the parse -> ppx -> typecheck pipeline but skips codegen.
-/// For structure files (.res), writes `(structure ...)`.
-/// For signature files (.resi), writes `(signature ...)`.
-pub fn typecheck_and_dump_sexp<W: std::io::Write>(
-    source: &str,
-    filename: &str,
-    options: &CompilerOptions,
-    writer: &mut W,
-) -> Result<()> {
-    let is_interface = filename.ends_with(".resi");
-
-    if is_interface {
-        // Parse as signature
-        let mut parser = Parser::new(filename, source);
-        let signature = module::parse_signature(&mut parser);
-        if parser.has_errors() {
-            return Err(anyhow!(
-                "Parse failed with {} error(s)",
-                parser.diagnostics().len()
-            ));
-        }
-        let frontend_warnings =
-            ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
-        let frontend_warning_specs = ppx::collect_leading_builtin_warning_signature_attribute_specs(
-            &signature,
-            parser.arena(),
-        );
-        let _ = emit_ppx_warnings(
-            parser.arena(),
-            source,
-            filename,
-            options,
-            &frontend_warnings,
-        );
-        let config_processing = validate_file_config_from_signature(
-            &signature,
-            parser.arena(),
-            &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
-        );
-        for (warning, config) in config_processing
-            .warnings
-            .iter()
-            .chain(config_processing.late_warnings.iter())
-        {
-            let _ = emit_ppx_warnings_with_config(
-                parser.arena(),
-                source,
-                filename,
-                config,
-                std::slice::from_ref(warning),
-            );
-        }
-        if let Some(err) = config_processing.error {
-            return Err(config_payload_error_to_anyhow(
-                err,
-                parser.arena(),
-                source,
-                filename,
-            ));
-        }
-        let file_config = config_processing.overrides;
-        let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-        let signature = preprocess_signature_for_typecheck_with_source(
-            signature,
-            options,
-            parser.arena_mut(),
-            source,
-            filename,
-            &mut Vec::new(),
-        )?;
-        parser.arena_mut().reserve_typecheck_synthetic_capacity();
-
-        // Type check
-        crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-        // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-        // at module initialization, consuming stamp 1000 before any compilation.
-        let _ = id_gen.next_stamp();
-        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-        let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-        tctx.experimental_let_unwrap = experimental_let_unwrap;
-        tctx.transparent_modules = options.transparent_modules;
-        apply_warning_options(&mut tctx, options);
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-        apply_file_config_warning_options(&mut tctx, &file_config);
-        let mut env = initial_env(&type_ctx);
-
-        let mut pers_env = PersistentEnv::new();
-        let (load_path, load_path_display) = shared_load_path_with_display(options);
-        type_ctx.set_load_paths_shared(load_path.clone());
-        pers_env.set_load_path_shared(load_path, load_path_display);
-        pers_env.set_open_modules(options.open_modules.clone());
-        pers_env.set_jsx_version(options.jsx_version);
-        pers_env.set_jsx_module(options.jsx_module.clone());
-        let current_unit_name = options.current_unit_name();
-        pers_env.set_compiling_module(current_unit_name.clone());
-        load_pervasives(
-            &mut pers_env,
-            &mut env,
-            &type_ctx,
-            &options.open_modules,
-            options.nopervasives,
-            current_unit_name.as_deref(),
-        );
-        tctx.set_persistent_env(pers_env);
-
-        let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-
-        print_typed_signature_with_locs(parser.arena(), &type_ctx, &typed_signature, writer)
-            .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
-    } else {
-        // Parse as structure
-        let mut parser = Parser::new(filename, source);
-        let structure = module::parse_structure(&mut parser);
-        if parser.has_errors() {
-            return Err(anyhow!(
-                "Parse failed with {} error(s)",
-                parser.diagnostics().len()
-            ));
-        }
-        let frontend_warning_specs =
-            ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
-        let file_config = extract_file_config_from_structure(&structure, parser.arena());
-        let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
-            options,
-            &file_config,
-            &frontend_warning_specs,
-        );
-        let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-        if !options.no_builtin_ppx {
-            reject_disabled_let_unwrap_in_structure(
-                experimental_let_unwrap,
-                &structure,
-                parser.arena(),
-                source,
-                filename,
-            )?;
-            reject_enabled_invalid_let_unwrap_in_structure(
-                experimental_let_unwrap,
-                &structure,
-                parser.arena(),
-                source,
-                filename,
-            )?;
-        }
-
-        let jsx_version = options.jsx_version.or(file_config.jsx_version);
-        let structure = if let Some(jsx_version) = jsx_version {
-            let (structure, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
-                structure,
-                jsx_version,
-                jsx_module_name(options, Some(&file_config)),
-                parser.arena_mut(),
-            );
-            let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
-            let _ = emit_ppx_warnings_with_config(
-                parser.arena(),
-                source,
-                filename,
-                &file_warning_config,
-                &jsx_warnings,
-            );
-            structure.map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
-        } else {
-            structure
-        };
-
-        let structure = if options.no_builtin_ppx {
-            structure
-        } else {
-            ppx::mark_config_attributes_structure(&structure, parser.arena());
-            let structure = ppx::expand_extensions(&structure, parser.arena_mut())
-                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-            parser
-                .arena_mut()
-                .set_builtin_spice(options.builtin_spice());
-            let (rewritten, ppx_warnings) =
-                ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut());
-            let _ = emit_ppx_warnings_with_config(
-                parser.arena(),
-                source,
-                filename,
-                &file_warning_config,
-                &ppx_warnings,
-            );
-            let rewritten =
-                rewritten.map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-            let (unused_attribute_warnings, invariant_error) =
-                ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
-            let _ = emit_ppx_warnings_with_config(
-                parser.arena(),
-                source,
-                filename,
-                &file_warning_config,
-                &unused_attribute_warnings,
-            );
-            if let Some(e) = invariant_error {
-                return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
-            }
-            rewritten
-        };
-        // js_implementation.ml:130 `no_export` after the frontend.
-        let structure =
-            crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
-        parser.arena_mut().reserve_typecheck_synthetic_capacity();
-
-        // Type check
-        crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-        let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-        let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-        tctx.experimental_let_unwrap = experimental_let_unwrap;
-        tctx.transparent_modules = options.transparent_modules;
-        apply_warning_options(&mut tctx, options);
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-        apply_file_config_warning_options(&mut tctx, &file_config);
-        let mut env = initial_env(&type_ctx);
-
-        let mut pers_env = PersistentEnv::new();
-        let (load_path, load_path_display) = shared_load_path_with_display(options);
-        type_ctx.set_load_paths_shared(load_path.clone());
-        pers_env.set_load_path_shared(load_path, load_path_display);
-        pers_env.set_open_modules(options.open_modules.clone());
-        pers_env.set_jsx_version(options.jsx_version);
-        pers_env.set_jsx_module(options.jsx_module.clone());
-        let current_unit_name = options.current_unit_name();
-        pers_env.set_compiling_module(current_unit_name.clone());
-        load_pervasives(
-            &mut pers_env,
-            &mut env,
-            &type_ctx,
-            &options.open_modules,
-            options.nopervasives,
-            current_unit_name.as_deref(),
-        );
-        tctx.set_persistent_env(pers_env);
-
-        let (typed_structure, _final_env) =
-            type_structure(&mut tctx, &env, parser.arena(), &structure)
-                .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-
-        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, None);
-
-        print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, writer)
-            .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
-    }
-
-    Ok(())
-}
-
-struct MoregenDebugLog {
-    lines: Option<Vec<String>>,
-}
-
-macro_rules! moregen_debug {
-    ($debug:expr, $($arg:tt)*) => {
-        if $debug.enabled() {
-            $debug.push(format!($($arg)*));
-        }
-    };
-}
-
-impl MoregenDebugLog {
-    fn from_env() -> Self {
-        let lines = std::env::var_os("RUST_DEBUG_MOREGEN").map(|_| Vec::new());
-        Self { lines }
-    }
-
-    fn enabled(&self) -> bool {
-        self.lines.is_some()
-    }
-
-    fn push(&mut self, line: String) {
-        if let Some(lines) = self.lines.as_mut() {
-            lines.push(line);
-        }
-    }
-
-    fn write(&self, module_name: &str) {
-        let Some(lines) = self.lines.as_ref() else {
-            return;
-        };
-        if lines.is_empty() {
-            return;
-        }
-        let debug_file = std::env::temp_dir().join(format!("moregen_debug_{}.txt", module_name));
-        let Ok(mut file) = std::fs::File::create(debug_file) else {
-            return;
-        };
-        use std::io::Write;
-        for line in lines {
-            let _ = writeln!(file, "{}", line);
-        }
-    }
-}
 
 /// Apply moregen-like interface constraints: link non-generic Tvars in the
 /// implementation to corresponding types from the .resi interface.
@@ -12359,7 +11908,7 @@ fn apply_moregen_constraints(
     type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
-    known_has_interface: Option<bool>,
+    has_resi: bool,
 ) {
     use crate::types::decl::SignatureItem;
     use crate::types::type_expr::TypeExprRef;
@@ -12373,10 +11922,6 @@ fn apply_moregen_constraints(
     if !source_file.ends_with(".res") {
         return;
     }
-    let has_resi = known_has_interface.unwrap_or_else(|| {
-        let resi_file = format!("{}i", source_file);
-        std::path::Path::new(&resi_file).exists()
-    });
     if !has_resi {
         return;
     }
@@ -12396,17 +11941,8 @@ fn apply_moregen_constraints(
             Some(p) => p,
             None => return,
         };
-        // Temporarily add source dir to load path
-        let source_dir = std::path::Path::new(source_file)
-            .parent()
-            .map(|d| d.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let already_in_path = pers.load_path_contains(&source_dir);
-        if !already_in_path {
-            pers.add_load_path(source_dir.clone());
-        }
         // Ensure the module is loaded first (for side effects like registering types)
-        let _ = pers.find_pers_struct(&module_name, type_ctx);
+        load_interface_unit(pers, source_file, &module_name, type_ctx);
         // Then read raw sig without path substitution for moregen
         let result = pers.read_raw_sig_shared(&module_name, type_ctx);
         match result {
@@ -12425,39 +11961,34 @@ fn apply_moregen_constraints(
     {
         let impl_sig = &typed_structure.str_type;
         let mut stamp_remap: ahash::AHashMap<i32, crate::types::Path> = ahash::AHashMap::new();
-        // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype
+        // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype.
+        // The first implementation item of each kind and name wins.
+        #[derive(PartialEq, Eq, Hash)]
+        enum PairKind {
+            Type,
+            Module,
+            Modtype,
+        }
+        fn pair_key(item: &SignatureItem) -> Option<(PairKind, &crate::ident::Ident)> {
+            match item {
+                SignatureItem::SigType(id, _, _) => Some((PairKind::Type, id)),
+                SignatureItem::SigModule(id, _, _) => Some((PairKind::Module, id)),
+                SignatureItem::SigModtype(id, _) => Some((PairKind::Modtype, id)),
+                _ => None,
+            }
+        }
+        let mut impl_items: ahash::AHashMap<(PairKind, &str), &crate::ident::Ident> =
+            ahash::AHashMap::new();
+        for item in impl_sig.iter() {
+            if let Some((kind, id)) = pair_key(item) {
+                impl_items.entry((kind, id.name())).or_insert(id);
+            }
+        }
         for iface_item in iface_sig.iter() {
-            let (iface_id, find_fn): (
-                &crate::ident::Ident,
-                Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>,
-            ) = match iface_item {
-                SignatureItem::SigType(id, _, _) => (
-                    id,
-                    Box::new(|i| match i {
-                        SignatureItem::SigType(impl_id, _, _) => Some(impl_id),
-                        _ => None,
-                    }),
-                ),
-                SignatureItem::SigModule(id, _, _) => (
-                    id,
-                    Box::new(|i| match i {
-                        SignatureItem::SigModule(impl_id, _, _) => Some(impl_id),
-                        _ => None,
-                    }),
-                ),
-                SignatureItem::SigModtype(id, _) => (
-                    id,
-                    Box::new(|i| match i {
-                        SignatureItem::SigModtype(impl_id, _) => Some(impl_id),
-                        _ => None,
-                    }),
-                ),
-                _ => continue,
+            let Some((kind, iface_id)) = pair_key(iface_item) else {
+                continue;
             };
-            if let Some(impl_id) = impl_sig.iter().find_map(|i| {
-                let candidate = find_fn(i)?;
-                (candidate.name() == iface_id.name()).then_some(candidate)
-            }) {
+            if let Some(&impl_id) = impl_items.get(&(kind, iface_id.name())) {
                 if iface_id.stamp() != 0
                     && impl_id.stamp() != 0
                     && iface_id.stamp() != impl_id.stamp()
@@ -12486,121 +12017,62 @@ fn apply_moregen_constraints(
 
     // Walk top-level implementation structure items and match with interface.
     // Also recurse into modules to find inner non-generic Tvars.
-    let mut debug = MoregenDebugLog::from_env();
-
-    // Debug: dump all top-level binding names and types
-    if debug.enabled() {
-        moregen_debug!(
-            debug,
-            "TOTAL TOP-LEVEL ITEMS: {}",
-            typed_structure.str_items.len()
-        );
-        for item in &typed_structure.str_items {
-            match &item.str_desc {
-                crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
-                    for binding in bindings {
-                        let name = extract_pat_name(&binding.vb_pat);
-                        moregen_debug!(debug, "TOP-LEVEL VALUE: {:?}", name);
-                        if name.as_deref() == Some("wrapJsForReason") {
-                            moregen_debug!(
-                                debug,
-                                "=== wrapJsForReason pat_type={:?} level={}",
-                                binding.vb_pat.pat_type,
-                                type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))
-                            );
-                            dump_all_tvars(
-                                type_ctx,
-                                binding.vb_pat.pat_type,
-                                &mut debug,
-                                &mut ahash::AHashSet::new(),
-                                0,
-                            );
-                        }
-                    }
-                }
-                crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
-                    moregen_debug!(debug, "TOP-LEVEL MODULE: {}", mb.mb_name.txt);
-                }
-                _ => {
-                    moregen_debug!(debug, "TOP-LEVEL OTHER");
-                }
-            }
-        }
-    }
-
-    moregen_link_structure(type_ctx, typed_structure, &iface_val_types, &mut debug);
-    debug.write(&module_name);
+    moregen_link_structure(type_ctx, typed_structure, &iface_val_types);
 }
 
 fn moregen_link_structure(
     type_ctx: &TypeContext,
     structure: &crate::types::typedtree::Structure,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
-    debug: &mut MoregenDebugLog,
 ) {
     for item in &structure.str_items {
         match &item.str_desc {
             crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
                 for binding in bindings {
-                    let name = extract_pat_name(&binding.vb_pat);
-                    if let Some(ref name) = name {
-                        if let Some(&iface_ty) = iface_val_types.get(name) {
-                            moregen_debug!(
-                                debug,
-                                "moregen_link: {} impl={:?} iface={:?}",
-                                name,
-                                binding.vb_pat.pat_type,
-                                iface_ty
-                            );
-                            let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
-                            moregen_link(
-                                type_ctx,
-                                binding.vb_pat.pat_type,
-                                iface_inst,
-                                &mut ahash::AHashSet::new(),
-                                debug,
-                            );
-                            if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
-                                &binding.vb_expr.exp_desc
-                            {
-                                moregen_debug!(
-                                    debug,
-                                    "moregen_link_alias: {} aliased={:?} iface={:?}",
-                                    name,
-                                    desc.val_type,
-                                    iface_ty
-                                );
-                                let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
-                                moregen_link_exported_alias(
-                                    type_ctx,
-                                    desc.val_type,
-                                    iface_inst,
-                                    &mut ahash::AHashSet::new(),
-                                    debug,
-                                );
-                                moregen_link_exported_alias(
-                                    type_ctx,
-                                    binding.vb_pat.pat_type,
-                                    desc.val_type,
-                                    &mut ahash::AHashSet::new(),
-                                    debug,
-                                );
-                                moregen_link_exported_alias(
-                                    type_ctx,
-                                    binding.vb_expr.exp_type,
-                                    desc.val_type,
-                                    &mut ahash::AHashSet::new(),
-                                    debug,
-                                );
-                            }
-                        } else {
-                            moregen_debug!(debug, "no iface match: {}", name);
-                        }
+                    let Some(name) = extract_pat_name(&binding.vb_pat) else {
+                        continue;
+                    };
+                    let Some(&iface_ty) = iface_val_types.get(&name) else {
+                        continue;
+                    };
+                    let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                    moregen_link(
+                        type_ctx,
+                        binding.vb_pat.pat_type,
+                        iface_inst,
+                        &mut ahash::AHashSet::new(),
+                    );
+                    if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
+                        &binding.vb_expr.exp_desc
+                    {
+                        // OCaml Ctype.moregeneral instantiates generic variables on
+                        // copies before comparison (compiler/ml/ctype.ml:3124-3139).
+                        // Only non-generic variables are shared with the original
+                        // typedtree and can be linked by inclusion.
+                        let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                        moregen_link(
+                            type_ctx,
+                            desc.val_type,
+                            iface_inst,
+                            &mut ahash::AHashSet::new(),
+                        );
+                        moregen_link(
+                            type_ctx,
+                            binding.vb_pat.pat_type,
+                            desc.val_type,
+                            &mut ahash::AHashSet::new(),
+                        );
+                        moregen_link(
+                            type_ctx,
+                            binding.vb_expr.exp_type,
+                            desc.val_type,
+                            &mut ahash::AHashSet::new(),
+                        );
                     }
                 }
             }
             crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
-                moregen_link_mod_expr(type_ctx, &mb.mb_expr, iface_val_types, debug);
+                moregen_link_mod_expr(type_ctx, &mb.mb_expr, iface_val_types);
             }
             _ => {}
         }
@@ -12611,80 +12083,16 @@ fn moregen_link_mod_expr(
     type_ctx: &TypeContext,
     mod_expr: &crate::types::typedtree::ModuleExpr,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
-    debug: &mut MoregenDebugLog,
 ) {
     match &mod_expr.mod_desc {
         crate::types::typedtree::ModuleExprDesc::Tmod_structure(s) => {
-            moregen_link_structure(type_ctx, s, iface_val_types, debug);
+            moregen_link_structure(type_ctx, s, iface_val_types);
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
-            moregen_link_mod_expr(type_ctx, inner, iface_val_types, debug);
+            moregen_link_mod_expr(type_ctx, inner, iface_val_types);
         }
         _ => {}
     }
-}
-
-fn dump_all_tvars(
-    ctx: &TypeContext,
-    ty: crate::types::type_expr::TypeExprRef,
-    debug: &mut MoregenDebugLog,
-    seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
-    depth: usize,
-) {
-    use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return;
-    }
-    let level = ctx.get_level(ty);
-    let desc = ctx.get_desc(ty);
-    let indent = "  ".repeat(depth);
-    match &*desc {
-        TypeDesc::Tvar(name) => {
-            let generic_str = if level == GENERIC_LEVEL {
-                "GENERIC"
-            } else {
-                "NON-GENERIC"
-            };
-            moregen_debug!(
-                debug,
-                "{}Tvar({:?}) {:?} {} level={}",
-                indent,
-                name,
-                ty,
-                generic_str,
-                level
-            );
-        }
-        TypeDesc::Tconstr { path, args, .. } => {
-            moregen_debug!(
-                debug,
-                "{}Tconstr({:?}) {:?} level={} args={}",
-                indent,
-                path,
-                ty,
-                level,
-                args.len()
-            );
-            let args = args.clone();
-            drop(desc);
-            for arg in &args {
-                dump_all_tvars(ctx, *arg, debug, seen, depth + 1);
-            }
-            return;
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            let (args, ret) = (args.clone(), *ret);
-            drop(desc);
-            for arg in args {
-                dump_all_tvars(ctx, arg.typ, debug, seen, depth + 1);
-            }
-            dump_all_tvars(ctx, ret, debug, seen, depth + 1);
-            return;
-        }
-        _ => {}
-    }
-    drop(desc);
 }
 
 fn extract_pat_name(pat: &crate::types::typedtree::Pattern) -> Option<String> {
@@ -12728,37 +12136,6 @@ fn moregen_link(
         crate::types::type_expr::TypeExprRef,
         crate::types::type_expr::TypeExprRef,
     )>,
-    debug: &mut MoregenDebugLog,
-) {
-    moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
-}
-
-fn moregen_link_exported_alias(
-    ctx: &TypeContext,
-    impl_ty: crate::types::type_expr::TypeExprRef,
-    iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut ahash::AHashSet<(
-        crate::types::type_expr::TypeExprRef,
-        crate::types::type_expr::TypeExprRef,
-    )>,
-    debug: &mut MoregenDebugLog,
-) {
-    // OCaml Ctype.moregeneral instantiates generic variables on copies before
-    // comparison (compiler/ml/ctype.ml:3124-3139). Only non-generic variables
-    // are shared with the original typedtree and can be linked by inclusion.
-    moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
-}
-
-fn moregen_link_impl(
-    ctx: &TypeContext,
-    impl_ty: crate::types::type_expr::TypeExprRef,
-    iface_ty: crate::types::type_expr::TypeExprRef,
-    visited: &mut ahash::AHashSet<(
-        crate::types::type_expr::TypeExprRef,
-        crate::types::type_expr::TypeExprRef,
-    )>,
-    debug: &mut MoregenDebugLog,
-    allow_generic_anonymous: bool,
 ) {
     use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
 
@@ -12775,55 +12152,11 @@ fn moregen_link_impl(
     let iface_desc = ctx.get_desc(iface_ty);
 
     match (&*impl_desc, &*iface_desc) {
-        (TypeDesc::Tvar(name), _) if ctx.get_level(impl_ty) != GENERIC_LEVEL => {
+        (TypeDesc::Tvar(_), _) if ctx.get_level(impl_ty) != GENERIC_LEVEL => {
             // Non-generic impl Tvar: link to interface type
-            if debug.enabled() {
-                let iface_summary = match &*iface_desc {
-                    TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
-                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
-                    _ => "other".to_string(),
-                };
-                moregen_debug!(
-                    debug,
-                    "  LINK {:?} Tvar({:?}) level={} -> {}",
-                    impl_ty,
-                    name,
-                    ctx.get_level(impl_ty),
-                    iface_summary
-                );
-            }
             drop(impl_desc);
             drop(iface_desc);
             crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
-        }
-        (TypeDesc::Tvar(name), _) if allow_generic_anonymous && name.is_none() => {
-            if debug.enabled() {
-                let iface_summary = match &*iface_desc {
-                    TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
-                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
-                    _ => "other".to_string(),
-                };
-                moregen_debug!(
-                    debug,
-                    "  LINK exported generic {:?} Tvar({:?}) level={} -> {}",
-                    impl_ty,
-                    name,
-                    ctx.get_level(impl_ty),
-                    iface_summary
-                );
-            }
-            drop(impl_desc);
-            drop(iface_desc);
-            crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
-        }
-        (TypeDesc::Tvar(name), _) => {
-            moregen_debug!(
-                debug,
-                "  SKIP generic {:?} Tvar({:?}) level={}",
-                impl_ty,
-                name,
-                ctx.get_level(impl_ty)
-            );
         }
         (
             TypeDesc::Tconstr {
@@ -12833,32 +12166,24 @@ fn moregen_link_impl(
                 path: p2, args: a2, ..
             },
         ) if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() => {
-            moregen_debug!(
-                debug,
-                "  Tconstr match: {:?} ~ {:?} args={}",
-                p1,
-                p2,
-                a1.len()
-            );
             let a1 = a1.clone();
             let a2 = a2.clone();
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in a1.iter().zip(a2.iter()) {
-                moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
+                moregen_link(ctx, *a, *b, visited);
             }
         }
         (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
             if a1.len() == a2.len() =>
         {
-            moregen_debug!(debug, "  Tarrow match");
             let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
             for (a1, a2) in a1.iter().zip(&a2) {
-                moregen_link_impl(ctx, a1.typ, a2.typ, visited, debug, false);
+                moregen_link(ctx, a1.typ, a2.typ, visited);
             }
-            moregen_link_impl(ctx, r1, r2, visited, debug, allow_generic_anonymous);
+            moregen_link(ctx, r1, r2, visited);
         }
         (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {
             let t1 = t1.clone();
@@ -12866,29 +12191,10 @@ fn moregen_link_impl(
             drop(impl_desc);
             drop(iface_desc);
             for (a, b) in t1.iter().zip(t2.iter()) {
-                moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
+                moregen_link(ctx, *a, *b, visited);
             }
         }
-        (
-            TypeDesc::Tconstr {
-                path: p1, args: a1, ..
-            },
-            TypeDesc::Tconstr {
-                path: p2, args: a2, ..
-            },
-        ) => {
-            moregen_debug!(
-                debug,
-                "  Tconstr MISMATCH: impl={:?}({}) iface={:?}({})",
-                p1,
-                a1.len(),
-                p2,
-                a2.len()
-            );
-        }
-        _ => {
-            moregen_debug!(debug, "  NO match");
-        }
+        _ => {}
     }
 }
 
@@ -13556,154 +12862,6 @@ pub fn extract_file_config_from_signature(
     .overrides
 }
 
-/// Typecheck a stored structure AST (from parse phase) and dump sexp.
-/// Applies remaining PPX passes (expand_extensions, rewrite_structure) before typechecking.
-pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
-    mut arena: crate::parse_arena::ParseArena,
-    structure: Structure,
-    options: &CompilerOptions,
-    writer: &mut W,
-) -> Result<()> {
-    // Reset counter: the arena was already used during binary AST writing
-    // (write_structure_ast_current_with_extra_deps → rewrite_structure), which
-    // expanded %%private items and incremented local_module_counter.
-    // OCaml starts fresh for each bsc invocation, so we reset to match.
-    arena.reset_local_module_counter();
-
-    let file_config = extract_file_config_from_structure(&structure, &arena);
-    let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_attribute_specs(&structure, &arena);
-    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-
-    let jsx_version = options.jsx_version.or(file_config.jsx_version);
-    let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure_result(
-            structure,
-            jsx_version,
-            jsx_module_name(options, Some(&file_config)),
-            &mut arena,
-        )
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-    } else {
-        structure
-    };
-
-    let structure = if options.no_builtin_ppx {
-        structure
-    } else {
-        let structure = ppx::expand_extensions(&structure, &mut arena)
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-        arena.set_builtin_spice(options.builtin_spice());
-        ppx::rewrite_structure(&structure, &mut arena)
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-    };
-
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    crate::types::typecore::prepare_typecheck_arena(&mut arena);
-    let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path, load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        current_unit_name.as_deref(),
-    );
-    tctx.set_persistent_env(pers_env);
-
-    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-
-    print_typed_structure_with_locs(&arena, &type_ctx, &typed_structure, writer)
-        .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
-
-    Ok(())
-}
-
-/// Typecheck a stored signature AST (from parse phase) and dump sexp.
-pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
-    mut arena: crate::parse_arena::ParseArena,
-    signature: Signature,
-    options: &CompilerOptions,
-    writer: &mut W,
-) -> Result<()> {
-    let file_config = extract_file_config_from_signature(&signature, &arena);
-    let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, &arena);
-    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
-    // at module initialization, consuming stamp 1000 before any compilation.
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    crate::types::typecore::prepare_typecheck_arena(&mut arena);
-    let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path, load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        current_unit_name.as_deref(),
-    );
-    tctx.set_persistent_env(pers_env);
-
-    let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-
-    print_typed_signature_with_locs(&arena, &type_ctx, &typed_signature, writer)
-        .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
-
-    Ok(())
-}
-
 /// Normalize types to match OCaml's normalize_signature.
 /// OCaml calls normalize_type on each Sig_value's val_type in the top-level
 /// inferred signature. normalize_type is recursive (walks all children via
@@ -13756,7 +12914,7 @@ fn rename_saved_module_type_idents(type_ctx: &TypeContext, mty: &crate::types::d
         } => {
             // Subst.modtype renames the functor binder before traversing its
             // argument and result module types (compiler/ml/subst.ml:345-348).
-            drop(type_ctx.rename_ident(param));
+            type_ctx.rename_ident(param);
             if let Some(param_type) = param_type {
                 rename_saved_module_type_idents(type_ctx, param_type);
             }
@@ -13782,7 +12940,7 @@ fn rename_saved_signature_idents(
             | SignatureItem::SigModtype(id, _)
             | SignatureItem::SigValue(id, _)
             | SignatureItem::SigTypext(id, _, _) => {
-                drop(type_ctx.rename_ident(id));
+                type_ctx.rename_ident(id);
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
@@ -13998,8 +13156,13 @@ pub fn compile_source_in_process(
     let structure = frontend.structure;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    let mut effective_options = options.clone();
-    effective_options.experimental_let_unwrap = experimental_let_unwrap;
+    let effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
+        std::borrow::Cow::Borrowed(options)
+    } else {
+        let mut options = options.clone();
+        options.experimental_let_unwrap = experimental_let_unwrap;
+        std::borrow::Cow::Owned(options)
+    };
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let result = compile_preprocessed_structure_in_process(
@@ -14091,29 +13254,27 @@ fn render_js_program(
     }
 }
 
-fn compile_js_program_for_output(
-    lowered_lambda: &crate::lambda::Lambda,
-    hoisted_functions: &[crate::lambda::HoistedFunction],
+type JsBackendOutput = (
+    DepsProgram,
+    ModulePathResolver,
+    ahash::AHashMap<String, CmjExportConstant>,
+    ahash::AHashMap<String, CmjExportArity>,
+    ahash::AHashMap<String, crate::lambda::Lambda>,
+);
+
+/// Build the `LambdaCompiler` for one JS output target: resolve local module
+/// path overrides for the possibly-required modules and install the hoisted
+/// functions.
+#[allow(clippy::too_many_arguments)]
+fn js_backend_compiler(
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
-    DepsProgram,
-    ModulePathResolver,
-    ahash::AHashMap<String, CmjExportConstant>,
-    ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
-    let _span = info_span!(
-        "compiler.js_backend",
-        module = options.module_name.as_deref().unwrap_or(""),
-        owned = false,
-        possible_required_modules = possible_required_modules.len()
-    )
-    .entered();
+) -> LambdaCompiler {
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         output_path,
@@ -14142,18 +13303,17 @@ fn compile_js_program_for_output(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
-    compiler.set_hoisted_functions(hoisted_functions.to_vec());
-    let program = compiler.compile_deps_program_with_possible_required_modules(
-        lowered_lambda,
-        possible_required_modules,
-    );
+    compiler.set_hoisted_functions(hoisted_functions);
+    compiler
+}
+
+fn finish_js_backend(mut compiler: LambdaCompiler, program: DepsProgram) -> JsBackendOutput {
     let module_path_resolver = compiler
         .take_module_path_resolver()
         .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
-
     (
         program,
         module_path_resolver,
@@ -14163,8 +13323,9 @@ fn compile_js_program_for_output(
     )
 }
 
-fn compile_js_program_for_output_owned(
-    lowered_lambda: crate::lambda::Lambda,
+#[allow(clippy::too_many_arguments)]
+fn compile_js_program_for_output(
+    lowered_lambda: &crate::lambda::Lambda,
     hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
@@ -14172,45 +13333,45 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
-    DepsProgram,
-    ModulePathResolver,
-    ahash::AHashMap<String, CmjExportConstant>,
-    ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
-    // The pre-JS result already collected the modules of this lowered lambda
-    // into `possible_required_modules` (see
-    // `compile_preprocessed_structure_in_process_until_js`).
-    let collected_possible_required_modules = possible_required_modules.clone();
-    compile_js_program_for_output_owned_with_collected_modules(
-        lowered_lambda,
-        hoisted_functions,
-        collected_possible_required_modules,
+) -> JsBackendOutput {
+    let _span = info_span!(
+        "compiler.js_backend",
+        module = options.module_name.as_deref().unwrap_or(""),
+        owned = false,
+        possible_required_modules = possible_required_modules.len()
+    )
+    .entered();
+    let mut compiler = js_backend_compiler(
+        hoisted_functions.to_vec(),
+        possible_required_modules,
         options,
         output_path,
         output_module_format,
         persistent_env,
         jsx_preserve,
-    )
+    );
+    let program = compiler.compile_deps_program_with_possible_required_modules(
+        lowered_lambda,
+        possible_required_modules,
+    );
+    finish_js_backend(compiler, program)
 }
 
-fn compile_js_program_for_output_owned_with_collected_modules(
+/// Single-target variant that consumes the lowered lambda. The pre-JS result
+/// already collected the modules of this lambda into
+/// `possible_required_modules` (see
+/// `compile_preprocessed_structure_in_process_until_js`).
+#[allow(clippy::too_many_arguments)]
+fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
-    hoisted_functions: &[crate::lambda::HoistedFunction],
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     possible_required_modules: AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (
-    DepsProgram,
-    ModulePathResolver,
-    ahash::AHashMap<String, CmjExportConstant>,
-    ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
-) {
+) -> JsBackendOutput {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -14219,54 +13380,22 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         precomputed_possible_required_modules = true
     )
     .entered();
-    let mut module_path_resolver = ModulePathResolver::from_compile_options(
-        options.source_filename.as_deref(),
+    let mut compiler = js_backend_compiler(
+        hoisted_functions,
+        &possible_required_modules,
+        options,
         output_path,
         output_module_format,
-        options.package_name.as_deref(),
-        options.runtime_path.as_deref(),
         persistent_env,
-        options.make_runtime,
-    );
-    module_path_resolver.set_package_specs(&options.js_package_specs);
-    for module in &possible_required_modules {
-        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
-            if let Some(path) =
-                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
-            {
-                module_path_resolver.set_module_path_override(module.id.name(), path);
-            }
-        }
-    }
-    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-        Some(module_path_resolver),
         jsx_preserve,
-        options.check_div_by_zero,
-        options.cross_module_inline,
     );
-    compiler.set_source_map_enabled(
-        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
-    );
-    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
         possible_required_modules,
     );
-    let module_path_resolver = compiler
-        .take_module_path_resolver()
-        .expect("lambda compiler retained module path resolver");
-    let cmj_export_constants = compiler.take_cmj_export_constants();
-    let cmj_export_arities = compiler.take_cmj_export_arities();
-    let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
-
-    (
-        program,
-        module_path_resolver,
-        cmj_export_constants,
-        cmj_export_arities,
-        cmj_export_lambdas,
-    )
+    finish_js_backend(compiler, program)
 }
+
 pub fn compile_preprocessed_structure_in_process(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -14321,11 +13450,21 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
 }
 
+/// A fresh type context with the stamp counter where OCaml's starts.
+fn fresh_type_context() -> TypeContext {
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+    // at module initialization, consuming stamp 1000 before any compilation.
+    let _ = id_gen.next_stamp();
+    TypeContext::new(std::sync::Arc::new(id_gen))
+}
+
 /// The type-checking context and initial environment an in-process
-/// implementation is typed in: the registry's units are the persistent
+/// implementation or interface is typed in: the registry's units are the persistent
 /// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
 /// does (res_compmisc.ml:56-62).
-fn in_process_structure_type_check_context<'a>(
+fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
     arena: &'a crate::parse_arena::ParseArena,
     options: &CompilerOptions,
@@ -14397,12 +13536,9 @@ pub fn typecheck_structure_for_tooling(
     let file_config = extract_file_config_from_structure(structure, arena);
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     let typed = {
-        let (mut tctx, env) = in_process_structure_type_check_context(
+        let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
             arena,
             options,
@@ -14443,39 +13579,17 @@ pub fn typecheck_signature_for_tooling(
     let file_config = extract_file_config_from_signature(signature, arena);
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let type_ctx = fresh_type_context();
     let typed = {
-        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-        tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-        tctx.transparent_modules = options.transparent_modules;
-        apply_warning_options(&mut tctx, options);
-        if !options.frontend_already_reported {
-            apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-        }
-        apply_file_config_warning_options(&mut tctx, &file_config);
-        let mut env = initial_env(&type_ctx);
-        let mut pers_env = PersistentEnv::from_registry(registry);
-        pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-        let (load_path, load_path_display) = shared_load_path_with_display(options);
-        type_ctx.set_load_paths_shared(load_path.clone());
-        pers_env.set_load_path_shared(load_path, load_path_display);
-        pers_env.set_open_modules(options.open_modules.clone());
-        pers_env.set_jsx_version(options.jsx_version);
-        pers_env.set_jsx_module(options.jsx_module.clone());
-        pers_env.set_nopervasives(options.nopervasives);
-        pers_env.set_compiling_module(Some(module_name.to_string()));
-        load_pervasives(
-            &mut pers_env,
-            &mut env,
+        let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
-            &options.open_modules,
-            options.nopervasives,
-            Some(module_name),
+            arena,
+            options,
+            registry,
+            module_name,
+            &file_config,
+            &frontend_warning_specs,
         );
-        tctx.set_persistent_env(pers_env);
         match transl_signature(&mut tctx, &env, arena, signature) {
             Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
@@ -14533,11 +13647,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     );
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    let (mut tctx, env) = in_process_structure_type_check_context(
+    let type_ctx = fresh_type_context();
+    let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
         options,
@@ -14595,7 +13706,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     tctx.drain_open_slot_uses();
     // Debugging aid: `RESCRIPT_DUMP_TYPED_SEXP=<Module>` prints the
     // in-process typed tree of that module like `bsc -dtyped-sexp`.
-    if std::env::var("RESCRIPT_DUMP_TYPED_SEXP").is_ok_and(|name| name == module_name) {
+    static DUMP_TYPED_SEXP_MODULE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if DUMP_TYPED_SEXP_MODULE
+        .get_or_init(|| std::env::var("RESCRIPT_DUMP_TYPED_SEXP").ok())
+        .as_deref()
+        == Some(module_name)
+    {
         let _ = print_typed_structure(arena, &type_ctx, &typed_structure, &mut std::io::stderr());
     }
 
@@ -14612,7 +13728,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &type_ctx,
                 &typed_structure,
                 options,
-                Some(has_interface),
+                has_interface,
             );
         }
 
@@ -14851,7 +13967,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &env,
                 &typed_structure,
                 options,
-                Some(has_interface),
+                has_interface,
             ),
         };
         let mut raw_converter =
@@ -15076,8 +14192,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
-                &pre_js.hoisted_functions,
-                &pre_js.possible_required_modules,
+                std::mem::take(&mut pre_js.hoisted_functions),
+                std::mem::take(&mut pre_js.possible_required_modules),
                 options,
                 primary_output_path,
                 primary_output_module_format,
@@ -15214,79 +14330,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     })
 }
 
-pub fn typecheck_interface_in_process(
-    source: &str,
-    filename: &str,
-    module_name: &str,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-) -> Result<InProcessInterfaceResult> {
-    let mut parser = Parser::new(filename, source);
-    let signature = module::parse_signature(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
-    }
-    let frontend_warnings =
-        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
-    let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
-    let _ = emit_ppx_warnings(
-        parser.arena(),
-        source,
-        filename,
-        options,
-        &frontend_warnings,
-    );
-    let config_processing = validate_file_config_from_signature(
-        &signature,
-        parser.arena(),
-        &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
-    );
-    for (warning, config) in config_processing
-        .warnings
-        .iter()
-        .chain(config_processing.late_warnings.iter())
-    {
-        let _ = emit_ppx_warnings_with_config(
-            parser.arena(),
-            source,
-            filename,
-            config,
-            std::slice::from_ref(warning),
-        );
-    }
-    if let Some(err) = config_processing.error {
-        return Err(config_payload_error_to_anyhow(
-            err,
-            parser.arena(),
-            source,
-            filename,
-        ));
-    }
-    let signature = preprocess_signature_for_typecheck_with_source(
-        signature,
-        options,
-        parser.arena_mut(),
-        source,
-        filename,
-        &mut Vec::new(),
-    )?;
-    parser.arena_mut().reserve_typecheck_synthetic_capacity();
-
-    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    typecheck_preprocessed_signature_in_process(
-        parser.arena(),
-        &signature,
-        filename,
-        module_name,
-        options,
-        registry,
-    )
-}
-
 pub fn typecheck_preprocessed_signature_in_process(
     arena: &crate::parse_arena::ParseArena,
     signature: &Signature,
@@ -15305,42 +14348,16 @@ pub fn typecheck_preprocessed_signature_in_process(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
 
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path, load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
+    let type_ctx = fresh_type_context();
+    let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        Some(module_name),
+        arena,
+        options,
+        registry,
+        module_name,
+        &file_config,
+        &frontend_warning_specs,
     );
-
-    tctx.set_persistent_env(pers_env);
 
     // Diagnostics are reported against the source file, read only when
     // there is something to report.
@@ -15510,112 +14527,6 @@ pub fn typecheck_preprocessed_signature_in_process(
         warnings,
         loaded_units: internal_env.loaded_units(),
         unit_reads,
-    })
-}
-
-/// Typecheck a `.res` implementation file in-process.
-/// Mirrors `typecheck_interface_in_process` but parses a structure (not a
-/// signature) and uses `type_structure`. No lambda or JS conversion is
-/// performed; the result is the module's published signature plus a
-/// portable `PersStruct` for the shared registry.
-pub fn typecheck_implementation_in_process(
-    source: &str,
-    filename: &str,
-    module_name: &str,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-    has_interface: bool,
-) -> Result<InProcessInterfaceResult> {
-    let mut parser = Parser::new(filename, source);
-    let structure = module::parse_structure(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
-    }
-    let file_config = extract_file_config_from_structure(&structure, parser.arena());
-    let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
-    // js_implementation.ml:130 `no_export` after parsing.
-    let structure =
-        crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
-    parser.arena_mut().reserve_typecheck_synthetic_capacity();
-
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-    let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    let mut pers_env = PersistentEnv::from_registry(registry);
-    pers_env.set_visible_package_roots(options.visible_package_roots.clone());
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path, load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_jsx_module(options.jsx_module.clone());
-    pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
-        Some(module_name),
-    );
-
-    tctx.set_persistent_env(pers_env);
-
-    let (typed_structure, _final_env) =
-        crate::timing::measure(crate::timing::Phase::Typecheck, || {
-            type_structure(&mut tctx, &env, parser.arena(), &structure)
-                .map_err(|e| anyhow!("Type checking failed: {e:?}"))
-        })?;
-    let _ = has_interface; // post-typecheck constraint pass not ported here
-
-    let published_signature =
-        crate::types::includemod::simplify_signature(&typed_structure.str_type);
-
-    let mut internal_env = tctx
-        .persistent_env
-        .take()
-        .unwrap_or_else(PersistentEnv::new);
-
-    // typemod.ml:1778: `Builtin_attributes.deprecated_of_str ast`.
-    internal_env.register_in_memory_signature(
-        module_name,
-        published_signature.clone(),
-        filename,
-        crate::types::typemod::deprecated_of_str(parser.arena(), &structure),
-        Vec::new(),
-        &type_ctx,
-    );
-
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, &type_ctx, Some(parser.arena()));
-
-    Ok(InProcessInterfaceResult {
-        signature: published_signature,
-        pers_struct,
-        new_alias_rewrites,
-        gentype_ignore_interface: false,
-        warnings: String::new(),
-        loaded_units: internal_env.loaded_units(),
-        unit_reads: Vec::new(),
     })
 }
 
