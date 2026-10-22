@@ -2,6 +2,7 @@
 //! into its recursive clusters at Lambda production, demoting bindings that
 //! are not recursive.
 
+use crate::fast_hash::AHashMap;
 use crate::ident::Ident;
 use crate::lambda::LetKind;
 use crate::raw_lambda::RawLambda;
@@ -59,6 +60,11 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
 /// bucket order.
 fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
     let mask_order = ocaml_ident_mask_iteration_order(groups);
+    // First position of each member, as a linear `position` scan would find.
+    let mut member_index = AHashMap::with_capacity(groups.len());
+    for (index, (member, _)) in groups.iter().enumerate() {
+        member_index.entry(*member).or_insert(index);
+    }
     groups
         .iter()
         .map(|(_, lam)| {
@@ -66,7 +72,7 @@ fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
             let mut remaining = groups.len();
             exists_var(
                 &mut |id: &Ident| {
-                    if let Some(index) = groups.iter().position(|(member, _)| member.same(id))
+                    if let Some(&index) = member_index.get(id)
                         && !hit[index]
                     {
                         hit[index] = true;
@@ -97,7 +103,7 @@ fn graph(e: &[Vec<usize>]) -> Vec<Vec<usize>> {
         index_array: Vec<Option<usize>>,
         lowlink: Vec<usize>,
     }
-    fn scc(st: &mut State, v: usize) {
+    fn scc(st: &mut State<'_>, v: usize) {
         st.index += 1;
         let new_index = st.index;
         st.s.push(v);
