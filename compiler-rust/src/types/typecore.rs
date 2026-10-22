@@ -51,7 +51,6 @@ use std::sync::Arc;
 
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
 const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
-const DICT_TYPE_NAME: &str = "dict";
 const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
 
@@ -313,14 +312,6 @@ fn ocaml_hashtbl_replace_fold_order(entries: &[String]) -> Vec<String> {
 // Location Conversion Helpers
 // ============================================================================
 
-/// Convert a parse_arena::Located<T> to a location::Located<T> with full Location.
-fn convert_located<T: Clone>(loc: &Located<T>, arena: &ParseArena) -> crate::location::Located<T> {
-    crate::location::Located {
-        txt: loc.txt.clone(),
-        loc: arena.to_location(loc.loc),
-    }
-}
-
 /// Convert a LocIdx to a Location using the arena.
 fn convert_loc(loc: LocIdx, arena: &ParseArena) -> Location {
     arena.to_location(loc)
@@ -338,18 +329,6 @@ fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::A
     attrs
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
-}
-
-fn has_explicit_arity_attribute(
-    arena: &ParseArena,
-    attrs: &[crate::parser::ast::Attribute],
-) -> bool {
-    attrs.iter().any(|attr| {
-        matches!(
-            arena.get_string(attr.0.txt),
-            "ocaml.explicit_arity" | "explicit_arity"
-        )
-    })
 }
 
 fn has_warn_on_literal_pattern_attribute(attrs: &[crate::types::decl::Attribute]) -> bool {
@@ -1106,13 +1085,6 @@ impl PatternState {
         Ok(id)
     }
 
-    /// Get pattern variables sorted by name.
-    pub fn sorted_pattern_variables(&self) -> Vec<&PatternVariable> {
-        let mut vars: Vec<_> = self.pattern_variables.iter().collect();
-        vars.sort_by(|a, b| a.id.name().cmp(b.id.name()));
-        vars
-    }
-
     /// Reset the pattern state.
     pub fn reset(&mut self, allow_modules: bool) {
         self.pattern_variables.clear();
@@ -1268,19 +1240,10 @@ pub struct TypeCheckContext<'a> {
     defer_delayed_type_component_lookup: bool,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
-    /// Scoped counter for OCaml's persistent-signature forcing side effect while
-    /// translating type aliases.
-    pub(crate) persistent_manifest_type_lookup_depth: usize,
-    /// Recursion depth for currently-typed `let rec` groups.
-    /// Used for recursive polymorphic-variant payload fallback.
-    pub recursive_let_depth: usize,
     /// Active recursive value bindings currently in scope.
     /// Used to restrict recursive polymorphic-variant payload fallback to
     /// identifiers that actually resolve to recursive bindings.
     pub active_recursive_value_ids: Vec<Ident>,
-    /// Scoped toggle used by type_application for OCaml-aligned local-float
-    /// instantiation in repeated argument sites.
-    pub force_fresh_local_float: bool,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
     /// `~deprecated_context:FunctionCall` of typecore.ml:2496: set while
@@ -1426,11 +1389,8 @@ impl<'a> TypeCheckContext<'a> {
             type_variables: HashMap::new(),
             fixed_type_variables: false,
             defer_delayed_type_component_lookup: false,
-            recursive_let_depth: 0,
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
-            persistent_manifest_type_lookup_depth: 0,
-            force_fresh_local_float: false,
             experimental_let_unwrap: false,
             deprecated_function_call: false,
             transparent_modules: false,
@@ -1952,35 +1912,6 @@ impl<'a> TypeCheckContext<'a> {
         self.delayed_check_seq
     }
 
-    /// Reserve the `Delayed_checks` registration slot for checks registered
-    /// now whose result is known later.
-    pub(crate) fn reserve_delayed_check_seq(&mut self) -> u64 {
-        self.next_delayed_check_seq()
-    }
-
-    /// Queue the warning of a delayed check registered at `seq`; `sub` orders
-    /// the checks registered together.
-    pub(crate) fn add_delayed_warning(
-        &mut self,
-        seq: u64,
-        sub: u32,
-        loc: LocIdx,
-        warning: Warning,
-    ) {
-        if !self.warning_config.is_active(&warning) {
-            return;
-        }
-        let is_error = self.warning_config.is_error(&warning);
-        self.delayed_warnings.push((
-            (seq, sub),
-            TypeCoreWarning {
-                loc,
-                warning,
-                is_error,
-            },
-        ));
-    }
-
     /// `Delayed_checks.force_delayed_checks`: run value-usage and unused-case
     /// checks in registration order.
     pub fn flush_value_usage_checks(&mut self) {
@@ -2087,14 +2018,6 @@ impl<'a> TypeCheckContext<'a> {
     /// For `Lident("int")` returns `"int"`, for `Ldot(Lident("Foo"), "bar")` returns `"Foo.bar"`.
     pub fn longident_to_string(&self, lid: &Longident) -> String {
         self.arena.longident_to_string(lid)
-    }
-
-    /// Convert a Located<LidentIdx> to Located<Longident> by cloning the longident.
-    pub fn resolve_located_lid(&self, lid: &Located<LidentIdx>) -> Located<Longident> {
-        Located {
-            txt: self.arena.get_longident(lid.txt).clone(),
-            loc: lid.loc,
-        }
     }
 }
 
@@ -2346,62 +2269,6 @@ fn convert_arg_label_for_ctx(
             arena.get_string(s.txt).to_string(),
             arena.to_location(s.loc),
         ),
-    }
-}
-
-fn collect_named_type_vars_from_core_type(
-    ctyp: &crate::types::typedtree::TypedCoreType,
-    out: &mut HashMap<String, TypeExprRef>,
-) {
-    use crate::types::typedtree::{ObjectFieldDesc, RowFieldDesc, TypedCoreTypeDesc};
-
-    match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_var(Some(name)) => {
-            out.entry(name.clone()).or_insert(ctyp.ctyp_type);
-        }
-        TypedCoreTypeDesc::Ttyp_var(None) => {}
-        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
-            for arg in args {
-                collect_named_type_vars_from_core_type(&arg.typ, out);
-            }
-            collect_named_type_vars_from_core_type(ret, out);
-        }
-        TypedCoreTypeDesc::Ttyp_tuple(items) | TypedCoreTypeDesc::Ttyp_constr(_, _, items) => {
-            for item in items {
-                collect_named_type_vars_from_core_type(item, out);
-            }
-        }
-        TypedCoreTypeDesc::Ttyp_object(fields, _) => {
-            for field in fields {
-                match &field.of_desc {
-                    ObjectFieldDesc::OTtag(_, ty) | ObjectFieldDesc::OTinherit(ty) => {
-                        collect_named_type_vars_from_core_type(ty, out);
-                    }
-                }
-            }
-        }
-        TypedCoreTypeDesc::Ttyp_poly(_, body) | TypedCoreTypeDesc::Ttyp_alias(body, _) => {
-            collect_named_type_vars_from_core_type(body, out);
-        }
-        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => {
-            for row in rows {
-                match &row.rf_desc {
-                    RowFieldDesc::Rtag(_, _, tys) => {
-                        for ty in tys {
-                            collect_named_type_vars_from_core_type(ty, out);
-                        }
-                    }
-                    RowFieldDesc::Rinherit(ty) => {
-                        collect_named_type_vars_from_core_type(ty, out);
-                    }
-                }
-            }
-        }
-        TypedCoreTypeDesc::Ttyp_package(pack) => {
-            for (_, ty) in &pack.pack_fields {
-                collect_named_type_vars_from_core_type(ty, out);
-            }
-        }
     }
 }
 
@@ -5184,110 +5051,6 @@ fn unify_pattern_types_gadt(
     }
 }
 
-fn row_field_contains_tunivar(
-    ctx: &TypeContext,
-    env: &Env,
-    field: &crate::types::type_expr::RowField,
-    seen: &mut HashSet<TypeExprRef>,
-) -> bool {
-    match field {
-        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
-            type_contains_tunivar(ctx, env, *ty, seen)
-        }
-        crate::types::type_expr::RowField::Reither { types, .. } => types
-            .iter()
-            .copied()
-            .any(|ty| type_contains_tunivar(ctx, env, ty, seen)),
-        _ => false,
-    }
-}
-
-fn type_contains_tunivar(
-    ctx: &TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
-) -> bool {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return false;
-    }
-
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tunivar(_) => true,
-        TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
-        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-            type_contains_tunivar(ctx, env, *target, seen)
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            args.iter()
-                .any(|arg| type_contains_tunivar(ctx, env, arg.typ, seen))
-                || type_contains_tunivar(ctx, env, *ret, seen)
-        }
-        TypeDesc::Ttuple(types) => types
-            .iter()
-            .copied()
-            .any(|ty| type_contains_tunivar(ctx, env, ty, seen)),
-        TypeDesc::Tconstr { path, args, .. } => {
-            is_local_abstract_type_path(ctx, env, path)
-                || args
-                    .iter()
-                    .copied()
-                    .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
-        }
-        TypeDesc::Tobject { fields } => type_contains_tunivar(ctx, env, *fields, seen),
-        TypeDesc::Tfield { typ, rest, .. } => {
-            type_contains_tunivar(ctx, env, *typ, seen)
-                || type_contains_tunivar(ctx, env, *rest, seen)
-        }
-        TypeDesc::Tvariant(row) => {
-            type_contains_tunivar(ctx, env, row.row_more, seen)
-                || row
-                    .row_fields
-                    .iter()
-                    .any(|(_, field)| row_field_contains_tunivar(ctx, env, field, seen))
-                || row.row_name.as_ref().is_some_and(|(_, args)| {
-                    args.iter()
-                        .copied()
-                        .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
-                })
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            type_contains_tunivar(ctx, env, *body, seen)
-                || vars
-                    .iter()
-                    .copied()
-                    .any(|ty| type_contains_tunivar(ctx, env, ty, seen))
-        }
-        TypeDesc::Tpackage { args, .. } => args
-            .iter()
-            .copied()
-            .any(|ty| type_contains_tunivar(ctx, env, ty, seen)),
-    }
-}
-
-fn is_local_abstract_type_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
-    let is_local_abstract = |decl: &crate::types::TypeDeclaration| {
-        decl.type_newtype_level.is_some()
-            && decl.type_manifest.is_none()
-            && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
-    };
-
-    if let Ok(decl) = env.lookup_type(path) {
-        if is_local_abstract(decl) {
-            return true;
-        }
-    }
-    if let Path::Pident(id) = path {
-        if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
-            if is_local_abstract(&decl) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn refine_record_as_type_label(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -6756,7 +6519,7 @@ fn type_pattern_record(
 /// Errors for record-rest pattern typing (compiler/ml/typecore_record_rest.ml
 /// `type error`).
 #[derive(Debug, Clone)]
-pub(crate) enum RecordRestError {
+pub enum RecordRestError {
     InvalidType,
     RequiresTypeAnnotation(String),
     NotRecord(Longident),
@@ -6891,7 +6654,6 @@ fn record_rest_extract_instantiated_concrete_typedecl(
         TypeDesc::Tconstr { path, .. } => path.clone(),
         _ => return Ok(None),
     };
-    drop(ctx);
 
     loop {
         let decl = match lookup_type_decl_for_path(
@@ -6911,7 +6673,6 @@ fn record_rest_extract_instantiated_concrete_typedecl(
                 TypeDesc::Tconstr { args, .. } => args.to_vec(),
                 _ => Vec::new(),
             };
-            drop(ctx);
             let inst = crate::types::ctype::instance_declaration(tctx.type_ctx, &decl);
             if inst.type_params.len() == args.len() {
                 for (param, arg) in inst.type_params.iter().zip(args.iter()) {
@@ -6929,14 +6690,12 @@ fn record_rest_extract_instantiated_concrete_typedecl(
                 None => return Ok(None),
             }
         };
-        drop(ctx);
         let ctx = tctx.type_ctx;
         let next_repr = ctx.repr(expanded);
         let next_path = match &*ctx.get_desc(next_repr) {
             TypeDesc::Tconstr { path, .. } => path.clone(),
             _ => return Ok(None),
         };
-        drop(ctx);
         if next_path == current_path {
             return Ok(None);
         }
@@ -7042,7 +6801,6 @@ fn type_record_pat_rest(
         }
         _ => return rest_err(rest_loc, RecordRestError::InvalidType),
     };
-    drop(core_type);
     let rest_type_longident = tctx.resolve_lid(rest_type_lid.txt).clone();
 
     // Typetexp.find_type env rest_type_lid.loc rest_type_lid.txt
@@ -9980,24 +9738,23 @@ fn force_lower_args_type_lookup_paths(
                 visit_manifest(tctx, env, inner, seen);
             }
             TypeDesc::Tvariant(row) => {
-                let row = row.clone();
-                drop(desc);
+                // Collect only the child refs (row_name args, row_more, then
+                // field payloads, in that order) instead of cloning the row.
+                let mut children: Vec<TypeExprRef> = Vec::new();
                 if let Some((_, args)) = &row.row_name {
-                    for arg in args {
-                        visit_manifest(tctx, env, *arg, seen);
-                    }
+                    children.extend(args.iter().copied());
                 }
-                visit_manifest(tctx, env, row.row_more, seen);
+                children.push(row.row_more);
                 for (_, field) in row.row_fields.iter() {
                     match field {
-                        RowField::Rpresent(Some(arg)) => visit_manifest(tctx, env, *arg, seen),
-                        RowField::Reither { types, .. } => {
-                            for arg in types {
-                                visit_manifest(tctx, env, *arg, seen);
-                            }
-                        }
+                        RowField::Rpresent(Some(arg)) => children.push(*arg),
+                        RowField::Reither { types, .. } => children.extend(types.iter().copied()),
                         RowField::Rpresent(None) | RowField::Rabsent => {}
                     }
+                }
+                drop(desc);
+                for child in children {
+                    visit_manifest(tctx, env, child, seen);
                 }
             }
             TypeDesc::Tpoly { body, vars } => {
@@ -10190,30 +9947,19 @@ const fn unified_op_entry(
     }
 }
 
-/// Check if a path (by name) is a unified op, returning its OCaml entry.
-/// `get_unified_op_entry` for the path `Pervasives.<op>`.
+/// OCaml `Unified_ops.index_by_path` lookup for the path `Pervasives.<op>`.
 fn get_unified_op_entry_for_op(op: &str) -> Option<UnifiedOpEntry> {
-    match op {
-        "~+" | "~-" | "~~~" | "+" | "-" | "*" | "/" | "%" | "mod" | "**" | "<<" | ">>" | "|||"
-        | "^^^" | "&&&" | ">>>" => get_unified_op_entry(&format!("Pervasives.{op}")),
-        _ => None,
-    }
-}
-
-fn get_unified_op_entry(path_name: &str) -> Option<UnifiedOpEntry> {
     use UnifiedOpForm::{Binary, Unary};
 
     // OCaml compiler/ml/unified_ops.ml:40-54 defines the specialization shape,
     // and unified_ops.ml:58-262 lists these per-operator capabilities.
-    match path_name {
-        "Pervasives.~+" | "Pervasives.~-" => Some(unified_op_entry(Unary, true, true, false)),
-        "Pervasives.~~~" => Some(unified_op_entry(Unary, false, true, false)),
-        "Pervasives.+" => Some(unified_op_entry(Binary, true, true, true)),
-        "Pervasives.-" | "Pervasives.*" | "Pervasives./" | "Pervasives.%" | "Pervasives.mod"
-        | "Pervasives.**" => Some(unified_op_entry(Binary, true, true, false)),
-        "Pervasives.<<" | "Pervasives.>>" | "Pervasives.|||" | "Pervasives.^^^"
-        | "Pervasives.&&&" => Some(unified_op_entry(Binary, false, true, false)),
-        "Pervasives.>>>" => Some(unified_op_entry(Binary, false, false, false)),
+    match op {
+        "~+" | "~-" => Some(unified_op_entry(Unary, true, true, false)),
+        "~~~" => Some(unified_op_entry(Unary, false, true, false)),
+        "+" => Some(unified_op_entry(Binary, true, true, true)),
+        "-" | "*" | "/" | "%" | "mod" | "**" => Some(unified_op_entry(Binary, true, true, false)),
+        "<<" | ">>" | "|||" | "^^^" | "&&&" => Some(unified_op_entry(Binary, false, true, false)),
+        ">>>" => Some(unified_op_entry(Binary, false, false, false)),
         _ => None,
     }
 }
@@ -10286,19 +10032,12 @@ fn translate_unified_ops(
     use crate::types::typedtree::ApplyArg;
 
     // Check if the function is a unified op (`Pervasives.<op>`).
-    let path_name = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => match path {
-            Path::Pdot(parent, op, _) if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") =>
-            {
-                get_unified_op_entry_for_op(op)?;
-                path.name()
-            }
-            _ => return None,
-        },
+    let entry = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(Path::Pdot(parent, op, _), _, _) if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") => {
+            get_unified_op_entry_for_op(op)?
+        }
         _ => return None,
     };
-
-    let entry = get_unified_op_entry(&path_name)?;
 
     let ctx = tctx.type_ctx;
 
@@ -10616,42 +10355,6 @@ fn lookup_qualified_value_for_arity_suggestion(
     None
 }
 
-fn lookup_module_value_by_name(
-    env: &Env,
-    module_name: &str,
-    value_name: &str,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &TypeContext,
-) -> Option<(Path, Arc<ValueDescription>)> {
-    let (module_path, _) = env.find_module_with_path(module_name).ok()?;
-
-    if let Some(cached) = ctx.find_resolved_module_value(&module_path, value_name) {
-        return Some(cached);
-    }
-
-    if let Some(Some((access_path, pos, vd))) =
-        with_resolved_module_components_for_path(&module_path, env, pers_env, ctx, |components| {
-            components
-                .lookup_value_for_access(value_name, ctx)
-                .map(|(pos, _, vd)| (components.access_path().clone(), pos, vd))
-        })
-    {
-        let result = (
-            Path::pdot_pos(access_path, value_name.to_string(), pos as i32),
-            Arc::new(vd),
-        );
-        ctx.register_resolved_module_value(
-            &module_path,
-            value_name,
-            result.0.clone(),
-            result.1.clone(),
-        );
-        return Some(result);
-    }
-
-    None
-}
-
 fn lookup_value_for_arity_suggestion(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -10860,86 +10563,6 @@ fn type_application(
     struct OmittedArrow {
         label: crate::types::ArgLabel,
         arg_ty: TypeExprRef,
-        level: i32,
-    }
-
-    fn result_type_from_omitted(
-        ctx: &TypeContext,
-        omitted: &[OmittedArrow],
-        ignored: &[OmittedArrow],
-        ty_fun: TypeExprRef,
-    ) -> TypeExprRef {
-        let mut result = ty_fun;
-        for arrow in omitted.iter().chain(ignored.iter()) {
-            result = new_arrow_with_level(
-                ctx,
-                arrow.label.clone(),
-                arrow.arg_ty,
-                result,
-                arrow.level,
-                None,
-            );
-        }
-        result
-    }
-
-    fn type_has_label(
-        ctx: &TypeContext,
-        env: &Env,
-        arena: &ParseArena,
-        label: &ArgLabel,
-        ty_fun: TypeExprRef,
-    ) -> bool {
-        fn same_label_name(
-            type_label: &crate::types::ArgLabel,
-            arena: &ParseArena,
-            label: &ArgLabel,
-        ) -> bool {
-            match (type_label.label_name(), label) {
-                (None, ArgLabel::Nolabel) => true,
-                (Some(type_name), ArgLabel::Labelled(loc) | ArgLabel::Optional(loc)) => {
-                    type_name == arena.get_string(loc.txt)
-                }
-                _ => false,
-            }
-        }
-
-        let mut ty = ty_fun;
-        loop {
-            let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-            match &*ctx.borrow_desc(expanded) {
-                TypeDesc::Tvar(_) => return true,
-                TypeDesc::Tarrow { args, ret } => {
-                    if args
-                        .iter()
-                        .any(|arg| same_label_name(arg.label(), arena, label))
-                    {
-                        return true;
-                    }
-                    ty = *ret;
-                }
-                _ => return false,
-            }
-        }
-    }
-
-    fn new_arrow_with_level(
-        ctx: &TypeContext,
-        label: crate::types::ArgLabel,
-        arg_ty: TypeExprRef,
-        ret_ty: TypeExprRef,
-        level: i32,
-        _arity: Option<i32>,
-    ) -> TypeExprRef {
-        // Match OCaml result_type/newty2 behavior for omitted labels:
-        // preserve the original arrow level and use a direct Cok commutable.
-        ctx.alloc_type_at_level(
-            TypeDesc::Tarrow {
-                args: vec![crate::types::TypeArg::new(label, arg_ty)].into(),
-                ret: ret_ty,
-            },
-            level,
-        )
     }
 
     fn parser_arg_label_name<'a>(label: &ArgLabel, arena: &'a ParseArena) -> &'a str {
@@ -11229,7 +10852,6 @@ fn type_application(
             ignored.push(OmittedArrow {
                 label: param.label().clone(),
                 arg_ty: param.typ,
-                level: function_level,
             });
             argument_thunks.push(ApplyArgThunk::SynthOptionalNone {
                 label: param.label().clone(),
@@ -11239,7 +10861,6 @@ fn type_application(
             omitted.push(OmittedArrow {
                 label: param.label().clone(),
                 arg_ty: param.typ,
-                level: function_level,
             });
             if !remaining_args.is_empty() {
                 argument_thunks.push(ApplyArgThunk::Omitted {
@@ -11317,9 +10938,6 @@ fn type_application(
                 skip_post_unify,
             } => {
                 let arg_expected_ty = expected_ty;
-                let force_fresh_local_float = false;
-                let previous_force_fresh_local_float = tctx.force_fresh_local_float;
-                tctx.force_fresh_local_float = force_fresh_local_float;
                 let saved_unify_env = tctx
                     .unify_state
                     .env()
@@ -11327,7 +10945,6 @@ fn type_application(
                     .map(crate::types::env::Env::clone_preserve_id);
                 let typed_arg_result =
                     type_expect(tctx, env, expr, arg_expected_ty, Some(context.clone()));
-                tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let typed_arg = typed_arg_result?;
                 if let Some(saved_env) = saved_unify_env {
@@ -21969,11 +21586,7 @@ fn type_let_bindings(
     allow_modules: bool,
     let_check: LetCheck,
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
-    let previous_recursive_let_depth = tctx.recursive_let_depth;
     let previous_recursive_value_count = tctx.active_recursive_value_ids.len();
-    if rec_flag == RecFlag::Recursive {
-        tctx.recursive_let_depth += 1;
-    }
     // OCaml typecore.ml:4503-4514 maps `Ast_helper.Typ.varify_constructors`
     // over the bindings before `begin_def`; a type variable that names one of
     // the locally abstract types escapes as an uncaught `Syntaxerr.Error`.
@@ -22371,7 +21984,6 @@ fn type_let_bindings(
         Ok((typed_bindings, new_env, unpacks))
     })();
 
-    tctx.recursive_let_depth = previous_recursive_let_depth;
     tctx.active_recursive_value_ids
         .truncate(previous_recursive_value_count);
     result
