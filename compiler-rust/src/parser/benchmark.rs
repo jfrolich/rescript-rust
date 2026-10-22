@@ -12,7 +12,8 @@
 //!
 //! Paths are relative to the `compiler-rust/` directory (where Cargo.toml lives),
 //! since `cargo test` sets the working directory to the package root.
-//! If `~/dev/tella-fusion` exists, it is included as an additional benchmark corpus.
+//! An extra benchmark corpus is read from `$PARSER_BENCH_CORPUS` when set, or
+//! from `~/dev/tella-fusion` when that directory exists.
 //!
 //! ## Running benchmarks
 //!
@@ -28,7 +29,7 @@
 //!   cargo test --release --lib -- benchmark_cold_repeat --ignored --nocapture
 //!
 //! # Individual subprocess check (50 iterations):
-//! cargo test --release --lib -- benchmark_regex --nocapture
+//! cargo test --release --lib -- benchmark_regex --ignored --nocapture
 //! ```
 
 #[cfg(test)]
@@ -60,7 +61,11 @@ mod tests {
     /// Base path for core syntax tests, relative to compiler-rust/
     const TEST_BASE: &str = "../tests/syntax_tests/data";
 
-    /// Extra benchmark corpus under $HOME. Added when the directory exists.
+    /// Environment variable naming an extra benchmark corpus directory.
+    const EXTRA_CORPUS_ENV: &str = "PARSER_BENCH_CORPUS";
+
+    /// Default extra benchmark corpus under $HOME, used when
+    /// `EXTRA_CORPUS_ENV` is unset and the directory exists.
     const TELLA_RELATIVE_TO_HOME: &str = "dev/tella-fusion";
 
     /// Directories to exclude while recursively walking benchmark corpora.
@@ -91,11 +96,17 @@ mod tests {
     /// Returns benchmark corpora to scan.
     ///
     /// Always includes TEST_BASE.
-    /// Also includes ~/dev/tella-fusion when that directory exists.
+    /// Also includes `$PARSER_BENCH_CORPUS` when set, otherwise
+    /// ~/dev/tella-fusion when that directory exists.
     fn benchmark_corpora() -> Vec<(String, PathBuf)> {
         let mut corpora = vec![("syntax_tests".to_string(), PathBuf::from(TEST_BASE))];
 
-        if let Some(home_dir) = std::env::var_os("HOME") {
+        if let Some(extra) = std::env::var_os(EXTRA_CORPUS_ENV) {
+            let extra = PathBuf::from(extra);
+            if extra.is_dir() {
+                corpora.push(("extra".to_string(), extra));
+            }
+        } else if let Some(home_dir) = std::env::var_os("HOME") {
             let tella = PathBuf::from(home_dir).join(TELLA_RELATIVE_TO_HOME);
             if tella.is_dir() {
                 corpora.push(("tella-fusion".to_string(), tella));
@@ -322,7 +333,9 @@ mod tests {
     /// Macro to generate individual benchmark tests, reducing boilerplate.
     macro_rules! benchmark_test {
         ($test_name:ident, $display_name:expr, $relative_path:expr) => {
+            // Wall-clock comparisons are noisy, so they only run on request.
             #[test]
+            #[ignore]
             fn $test_name() {
                 if !binaries_available() {
                     eprintln!(

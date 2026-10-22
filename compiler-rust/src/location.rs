@@ -70,16 +70,6 @@ impl Position {
         }
     }
 
-    /// Create a position at the start of a file.
-    pub fn at_file_start(file_name: StrIdx) -> Self {
-        Self {
-            file_name,
-            line: 1,
-            bol: 0,
-            cnum: 0,
-        }
-    }
-
     /// Get the column number (0-indexed).
     pub fn column(&self) -> i32 {
         self.cnum - self.bol
@@ -146,8 +136,8 @@ impl Location {
     }
 
     /// Create a location for error reporting contexts where we don't have an arena.
-    /// Uses StrIdx(0) as a placeholder - the file name won't be resolved correctly
-    /// but this is only used for error display, not marshalling.
+    /// The file name argument is ignored: the location uses `StrIdx(0)` as a
+    /// placeholder, so it only carries the offsets and is never marshalled.
     pub fn new_for_error(_file_name: &str, start_offset: usize, end_offset: usize) -> Self {
         Self::new(StrIdx::default(), start_offset, end_offset)
     }

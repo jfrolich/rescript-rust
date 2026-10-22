@@ -10,7 +10,7 @@
 //!
 //! - [`CompilerConfig`] - Immutable configuration shared across compilations
 //! - [`CompilationContext`] - Per-compilation context with ID generation and diagnostics
-//! - [`TypeContext`] - Per-type-checking context with type arena (future)
+//! - [`TypeContext`] - Per-type-checking context owning the type-node arena
 //! - [`ModuleCache`] - Thread-safe cache for compiled module interfaces
 //!
 //! # Concurrency Model
@@ -18,7 +18,9 @@
 //! Multiple files can be compiled in parallel because:
 //! 1. No global mutable state - all state is in explicit contexts
 //! 2. Each compilation gets its own `CompilationContext`
-//! 3. Shared data uses thread-safe structures (`Arc`, `DashMap`)
+//! 3. Only the cross-compilation [`ModuleCache`] and configuration are shared
+//!    (behind `Arc`/`DashMap`); compiler data inside a compilation lives in
+//!    per-compilation arenas addressed by indices, not `Rc`/`Arc`
 //!
 //! ```rust,ignore
 //! use rescript_compiler::{CompilationContext, CompilerConfig, ModuleCache};

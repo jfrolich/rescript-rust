@@ -316,26 +316,25 @@ impl Doc {
     }
 
     /// Check if the document fits within the given width.
-    /// Takes the current item and the rest of the stack as a slice to avoid cloning.
+    ///
+    /// Mirrors `Res_doc.fits` (`compiler/syntax/src/res_doc.ml:143-185`):
+    /// `first` is processed, then the entries of `rest` from the top of the
+    /// render stack downwards, stopping as soon as the result is known. `rest`
+    /// is walked lazily so a check never copies the whole render stack.
     fn fits(width: i32, first: (i32, Mode, &Doc), rest: &[(i32, Mode, &Doc)]) -> bool {
         let mut width = width;
-        // Create a stack: first the rest items (same order - they'll be processed later),
-        // then the first item (which will be popped and processed first)
-        let mut stack: Vec<(i32, Mode, &Doc)> = Vec::with_capacity(rest.len() + 1);
-        // Push rest items in order (they'll be processed after first)
-        for item in rest.iter() {
-            stack.push(*item);
-        }
-        // Push the first item last so it gets processed first (popped first)
-        stack.push(first);
+        let mut stack: Vec<(i32, Mode, &Doc)> = vec![first];
+        let mut rest = rest.iter().rev();
 
-        // Limit iterations to prevent exponential blowup with deeply nested custom layouts
-        let mut iterations = 0;
-        const MAX_ITERATIONS: i32 = 10000;
-
-        while let Some((indent, mode, doc)) = stack.pop() {
-            iterations += 1;
-            if iterations > MAX_ITERATIONS || width < 0 {
+        loop {
+            let (indent, mode, doc) = match stack.pop() {
+                Some(item) => item,
+                None => match rest.next() {
+                    Some(item) => *item,
+                    None => break,
+                },
+            };
+            if width < 0 {
                 return false;
             }
 
@@ -698,5 +697,30 @@ mod tests {
             true,
         );
         assert_eq!(doc.to_string(80), "a\n\nb");
+    }
+
+    #[test]
+    fn test_fits_has_no_iteration_cap() {
+        // OCaml `Res_doc.fits` has no node budget: a group with many zero-width
+        // nodes before its text still fits on one line.
+        let mut docs: Vec<Doc> = (0..20_000).map(|_| Doc::soft_line()).collect();
+        docs.extend([Doc::text("a"), Doc::line(), Doc::text("b")]);
+        let doc = Doc::group(Doc::concat(docs));
+        assert_eq!(doc.to_string(80), "a b");
+    }
+
+    #[test]
+    fn test_fits_checks_rest_of_stack() {
+        // The text following a group counts towards whether the group fits.
+        let doc = Doc::concat(vec![
+            Doc::group(Doc::concat(vec![
+                Doc::text("hello"),
+                Doc::line(),
+                Doc::text("world"),
+            ])),
+            Doc::text("!!!!"),
+        ]);
+        assert_eq!(doc.to_string(13), "hello\nworld!!!!");
+        assert_eq!(doc.to_string(15), "hello world!!!!");
     }
 }

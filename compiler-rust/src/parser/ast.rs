@@ -19,15 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::string_literal::StringLiteral;
 
-/// Convert any `Cow<'_, str>` into `Cow<'static, str>` without unsafe.
+/// Convert any `Cow<'_, str>` into an owned `Cow<'static, str>`.
 ///
 /// Borrowed values are copied into owned strings; owned values are moved through.
 #[inline(always)]
 pub fn extend_cow_lifetime(cow: Cow<'_, str>) -> Cow<'static, str> {
-    match cow {
-        Cow::Borrowed(s) => Cow::Owned(s.to_string()),
-        Cow::Owned(s) => Cow::Owned(s),
-    }
+    Cow::Owned(cow.into_owned())
 }
 
 /// Re-export Located for convenience.
@@ -43,13 +40,13 @@ pub type StringLoc = Located<StrIdx>;
 
 /// Arity information for functions.
 ///
-/// This is now an arena index instead of an enum. Arity values are stored in
-/// the ParseArena and deduplicated by content:
-/// - `arena.push_arity(None)` → ArityIdx pointing to "Unknown" arity
-/// - `arena.push_arity(Some(n))` → ArityIdx pointing to "Full(n)" arity
+/// This is an arena index instead of an enum. Arity values are stored in the
+/// ParseArena without content deduplication:
+/// - `arena.push_arity(None)` → fresh ArityIdx for an "Unknown" arity
+/// - `arena.push_arity(Some(n))` → fresh ArityIdx for a "Full(n)" arity
 ///
-/// Two arities with the same value get the same index, enabling marshal sharing
-/// that matches OCaml's constant folding behavior.
+/// Marshal sharing follows index identity. Literal arities that OCaml shares
+/// as one constant use the arena's pre-allocated static arity indices.
 pub type Arity = ArityIdx;
 
 /// Recursive flag for let bindings.
@@ -234,6 +231,8 @@ pub type Attribute = (StringLoc, Payload);
 /// per Expression, Pattern, CoreType, and many other nodes (40→24 bytes each).
 ///
 /// The empty case is represented as `None` (no heap allocation at all).
+/// Every constructor and mutator keeps the invariant that `Some` never holds
+/// an empty Vec, which `is_empty` and the derived `PartialEq` rely on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attributes(
     #[serde(
@@ -327,8 +326,9 @@ impl Attributes {
     pub fn insert(&mut self, index: usize, attr: Attribute) {
         match &mut self.0 {
             None => {
-                assert_eq!(index, 0);
-                self.0 = Some(Box::new(vec![attr]));
+                let mut v = Vec::with_capacity(1);
+                v.insert(index, attr);
+                self.0 = Some(Box::new(v));
             }
             Some(v) => v.insert(index, attr),
         }
@@ -374,14 +374,6 @@ impl Attributes {
                 Attributes(Some(a))
             }
         }
-    }
-
-    /// Get the inner Vec mutably, allocating if needed.
-    pub fn as_mut_vec(&mut self) -> &mut Vec<Attribute> {
-        if self.0.is_none() {
-            self.0 = Some(Box::new(Vec::new()));
-        }
-        self.0.as_mut().unwrap()
     }
 
     /// Convert to a Vec, consuming self.

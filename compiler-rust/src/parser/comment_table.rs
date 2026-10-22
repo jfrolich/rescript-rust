@@ -5,6 +5,7 @@
 //!
 //! This is a 1:1 port of OCaml's `res_comments_table.ml`.
 
+use crate::fast_hash::AHashMap as HashMap;
 use crate::location::Location;
 use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PatIdx};
 use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp};
@@ -21,7 +22,6 @@ use crate::parser::ast::{
 use crate::parser::comment::Comment;
 use crate::parser::longident::Longident;
 use crate::parser::parsetree_viewer;
-use std::collections::HashMap;
 
 /// Position-based key for comment lookup.
 /// Uses (start_cnum, end_cnum) to uniquely identify a location span.
@@ -92,13 +92,9 @@ impl CommentTable {
         }
     }
 
-    /// Create a copy of the comment table.
+    /// Create a copy of the comment table (OCaml `CommentTable.copy`).
     pub fn copy(&self) -> Self {
-        Self {
-            leading: self.leading.clone(),
-            inside: self.inside.clone(),
-            trailing: self.trailing.clone(),
-        }
+        self.clone()
     }
 
     /// Remove and return leading comments for a location.

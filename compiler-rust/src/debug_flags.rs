@@ -13,9 +13,6 @@ static RAW_FALLBACK_TRACE: OnceLock<bool> = OnceLock::new();
 static SKIP_FOR_MULTIPLE_MATCH: OnceLock<bool> = OnceLock::new();
 static SKIP_PATTERN_LOWER: OnceLock<bool> = OnceLock::new();
 static DEBUG_OPEN_SIG_VALUES: OnceLock<bool> = OnceLock::new();
-static DEBUG_STATICCATCH_RETURN: OnceLock<bool> = OnceLock::new();
-static DEBUG_TAKE_RETURN_TAIL: OnceLock<bool> = OnceLock::new();
-static DEBUG_COMPILE_TEST_RETURN: OnceLock<bool> = OnceLock::new();
 
 /// Whether raw-lambda fallback tracing is enabled.
 pub fn raw_fallback_trace() -> bool {
@@ -35,21 +32,6 @@ pub fn skip_pattern_lower() -> bool {
 /// Whether opened signature values should be traced.
 pub fn debug_open_sig_values() -> bool {
     enabled(&DEBUG_OPEN_SIG_VALUES, "RUST_DEBUG_OPEN_SIG_VALUES")
-}
-
-/// Whether staticcatch return lowering should be traced.
-pub fn debug_staticcatch_return() -> bool {
-    enabled(&DEBUG_STATICCATCH_RETURN, "RUST_DEBUG_STATICCATCH_RETURN")
-}
-
-/// Whether return-tail extraction should be traced.
-pub fn debug_take_return_tail() -> bool {
-    enabled(&DEBUG_TAKE_RETURN_TAIL, "RUST_DEBUG_TAKE_RETURN_TAIL")
-}
-
-/// Whether compile-test-return lowering should be traced.
-pub fn debug_compile_test_return() -> bool {
-    enabled(&DEBUG_COMPILE_TEST_RETURN, "RUST_DEBUG_COMPILE_TEST_RETURN")
 }
 
 static DEBUG_PERS_STRUCT: OnceLock<bool> = OnceLock::new();

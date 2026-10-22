@@ -6619,7 +6619,7 @@ fn type_pattern_record(
             // typecore.ml:1529 builds the constructor with
             // `mknoloc (Ldot (Lident "*predef*", "Some"))`.
             let some_lid = Located {
-                txt: tctx.arena.some_lid(),
+                txt: tctx.arena.predef_some_lid(),
                 loc: tctx.arena.none_loc(),
             };
             let some_cstr = make_some_constructor(ctx);
@@ -16265,7 +16265,7 @@ fn type_record(
         // user did not write the `?` form.
         let final_expr = if label_desc.lbl_optional && !field.opt {
             let some_cstr = make_some_constructor(ctx);
-            let some_lid = Located::mknoloc(tctx.arena.some_lid());
+            let some_lid = Located::mknoloc(tctx.arena.predef_some_lid());
             // typecore.ml:2373-2379 builds `Some e` with `~loc:e.pexp_loc`
             // before typing, so it keeps the field expression's own location
             // (for `{ open M; body }` the block's, not the body's).
