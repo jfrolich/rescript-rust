@@ -1801,11 +1801,15 @@ mod source_loc_tests {
             source_loc: Some(Location::none()),
         };
         let program = Program::new(
-            vec![Statement::new(StatementDesc::IntSwitch(
-                Expression::number(Number::int(0)),
-                vec![(0, clause)],
-                None,
-            ))],
+            vec![Statement {
+                source_loc: None,
+                desc: StatementDesc::IntSwitch(
+                    Expression::number(Number::int(0)),
+                    vec![(0, clause)],
+                    None,
+                ),
+                comment: None,
+            }],
             vec![],
         );
 
