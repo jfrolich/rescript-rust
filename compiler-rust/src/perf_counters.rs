@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::types::typecore::ComponentLookupApi;
+
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static VALUE_HITS: AtomicU64 = AtomicU64::new(0);
@@ -59,7 +61,6 @@ static STORED_COMPONENT_TRANSIENT: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_HITS: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_REGISTERED: AtomicU64 = AtomicU64::new(0);
-static QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_UNCACHED_OTHER: AtomicU64 = AtomicU64::new(0);
 
 static SPARSE_RECORD_LARGE: AtomicU64 = AtomicU64::new(0);
@@ -92,17 +93,6 @@ static SIGNATURE_FRESHEN_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite
 static MODULE_SIGNATURE_COPIES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
     OnceLock::new();
 static MODULE_SIGNATURE_FRESHENS: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
-    OnceLock::new();
-
-static MATCH_ACTION_CLONE_CALLS: AtomicU64 = AtomicU64::new(0);
-static MATCH_ACTION_CLONE_NODES: AtomicU64 = AtomicU64::new(0);
-static MATCH_ACTION_CLONE_BYTES: AtomicU64 = AtomicU64::new(0);
-static MATCH_ACTION_CLONE_NANOS: AtomicU64 = AtomicU64::new(0);
-static MATCH_ACTION_CLONE_MAX_REFERENCES: AtomicU64 = AtomicU64::new(0);
-static MATCH_ACTION_CLONE_SITES: OnceLock<
-    Mutex<HashMap<(&'static str, u32), MatchActionCloneSite>>,
-> = OnceLock::new();
-static MODULE_MATCH_ACTION_CLONES: OnceLock<Mutex<HashMap<String, MatchActionCloneSite>>> =
     OnceLock::new();
 
 thread_local! {
@@ -191,13 +181,36 @@ struct SignatureCopySite {
     max_items: u64,
 }
 
-#[derive(Clone, Copy, Default)]
-struct MatchActionCloneSite {
-    calls: u64,
-    nodes: u64,
-    bytes: u64,
-    nanos: u64,
-    max_references: u64,
+impl SignatureCopySite {
+    fn record(&mut self, item_count: usize) {
+        self.calls += 1;
+        self.items += item_count as u64;
+        self.max_items = self.max_items.max(item_count as u64);
+    }
+}
+
+/// Print the 20 entries of `map` with the most items (then calls).
+fn print_top_signature_sites<K: Clone>(
+    map: &OnceLock<Mutex<HashMap<K, SignatureCopySite>>>,
+    mut print: impl FnMut(&K, &SignatureCopySite),
+) {
+    let Some(map) = map.get() else {
+        return;
+    };
+    let mut entries = map
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(key, site)| (key.clone(), *site))
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+    for (key, site) in entries.into_iter().take(20) {
+        print(&key, &site);
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -367,7 +380,6 @@ pub fn reset() {
         &QUALIFIED_RECORD_LABEL_HITS,
         &QUALIFIED_RECORD_LABEL_MISSES,
         &QUALIFIED_RECORD_LABEL_REGISTERED,
-        &QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT,
         &QUALIFIED_RECORD_LABEL_UNCACHED_OTHER,
         &SPARSE_RECORD_LARGE,
         &SPARSE_RECORD_USED,
@@ -383,11 +395,6 @@ pub fn reset() {
         &SIGNATURE_COPY_CALLS,
         &SIGNATURE_COPY_ITEMS,
         &SIGNATURE_COPY_MAX_ITEMS,
-        &MATCH_ACTION_CLONE_CALLS,
-        &MATCH_ACTION_CLONE_NODES,
-        &MATCH_ACTION_CLONE_BYTES,
-        &MATCH_ACTION_CLONE_NANOS,
-        &MATCH_ACTION_CLONE_MAX_REFERENCES,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -432,12 +439,6 @@ pub fn reset() {
         modules.lock().unwrap().clear();
     }
     if let Some(modules) = MODULE_SPARSE_RECORDS.get() {
-        modules.lock().unwrap().clear();
-    }
-    if let Some(sites) = MATCH_ACTION_CLONE_SITES.get() {
-        sites.lock().unwrap().clear();
-    }
-    if let Some(modules) = MODULE_MATCH_ACTION_CLONES.get() {
         modules.lock().unwrap().clear();
     }
 }
@@ -502,15 +503,19 @@ pub(crate) fn record_stored_component_cached() {
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_stored_component_build(mode: &'static str, published: bool) {
+pub(crate) fn record_stored_component_build(mode: ComponentLookupApi, published: bool) {
     match mode {
-        "find_module" => {
+        ComponentLookupApi::FindModule => {
             STORED_COMPONENT_BUILD_FIND_MODULE.fetch_add(1, Ordering::Relaxed);
         }
-        "probe_module_descr" => {
+        ComponentLookupApi::ProbeModuleDescr => {
             STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR.fetch_add(1, Ordering::Relaxed);
         }
-        _ => {}
+        ComponentLookupApi::LookupModule
+        | ComponentLookupApi::FindModuleDescr
+        | ComponentLookupApi::FindType
+        | ComponentLookupApi::FindModtype
+        | ComponentLookupApi::OpenSignature => {}
     }
     if published {
         STORED_COMPONENT_PUBLISHED.fetch_add(1, Ordering::Relaxed);
@@ -541,14 +546,6 @@ pub(crate) fn record_qualified_record_label_miss() {
 #[inline]
 pub(crate) fn record_qualified_record_label_registered() {
     QUALIFIED_RECORD_LABEL_REGISTERED.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a local-root record label that is currently not cacheable.
-///
-/// Caller must check [`enabled`] before calling this hot-path helper.
-#[inline]
-pub(crate) fn record_qualified_record_label_uncached_local_root() {
-    QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Record a record label that is not eligible for the qualified-label cache.
@@ -633,10 +630,10 @@ pub(crate) fn record_signature_copy(
 
     let sites = SIGNATURE_COPY_SITES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut sites = sites.lock().unwrap();
-    let entry = sites.entry((location.file(), location.line())).or_default();
-    entry.calls += 1;
-    entry.items += item_count as u64;
-    entry.max_items = entry.max_items.max(item_count as u64);
+    sites
+        .entry((location.file(), location.line()))
+        .or_default()
+        .record(item_count);
     record_current_module_signature_copy(item_count);
 }
 
@@ -646,10 +643,7 @@ pub(crate) fn record_signature_copy(
 pub(crate) fn record_signature_qualification(kind: &'static str, item_count: usize) {
     let kinds = SIGNATURE_QUALIFICATION_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut kinds = kinds.lock().unwrap();
-    let entry = kinds.entry(kind).or_default();
-    entry.calls += 1;
-    entry.items += item_count as u64;
-    entry.max_items = entry.max_items.max(item_count as u64);
+    kinds.entry(kind).or_default().record(item_count);
 }
 
 /// Record a named signature qualification entry.
@@ -662,11 +656,10 @@ pub(crate) fn record_signature_qualification_name(
 ) {
     let names = SIGNATURE_QUALIFICATION_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut names = names.lock().unwrap();
-    let key = format!("{kind}:{name}");
-    let entry = names.entry(key).or_default();
-    entry.calls += 1;
-    entry.items += item_count as u64;
-    entry.max_items = entry.max_items.max(item_count as u64);
+    names
+        .entry(format!("{kind}:{name}"))
+        .or_default()
+        .record(item_count);
 }
 
 /// Record a signature freshening entry point before it performs full-copy work.
@@ -675,10 +668,7 @@ pub(crate) fn record_signature_qualification_name(
 pub(crate) fn record_signature_freshen(kind: &'static str, item_count: usize) {
     let kinds = SIGNATURE_FRESHEN_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut kinds = kinds.lock().unwrap();
-    let entry = kinds.entry(kind).or_default();
-    entry.calls += 1;
-    entry.items += item_count as u64;
-    entry.max_items = entry.max_items.max(item_count as u64);
+    kinds.entry(kind).or_default().record(item_count);
     record_current_module_signature_freshen(item_count);
 }
 
@@ -688,11 +678,10 @@ pub(crate) fn record_signature_freshen(kind: &'static str, item_count: usize) {
 pub(crate) fn record_signature_freshen_name(kind: &'static str, name: &str, item_count: usize) {
     let names = SIGNATURE_FRESHEN_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut names = names.lock().unwrap();
-    let key = format!("{kind}:{name}");
-    let entry = names.entry(key).or_default();
-    entry.calls += 1;
-    entry.items += item_count as u64;
-    entry.max_items = entry.max_items.max(item_count as u64);
+    names
+        .entry(format!("{kind}:{name}"))
+        .or_default()
+        .record(item_count);
 }
 
 fn record_current_module_signature_copy(item_count: usize) {
@@ -703,10 +692,10 @@ fn record_current_module_signature_copy(item_count: usize) {
         };
         let modules = MODULE_SIGNATURE_COPIES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut modules = modules.lock().unwrap();
-        let entry = modules.entry(module.clone()).or_default();
-        entry.calls += 1;
-        entry.items += item_count as u64;
-        entry.max_items = entry.max_items.max(item_count as u64);
+        modules
+            .entry(module.clone())
+            .or_default()
+            .record(item_count);
     });
 }
 
@@ -718,54 +707,10 @@ fn record_current_module_signature_freshen(item_count: usize) {
         };
         let modules = MODULE_SIGNATURE_FRESHENS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut modules = modules.lock().unwrap();
-        let entry = modules.entry(module.clone()).or_default();
-        entry.calls += 1;
-        entry.items += item_count as u64;
-        entry.max_items = entry.max_items.max(item_count as u64);
-    });
-}
-
-/// Record one recursive materialization of a shared match action.
-///
-/// `bytes` is the estimated owned RawLambda footprint cloned at this site;
-/// `references` is the number of Arc handles or logical output uses that require the clone.
-pub(crate) fn record_match_action_clone(
-    location: &'static std::panic::Location<'static>,
-    nodes: usize,
-    bytes: usize,
-    elapsed_nanos: u64,
-    references: usize,
-) {
-    MATCH_ACTION_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
-    MATCH_ACTION_CLONE_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
-    MATCH_ACTION_CLONE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    MATCH_ACTION_CLONE_NANOS.fetch_add(elapsed_nanos, Ordering::Relaxed);
-    MATCH_ACTION_CLONE_MAX_REFERENCES.fetch_max(references as u64, Ordering::Relaxed);
-
-    let update = |entry: &mut MatchActionCloneSite| {
-        entry.calls += 1;
-        entry.nodes += nodes as u64;
-        entry.bytes += bytes as u64;
-        entry.nanos += elapsed_nanos;
-        entry.max_references = entry.max_references.max(references as u64);
-    };
-
-    let sites = MATCH_ACTION_CLONE_SITES.get_or_init(|| Mutex::new(HashMap::new()));
-    update(
-        sites
-            .lock()
-            .unwrap()
-            .entry((location.file(), location.line()))
-            .or_default(),
-    );
-
-    CURRENT_MODULE.with(|current| {
-        let current = current.borrow();
-        let Some(module) = current.as_ref() else {
-            return;
-        };
-        let modules = MODULE_MATCH_ACTION_CLONES.get_or_init(|| Mutex::new(HashMap::new()));
-        update(modules.lock().unwrap().entry(module.clone()).or_default());
+        modules
+            .entry(module.clone())
+            .or_default()
+            .record(item_count);
     });
 }
 
@@ -820,11 +765,10 @@ pub fn print_report() {
         STORED_COMPONENT_TRANSIENT.load(Ordering::Relaxed),
     );
     eprintln!(
-        "[compiler-counter] qualified_record_labels hits={} misses={} registered={} uncached_local_root={} uncached_other={}",
+        "[compiler-counter] qualified_record_labels hits={} misses={} registered={} uncached_other={}",
         QUALIFIED_RECORD_LABEL_HITS.load(Ordering::Relaxed),
         QUALIFIED_RECORD_LABEL_MISSES.load(Ordering::Relaxed),
         QUALIFIED_RECORD_LABEL_REGISTERED.load(Ordering::Relaxed),
-        QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.load(Ordering::Relaxed),
         QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.load(Ordering::Relaxed),
     );
     eprintln!(
@@ -858,7 +802,6 @@ pub fn print_report() {
     print_signature_freshen_names();
     print_module_signature_copies();
     print_module_signature_freshens();
-    print_match_action_clones();
     eprintln!(
         "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
         TYPE_MUTATION_DESC.load(Ordering::Relaxed),
@@ -883,49 +826,6 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
-}
-
-fn print_match_action_clones() {
-    eprintln!(
-        "[compiler-counter] match_action_clones calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
-        MATCH_ACTION_CLONE_CALLS.load(Ordering::Relaxed),
-        MATCH_ACTION_CLONE_NODES.load(Ordering::Relaxed),
-        MATCH_ACTION_CLONE_BYTES.load(Ordering::Relaxed),
-        MATCH_ACTION_CLONE_NANOS.load(Ordering::Relaxed),
-        MATCH_ACTION_CLONE_MAX_REFERENCES.load(Ordering::Relaxed),
-    );
-
-    if let Some(sites) = MATCH_ACTION_CLONE_SITES.get() {
-        let mut sites: Vec<_> = sites
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
-        sites.sort_by_key(|(_, site)| std::cmp::Reverse(site.nodes));
-        for ((file, line), site) in sites.into_iter().take(12) {
-            eprintln!(
-                "[compiler-counter] match_action_clone_site file={file}:{line} calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
-                site.calls, site.nodes, site.bytes, site.nanos, site.max_references,
-            );
-        }
-    }
-
-    if let Some(modules) = MODULE_MATCH_ACTION_CLONES.get() {
-        let mut modules: Vec<_> = modules
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        modules.sort_by_key(|(_, site)| std::cmp::Reverse(site.nodes));
-        for (module, site) in modules.into_iter().take(20) {
-            eprintln!(
-                "[compiler-counter] module_match_action_clones module={module} calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
-                site.calls, site.nodes, site.bytes, site.nanos, site.max_references,
-            );
-        }
-    }
 }
 
 fn print_module_sparse_records() {
@@ -954,178 +854,66 @@ fn print_module_sparse_records() {
 }
 
 fn print_module_signature_copies() {
-    let Some(modules) = MODULE_SIGNATURE_COPIES.get() else {
-        return;
-    };
-
-    let mut modules = modules
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(module, site)| (module.clone(), *site))
-        .collect::<Vec<_>>();
-    modules.sort_by(|a, b| {
-        b.1.items
-            .cmp(&a.1.items)
-            .then_with(|| b.1.calls.cmp(&a.1.calls))
-    });
-
-    for (module, site) in modules.into_iter().take(20) {
+    print_top_signature_sites(&MODULE_SIGNATURE_COPIES, |module, site| {
         eprintln!(
             "[compiler-counter] module_signature_copies module={} calls={} items={} max_items={}",
             module, site.calls, site.items, site.max_items
         );
-    }
+    });
 }
 
 fn print_module_signature_freshens() {
-    let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() else {
-        return;
-    };
-
-    let mut modules = modules
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(module, site)| (module.clone(), *site))
-        .collect::<Vec<_>>();
-    modules.sort_by(|a, b| {
-        b.1.items
-            .cmp(&a.1.items)
-            .then_with(|| b.1.calls.cmp(&a.1.calls))
-    });
-
-    for (module, site) in modules.into_iter().take(20) {
+    print_top_signature_sites(&MODULE_SIGNATURE_FRESHENS, |module, site| {
         eprintln!(
             "[compiler-counter] module_signature_freshens module={} calls={} items={} max_items={}",
             module, site.calls, site.items, site.max_items
         );
-    }
+    });
 }
 
 fn print_signature_qualification_names() {
-    let Some(names) = SIGNATURE_QUALIFICATION_NAMES.get() else {
-        return;
-    };
-
-    let mut names = names
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(name, counters)| (name.clone(), *counters))
-        .collect::<Vec<_>>();
-    names.sort_by(|a, b| {
-        b.1.items
-            .cmp(&a.1.items)
-            .then_with(|| b.1.calls.cmp(&a.1.calls))
-    });
-
-    for (name, counters) in names.into_iter().take(20) {
+    print_top_signature_sites(&SIGNATURE_QUALIFICATION_NAMES, |name, counters| {
         eprintln!(
             "[compiler-counter] signature_qualification_name name={} calls={} items={} max_items={}",
             name, counters.calls, counters.items, counters.max_items,
         );
-    }
+    });
 }
 
 fn print_signature_freshen_names() {
-    let Some(names) = SIGNATURE_FRESHEN_NAMES.get() else {
-        return;
-    };
-
-    let mut names = names
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(name, counters)| (name.clone(), *counters))
-        .collect::<Vec<_>>();
-    names.sort_by(|a, b| {
-        b.1.items
-            .cmp(&a.1.items)
-            .then_with(|| b.1.calls.cmp(&a.1.calls))
-    });
-
-    for (name, counters) in names.into_iter().take(20) {
+    print_top_signature_sites(&SIGNATURE_FRESHEN_NAMES, |name, counters| {
         eprintln!(
             "[compiler-counter] signature_freshen_name name={} calls={} items={} max_items={}",
             name, counters.calls, counters.items, counters.max_items,
         );
-    }
+    });
 }
 
 fn print_signature_freshen_kinds() {
-    let Some(kinds) = SIGNATURE_FRESHEN_KINDS.get() else {
-        return;
-    };
-
-    let mut kinds = kinds
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(kind, counters)| (*kind, *counters))
-        .collect::<Vec<_>>();
-    kinds.sort_by(|a, b| {
-        b.1.items
-            .cmp(&a.1.items)
-            .then_with(|| b.1.calls.cmp(&a.1.calls))
-    });
-
-    for (kind, counters) in kinds.into_iter().take(20) {
+    print_top_signature_sites(&SIGNATURE_FRESHEN_KINDS, |kind, counters| {
         eprintln!(
             "[compiler-counter] signature_freshen kind={} calls={} items={} max_items={}",
             kind, counters.calls, counters.items, counters.max_items,
         );
-    }
+    });
 }
 
 fn print_signature_qualification_kinds() {
-    let Some(kinds) = SIGNATURE_QUALIFICATION_KINDS.get() else {
-        return;
-    };
-
-    let mut kinds = kinds
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(kind, counters)| (*kind, *counters))
-        .collect::<Vec<_>>();
-    kinds.sort_by(|a, b| {
-        b.1.items
-            .cmp(&a.1.items)
-            .then_with(|| b.1.calls.cmp(&a.1.calls))
-    });
-
-    for (kind, counters) in kinds.into_iter().take(20) {
+    print_top_signature_sites(&SIGNATURE_QUALIFICATION_KINDS, |kind, counters| {
         eprintln!(
             "[compiler-counter] signature_qualification kind={} calls={} items={} max_items={}",
             kind, counters.calls, counters.items, counters.max_items,
         );
-    }
+    });
 }
 
 fn print_signature_copy_sites() {
-    let Some(sites) = SIGNATURE_COPY_SITES.get() else {
-        return;
-    };
-
-    let mut sites = sites
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|((file, line), counters)| (*file, *line, *counters))
-        .collect::<Vec<_>>();
-    sites.sort_by(|a, b| {
-        b.2.items
-            .cmp(&a.2.items)
-            .then_with(|| b.2.calls.cmp(&a.2.calls))
-    });
-
-    for (file, line, counters) in sites.into_iter().take(20) {
+    print_top_signature_sites(&SIGNATURE_COPY_SITES, |(file, line), counters| {
         eprintln!(
             "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={}",
             file, line, counters.calls, counters.items, counters.max_items,
         );
-    }
+    });
 }
 
 fn print_lazy(kind: LazyLookupKind) {

@@ -5,7 +5,6 @@
 //! point in `driver.rs`.
 
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
-use std::sync::Arc;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -204,8 +203,8 @@ impl<'a> LoweringContext<'a> {
 
         match primitive {
             Primitive::Pidentity => args.into_iter().next().unwrap_or_else(Lambda::unit),
-            Primitive::PextensionSlotEq => match args.as_slice() {
-                [lhs, rhs] => Lambda::prim(
+            Primitive::PextensionSlotEq => match <[Lambda; 2]>::try_from(args) {
+                Ok([lhs, rhs]) => Lambda::prim(
                     Primitive::Pstringcomp(Comparison::Eq),
                     vec![
                         Lambda::prim(
@@ -215,14 +214,14 @@ impl<'a> LoweringContext<'a> {
                                     name: EXCEPTION_ID_FIELD.to_string(),
                                 },
                             ),
-                            vec![lhs.clone()],
+                            vec![lhs],
                             loc,
                         ),
-                        rhs.clone(),
+                        rhs,
                     ],
                     loc,
                 ),
-                _ => unreachable!("PextensionSlotEq expects exactly two arguments"),
+                Err(_) => unreachable!("PextensionSlotEq expects exactly two arguments"),
             },
             // lambda.ml `mk_builtin`: `Lsequence (arg, lambda_unit)`, not the
             // folding `Lambda.seq`.
@@ -230,17 +229,16 @@ impl<'a> LoweringContext<'a> {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
                 Lambda::Lsequence(Box::new(arg), Box::new(Lambda::unit()))
             }
-            Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
-                [_, value] => Lambda::prim(
-                    Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
-                    vec![
-                        Lambda::const_(polyvar_block_tag_constant(&name)),
-                        value.clone(),
-                    ],
-                    loc,
-                ),
-                _ => unreachable!("polyvariant blocks expect tag and payload"),
-            },
+            Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => {
+                match <[Lambda; 2]>::try_from(args) {
+                    Ok([_, value]) => Lambda::prim(
+                        Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
+                        vec![Lambda::const_(polyvar_block_tag_constant(&name)), value],
+                        loc,
+                    ),
+                    Err(_) => unreachable!("polyvariant blocks expect tag and payload"),
+                }
+            }
             Primitive::Pmakeblock(TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
@@ -272,50 +270,36 @@ impl<'a> LoweringContext<'a> {
             .map(|lam| Box::new(self.lower_lambda(*lam)));
         let lowered_scrutinee = self.lower_lambda(scrutinee);
 
-        if const_only_switch {
-            if let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch) {
-                if diff == 0 {
-                    return lowered_scrutinee;
-                }
-                return Lambda::prim(
-                    Primitive::Paddint,
-                    vec![
-                        lowered_scrutinee,
-                        Lambda::const_(Constant::Int {
-                            i: diff,
-                            comment: None,
-                        }),
-                    ],
-                    Location::none(),
-                );
+        if const_only_switch
+            && let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch)
+        {
+            if diff == 0 {
+                return lowered_scrutinee;
             }
+            return Lambda::prim(
+                Primitive::Paddint,
+                vec![
+                    lowered_scrutinee,
+                    Lambda::const_(Constant::Int {
+                        i: diff,
+                        comment: None,
+                    }),
+                ],
+                Location::none(),
+            );
         }
 
-        if const_only_switch {
-            Lambda::Lswitch(
-                Box::new(lowered_scrutinee),
-                Box::new(LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: lowered_consts,
-                    sw_blocks_full: true,
-                    sw_blocks: lowered_blocks,
-                    sw_failaction: lowered_failaction,
-                    sw_dispatch: switch.sw_dispatch,
-                }),
-            )
-        } else {
-            Lambda::Lswitch(
-                Box::new(lowered_scrutinee),
-                Box::new(LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: lowered_consts,
-                    sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: lowered_blocks,
-                    sw_failaction: lowered_failaction,
-                    sw_dispatch: switch.sw_dispatch,
-                }),
-            )
-        }
+        Lambda::Lswitch(
+            Box::new(lowered_scrutinee),
+            Box::new(LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: lowered_consts,
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: lowered_blocks,
+                sw_failaction: lowered_failaction,
+                sw_dispatch: switch.sw_dispatch,
+            }),
+        )
     }
 
     fn lower_try_with(&mut self, body: RawLambda, id: Ident, handler: RawLambda) -> Lambda {
@@ -608,42 +592,27 @@ fn eta_reduce_function_apply(
     ap_info: &ApInfo,
 ) -> Option<Lambda> {
     match function.body.as_ref() {
-        Lambda::Lprim(__prim1)
+        Lambda::Lprim(wrap)
             if matches!(
-                __prim1.as_ref(),
-                PrimInfo {
-                    primitive: Primitive::PnullToOpt
-                        | Primitive::PnullUndefinedToOpt
-                        | Primitive::PisNull
-                        | Primitive::PisNullUndefined
-                        | Primitive::Ptypeof,
-                    args: _wrap_args,
-                    ..
-                }
-            ) =>
-        {
-            let PrimInfo {
-                primitive:
-                    Primitive::PnullToOpt
+                wrap.primitive,
+                Primitive::PnullToOpt
                     | Primitive::PnullUndefinedToOpt
                     | Primitive::PisNull
                     | Primitive::PisNullUndefined
-                    | Primitive::Ptypeof,
-                args: wrap_args,
-                ..
-            } = __prim1.as_ref()
-            else {
-                unreachable!()
-            };
-
-            let [Lambda::Lprim(inner_call)] = wrap_args.as_slice() else {
+                    | Primitive::Ptypeof
+            ) =>
+        {
+            let [Lambda::Lprim(inner_call)] = wrap.args.as_slice() else {
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
-            let wrap = function_primitive(function.body.as_ref())?;
             let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc);
-            Some(Lambda::prim(wrap, vec![inner], ap_info.loc))
+            Some(Lambda::prim(
+                wrap.primitive.clone(),
+                vec![inner],
+                ap_info.loc,
+            ))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
@@ -665,16 +634,6 @@ fn eta_reduce_function_apply(
                 Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc),
                 Lambda::Lconst(constant.clone()),
             ))
-        }
-        _ => None,
-    }
-}
-
-fn function_primitive(body: &Lambda) -> Option<Primitive> {
-    match body {
-        Lambda::Lprim(__prim0) => {
-            let PrimInfo { primitive, .. } = __prim0.as_ref();
-            Some(primitive.clone())
         }
         _ => None,
     }
@@ -719,13 +678,6 @@ fn bool_const(value: bool) -> Lambda {
         Lambda::true_()
     } else {
         Lambda::false_()
-    }
-}
-
-fn int_const_value_any(lam: &Lambda) -> Option<i32> {
-    match lam {
-        Lambda::Lconst(Constant::Int { i, .. }) => Some(*i),
-        _ => None,
     }
 }
 
@@ -822,10 +774,8 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
             | (Primitive::Plslint, _, _)
             | (Primitive::Plsrint, _, _)
             | (Primitive::Pasrint, _, _) => {
-                let Some(lhs) = int_const_value_any(&Lambda::Lconst(lhs.clone())) else {
-                    return Lambda::prim(primitive, args, loc);
-                };
-                let Some(rhs) = int_const_value_any(&Lambda::Lconst(rhs.clone())) else {
+                let (&Constant::Int { i: lhs, .. }, &Constant::Int { i: rhs, .. }) = (lhs, rhs)
+                else {
                     return Lambda::prim(primitive, args, loc);
                 };
                 let folded = match primitive {
@@ -930,16 +880,16 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
     let (first_arg, rest_args) = args.split_first()?;
 
     let (field_name, first_index, module_value) = module_field_access(first_arg)?;
-    if field_name != first_field.as_str() || first_index != 0 {
+    if field_name != first_field || first_index != 0 {
         return None;
     }
 
     let mut expected_index = 1i32;
     for (field, arg) in rest_fields.iter().zip(rest_args.iter()) {
         let (field_name, arg_index, arg_module_value) = module_field_access(arg)?;
-        if field_name != field.as_str()
+        if field_name != field
             || arg_index != expected_index
-            || !same_module_source(&module_value, &arg_module_value)
+            || !same_module_source(module_value, arg_module_value)
         {
             return None;
         }
@@ -950,18 +900,18 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
         return None;
     }
 
-    Some(module_value)
+    Some(module_value.clone())
 }
 
-fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
-    let Lambda::Lprim(__prim200) = arg else {
+fn module_field_access(arg: &Lambda) -> Option<(&str, i32, &Lambda)> {
+    let Lambda::Lprim(prim) = arg else {
         return None;
     };
     let PrimInfo {
         primitive: Primitive::Pfield(index, FieldDbgInfo::Module { name }),
         args,
         ..
-    } = __prim200.as_ref()
+    } = prim.as_ref()
     else {
         return None;
     };
@@ -971,7 +921,7 @@ fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
     if *index < 0 {
         return None;
     }
-    Some((name.clone(), *index, module_value.clone()))
+    Some((name.as_str(), *index, module_value))
 }
 
 fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
@@ -1062,7 +1012,8 @@ fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
     }
 }
 
-/// Lower raw lambda into the existing JS-facing Lambda IR.
+/// The largest ident stamp in `raw`, used to start fresh lowering idents
+/// after every stamp the raw tree already uses.
 fn max_ident_stamp(raw: &RawLambda) -> i32 {
     fn visit_ident(max_stamp: &mut i32, id: &Ident) {
         *max_stamp = (*max_stamp).max(id.stamp());
@@ -1195,14 +1146,15 @@ pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lam
     LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
 }
 
-/// Additive M5 entrypoint for the inactive indexed pipeline. The caller keeps
-/// this exact generator through optimization and later JS lowering.
-pub(crate) fn lower_to_lambda_with_id_gen(raw: RawLambda, id_gen: Arc<IdGenerator>) -> Lambda {
+/// Lowers with the caller's id generator, which the indexed pipeline keeps
+/// through optimization and JS lowering.
+pub(crate) fn lower_to_lambda_with_id_gen(raw: RawLambda, id_gen: &IdGenerator) -> Lambda {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
+    LoweringContext::with_id_gen(exported_idents, id_gen).lower_lambda(raw)
 }
 
+/// Lower raw lambda into the existing JS-facing Lambda IR.
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
     let start_stamp = max_ident_stamp(&raw);
     lower_to_lambda_with_start_stamp(raw, start_stamp)
@@ -1219,7 +1171,7 @@ mod tests {
 
     #[test]
     fn shared_generator_entrypoint_preserves_the_caller_owned_stamp_stream() {
-        let generator = Arc::new(IdGenerator::with_start_stamp(41));
+        let generator = IdGenerator::with_start_stamp(41);
         let exception = Ident::new("caught", 7, crate::ident::IdentFlags::NONE);
         let lowered = lower_to_lambda_with_id_gen(
             RawLambda::LtryWith(
@@ -1227,7 +1179,7 @@ mod tests {
                 exception,
                 Box::new(RawLambda::var(exception)),
             ),
-            generator.clone(),
+            &generator,
         );
         let Lambda::LtryWith(_, raw_exception, handler) = lowered else {
             panic!("expected lowered try-with");

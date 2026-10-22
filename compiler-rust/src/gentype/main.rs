@@ -99,7 +99,7 @@ fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     let path = PathBuf::from(cmt_file);
     let path = if path.is_relative() {
         crate::process_cwd::current_dir()
-            .unwrap_or_else(|_| PathBuf::new())
+            .unwrap_or_else(|_| Path::new(""))
             .join(path)
     } else {
         path

@@ -207,7 +207,7 @@ fn absolute_path(path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         crate::process_cwd::current_dir()
-            .unwrap_or_default()
+            .unwrap_or_else(|_| Path::new(""))
             .join(path)
     }
 }

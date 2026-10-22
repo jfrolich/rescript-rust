@@ -11675,7 +11675,7 @@ fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
 fn shared_load_path_with_display(
     options: &CompilerOptions,
 ) -> (std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>) {
-    type Key = (Option<PathBuf>, Vec<PathBuf>, Option<PathBuf>);
+    type Key = (Option<PathBuf>, Vec<PathBuf>, Option<&'static FsPath>);
     thread_local! {
         static CACHE: std::cell::RefCell<Vec<(Key, std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>)>> =
             const { std::cell::RefCell::new(Vec::new()) };
@@ -11721,20 +11721,12 @@ fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec
     let mut display_paths = Vec::new();
 
     for path in &options.include_paths {
-        paths.push(normalize_load_path_entry(
-            path,
-            stdlib_dir.as_deref(),
-            cwd.as_deref(),
-        ));
-        display_paths.push(display_load_path_entry(
-            path,
-            stdlib_dir.as_deref(),
-            cwd.as_deref(),
-        ));
+        paths.push(normalize_load_path_entry(path, stdlib_dir.as_deref(), cwd));
+        display_paths.push(display_load_path_entry(path, stdlib_dir.as_deref(), cwd));
     }
 
     if let Some(stdlib_dir) = stdlib_dir {
-        paths.push(normalize_load_path_entry(&stdlib_dir, None, cwd.as_deref()));
+        paths.push(normalize_load_path_entry(&stdlib_dir, None, cwd));
         display_paths.push(stdlib_dir);
     }
 
