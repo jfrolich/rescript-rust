@@ -28558,6 +28558,30 @@ fn rewrite_alias_pident_child_prefixes(
     }
 }
 
+/// Rewrite a `Pdot` module-alias target prefix to the selected access path.
+fn rewrite_alias_pdot_target(
+    sig: &mut crate::types::decl::Signature,
+    target: &Path,
+    access_path: &Path,
+    pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) {
+    crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, target, access_path, ctx);
+    // OCaml compiler/ml/env.ml:1567-1579 keeps child module
+    // declarations/components as separate lazy thunks. For an alias such as
+    // `module J = Js.Json`, compiler/ml/mtype.ml:98-102 strengthens `Kind` to
+    // the scraped target `Js.Json.Kind`, while compiler/ml/env.ml:1530 and
+    // compiler/ml/subst.ml:87-95 expose the selected component path as
+    // `J.Kind`. Do not rewrite the child module declaration alias itself here.
+    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(sig, target, access_path);
+    // OCaml compiler/ml/env.ml:1517 scrapes the alias target and
+    // compiler/ml/env.ml:1530-1538 then prefixes the selected component path.
+    // If the scraped target came from a flattened runtime unit such as
+    // `Js_json`, rewrite that backing unit as well as the source alias path
+    // (`Js.Json`) before child components are forced.
+    rewrite_flattened_alias_head_prefixes(sig, target, access_path, pers_env.as_ref(), ctx);
+}
+
 fn qualify_resolved_signature_for_access_path_inner(
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,
@@ -28718,37 +28742,7 @@ fn qualify_resolved_signature_for_access_path_inner(
                 );
             }
             Path::Pdot(..) => {
-                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                    &sig,
-                    target,
-                    access_path,
-                    ctx,
-                );
-                // OCaml compiler/ml/env.ml:1567-1579 keeps child module
-                // declarations/components as separate lazy thunks. For an
-                // alias such as `module J = Js.Json`, compiler/ml/mtype.ml:98-102
-                // strengthens `Kind` to the scraped target `Js.Json.Kind`,
-                // while compiler/ml/env.ml:1530 and compiler/ml/subst.ml:87-95
-                // expose the selected component path as `J.Kind`. Do not
-                // rewrite the child module declaration alias itself here.
-                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
-                    &mut sig,
-                    target,
-                    access_path,
-                );
-                // OCaml compiler/ml/env.ml:1517 scrapes the alias target and
-                // compiler/ml/env.ml:1530-1538 then prefixes the selected
-                // component path. If the scraped target came from a flattened
-                // runtime unit such as `Js_json`, rewrite that backing unit as
-                // well as the source alias path (`Js.Json`) before child
-                // components are forced.
-                rewrite_flattened_alias_head_prefixes(
-                    &mut sig,
-                    target,
-                    access_path,
-                    pers_env.as_ref(),
-                    ctx,
-                );
+                rewrite_alias_pdot_target(&mut sig, target, access_path, pers_env, ctx);
             }
             Path::Papply(_, _) => {}
         }
@@ -28759,31 +28753,7 @@ fn qualify_resolved_signature_for_access_path_inner(
     {
         match target {
             Path::Pdot(..) => {
-                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                    &sig,
-                    target,
-                    access_path,
-                    ctx,
-                );
-                // OCaml compiler/ml/env.ml:1567-1579 keeps child module
-                // declarations/components as separate lazy thunks. For an
-                // alias such as `module J = Js.Json`, compiler/ml/mtype.ml:98-102
-                // strengthens `Kind` to the scraped target `Js.Json.Kind`,
-                // while compiler/ml/env.ml:1530 and compiler/ml/subst.ml:87-95
-                // expose the selected component path as `J.Kind`. Do not
-                // rewrite the child module declaration alias itself here.
-                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
-                    &mut sig,
-                    target,
-                    access_path,
-                );
-                rewrite_flattened_alias_head_prefixes(
-                    &mut sig,
-                    target,
-                    access_path,
-                    pers_env.as_ref(),
-                    ctx,
-                );
+                rewrite_alias_pdot_target(&mut sig, target, access_path, pers_env, ctx);
             }
             Path::Pident(alias_id) => {
                 // OCaml compiler/ml/env.ml:1567-1579 stores child
