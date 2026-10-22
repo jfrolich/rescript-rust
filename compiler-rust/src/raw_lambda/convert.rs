@@ -5885,7 +5885,7 @@ impl<'a> RawLambdaConverter<'a> {
                     let partial = *partial;
                     let loc = self.loc(expr.exp_loc);
                     // Use full matching compiler (ported from OCaml's matching.ml)
-                    self.compile_full_matching(loc, scrut, cases, partial, expr)
+                    self.compile_full_matching(loc, scrut, cases, partial)
                 }
             }
             ExpressionDesc::Texp_try(body, cases) => {
@@ -6131,19 +6131,14 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     /// Use the full matching compiler (matching.rs) for patterns that
-    /// the simple matchers can't handle. Falls back to Lambda lowering
-    /// if the matching compiler panics.
+    /// the simple matchers can't handle.
     fn compile_full_matching(
         &mut self,
         loc: Location,
         scrut: &Expression,
         cases: &[Case],
         partial: Partial,
-        _expr: &Expression,
     ) -> RawLambda {
-        // Reset raise count — the simple matchers may have consumed one
-        // for the partial default, but the full matching compiler manages
-        // its own raise counts.
         let pat_act_list = self.cases_to_pat_act_list(cases);
 
         // OCaml optimization: when the scrutinee is a tuple, decompose into
@@ -6168,7 +6163,7 @@ impl<'a> RawLambdaConverter<'a> {
             let payload = RawLambda::Lconst(Constant::Block {
                 tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![
-                    Constant::const_string(&fname.clone()),
+                    Constant::const_string(&fname),
                     Constant::int(line),
                     Constant::int(char_pos),
                 ],
@@ -6237,7 +6232,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let payload = RawLambda::Lconst(Constant::Block {
                     tag_info: Box::new(TagInfo::Tuple),
                     elements: vec![
-                        Constant::const_string(&fname.clone()),
+                        Constant::const_string(&fname),
                         Constant::int(line),
                         Constant::int(char_pos),
                     ],
