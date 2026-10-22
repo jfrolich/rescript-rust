@@ -6885,92 +6885,6 @@ fn add_signature_to_env_with_options_inner(
         substitute_type_paths_in_sig(sig_items, module_path, ctx);
     }
 
-    fn collect_target_constr_nodes(
-        ctx: &TypeContext,
-        initial_ty: TypeExprRef,
-        out: &mut Vec<(TypeExprRef, String)>,
-        seen: &mut HashSet<TypeExprRef>,
-    ) {
-        // Use an explicit work stack to avoid stack overflow on large type
-        // graphs (e.g., objects with hundreds of fields create deep Tfield chains).
-        let mut work_stack = vec![initial_ty];
-
-        while let Some(raw_ty) = work_stack.pop() {
-            let ty = ctx.repr(raw_ty);
-            if !seen.insert(ty) {
-                continue;
-            }
-            let desc = ctx.get_desc(ty);
-            match &*desc {
-                TypeDesc::Tconstr { path, args, .. } => {
-                    let path_name = path.name();
-                    if path_name == "React.element"
-                        || path_name == "Jsx.element"
-                        || path.last() == "element"
-                        || path.last() == "someElement"
-                    {
-                        out.push((ty, path_name));
-                    }
-                    for arg in args {
-                        work_stack.push(*arg);
-                    }
-                }
-                TypeDesc::Tarrow { args, ret } => {
-                    work_stack.extend(args.iter().map(|arg| arg.typ));
-                    work_stack.push(*ret);
-                }
-                TypeDesc::Ttuple(items) => {
-                    for item in items {
-                        work_stack.push(*item);
-                    }
-                }
-                TypeDesc::Tobject { fields } => {
-                    work_stack.push(*fields);
-                }
-                TypeDesc::Tfield { typ, rest, .. } => {
-                    work_stack.push(*typ);
-                    work_stack.push(*rest);
-                }
-                TypeDesc::Tpoly { body, vars } => {
-                    work_stack.push(*body);
-                    for var in vars {
-                        work_stack.push(*var);
-                    }
-                }
-                TypeDesc::Tvariant(row) => {
-                    if let Some((_, args)) = &row.row_name {
-                        for arg in args {
-                            work_stack.push(*arg);
-                        }
-                    }
-                    work_stack.push(row.row_more);
-                    for (_label, field) in &row.row_fields {
-                        match field {
-                            crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
-                                work_stack.push(*ty);
-                            }
-                            crate::types::type_expr::RowField::Reither { types, .. } => {
-                                for ty in types {
-                                    work_stack.push(*ty);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                TypeDesc::Tpackage { args, .. } => {
-                    for arg in args {
-                        work_stack.push(*arg);
-                    }
-                }
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                    work_stack.push(*target);
-                }
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-            }
-        }
-    }
-
     fn inline_record_type_params(
         ctx: &TypeContext,
         parent_type_params: &[TypeExprRef],
@@ -7043,31 +6957,6 @@ fn add_signature_to_env_with_options_inner(
                 // OCaml: only increment pos for non-primitive values
                 if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
                     pos += 1;
-                }
-                if crate::debug_flags::debug_open_sig_values()
-                    && (id.name() == "someElement"
-                        || id.name() == "element"
-                        || id.name() == "stringToJson"
-                        || id.name() == "stringFromJson"
-                        || module_path.last() == "ReactDOM")
-                {
-                    let mut seen = HashSet::new();
-                    let mut nodes = Vec::new();
-                    collect_target_constr_nodes(ctx, desc.val_type, &mut nodes, &mut seen);
-                    let refs = nodes
-                        .iter()
-                        .map(|(ty, path_name)| {
-                            let repr = ctx.repr(*ty);
-                            format!("{}#{}@{}", path_name, repr.0, ctx.get_level(repr))
-                        })
-                        .collect::<Vec<_>>();
-                    eprintln!(
-                        "[open-sig-value] module={} id={} val_type={} refs={}",
-                        module_path.name(),
-                        id.name(),
-                        ctx.repr(desc.val_type).0,
-                        refs.join(",")
-                    );
                 }
                 if as_opened {
                     opened_values.push((*id, desc, value_pos));

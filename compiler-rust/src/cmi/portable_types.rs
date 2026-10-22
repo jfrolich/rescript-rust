@@ -1143,55 +1143,6 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
     }
 
     let shareable = graph_is_shareable(&pps.type_graph);
-    if crate::debug_flags::debug_store() {
-        let non_generic = pps
-            .type_graph
-            .entries
-            .iter()
-            .filter(|entry| !entry_is_shareable(entry))
-            .count();
-        let mut kinds = std::collections::BTreeMap::new();
-        for entry in pps
-            .type_graph
-            .entries
-            .iter()
-            .filter(|entry| !entry_is_shareable(entry))
-        {
-            let kind = match entry.desc {
-                PortableTypeDesc::Tvar(_) => "Tvar",
-                PortableTypeDesc::Tarrow { .. } => "Tarrow",
-                PortableTypeDesc::Ttuple(_) => "Ttuple",
-                PortableTypeDesc::Tconstr { .. } => "Tconstr",
-                PortableTypeDesc::Tobject { .. } => "Tobject",
-                PortableTypeDesc::Tfield { .. } => "Tfield",
-                PortableTypeDesc::Tnil => "Tnil",
-                PortableTypeDesc::Tlink(_) => "Tlink",
-                PortableTypeDesc::Tsubst(_) => "Tsubst",
-                PortableTypeDesc::Tvariant(_) => "Tvariant",
-                PortableTypeDesc::Tunivar(_) => "Tunivar",
-                PortableTypeDesc::Tpoly { .. } => "Tpoly",
-                PortableTypeDesc::Tpackage { .. } => "Tpackage",
-            };
-            *kinds
-                .entry(format!("{kind}@{}", entry.level))
-                .or_insert(0usize) += 1;
-        }
-        if non_generic > 0 {
-            eprintln!("[store] non-shareable kinds {}: {kinds:?}", pps.ps_name);
-        }
-        let tsubst = pps
-            .type_graph
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.desc, PortableTypeDesc::Tsubst(_)))
-            .count();
-        eprintln!(
-            "[store] internalize {} entries={} shareable={shareable} non_generic={non_generic} tsubst={tsubst} store_types={}",
-            pps.ps_name,
-            pps.type_graph.entries.len(),
-            store.type_count()
-        );
-    }
     if shareable {
         // Internalize once per build for every worker; the worker store
         // keeps the result so later units on this worker skip the pool map.
