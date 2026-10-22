@@ -1210,7 +1210,7 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
             // Reuse the existing PosIdx from result.pmod_loc to match OCaml's sharing
             let start_idx = p.loc_start_idx(result.pmod_loc);
             let end_idx = p.loc_end_idx(arg.pmod_loc);
-            let loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let loc = p.mk_loc_idx(start_idx, end_idx);
             let result_idx = p.arena_mut().push_mod_expr(result);
             let arg_idx = p.arena_mut().push_mod_expr(arg);
             result = ModuleExpr {
@@ -1412,7 +1412,7 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             // Reuse the existing PosIdx from rhs_module_expr.pmod_loc to match OCaml's sharing
             let start_idx = p.loc_start_idx(rhs_module_expr.pmod_loc);
             let end_idx = p.loc_end_idx(mod_type.pmty_loc);
-            let loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let loc = p.mk_loc_idx(start_idx, end_idx);
             let expr_idx = p.arena_mut().push_mod_expr(rhs_module_expr);
             let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
             ModuleExpr {
@@ -3094,7 +3094,7 @@ fn parse_record_or_object_decl(
             let dotdotdot_end = p.end_pos_idx();
             p.next();
             let typ = typ::parse_typ_expr(p);
-            let dot_name_loc = p.mk_loc_idx_full(dotdotdot_start, dotdotdot_end);
+            let dot_name_loc = p.mk_loc_idx(dotdotdot_start, dotdotdot_end);
             if p.token == Token::Rbrace {
                 p.next();
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -3256,8 +3256,8 @@ fn parse_constr_decl_args(p: &mut Parser<'_>) -> (ConstructorArguments, Option<C
                     let spread_typ_idx = p.arena_mut().push_core_type(spread_typ);
                     if p.token == Token::Rbrace {
                         p.next();
-                        let name_loc = p.mk_loc_idx_full(dotdotdot_start, dotdotdot_end);
-                        let loc = p.mk_loc_idx_full(start_pos_idx, spread_end);
+                        let name_loc = p.mk_loc_idx(dotdotdot_start, dotdotdot_end);
+                        let loc = p.mk_loc_idx(start_pos_idx, spread_end);
                         let field = spread_field(p, loc, name_loc, spread_typ_idx);
                         p.optional(&Token::Comma);
                         p.expect(Token::Rparen);
@@ -3270,8 +3270,8 @@ fn parse_constr_decl_args(p: &mut Parser<'_>) -> (ConstructorArguments, Option<C
                             grammar::Grammar::FieldDeclarations,
                         ) {
                             SpreadTail::Record(fields) => {
-                                let name_loc = p.mk_loc_idx_full(dotdotdot_start, dotdotdot_end);
-                                let loc = p.mk_loc_idx_full(start_pos_idx, spread_end);
+                                let name_loc = p.mk_loc_idx(dotdotdot_start, dotdotdot_end);
+                                let loc = p.mk_loc_idx(start_pos_idx, spread_end);
                                 let field = spread_field(p, loc, name_loc, spread_typ_idx);
                                 p.optional(&Token::Comma);
                                 p.expect(Token::Rparen);

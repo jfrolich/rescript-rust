@@ -993,7 +993,7 @@ pub mod ast_helper {
             let start_idx = p.loc_start_idx(item.ppat_loc);
             let end_idx = p.loc_end_idx(result.ppat_loc);
             // res_core.ml `make_list_pattern`: `{txt = [p1; pat_pl]; loc}`.
-            let cons_loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let cons_loc = p.mk_loc_idx(start_idx, end_idx);
             let item_idx = p.arena_mut().push_pat(item);
             let result_idx = p.arena_mut().push_pat(result);
             let cons = with_loc(cons_idx, cons_loc);

@@ -123,7 +123,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
         Token::True | Token::False => {
             let end_pos = p.end_pos_idx();
             p.next();
-            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, end_pos);
             let name = if token == Token::True {
                 "true"
             } else {
@@ -197,14 +197,14 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
         Token::Lbrace => parse_record_pattern(p, attrs.clone()),
         Token::Underscore => {
             let end_pos = p.end_pos_idx();
-            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, end_pos);
             p.next();
             pat(PatternDesc::Ppat_any, loc, attrs.clone())
         }
         Token::Lident(ident) => {
             let ident = ident.to_string();
             let end_pos = p.end_pos_idx();
-            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, end_pos);
             p.next();
             if p.token == Token::Backtick {
                 let start_pos = *p.arena().get_position(start_pos_idx);

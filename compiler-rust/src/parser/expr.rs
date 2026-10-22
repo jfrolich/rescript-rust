@@ -2107,7 +2107,7 @@ fn parse_bracket_access(
                     loc: ident_loc,
                 },
             )))),
-            pexp_loc: p.mk_loc_idx_full(start_pos_idx, rbracket_end_idx),
+            pexp_loc: p.mk_loc_idx(start_pos_idx, rbracket_end_idx),
             pexp_attributes: Attributes::new(),
         };
         let e = parse_primary_expr(p, send, false);
@@ -2119,7 +2119,7 @@ fn parse_bracket_access(
         let equal_end_idx = p.prev_end_pos_idx();
         let rhs = parse_expr(p);
         let rhs_end_idx = p.loc_end_idx(rhs.pexp_loc);
-        let loc = p.mk_loc_idx_full(start_pos_idx, rhs_end_idx);
+        let loc = p.mk_loc_idx(start_pos_idx, rhs_end_idx);
         let Expression {
             pexp_desc,
             pexp_loc: e_loc,
@@ -2765,7 +2765,7 @@ fn make_list_expression_simple(
     for item in exprs.into_iter().rev() {
         // Reuse the existing PosIdx from item.pexp_loc to match OCaml's sharing
         let item_start_idx = p.loc_start_idx(item.pexp_loc);
-        let cons_loc = p.mk_loc_idx_full(item_start_idx, list_end_idx);
+        let cons_loc = p.mk_loc_idx(item_start_idx, list_end_idx);
         let item_idx = p.arena_mut().push_expr(item);
         let acc_idx = p.arena_mut().push_expr(acc);
         let lid_idx = p.expr_cons();
@@ -2821,7 +2821,7 @@ fn make_list_expression_with_loc(
     for item in exprs.into_iter().rev() {
         // Reuse the existing PosIdx from item.pexp_loc to match OCaml's sharing
         let item_start_idx = p.loc_start_idx(item.pexp_loc);
-        let cons_loc = p.mk_loc_idx_full(item_start_idx, list_end_idx);
+        let cons_loc = p.mk_loc_idx(item_start_idx, list_end_idx);
         let item_idx = p.arena_mut().push_expr(item);
         let acc_idx = p.arena_mut().push_expr(acc);
         acc = Expression {
@@ -2910,7 +2910,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                             pexp_loc: key_loc,
                             pexp_attributes: Attributes::new(),
                         };
-                        let tuple_loc = p.mk_loc_idx_full(key_start_idx, value_end_idx);
+                        let tuple_loc = p.mk_loc_idx(key_start_idx, value_end_idx);
                         let key_expr_idx = p.arena_mut().push_expr(key_expr);
                         let value_idx = p.arena_mut().push_expr(value);
                         let tuple = Expression {
@@ -2961,7 +2961,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     let make_dict_chunk =
         |p: &mut Parser<'_>, rows: Vec<Expression>, loc_override: Option<Location>| {
             let chunk_loc = loc_override.unwrap_or_else(|| match (rows.first(), rows.last()) {
-                (Some(first), Some(last)) => p.mk_loc_idx_full(
+                (Some(first), Some(last)) => p.mk_loc_idx(
                     p.loc_start_idx(first.pexp_loc),
                     p.loc_end_idx(last.pexp_loc),
                 ),
@@ -4960,7 +4960,7 @@ fn read_local_jsx_name(p: &mut Parser<'_>) -> Option<(String, LocIdx, JsxIdentKi
     let mut buf = head;
     let mut last_end = head_end;
     read_hyphen_chain(p, &mut buf, &mut last_end);
-    let loc = p.mk_loc_idx_full(start, last_end);
+    let loc = p.mk_loc_idx(start, last_end);
     Some((buf, loc, kind))
 }
 
@@ -4981,7 +4981,7 @@ fn read_jsx_tag_name(p: &mut Parser<'_>) -> Result<(JsxTagName, LocIdx), String>
         if p.token != Token::Dot {
             let path = super::core::build_longident(p.arena_mut(), &segs);
             let path_idx = p.push_longident(path);
-            let loc = p.mk_loc_idx_full(start, last_end);
+            let loc = p.mk_loc_idx(start, last_end);
             return Ok((JsxTagName::Upper(path_idx), loc));
         }
         p.next();
@@ -5075,7 +5075,7 @@ fn parse_jsx_opening_or_self_closing_element(
             p.next();
             let jsx_end_pos = p.end_pos_idx();
             p.expect(Token::GreaterThan);
-            let loc = p.mk_loc_idx_full(start_pos_idx, jsx_end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, jsx_end_pos);
             jsx_expression(
                 JsxElement::Unary(JsxUnaryElement {
                     tag_name: with_loc(name, name_loc),
@@ -5238,7 +5238,7 @@ fn parse_jsx_fragment(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     p.expect(Token::Forwardslash);
     let end_pos = p.end_pos_idx();
     p.expect(Token::GreaterThan);
-    let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+    let loc = p.mk_loc_idx(start_pos_idx, end_pos);
     let children: Vec<ExprIdx> = children
         .into_iter()
         .map(|e| p.arena_mut().push_expr(e))
@@ -5308,7 +5308,7 @@ fn parse_jsx_prop(p: &mut Parser<'_>) -> Option<JsxProp> {
                 return None;
             }
             let spread_end = p.end_pos_idx();
-            let loc = p.mk_loc_idx_full(spread_start, spread_end);
+            let loc = p.mk_loc_idx(spread_start, spread_end);
             p.next();
             let expr = p.arena_mut().push_expr(attr_expr);
             Some(JsxProp::Spreading { loc, expr })
@@ -5400,7 +5400,7 @@ fn parse_template_literal_with_prefix(
         (Some((_, first_loc, _)), Some((_, last_loc, _))) => {
             let start_idx = p.loc_start_idx(*first_loc);
             let end_idx = p.loc_end_idx(*last_loc);
-            p.mk_loc_idx_full(start_idx, end_idx)
+            p.mk_loc_idx(start_idx, end_idx)
         }
         _ => p.none_loc(),
     };
