@@ -757,15 +757,6 @@ impl QualifiedModuleComponents {
         Self::new_with_child_components_arc(access_path, Arc::new(signature), HashMap::new(), ctx)
     }
 
-    pub(crate) fn new_with_child_components(
-        access_path: Path,
-        signature: Signature,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        ctx: &super::context::TypeContext,
-    ) -> Self {
-        Self::new_with_child_components_arc(access_path, Arc::new(signature), child_components, ctx)
-    }
-
     pub(crate) fn new_with_child_components_arc(
         access_path: Path,
         signature: Arc<Signature>,
