@@ -296,15 +296,19 @@ impl Layout {
                         LiteralTag::Undefined => has_undefined = true,
                         _ => has_other_literal = true,
                     }
-                    literal_tags.insert(0, literal);
+                    literal_tags.push(literal);
                 }
                 ConstructorCase::Block(block) => {
                     if let Block::Untagged { block_type, .. } = block {
-                        block_types.insert(0, block_type.clone());
+                        block_types.push(block_type.clone());
                     }
                 }
             }
         }
+        // OCaml conses each tag onto the front of its list; build in source
+        // order and reverse once to get the same order.
+        block_types.reverse();
+        literal_tags.reverse();
         Self {
             unboxed: configuration.unboxed,
             constructors,
