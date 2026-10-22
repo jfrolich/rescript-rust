@@ -1048,20 +1048,11 @@ fn mcomp_enter_poly(
     body2: TypeExprRef,
     vars2: &[TypeExprRef],
 ) -> TypeResult<()> {
-    let known: HashSet<TypeExprRef> = state
-        .univar_pairs
-        .iter()
-        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
-        .collect();
-    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
-    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
-    if (tl1.iter().any(|t| known.contains(t))
-        && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl1, body2, &tl2))
-        || (tl2.iter().any(|t| known.contains(t))
-            && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl2, body1, &tl1))
-    {
+    let Some((tl1, tl2)) =
+        enter_poly_univars(ctx, env, &state.univar_pairs, body1, vars1, body2, vars2)
+    else {
         return mcomp_fail();
-    }
+    };
     let new_slot = |state: &mut McompState| {
         state.univar_slots.push(None);
         state.univar_slots.len() - 1
@@ -1077,15 +1068,41 @@ fn mcomp_enter_poly(
     result
 }
 
-/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464).
-fn mcomp_unify_univar(
+/// OCaml `enter_poly` (compiler/ml/ctype.ml:1561-1584) escape check, shared
+/// by `mcomp` and `unify`. Returns the represented `(tl1, tl2)`, or `None`
+/// when a univar would escape.
+fn enter_poly_univars(
     ctx: &TypeContext,
-    state: &mut McompState,
+    env: &Env,
+    univar_pairs: &[UnivarPairEntry],
+    body1: TypeExprRef,
+    vars1: &[TypeExprRef],
+    body2: TypeExprRef,
+    vars2: &[TypeExprRef],
+) -> Option<(Vec<TypeExprRef>, Vec<TypeExprRef>)> {
+    let known: HashSet<TypeExprRef> = univar_pairs
+        .iter()
+        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
+        .collect();
+    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
+    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
+    let escapes = (tl1.iter().any(|t| known.contains(t))
+        && mcomp_univars_escape(ctx, env, univar_pairs, &tl1, body2, &tl2))
+        || (tl2.iter().any(|t| known.contains(t))
+            && mcomp_univars_escape(ctx, env, univar_pairs, &tl2, body1, &tl1));
+    (!escapes).then_some((tl1, tl2))
+}
+
+/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464), shared by `mcomp`
+/// and `unify`. Returns whether `t1` and `t2` are bound to each other.
+fn univars_unify(
+    ctx: &TypeContext,
+    univar_pairs: &[UnivarPairEntry],
+    univar_slots: &mut [Option<TypeExprRef>],
     t1: TypeExprRef,
     t2: TypeExprRef,
-) -> TypeResult<()> {
-    for idx in (0..state.univar_pairs.len()).rev() {
-        let (cl1, cl2) = &state.univar_pairs[idx];
+) -> bool {
+    for (cl1, cl2) in univar_pairs.iter().rev() {
         let r1 = cl1
             .iter()
             .find(|(t, _)| ctx.repr(*t) == t1)
@@ -1095,21 +1112,33 @@ fn mcomp_unify_univar(
             .find(|(t, _)| ctx.repr(*t) == t2)
             .map(|(_, r)| *r);
         match (r1, r2) {
-            (Some(r1), Some(_)) if state.univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) => {
-                return Ok(());
+            (Some(r1), Some(_)) if univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) => {
+                return true;
             }
-            (Some(r1), Some(r2))
-                if state.univar_slots[r1].is_none() && state.univar_slots[r2].is_none() =>
-            {
-                state.univar_slots[r1] = Some(t2);
-                state.univar_slots[r2] = Some(t1);
-                return Ok(());
+            (Some(r1), Some(r2)) if univar_slots[r1].is_none() && univar_slots[r2].is_none() => {
+                univar_slots[r1] = Some(t2);
+                univar_slots[r2] = Some(t1);
+                return true;
             }
             (None, None) => continue,
-            _ => return mcomp_fail(),
+            _ => return false,
         }
     }
-    mcomp_fail()
+    false
+}
+
+/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464) for `mcomp`.
+fn mcomp_unify_univar(
+    ctx: &TypeContext,
+    state: &mut McompState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    if univars_unify(ctx, &state.univar_pairs, &mut state.univar_slots, t1, t2) {
+        Ok(())
+    } else {
+        mcomp_fail()
+    }
 }
 
 /// OCaml `unify_univar` (ctype.ml) over the unifier's `univar_pairs`.
@@ -1119,32 +1148,11 @@ fn unify_univar(
     t1: TypeExprRef,
     t2: TypeExprRef,
 ) -> TypeResult<()> {
-    for idx in (0..state.univar_pairs.len()).rev() {
-        let (cl1, cl2) = &state.univar_pairs[idx];
-        let r1 = cl1
-            .iter()
-            .find(|(t, _)| ctx.repr(*t) == t1)
-            .map(|(_, r)| *r);
-        let r2 = cl2
-            .iter()
-            .find(|(t, _)| ctx.repr(*t) == t2)
-            .map(|(_, r)| *r);
-        match (r1, r2) {
-            (Some(r1), Some(_)) if state.univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) => {
-                return Ok(());
-            }
-            (Some(r1), Some(r2))
-                if state.univar_slots[r1].is_none() && state.univar_slots[r2].is_none() =>
-            {
-                state.univar_slots[r1] = Some(t2);
-                state.univar_slots[r2] = Some(t1);
-                return Ok(());
-            }
-            (None, None) => continue,
-            _ => return Err(TypeError::Unify(Vec::new())),
-        }
+    if univars_unify(ctx, &state.univar_pairs, &mut state.univar_slots, t1, t2) {
+        Ok(())
+    } else {
+        Err(TypeError::Unify(Vec::new()))
     }
-    Err(TypeError::Unify(Vec::new()))
 }
 
 /// OCaml `enter_poly env univar_pairs t1 tl1 t2 tl2 (unify env)`.
@@ -1156,13 +1164,6 @@ fn unify_enter_poly(
     body2: TypeExprRef,
     vars2: &[TypeExprRef],
 ) -> TypeResult<()> {
-    let known: HashSet<TypeExprRef> = state
-        .univar_pairs
-        .iter()
-        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
-        .collect();
-    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
-    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
     let empty_env;
     let env = match state.env() {
         Some(env) => env,
@@ -1171,13 +1172,11 @@ fn unify_enter_poly(
             &empty_env
         }
     };
-    if (tl1.iter().any(|t| known.contains(t))
-        && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl1, body2, &tl2))
-        || (tl2.iter().any(|t| known.contains(t))
-            && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl2, body1, &tl1))
-    {
+    let Some((tl1, tl2)) =
+        enter_poly_univars(ctx, env, &state.univar_pairs, body1, vars1, body2, vars2)
+    else {
         return Err(TypeError::Unify(Vec::new()));
-    }
+    };
     let saved_slots = state.univar_slots.len();
     let new_slot = |state: &mut UnifyState| {
         state.univar_slots.push(None);
