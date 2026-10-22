@@ -3,9 +3,11 @@
 //! This module exists to mirror OCaml's staged pipeline:
 //! typedtree -> raw lambda -> lowered lambda -> JS IR.
 //!
-//! The initial scaffolding keeps the raw stage structurally separate
-//! from the existing lowered [`crate::lambda`] IR, so `-drawlambda`
-//! can evolve independently without perturbing JS generation.
+//! [`convert`] translates the typedtree into [`RawLambda`] (using
+//! [`matching`] for pattern matching and [`switch`] for integer switches),
+//! [`print`] renders it for `-drawlambda`, and [`lower`] turns it into the
+//! lowered [`crate::lambda`] IR that the optimization passes and JS
+//! generation consume.
 
 pub mod convert;
 pub(crate) mod lambda_scc;
@@ -17,7 +19,7 @@ pub(crate) mod typeopt;
 
 use crate::ident::Ident;
 use crate::lambda::{ApInfo, DirectionFlag, FunctionAttribute, Lambda, LetKind};
-use crate::lambda::{Comparison, Constant, FieldDbgInfo, Primitive, SetFieldDbgInfo};
+use crate::lambda::{Comparison, Constant, Primitive};
 use crate::location::Location;
 
 /// Raw-lambda switch construct.
@@ -333,28 +335,19 @@ impl RawLambda {
             cond if is_assertfalse(&then_) => RawLambda::seq(cond, else_),
             // lambda.ml `if_`: `if a then true else false` is `a`, and
             // `if a then false else true` is `not a`, when `a` is boolean.
-            cond if matches!(
-                (&then_, &else_),
+            cond => match (raw_has_boolean_type(&cond), &then_, &else_) {
                 (
+                    Some(_),
                     RawLambda::Lconst(Constant::JsTrue),
-                    RawLambda::Lconst(Constant::JsFalse)
-                )
-            ) && raw_has_boolean_type(&cond).is_some() =>
-            {
-                cond
-            }
-            cond if matches!(
-                (&then_, &else_),
-                (
                     RawLambda::Lconst(Constant::JsFalse),
-                    RawLambda::Lconst(Constant::JsTrue)
-                )
-            ) && raw_has_boolean_type(&cond).is_some() =>
-            {
-                let loc = raw_has_boolean_type(&cond).expect("checked above");
-                raw_not(loc, cond)
-            }
-            cond => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+                ) => cond,
+                (
+                    Some(loc),
+                    RawLambda::Lconst(Constant::JsFalse),
+                    RawLambda::Lconst(Constant::JsTrue),
+                ) => raw_not(loc, cond),
+                _ => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+            },
         }
     }
 
@@ -614,9 +607,6 @@ impl RawLambda {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _keep_public_types_used(_cmp: Comparison, _field: FieldDbgInfo, _set_field: SetFieldDbgInfo) {}
 
 /// `Lambda.has_boolean_type` (`compiler/ml/lambda.ml:1137-1147`).
 fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
