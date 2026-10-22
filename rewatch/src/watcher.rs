@@ -181,36 +181,35 @@ fn carry_forward_compile_state(previous: &BuildCommandState, next: &mut BuildCom
             continue;
         }
 
-        match (&previous_module.source_type, &mut next_module.source_type) {
-            (SourceType::SourceFile(previous_source), SourceType::SourceFile(next_source)) => {
-                if previous_source.implementation.path == next_source.implementation.path {
-                    // A changed CMI can leave a dependent blocked behind a failed
-                    // implementation. Asset timestamps alone cannot recover this
-                    // dirtiness when a full watcher rebuild recreates the state.
-                    if previous_module.compile_dirty {
-                        next_module.compile_dirty = true;
-                    }
-                    next_source.implementation.compile_warnings =
-                        previous_source.implementation.compile_warnings.clone();
-
-                    if next_source.implementation.compile_warnings.is_some() {
-                        next_source.implementation.compile_state =
-                            previous_source.implementation.compile_state.clone();
-                    }
+        if let (SourceType::SourceFile(previous_source), SourceType::SourceFile(next_source)) =
+            (&previous_module.source_type, &mut next_module.source_type)
+        {
+            if previous_source.implementation.path == next_source.implementation.path {
+                // A changed CMI can leave a dependent blocked behind a failed
+                // implementation. Asset timestamps alone cannot recover this
+                // dirtiness when a full watcher rebuild recreates the state.
+                if previous_module.compile_dirty {
+                    next_module.compile_dirty = true;
                 }
+                next_source.implementation.compile_warnings =
+                    previous_source.implementation.compile_warnings.clone();
 
-                if let (Some(previous_interface), Some(next_interface)) =
-                    (&previous_source.interface, &mut next_source.interface)
-                    && previous_interface.path == next_interface.path
-                {
-                    next_interface.compile_warnings = previous_interface.compile_warnings.clone();
-
-                    if next_interface.compile_warnings.is_some() {
-                        next_interface.compile_state = previous_interface.compile_state.clone();
-                    }
+                if next_source.implementation.compile_warnings.is_some() {
+                    next_source.implementation.compile_state =
+                        previous_source.implementation.compile_state.clone();
                 }
             }
-            _ => (),
+
+            if let (Some(previous_interface), Some(next_interface)) =
+                (&previous_source.interface, &mut next_source.interface)
+                && previous_interface.path == next_interface.path
+            {
+                next_interface.compile_warnings = previous_interface.compile_warnings.clone();
+
+                if next_interface.compile_warnings.is_some() {
+                    next_interface.compile_state = previous_interface.compile_state.clone();
+                }
+            }
         }
     }
 }
@@ -734,7 +733,6 @@ mod tests {
     use crate::project_context::ProjectContext;
     use ahash::{AHashMap, AHashSet};
     use std::path::PathBuf;
-    use std::sync::RwLock;
     use std::time::SystemTime;
 
     fn test_project_context(root: &str) -> ProjectContext {
