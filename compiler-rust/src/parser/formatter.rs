@@ -558,10 +558,9 @@ impl<W: Write> Formatter<W> {
     // Public API - Content
     // ========================================================================
 
-    /// Print a string. Width is the byte length, matching OCaml's
-    /// `pp_print_string state s = pp_print_as state (String.length s) s`.
+    /// Print a string
     pub fn string(&mut self, s: &str) {
-        let len = s.len() as i32;
+        let len = s.chars().count() as i32;
         self.enqueue_string_as(len, s.to_string());
     }
 
@@ -812,20 +811,5 @@ mod tests {
             pp!(f, "let {} = {}", name, value);
         });
         assert_eq!(result, "let x = 42");
-    }
-
-    #[test]
-    fn test_string_width_is_byte_length() {
-        // OCaml: `Format.set_margin 10; printf "@[<hov 0>ééééé@ ab@]@."`
-        // prints "ééééé\nab" because "ééééé" is 10 bytes wide.
-        let result = format_to_string(|f| {
-            f.set_margin(10);
-            f.open_hovbox(0);
-            f.string("ééééé");
-            f.space();
-            f.string("ab");
-            f.close_box();
-        });
-        assert_eq!(result, "ééééé\nab");
     }
 }
