@@ -5,7 +5,7 @@
 //! This corresponds to OCaml's `js_dump_program.ml`.
 
 use super::op::Kind;
-use super::printer::{JsPrinter, convert_ident_name};
+use super::printer::{JsPrinter, js_export_name};
 use super::source_map::{SourceMapBuilder, SourceMapMode, inline_comment, linked_comment};
 use super::{
     Block, DepsProgram, Expression, ExpressionDesc, ModuleFormat, ModulePathResolver, Program,
@@ -195,11 +195,7 @@ impl JsPrinter {
             self.newline();
             let local_name = self.ident_name(export);
             self.write(&local_name);
-            let export_name = if export.name() == "default" {
-                "default".to_string()
-            } else {
-                convert_ident_name(export.name())
-            };
+            let export_name = js_export_name(export.name());
             if local_name != export_name {
                 self.write(" as ");
                 self.write(&export_name);
@@ -217,11 +213,7 @@ impl JsPrinter {
                 self.newline();
             }
             let local_name = self.ident_name(export);
-            let export_name = if export.name() == "default" {
-                "default".to_string()
-            } else {
-                convert_ident_name(export.name())
-            };
+            let export_name = js_export_name(export.name());
             self.write("exports.");
             self.write(&export_name);
             self.write(" = ");
@@ -334,15 +326,14 @@ pub fn print_deps_program_with_directives(
     debug: bool,
     jsx_preserve: bool,
 ) -> String {
-    let capacity = estimated_deps_program_output_capacity(program, directives, true);
-    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+    print_deps_program_with_directives_and_options(
+        program,
         module_path_resolver,
+        directives,
         debug,
         jsx_preserve,
-        capacity,
-    );
-    printer.print_deps_program_with_directives(program, directives);
-    printer.into_output()
+        true,
+    )
 }
 
 pub fn print_deps_program_with_directives_and_options(
@@ -381,13 +372,7 @@ pub fn print_deps_program_with_source_map(
     source_root: &str,
     source_file_names: Arc<HashMap<StrIdx, String>>,
 ) -> (String, Option<String>) {
-    let capacity = estimated_block_output_capacity(
-        program.program.block.len(),
-        program.program.exports.len(),
-        program.modules.len(),
-        directives.iter().map(String::len).sum(),
-        emit_header,
-    );
+    let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
     let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
         module_path_resolver,
         debug,
