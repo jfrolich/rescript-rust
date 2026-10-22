@@ -191,96 +191,91 @@ pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T
     }
 }
 
+impl FlagState {
+    /// Apply one GenType CLI flag, reading its value (if it takes one) from
+    /// `next`. Returns whether `flag` is a GenType flag; `next` is called
+    /// only for flags that take a value. Mirrors
+    /// compiler/bsc/rescript_compiler_main.ml:266-270 and :300-343.
+    pub fn apply(&mut self, flag: &str, next: impl FnOnce() -> Option<String>) -> bool {
+        match flag {
+            "-bs-project-root" => {
+                if let Some(value) = next() {
+                    self.project_root = value;
+                }
+            }
+            "-bs-gentype-module" => {
+                if let Some(value) = next() {
+                    self.module_flag = module_of_string(&value);
+                }
+            }
+            "-bs-gentype-module-resolution" => {
+                if let Some(value) = next() {
+                    self.module_resolution_flag = module_resolution_of_string(&value);
+                }
+            }
+            "-bs-gentype-export-interfaces" => {
+                self.export_interfaces_flag = true;
+            }
+            "-bs-gentype-generated-extension" => {
+                if let Some(value) = next() {
+                    self.generated_file_extension_flag = Some(value);
+                }
+            }
+            "-bs-gentype-suffix" => {
+                if let Some(value) = next() {
+                    self.suffix_flag = Some(value);
+                }
+            }
+            "-bs-gentype-shim" => {
+                if let Some(value) = next()
+                    && let Some((from_module, to_module)) = value.split_once('=')
+                {
+                    self.shims
+                        .insert(0, (from_module.to_string(), to_module.to_string()));
+                }
+            }
+            "-bs-gentype-debug" => {
+                if let Some(value) = next() {
+                    crate::gentype::debug::set_item(&value);
+                }
+            }
+            "-bs-gentype-dep" => {
+                if let Some(value) = next() {
+                    self.bs_dependencies_flag.insert(0, value);
+                }
+            }
+            "-bs-gentype-source-dir" => {
+                if let Some(value) = next() {
+                    self.source_dirs_flag.insert(0, value);
+                }
+            }
+            "-bs-gentype-dep-path" => {
+                if let Some(value) = next()
+                    && let Some((name, path)) = value.split_once('=')
+                {
+                    self.dep_paths_flag
+                        .insert(0, (name.to_string(), path.to_string()));
+                }
+            }
+            "-bs-gentype-bsb-project-root" => {
+                if let Some(value) = next() {
+                    self.bsb_project_root = value;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
 pub fn flag_state_from_cli_args(args: &[String]) -> FlagState {
     // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343. This helper lets
     // the bsc subprocess path and rewatch in-process path build GenTypeConfig.t
     // from the same observable flags.
     let mut flags = FlagState::default();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-bs-project-root" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.project_root = value.clone();
-                }
-                i += 2;
-            }
-            "-bs-gentype-module" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.module_flag = module_of_string(value);
-                }
-                i += 2;
-            }
-            "-bs-gentype-module-resolution" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.module_resolution_flag = module_resolution_of_string(value);
-                }
-                i += 2;
-            }
-            "-bs-gentype-export-interfaces" => {
-                flags.export_interfaces_flag = true;
-                i += 1;
-            }
-            "-bs-gentype-generated-extension" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.generated_file_extension_flag = Some(value.clone());
-                }
-                i += 2;
-            }
-            "-bs-gentype-suffix" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.suffix_flag = Some(value.clone());
-                }
-                i += 2;
-            }
-            "-bs-gentype-shim" => {
-                if let Some(value) = args.get(i + 1)
-                    && let Some((from_module, to_module)) = value.split_once('=')
-                {
-                    flags
-                        .shims
-                        .insert(0, (from_module.to_string(), to_module.to_string()));
-                }
-                i += 2;
-            }
-            "-bs-gentype-debug" => {
-                if let Some(value) = args.get(i + 1) {
-                    crate::gentype::debug::set_item(value);
-                }
-                i += 2;
-            }
-            "-bs-gentype-dep" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.bs_dependencies_flag.insert(0, value.clone());
-                }
-                i += 2;
-            }
-            "-bs-gentype-source-dir" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.source_dirs_flag.insert(0, value.clone());
-                }
-                i += 2;
-            }
-            "-bs-gentype-dep-path" => {
-                if let Some(value) = args.get(i + 1)
-                    && let Some((name, path)) = value.split_once('=')
-                {
-                    flags
-                        .dep_paths_flag
-                        .insert(0, (name.to_string(), path.to_string()));
-                }
-                i += 2;
-            }
-            "-bs-gentype-bsb-project-root" => {
-                if let Some(value) = args.get(i + 1) {
-                    flags.bsb_project_root = value.clone();
-                }
-                i += 2;
-            }
-            _ => {
-                i += 1;
-            }
-        }
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        flags.apply(arg, || args.next().cloned());
     }
     flags
 }
