@@ -765,12 +765,7 @@ mod tests {
             path: root_path.clone(),
         });
 
-        ProjectContext {
-            current_config: config,
-            monorepo_context: None,
-            node_modules_exist_cache: RwLock::new(AHashMap::new()),
-            packages_cache: RwLock::new(AHashMap::new()),
-        }
+        ProjectContext::with_empty_caches(config, None)
     }
 
     fn test_package(name: &str, path: &str) -> Package {
