@@ -124,14 +124,9 @@ pub fn format_finished_compilation_message(
 
 #[instrument(name = "rewatch.compiler_args", skip_all, fields(file_path = %rescript_file_path.display()))]
 pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
-    let _span = info_span!(
-        "rewatch.compiler_args",
-        file_path = %rescript_file_path.display()
-    )
-    .entered();
     let filename = &helpers::get_abs_path(rescript_file_path);
     let current_package = helpers::get_abs_path(
-        &helpers::get_nearest_config(rescript_file_path).expect("Couldn't find package root"),
+        &helpers::get_nearest_config(rescript_file_path).context("Couldn't find package root")?,
     );
     let project_context = ProjectContext::new(&current_package)?;
 
@@ -143,10 +138,16 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     };
 
     // make PathBuf from package root and get the relative path for filename
-    let relative_filename = filename.strip_prefix(PathBuf::from(&current_package)).unwrap();
+    let relative_filename = filename.strip_prefix(&current_package).with_context(|| {
+        format!(
+            "{} is not inside package {}",
+            filename.display(),
+            current_package.display()
+        )
+    })?;
 
-    let file_path = PathBuf::from(&current_package).join(filename);
-    let contents = helpers::read_file(&file_path).expect("Error reading file");
+    let file_path = current_package.join(filename);
+    let contents = helpers::read_file(&file_path).context("Error reading file")?;
 
     let (ast_path, parser_args) = parser_args(
         &project_context,
