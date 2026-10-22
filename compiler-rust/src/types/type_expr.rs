@@ -455,7 +455,7 @@ pub(crate) const STORE_REF_TAG: u32 = 1 << 31;
 /// worker store. Shared references are also `is_store()`: every non-local
 /// cell is read-only outside a store build and written through overlays.
 pub(crate) const SHARED_REF_TAG: u32 = 1 << 30;
-const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
+pub(crate) const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
 
 /// Compact physical identity for a type node, matching OCaml `type_expr`
 /// identity (`compiler/ml/types.ml:22`, `compiler/ml/btype.ml:46-48`).

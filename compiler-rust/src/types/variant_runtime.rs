@@ -216,7 +216,7 @@ impl LayoutRef {
     pub(crate) fn from_store_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("variant layout store index exceeds u32::MAX");
         assert!(
-            raw & super::type_expr::STORE_REF_TAG == 0,
+            raw & super::type_expr::SHARED_REF_BITS == 0,
             "variant layout store index exceeds the tag range"
         );
         Self(raw | super::type_expr::STORE_REF_TAG)
@@ -225,7 +225,7 @@ impl LayoutRef {
     /// Layout `idx` of the process-wide shared pool.
     #[inline]
     pub(crate) fn from_shared_index(idx: u32) -> Self {
-        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        let bits = super::type_expr::SHARED_REF_BITS;
         assert!(
             idx & bits == 0,
             "shared variant layout index exceeds the tag range"
@@ -235,14 +235,14 @@ impl LayoutRef {
 
     #[inline]
     pub(crate) fn is_shared(self) -> bool {
-        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        let bits = super::type_expr::SHARED_REF_BITS;
         self.0 & bits == bits
     }
 
     #[inline]
     pub(crate) fn shared_index(self) -> u32 {
         debug_assert!(self.is_shared());
-        self.0 & !(super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG)
+        self.0 & !super::type_expr::SHARED_REF_BITS
     }
 
     /// Whether this layout lives in the per-thread store.
@@ -263,8 +263,8 @@ impl LayoutRef {
     #[inline]
     pub(crate) fn store_index(self) -> usize {
         debug_assert!(
-            self.is_store(),
-            "local variant layout used as a store index"
+            self.is_store() && !self.is_shared(),
+            "non-store variant layout used as a store index"
         );
         (self.0 & !super::type_expr::STORE_REF_TAG) as usize
     }
