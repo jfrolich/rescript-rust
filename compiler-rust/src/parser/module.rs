@@ -2275,7 +2275,7 @@ fn parse_type_equation_and_representation(
         Token::Lbrace => {
             parse_record_or_object_decl(p, inline_ctx, inline_ctx.map(|_| current_type_name_path))
         }
-        Token::Private => parse_private_eq_or_repr(p, current_type_name_path),
+        Token::Private => parse_private_eq_or_repr(p),
         Token::Bar | Token::DotDot | Token::DocComment { .. } => {
             let (private, kind) = parse_type_representation(p, None, None);
             (None, kind, private)
@@ -2396,10 +2396,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
 }
 
 /// OCaml `parse_private_eq_or_repr` (res_core.ml:6081-6097).
-fn parse_private_eq_or_repr(
-    p: &mut Parser<'_>,
-    _current_type_name_path: &Vec<StrIdx>,
-) -> TypeEquation {
+fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquation {
     p.expect(Token::Private);
     match p.token {
         Token::Lbrace => {

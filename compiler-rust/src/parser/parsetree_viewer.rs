@@ -431,7 +431,7 @@ fn is_multiline_text(txt: &str) -> bool {
 }
 
 /// Check if an expression is "huggable" as a RHS (simpler than is_huggable_expression).
-pub fn is_huggable_rhs(_arena: &ParseArena, expr: &Expression) -> bool {
+pub fn is_huggable_rhs(expr: &Expression) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)

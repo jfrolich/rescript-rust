@@ -774,7 +774,7 @@ pub fn print_comments_inside(cmt_tbl: &mut CommentTable, loc: LocIdx, arena: &Pa
 }
 
 /// Print comments inside an empty file.
-pub fn print_comments_inside_file(cmt_tbl: &mut CommentTable, _arena: &ParseArena) -> Doc {
+pub fn print_comments_inside_file(cmt_tbl: &mut CommentTable) -> Doc {
     // Use PosRange::none() which corresponds to Location::none()
     match cmt_tbl.inside.remove(&PosRange::none()) {
         None => Doc::nil(),
@@ -7238,7 +7238,7 @@ fn print_try_expression(
 
 /// Check if a pattern needs parentheses in a case context.
 /// Constraint patterns like `(p: typ)` need parens at the case level.
-fn case_pattern_needs_parens(_arena: &ParseArena, pattern: &Pattern) -> bool {
+fn case_pattern_needs_parens(pattern: &Pattern) -> bool {
     // res_printer.ml:5545-5549: every constrained case pattern is
     // parenthesized, `(module(M: S))` included.
     matches!(&*pattern.ppat_desc, PatternDesc::Ppat_constraint(_))
@@ -7396,7 +7396,7 @@ fn print_case_content(
                 matches!(name, "()" | "true" | "false")
             }
             ExpressionDesc::Pexp_constant(_) | ExpressionDesc::Pexp_ident(_) => true,
-            _ if parsetree_viewer::is_huggable_rhs(arena, rhs_expr) => true,
+            _ if parsetree_viewer::is_huggable_rhs(rhs_expr) => true,
             _ => false,
         };
 
@@ -7406,7 +7406,7 @@ fn print_case_content(
     // Print pattern
     let pattern_doc = {
         let doc = print_pattern(state, lhs, cmt_tbl, arena);
-        if case_pattern_needs_parens(arena, lhs) {
+        if case_pattern_needs_parens(lhs) {
             add_parens(doc)
         } else {
             doc
@@ -7997,7 +7997,7 @@ pub fn print_structure(
     arena: &ParseArena,
 ) -> Doc {
     if structure.is_empty() {
-        return print_comments_inside_file(cmt_tbl, arena);
+        return print_comments_inside_file(cmt_tbl);
     }
 
     let mut sequential_state = state.clone();
@@ -8021,7 +8021,7 @@ pub fn print_signature(
     arena: &ParseArena,
 ) -> Doc {
     if signature.is_empty() {
-        return print_comments_inside_file(cmt_tbl, arena);
+        return print_comments_inside_file(cmt_tbl);
     }
 
     let mut sequential_state = state.clone();
