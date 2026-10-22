@@ -2356,18 +2356,20 @@ impl PersistentEnv {
     }
 
     fn find_in_path_uncap_entry(&self, filename: &str) -> Option<(String, String)> {
+        let uncap = filename
+            .chars()
+            .next()
+            .filter(char::is_ascii_uppercase)
+            .map(|first_char| format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]));
         for (index, dir) in self.load_path.iter().enumerate() {
             let display_dir = self.load_path_display.get(index).unwrap_or(dir);
-            if let Some(first_char) = filename.chars().next() {
-                if first_char.is_ascii_uppercase() {
-                    let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
-                    let uncap_path = dir.join(&uncap);
-                    if uncap_path.exists() {
-                        return Some((
-                            uncap_path.to_string_lossy().into_owned(),
-                            display_dir.join(uncap).to_string_lossy().into_owned(),
-                        ));
-                    }
+            if let Some(uncap) = &uncap {
+                let uncap_path = dir.join(uncap);
+                if uncap_path.exists() {
+                    return Some((
+                        uncap_path.to_string_lossy().into_owned(),
+                        display_dir.join(uncap).to_string_lossy().into_owned(),
+                    ));
                 }
             }
 
