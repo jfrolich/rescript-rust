@@ -224,7 +224,7 @@ impl Sexp {
 /// Unwrap an uppercase exotic identifier encoding.
 /// `\"Uident"` becomes `Uident`; other strings pass through unchanged.
 /// Matches OCaml's `Ext_ident.unwrap_uppercase_exotic`.
-fn unwrap_uppercase_exotic(s: &str) -> &str {
+pub(crate) fn unwrap_uppercase_exotic(s: &str) -> &str {
     let bytes = s.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' && bytes[bytes.len() - 1] == b'"' {
         &s[2..s.len() - 1]
@@ -233,7 +233,7 @@ fn unwrap_uppercase_exotic(s: &str) -> &str {
     }
 }
 
-fn quote_string_literal(s: &str) -> String {
+pub(crate) fn quote_string_literal(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 2);
     result.push('"');
     result.push_str(s);
@@ -241,11 +241,11 @@ fn quote_string_literal(s: &str) -> String {
     result
 }
 
-fn quote_string(s: &str) -> String {
+pub(crate) fn quote_string(s: &str) -> String {
     quote_string_literal(unwrap_uppercase_exotic(s))
 }
 
-fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
+pub(crate) fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
 where
     F: Fn(&T) -> Sexp,
 {
@@ -260,7 +260,7 @@ where
 // Longident
 // ============================================================================
 
-fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
+pub(crate) fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
     match lid {
         Longident::Lident(name_idx) => {
             let name = arena.get_string(*name_idx);
@@ -282,11 +282,11 @@ fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> S
     }
 }
 
-fn longident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
+pub(crate) fn longident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
     Sexp::list(vec![Sexp::atom("longident"), longident_inner(arena, lid)])
 }
 
-fn longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp {
+pub(crate) fn longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp {
     longident(arena, arena.get_longident(idx))
 }
 
@@ -294,49 +294,49 @@ fn longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp
 // Flags
 // ============================================================================
 
-fn rec_flag(flag: &RecFlag) -> Sexp {
+pub(crate) fn rec_flag(flag: &RecFlag) -> Sexp {
     Sexp::atom(match flag {
         RecFlag::Recursive => "Recursive",
         RecFlag::Nonrecursive => "Nonrecursive",
     })
 }
 
-fn closed_flag(flag: &ClosedFlag) -> Sexp {
+pub(crate) fn closed_flag(flag: &ClosedFlag) -> Sexp {
     Sexp::atom(match flag {
         ClosedFlag::Closed => "Closed",
         ClosedFlag::Open => "Open",
     })
 }
 
-fn direction_flag(flag: &DirectionFlag) -> Sexp {
+pub(crate) fn direction_flag(flag: &DirectionFlag) -> Sexp {
     Sexp::atom(match flag {
         DirectionFlag::Upto => "Upto",
         DirectionFlag::Downto => "Downto",
     })
 }
 
-fn override_flag(flag: &OverrideFlag) -> Sexp {
+pub(crate) fn override_flag(flag: &OverrideFlag) -> Sexp {
     Sexp::atom(match flag {
         OverrideFlag::Override => "Override",
         OverrideFlag::Fresh => "Fresh",
     })
 }
 
-fn private_flag(flag: &PrivateFlag) -> Sexp {
+pub(crate) fn private_flag(flag: &PrivateFlag) -> Sexp {
     Sexp::atom(match flag {
         PrivateFlag::Private => "Private",
         PrivateFlag::Public => "Public",
     })
 }
 
-fn mutable_flag(flag: &MutableFlag) -> Sexp {
+pub(crate) fn mutable_flag(flag: &MutableFlag) -> Sexp {
     Sexp::atom(match flag {
         MutableFlag::Mutable => "Mutable",
         MutableFlag::Immutable => "Immutable",
     })
 }
 
-fn variance(v: &Variance) -> Sexp {
+pub(crate) fn variance(v: &Variance) -> Sexp {
     Sexp::atom(match v {
         Variance::Covariant => "Covariant",
         Variance::Contravariant => "Contravariant",

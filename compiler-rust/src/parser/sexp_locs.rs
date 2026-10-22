@@ -6,8 +6,10 @@
 
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx};
 use crate::parser::ast::*;
-use crate::parser::longident::Longident;
-use crate::parser::sexp::{Sexp, string_to_latin1_bytes};
+use crate::parser::sexp::{
+    Sexp, closed_flag, direction_flag, longident_idx, map_empty, mutable_flag, override_flag,
+    private_flag, quote_string, quote_string_literal, rec_flag, string_to_latin1_bytes, variance,
+};
 use std::io::Write;
 
 // ============================================================================
@@ -33,51 +35,8 @@ fn location(loc: LocIdx, arena: &ParseArena) -> Sexp {
 }
 
 // ============================================================================
-// String quoting (reuse from sexp module patterns)
+// Lists
 // ============================================================================
-
-/// Unwrap an uppercase exotic identifier encoding.
-/// `\"Uident"` -> `Uident`, other strings pass through unchanged.
-/// Matches OCaml's Ext_ident.unwrap_uppercase_exotic.
-fn unwrap_uppercase_exotic(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' && bytes[bytes.len() - 1] == b'"' {
-        &s[2..s.len() - 1]
-    } else {
-        s
-    }
-}
-
-fn quote_string(s: &str) -> String {
-    // OCaml sexp debugger applies unwrap_uppercase_exotic to all strings
-    let s = unwrap_uppercase_exotic(s);
-    let mut result = String::with_capacity(s.len() + 2);
-    result.push('"');
-    result.push_str(s);
-    result.push('"');
-    result
-}
-
-/// Quote a string literal constant - does NOT apply unwrap_uppercase_exotic.
-/// Matches OCaml's string_literal function in res_ast_debugger.ml.
-fn quote_string_literal(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 2);
-    result.push('"');
-    result.push_str(s);
-    result.push('"');
-    result
-}
-
-fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
-where
-    F: Fn(&T) -> Sexp,
-{
-    if items.is_empty() {
-        vec![Sexp::list(vec![])]
-    } else {
-        items.iter().map(f).collect()
-    }
-}
 
 fn map_empty_with_arena<'a, T, F>(items: &'a [T], arena: &'a ParseArena, f: F) -> Vec<Sexp>
 where
@@ -91,101 +50,8 @@ where
 }
 
 // ============================================================================
-// Longident
+// Positions
 // ============================================================================
-
-fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
-    match lid {
-        Longident::Lident(name_idx) => {
-            let name = arena.get_string(*name_idx);
-            Sexp::list(vec![Sexp::atom("Lident"), Sexp::atom(&quote_string(name))])
-        }
-        Longident::Ldot(prefix, name_idx) => {
-            let name = arena.get_string(*name_idx);
-            Sexp::list(vec![
-                Sexp::atom("Ldot"),
-                longident_inner(arena, prefix),
-                Sexp::atom(&quote_string(name)),
-            ])
-        }
-        Longident::Lapply(l1, l2) => Sexp::list(vec![
-            Sexp::atom("Lapply"),
-            longident_inner(arena, l1),
-            longident_inner(arena, l2),
-        ]),
-    }
-}
-
-/// Returns (longident ...) without location - location is added separately at call sites
-fn longident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
-    Sexp::list(vec![Sexp::atom("longident"), longident_inner(arena, lid)])
-}
-
-/// Helper to convert LidentIdx to longident sexp
-fn longident_idx(arena: &ParseArena, idx: LidentIdx) -> Sexp {
-    longident(arena, arena.get_longident(idx))
-}
-
-// ============================================================================
-// Flags
-// ============================================================================
-
-fn rec_flag(flag: &RecFlag) -> Sexp {
-    Sexp::atom(match flag {
-        RecFlag::Recursive => "Recursive",
-        RecFlag::Nonrecursive => "Nonrecursive",
-    })
-}
-
-fn closed_flag(flag: &ClosedFlag) -> Sexp {
-    Sexp::atom(match flag {
-        ClosedFlag::Closed => "Closed",
-        ClosedFlag::Open => "Open",
-    })
-}
-
-fn direction_flag(flag: &DirectionFlag) -> Sexp {
-    Sexp::atom(match flag {
-        DirectionFlag::Upto => "Upto",
-        DirectionFlag::Downto => "Downto",
-    })
-}
-
-fn override_flag(flag: &OverrideFlag) -> Sexp {
-    Sexp::atom(match flag {
-        OverrideFlag::Override => "Override",
-        OverrideFlag::Fresh => "Fresh",
-    })
-}
-
-fn private_flag(flag: &PrivateFlag) -> Sexp {
-    Sexp::atom(match flag {
-        PrivateFlag::Private => "Private",
-        PrivateFlag::Public => "Public",
-    })
-}
-
-fn mutable_flag(flag: &MutableFlag) -> Sexp {
-    Sexp::atom(match flag {
-        MutableFlag::Mutable => "Mutable",
-        MutableFlag::Immutable => "Immutable",
-    })
-}
-
-fn variance(v: &Variance) -> Sexp {
-    Sexp::atom(match v {
-        Variance::Covariant => "Covariant",
-        Variance::Contravariant => "Contravariant",
-        Variance::Invariant => "Invariant",
-    })
-}
-
-fn arity(a: &Arity, arena: &ParseArena) -> Sexp {
-    match arena.get_arity(*a) {
-        Some(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
-        None => Sexp::atom("None"),
-    }
-}
 
 fn position_opt_idx(pos: &Option<PosIdx>, arena: &ParseArena) -> Sexp {
     match pos {
