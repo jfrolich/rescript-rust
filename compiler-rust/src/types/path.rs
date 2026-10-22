@@ -81,27 +81,6 @@ impl Path {
         Path::Pident(id)
     }
 
-    /// Create a path from a longident.
-    ///
-    /// Requires a string lookup function because Longident stores StrIdx.
-    pub fn from_longident<'a>(
-        lid: &crate::parser::longident::Longident,
-        get_str: impl Fn(crate::intern::StrIdx) -> &'a str + Copy,
-    ) -> Self {
-        use crate::parser::longident::Longident;
-        match lid {
-            Longident::Lident(name) => Path::pident(Ident::create_local(get_str(*name))),
-            Longident::Ldot(prefix, name) => {
-                let prefix_path = Path::from_longident(prefix, get_str);
-                Path::pdot(prefix_path, get_str(*name))
-            }
-            Longident::Lapply(_, _) => {
-                // Placeholder - proper implementation would handle functor application
-                Path::pident(Ident::create_local("apply"))
-            }
-        }
-    }
-
     /// Create a dotted path.
     #[inline]
     pub fn pdot(prefix: Path, name: impl Into<crate::name::Name>) -> Self {
@@ -155,7 +134,8 @@ impl Path {
 
     /// Get the binding time of this path.
     ///
-    /// This is the minimum stamp among all identifiers in the path.
+    /// For a functor application this is the later of the two binding
+    /// times (OCaml `Path.binding_time`).
     pub fn binding_time(&self) -> i32 {
         match self {
             Path::Pident(id) => id.binding_time(),
@@ -345,8 +325,22 @@ impl PartialOrd for Path {
 }
 
 impl fmt::Display for Path {
+    /// Same text as `name()`, written without an intermediate `String`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        match self {
+            Path::Pident(id) => f.write_str(id.name()),
+            Path::Pdot(p, s, _) => {
+                fmt::Display::fmt(&**p, f)?;
+                f.write_str(".")?;
+                f.write_str(s)
+            }
+            Path::Papply(p1, p2) => {
+                fmt::Display::fmt(&**p1, f)?;
+                f.write_str("(")?;
+                fmt::Display::fmt(&**p2, f)?;
+                f.write_str(")")
+            }
+        }
     }
 }
 
@@ -381,7 +375,12 @@ impl Path {
 
     /// Check if this path refers to a constructor type.
     pub fn is_constructor_typath(&self) -> bool {
-        !matches!(self.constructor_typath(), Typath::Regular(_))
+        // Same cases as `constructor_typath`, without building the result.
+        match self {
+            Path::Pident(id) => is_uident_str(id.name()),
+            Path::Pdot(_, s, _) => is_uident_str(s),
+            Path::Papply(..) => false,
+        }
     }
 }
 
