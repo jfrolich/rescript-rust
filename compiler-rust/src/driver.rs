@@ -1689,10 +1689,10 @@ fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &Pa
     let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
         return false;
     };
-    match (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()) {
-        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false) => true,
-        _ => false,
-    }
+    matches!(
+        (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()),
+        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false)
+    )
 }
 
 fn invalid_enabled_let_unwrap_in_bindings(
@@ -2224,14 +2224,17 @@ fn format_reparse_warnings(type_ctx: &TypeContext) -> String {
     output
 }
 
-/// The typed environment recorded for an error, or an empty one when none
-/// was captured. Error printers only read the environment.
-fn typed_env_or_empty(
+/// Run `f` with the typed environment recorded for an error, or an empty one
+/// when none was captured. Error printers only read the environment.
+fn with_typed_env_or_empty<R>(
     type_ctx: &TypeContext,
     env: Option<crate::types::typedtree::EnvRef>,
-) -> std::sync::Arc<crate::types::Env> {
-    env.and_then(|env| type_ctx.get_typed_env(env))
-        .unwrap_or_else(|| std::sync::Arc::new(crate::types::Env::empty()))
+    f: impl FnOnce(&crate::types::Env) -> R,
+) -> R {
+    match env.and_then(|env| type_ctx.get_typed_env(env)) {
+        Some(env) => f(&env),
+        None => f(&crate::types::Env::empty()),
+    }
 }
 
 fn type_mod_error_to_anyhow_styled(
@@ -2341,9 +2344,10 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = typed_env_or_empty(type_ctx, *env);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_or_pattern_type_clash(ppf, type_ctx, &env, id.name(), trace)
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_or_pattern_type_clash(ppf, type_ctx, env, id.name(), trace)
+                })
             });
             UserDiagnostic::new(
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
@@ -2855,9 +2859,10 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = typed_env_or_empty(type_ctx, *env);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_pattern_type_clash(ppf, type_ctx, &env, trace)
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_pattern_type_clash(ppf, type_ctx, env, trace)
+                })
             });
             let report =
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
@@ -2905,9 +2910,10 @@ fn type_mod_error_to_anyhow_styled(
             context,
             env,
         }) => {
-            let env = typed_env_or_empty(type_ctx, *env);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_not_subtype(ppf, type_ctx, &env, trace, trace2, context.as_ref())
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_not_subtype(ppf, type_ctx, env, trace, trace2, context.as_ref())
+                })
             });
             let report =
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
@@ -2919,9 +2925,10 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = typed_env_or_empty(type_ctx, *env);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_less_general(ppf, type_ctx, &env, kind, trace)
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_less_general(ppf, type_ctx, env, kind, trace)
+                })
             });
             UserDiagnostic::new(
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
@@ -6465,24 +6472,13 @@ fn format_expr_type_clash_report(
         Some(TypeClashContext::ComparisonOperator)
             | Some(TypeClashContext::IfCondition)
             | Some(TypeClashContext::StatementFunctionCall)
-    ) {
-        let message = format_type_clash_message_with_empty_blank_lines(&message);
-        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if matches!(
-        context,
-        Some(TypeClashContext::LetUnwrapReturn)
+            | Some(TypeClashContext::LetUnwrapReturn)
             | Some(TypeClashContext::SwitchExpression)
             | Some(TypeClashContext::JsxComponent)
     ) || plain_function_to_component
-    {
-        let message = format_type_clash_message_with_empty_blank_lines(&message);
-        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if type_clash_string_to_polyvariant(type_ctx, trace)
+        || type_clash_string_to_polyvariant(type_ctx, trace)
         || type_clash_string_to_variant(type_ctx, trace)
-    {
-        let message = format_type_clash_message_with_empty_blank_lines(&message);
-        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if type_clash_array_to_tuple(type_ctx, trace)
+        || type_clash_array_to_tuple(type_ctx, trace)
         || type_clash_expected_unit_actual(type_ctx, trace).is_some()
         || type_clash_actual_promise(type_ctx, trace)
     {
