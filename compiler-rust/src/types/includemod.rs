@@ -964,10 +964,7 @@ pub fn modtypes_with_warnings(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    modtypes_inner(
-        type_ctx, env, &subst, mty_impl, mty_sig, None, false, warnings,
-    )
-    .map_err(|error| {
+    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, warnings).map_err(|error| {
         if module_type_error_is_alias_unbound_module(mty_impl, mty_sig, &error) {
             error
         } else {
@@ -1012,7 +1009,7 @@ fn wrap_modtypes_error(
     }
 }
 
-/// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
+/// Check if `mty_impl` is a subtype of `mty_sig` under `subst`.
 fn modtypes_inner(
     type_ctx: &TypeContext,
     env: &Env,
@@ -1020,7 +1017,6 @@ fn modtypes_inner(
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
     sig_access_path: Option<&Path>,
-    aliasable: bool,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     // Guard against infinite recursion in module type expansion
@@ -1213,7 +1209,6 @@ fn modtypes_inner(
                         &expanded,
                         mty_sig,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                     .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))
@@ -1236,7 +1231,6 @@ fn modtypes_inner(
                     &expanded,
                     mty_sig,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
                 .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))?
@@ -1289,16 +1283,7 @@ fn modtypes_inner(
             let param_coercion = match (param_type_impl, expected_param_type.as_ref()) {
                 (Some(pt_impl), Some(pt_sig)) => {
                     // Note: parameters are contravariant, so we swap impl/sig
-                    modtypes_inner(
-                        type_ctx,
-                        env,
-                        &empty_subst,
-                        pt_sig,
-                        pt_impl,
-                        None,
-                        true,
-                        warnings,
-                    )?
+                    modtypes_inner(type_ctx, env, &empty_subst, pt_sig, pt_impl, None, warnings)?
                 }
                 (None, None) => ModuleCoercion::Tcoerce_none,
                 _ => {
@@ -1336,7 +1321,6 @@ fn modtypes_inner(
                 result_impl,
                 result_sig,
                 sig_access_path,
-                false,
                 warnings,
             )
             .map_err(|error| IncludeModError::InFunctorBody {
@@ -1375,7 +1359,6 @@ fn modtypes_inner(
                         expanded,
                         mty_sig,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                 })
@@ -1392,7 +1375,6 @@ fn modtypes_inner(
                     &expanded,
                     mty_sig,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
             } else {
@@ -1417,7 +1399,6 @@ fn modtypes_inner(
                         expanded,
                         mty_sig,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                 })
@@ -1434,7 +1415,6 @@ fn modtypes_inner(
                     &expanded,
                     mty_sig,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
             } else if let ModuleType::MtyIdent(sig_path) = mty_sig {
@@ -1458,7 +1438,6 @@ fn modtypes_inner(
                         mty_impl,
                         &expanded,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                 } else {
@@ -1497,7 +1476,6 @@ fn modtypes_inner(
                         mty_impl,
                         expanded,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                 })
@@ -1514,7 +1492,6 @@ fn modtypes_inner(
                     mty_impl,
                     &expanded,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
             } else {
@@ -1889,7 +1866,6 @@ fn check_paired_signature_items(
                     &impl_mty,
                     &sig_mod_decl.md_type,
                     nested_sig_access_path.as_ref(),
-                    false,
                     warnings,
                 )
                 .map_err(|error| {
