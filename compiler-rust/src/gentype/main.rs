@@ -131,13 +131,14 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
+fn lookup_in_process_type_declarations(
+    cmt_file: &str,
+) -> Option<std::sync::Arc<InProcessTypeDeclarations>> {
     let key = normalize_cmt_cache_key(cmt_file);
-    let shared = in_process_type_declarations_cache()
+    in_process_type_declarations_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.by_cmt.get(&key).cloned())?;
-    Some(shared.as_ref().clone())
+        .and_then(|cache| cache.by_cmt.get(&key).cloned())
 }
 
 fn register_in_process_type_declarations(
@@ -405,17 +406,13 @@ pub fn input_cmt_translate_type_declarations(
     _output_file_relative: &str,
     _resolver: &crate::gentype::module_resolver::Resolver,
     cmt_file: &str,
-) -> crate::gentype::translation::T {
+) -> std::sync::Arc<InProcessTypeDeclarations> {
     // This is the Rust callback boundary used by emit_js.rs for
     // compiler/gentype/EmitJs.ml:449-453.
-    if let Some(type_declarations) = lookup_in_process_type_declarations(cmt_file) {
-        return crate::gentype::translation::T {
-            import_types: vec![],
-            code_items: vec![],
-            type_declarations,
-        };
+    match lookup_in_process_type_declarations(cmt_file) {
+        Some(type_declarations) => type_declarations,
+        None => read_cmt(cmt_file),
     }
-    read_cmt(cmt_file)
 }
 
 pub fn emit_translation(

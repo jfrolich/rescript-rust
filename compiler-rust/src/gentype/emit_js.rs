@@ -26,7 +26,7 @@ pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
         &str,
         &crate::gentype::module_resolver::Resolver,
         &str,
-    ) -> crate::gentype::translation::T
+    ) -> std::sync::Arc<Vec<code_item::TypeDeclaration>>
     + 'a;
 
 pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
@@ -647,19 +647,13 @@ pub fn read_cmt_files_recursively(
         type_name: &str,
         as_type: &str,
         export_type_map_from_cmt: &code_item::ExportTypeMap,
-        mut env: Env,
-    ) -> Env {
-        match export_type_map_from_cmt.get(type_name) {
-            Some(export_type_item) => {
-                let type_ =
-                    type_get_inlined(config, export_type_map_from_cmt, &export_type_item.type_);
-                let mut export_type_item = export_type_item.clone();
-                export_type_item.type_ = type_;
-                env.export_type_map_from_other_files
-                    .insert(as_type.to_string(), export_type_item);
-                env
-            }
-            None => env,
+        export_type_map_from_other_files: &mut code_item::ExportTypeMap,
+    ) {
+        if let Some(export_type_item) = export_type_map_from_cmt.get(type_name) {
+            let type_ = type_get_inlined(config, export_type_map_from_cmt, &export_type_item.type_);
+            let mut export_type_item = export_type_item.clone();
+            export_type_item.type_ = type_;
+            export_type_map_from_other_files.insert(as_type.to_string(), export_type_item);
         }
     }
 
@@ -674,22 +668,25 @@ pub fn read_cmt_files_recursively(
 
     match (&import_type.as_type_name, cmt_file.as_str()) {
         (Some(as_type), cmt_file) if !cmt_file.is_empty() => {
-            match env.cmt_to_export_type_map.get(cmt_file).cloned() {
-                Some(export_type_map_from_cmt) => update_type_map_from_other_files(
-                    config,
-                    &import_type.type_name,
-                    as_type,
-                    &export_type_map_from_cmt,
-                    env,
-                ),
+            let mut env = env;
+            match env.cmt_to_export_type_map.get(cmt_file) {
+                Some(export_type_map_from_cmt) => {
+                    update_type_map_from_other_files(
+                        config,
+                        &import_type.type_name,
+                        as_type,
+                        export_type_map_from_cmt,
+                        &mut env.export_type_map_from_other_files,
+                    );
+                    env
+                }
                 None => {
-                    let translation = input_cmt_translate_type_declarations(
+                    let type_declarations = input_cmt_translate_type_declarations(
                         config,
                         output_file_relative,
                         resolver,
                         cmt_file,
                     );
-                    let type_declarations = translation.type_declarations;
                     let file = Path::new(cmt_file)
                         .file_name()
                         .and_then(|s| s.to_str())
@@ -697,19 +694,18 @@ pub fn read_cmt_files_recursively(
                         .unwrap_or_else(|| cmt_file.to_string());
                     let export_type_map_from_cmt =
                         create_export_type_map(config, &file, true, &type_declarations);
-                    let mut env = env;
-                    env.cmt_to_export_type_map
-                        .insert(cmt_file.to_string(), export_type_map_from_cmt.clone());
-                    let env = update_type_map_from_other_files(
+                    update_type_map_from_other_files(
                         config,
                         &import_type.type_name,
                         as_type,
                         &export_type_map_from_cmt,
-                        env,
+                        &mut env.export_type_map_from_other_files,
                     );
+                    env.cmt_to_export_type_map
+                        .insert(cmt_file.to_string(), export_type_map_from_cmt);
                     let new_import_types = type_declarations
                         .iter()
-                        .flat_map(|type_declaration| type_declaration.import_types.clone())
+                        .flat_map(|type_declaration| type_declaration.import_types.iter().cloned())
                         .collect::<Vec<_>>();
                     new_import_types.iter().fold(env, |env, new_import_type| {
                         read_cmt_files_recursively(
@@ -1091,7 +1087,6 @@ pub fn emit_translation_as_string(
         ),
         false => env,
     };
-    let final_env = env.clone();
     let emitters = crate::gentype::export_module::emit_all_module_items(
         config,
         emitters,
@@ -1101,11 +1096,11 @@ pub fn emit_translation_as_string(
     crate::gentype::emitters::to_string(
         "\n\n",
         emit_requires(
-            final_env.imported_value_or_component,
+            env.imported_value_or_component,
             false,
             config,
-            &final_env.requires,
-            emit_requires(false, true, config, &final_env.requires_early, emitters),
+            &env.requires,
+            emit_requires(false, true, config, &env.requires_early, emitters),
         ),
     )
 }
