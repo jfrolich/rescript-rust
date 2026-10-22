@@ -2187,10 +2187,7 @@ impl StoredModuleComponents {
             cache_mode,
         )?;
         if ctx.compiler_counters_enabled() {
-            crate::perf_counters::record_stored_component_build(
-                cache_mode.counter_name(),
-                cache_mode.publishes(),
-            );
+            crate::perf_counters::record_stored_component_build(cache_mode, cache_mode.publishes());
         }
         Some(components)
     }

@@ -29308,18 +29308,6 @@ pub(crate) enum ComponentLookupApi {
 }
 
 impl ComponentLookupApi {
-    pub(crate) fn counter_name(self) -> &'static str {
-        match self {
-            ComponentLookupApi::FindModule => "find_module",
-            ComponentLookupApi::LookupModule => "lookup_module",
-            ComponentLookupApi::FindModuleDescr => "find_module_descr",
-            ComponentLookupApi::FindType => "find_type",
-            ComponentLookupApi::FindModtype => "find_modtype",
-            ComponentLookupApi::OpenSignature => "open_signature",
-            ComponentLookupApi::ProbeModuleDescr => "probe_module_descr",
-        }
-    }
-
     pub(crate) fn publishes(self) -> bool {
         !matches!(self, ComponentLookupApi::ProbeModuleDescr)
     }
