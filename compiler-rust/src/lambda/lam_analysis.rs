@@ -260,7 +260,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         // Impure primitives
         Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
-        | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod
         | Primitive::PupdateMod

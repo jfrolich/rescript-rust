@@ -5,7 +5,7 @@
 //! the #1698 safety check: an outer `Lstaticcatch` may only absorb an inner
 //! one if the inner's handler cannot raise back to any already-absorbed label.
 
-use crate::lambda::{Lambda, PrimInfo};
+use crate::lambda::Lambda;
 
 /// Direct port of `Lam_exit_code.has_exit_code` (lam_exit_code.ml:25-33).
 ///
@@ -38,10 +38,7 @@ where
             Lambda::Lletrec(decl, body) => {
                 aux(body, exits) || decl.iter().any(|(_, l)| aux(l, exits))
             }
-            Lambda::Lprim(__prim0) => {
-                let PrimInfo { args, .. } = __prim0.as_ref();
-                args.iter().any(|a| aux(a, exits))
-            }
+            Lambda::Lprim(prim) => prim.args.iter().any(|a| aux(a, exits)),
             Lambda::Lswitch(arg, sw) => {
                 aux(arg, exits)
                     || sw.sw_consts.iter().any(|(_, l)| aux(l, exits))

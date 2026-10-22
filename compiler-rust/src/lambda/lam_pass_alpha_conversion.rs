@@ -14,26 +14,8 @@ use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
 use crate::lambda::{map_function_body, map_prim_args};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
-/// (lam_pass_alpha_conversion.ml:25-129).
-pub fn alpha_conversion(meta: &LamStats, lam: &Lambda) -> Lambda {
-    alpha_conversion_owned(meta, lam.clone())
-}
-
-/// Owned entry point for the same OCaml pass
-/// (`compiler/core/lam_pass_alpha_conversion.ml:25-129`).
-///
-/// OCaml rebuilds the immutable Lambda tree. Rust can consume the previous
-/// pass result in the backend pipeline, preserving the same case behavior while
-/// avoiding an eager clone of the whole tree before the rebuild.
-pub fn alpha_conversion_owned(meta: &LamStats, lam: Lambda) -> Lambda {
-    let mut meta = meta.clone();
-    let mut alpha = Alpha {
-        meta: &mut meta,
-        external_arity: None,
-    };
-    alpha.simpl_owned(lam)
-}
-
+/// (`compiler/core/lam_pass_alpha_conversion.ml:25-129`), consuming the
+/// previous pass result instead of cloning it.
 pub fn alpha_conversion_with_external_arity_owned(
     meta: &mut LamStats,
     lam: Lambda,

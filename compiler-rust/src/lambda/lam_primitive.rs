@@ -300,8 +300,6 @@ pub enum Primitive {
     Pjscomp(Comparison),
     /// Apply function
     PjsApply,
-    /// Runtime apply
-    PjsRuntimeApply,
     /// Debugger statement
     Pdebugger,
     /// Object property read: `obj["name"]`.
@@ -448,7 +446,6 @@ impl Primitive {
             | PdictHas
             | Pawait
             | PjsApply
-            | PjsRuntimeApply
             | PvalFromOption
             | PvalFromOptionNotNest
             | PnullToOpt

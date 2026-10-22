@@ -21,6 +21,10 @@ pub type IdentSet = HashSet<Ident>;
 ///
 /// Note: Global modules are not considered free variables since they
 /// represent module references rather than local bindings.
+///
+/// Like OCaml `Lambda_traverse.free_ids` (lambda_traverse.ml:200-224), binders
+/// are removed from one shared accumulator after their children are visited,
+/// so a binder also hides same-ident occurrences collected from siblings.
 pub fn free_variables(lam: &Lambda) -> IdentSet {
     let mut fv = IdentSet::new();
     collect_free_variables(lam, &mut fv);
@@ -161,26 +165,6 @@ fn collect_free_variables(lam: &Lambda, fv: &mut IdentSet) {
 
         Lambda::Lbreak | Lambda::Lcontinue => {}
     }
-}
-
-/// Check if a Lambda expression has any free variables from the given set.
-///
-/// This is more efficient than computing the full free variable set when
-/// we only need to know if certain variables are captured.
-///
-/// Note: This properly handles bound variables - a variable that is bound
-/// in the expression is not considered free, even if it appears in `vars`.
-pub fn has_free_variables(lam: &Lambda, vars: &IdentSet) -> bool {
-    if vars.is_empty() {
-        return false;
-    }
-    let fv = free_variables(lam);
-    vars.iter().any(|v| fv.contains(v))
-}
-
-/// Check if a Lambda expression is closed (has no free variables).
-pub fn is_closed(lam: &Lambda) -> bool {
-    free_variables(lam).is_empty()
 }
 
 #[cfg(test)]
@@ -355,49 +339,6 @@ mod tests {
         assert!(fv.contains(&x));
         assert!(fv.contains(&y));
         assert_eq!(fv.len(), 2);
-    }
-
-    #[test]
-    fn test_has_free_variables() {
-        let x = Ident::create_local("x");
-        let y = Ident::create_local("y");
-        let z = Ident::create_local("z");
-
-        // let x = y in x
-        let expr = Lambda::let_(LetKind::Strict, x, Lambda::var(y), Lambda::var(x));
-
-        let mut check_set = IdentSet::new();
-        check_set.insert(y);
-        assert!(has_free_variables(&expr, &check_set));
-
-        check_set.clear();
-        check_set.insert(z);
-        assert!(!has_free_variables(&expr, &check_set));
-
-        check_set.clear();
-        check_set.insert(x);
-        assert!(!has_free_variables(&expr, &check_set));
-    }
-
-    #[test]
-    fn test_is_closed() {
-        let x = Ident::create_local("x");
-
-        // Constant is closed
-        assert!(is_closed(&Lambda::const_(Constant::int(42))));
-
-        // fun x -> x is closed
-        let func = Lambda::function_(
-            1,
-            vec![x],
-            Lambda::var(x),
-            FunctionAttribute::default(),
-            crate::location::Location::none(),
-        );
-        assert!(is_closed(&func));
-
-        // Variable reference is not closed
-        assert!(!is_closed(&Lambda::var(x)));
     }
 
     #[test]

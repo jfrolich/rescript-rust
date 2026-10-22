@@ -10,6 +10,7 @@ use ahash::AHashMap as HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
 use crate::lambda::{Lambda, PrimInfo};
@@ -21,26 +22,20 @@ enum FlattenGroup {
     Nop(Lambda),
 }
 
-/// Direct port of `Lam_pass_deep_flatten.deep_flatten`
-/// (compiler/core/lam_pass_deep_flatten.ml).
-pub fn deep_flatten(lam: &Lambda) -> Lambda {
-    deep_flatten_owned(lam.clone())
-}
-
-/// Owned variant of `deep_flatten`.
-///
-/// The rewrite is still the same OCaml algorithm from
-/// `compiler/core/lam_pass_deep_flatten.ml:96-266`; this entry point only
-/// consumes the Rust tree when the caller is done with it, avoiding a full
-/// recursive clone before rebuilding the pass output.
-pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
+/// Test-only entry point that derives a stamp counter from the tree. Real
+/// callers must share the compilation's counter via
+/// [`deep_flatten_owned_with_id_gen`].
+#[cfg(test)]
+fn deep_flatten_owned(lam: Lambda) -> Lambda {
     let id_gen = IdGenerator::with_start_stamp(
         crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&lam),
     );
     deep_flatten_owned_with_id_gen(lam, &id_gen)
 }
 
-/// Owned variant using the caller's OCaml-style `Ident.currentstamp`.
+/// Direct port of `Lam_pass_deep_flatten.deep_flatten`
+/// (compiler/core/lam_pass_deep_flatten.ml:96-266), using the caller's
+/// OCaml-style `Ident.currentstamp`.
 pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
     fn lambda_of_groups(bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
         // lam_pass_deep_flatten.ml:108 — fold each Single back through
@@ -61,111 +56,24 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
             })
     }
 
-    fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
-        match lam {
-            Lambda::Lvar(id) => id.same(target),
-            Lambda::LglobalModule(_) | Lambda::Lconst(_) => false,
-            Lambda::Lapply(apply) => {
-                hit_variable(target, &apply.ap_func)
-                    || apply.ap_args.iter().any(|arg| hit_variable(target, arg))
-            }
-            Lambda::Lfunction(func) => hit_variable(target, &func.body),
-            Lambda::Llet(_, _, value, body) => {
-                hit_variable(target, value) || hit_variable(target, body)
-            }
-            Lambda::Lletrec(bindings, body) => {
-                hit_variable(target, body)
-                    || bindings.iter().any(|(_, lam)| hit_variable(target, lam))
-            }
-            Lambda::Lprim(info) => info.args.iter().any(|arg| hit_variable(target, arg)),
-            Lambda::Lswitch(arg, switch) => {
-                hit_variable(target, arg)
-                    || switch
-                        .sw_consts
-                        .iter()
-                        .any(|(_, lam)| hit_variable(target, lam))
-                    || switch
-                        .sw_blocks
-                        .iter()
-                        .any(|(_, lam)| hit_variable(target, lam))
-                    || switch
-                        .sw_failaction
-                        .as_deref()
-                        .is_some_and(|lam| hit_variable(target, lam))
-            }
-            Lambda::LstringSwitch(arg, cases, default) => {
-                hit_variable(target, arg)
-                    || cases.iter().any(|(_, lam)| hit_variable(target, lam))
-                    || default
-                        .as_deref()
-                        .is_some_and(|lam| hit_variable(target, lam))
-            }
-            Lambda::LstaticRaise(_, args) => args.iter().any(|arg| hit_variable(target, arg)),
-            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
-                hit_variable(target, body) || hit_variable(target, handler)
-            }
-            Lambda::LifThenElse(cond, then_, else_) => {
-                hit_variable(target, cond)
-                    || hit_variable(target, then_)
-                    || hit_variable(target, else_)
-            }
-            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-                hit_variable(target, first) || hit_variable(target, second)
-            }
-            Lambda::Lfor(_, start, end, _, body) => {
-                hit_variable(target, start)
-                    || hit_variable(target, end)
-                    || hit_variable(target, body)
-            }
-            Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-                hit_variable(target, iterable) || hit_variable(target, body)
-            }
-            Lambda::Lbreak | Lambda::Lcontinue => false,
-            Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
-        }
-    }
-
     fn can_eliminate_tuple<'a>(
         id: &Ident,
         lam: &'a Lambda,
         mut tuple_mapping: HashMap<i32, Ident>,
     ) -> Option<(HashMap<i32, Ident>, &'a Lambda)> {
-        match lam {
-            Lambda::Llet(LetKind::Alias, projected, value, body) => match value.as_ref() {
-                Lambda::Lprim(__prim2)
-                    if matches!(__prim2.as_ref(), PrimInfo {
-                    primitive: Primitive::Pfield(index, _),
-                    args,
-                    loc: _,
-                } if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id))) =>
-                {
-                    let PrimInfo {
-                        primitive: Primitive::Pfield(index, _),
-                        args: _,
-                        loc: _,
-                    } = __prim2.as_ref()
-                    else {
-                        unreachable!()
-                    };
-
-                    tuple_mapping.insert(*index, *projected);
-                    can_eliminate_tuple(id, body, tuple_mapping)
-                }
-                _ => {
-                    if hit_variable(id, lam) {
-                        None
-                    } else {
-                        Some((tuple_mapping, lam))
-                    }
-                }
-            },
-            _ => {
-                if hit_variable(id, lam) {
-                    None
-                } else {
-                    Some((tuple_mapping, lam))
-                }
-            }
+        if let Lambda::Llet(LetKind::Alias, projected, value, body) = lam
+            && let Lambda::Lprim(prim) = value.as_ref()
+            && let (Primitive::Pfield(index, _), [Lambda::Lvar(tuple)]) =
+                (&prim.primitive, prim.args.as_slice())
+            && tuple.same(id)
+        {
+            tuple_mapping.insert(*index, *projected);
+            return can_eliminate_tuple(id, body, tuple_mapping);
+        }
+        if hit_variable(id, lam) {
+            None
+        } else {
+            Some((tuple_mapping, lam))
         }
     }
 

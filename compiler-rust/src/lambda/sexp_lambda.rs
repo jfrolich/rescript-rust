@@ -30,26 +30,38 @@ impl Sexp {
         Sexp::List(items)
     }
 
-    fn to_string_indent(&self, indent: usize) -> String {
-        let spaces = " ".repeat(indent * 2);
+    /// Append the rendering to `out`. A multi-item list puts each item
+    /// after the first on its own line, indented by `2 * (indent + 1)`
+    /// spaces, and renders the items at `indent + 1`; a one-item list keeps
+    /// the current indent.
+    fn write_to(&self, out: &mut String, indent: usize) {
         match self {
-            Sexp::Atom(s) => s.clone(),
-            Sexp::List(items) if items.is_empty() => "()".to_string(),
-            Sexp::List(items) if items.len() == 1 => {
-                format!("({})", items[0].to_string_indent(indent))
-            }
+            Sexp::Atom(s) => out.push_str(s),
             Sexp::List(items) => {
-                let inner: Vec<String> = items
-                    .iter()
-                    .map(|item| item.to_string_indent(indent + 1))
-                    .collect();
-                format!("({})", inner.join(&format!("\n{}  ", spaces)))
+                out.push('(');
+                match items.as_slice() {
+                    [] => {}
+                    [only] => only.write_to(out, indent),
+                    [first, rest @ ..] => {
+                        first.write_to(out, indent + 1);
+                        for item in rest {
+                            out.push('\n');
+                            out.extend(std::iter::repeat_n(' ', 2 * (indent + 1)));
+                            item.write_to(out, indent + 1);
+                        }
+                    }
+                }
+                out.push(')');
             }
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.to_string_indent(0)
+impl std::fmt::Display for Sexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = String::new();
+        self.write_to(&mut out, 0);
+        f.write_str(&out)
     }
 }
 
@@ -423,7 +435,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PinitMod => Sexp::atom("Pinit_mod"),
         Primitive::PupdateMod => Sexp::atom("Pupdate_mod"),
         Primitive::PjsApply => Sexp::atom("Pjs_apply"),
-        Primitive::PjsRuntimeApply => Sexp::atom("Pjs_runtime_apply"),
         Primitive::PjsObjectGet(name) => {
             Sexp::list(vec![Sexp::atom("Pjs_object_get"), string(name)])
         }
@@ -949,11 +960,7 @@ pub(crate) fn print_indexed_node(
     with_locs: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "{}",
-        indexed_lambda(store, node, with_locs).to_string()
-    )
+    writeln!(out, "{}", indexed_lambda(store, node, with_locs))
 }
 
 pub(crate) fn print_indexed_context(
@@ -967,19 +974,30 @@ pub(crate) fn print_indexed_context(
 /// Print lambda as sexp (without locations)
 pub fn print_lambda(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
     let sexp = lambda(lam, false);
-    writeln!(out, "{}", sexp.to_string())
+    writeln!(out, "{sexp}")
 }
 
 /// Print lambda as sexp (with locations)
 pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
     let sexp = lambda(lam, true);
-    writeln!(out, "{}", sexp.to_string())
+    writeln!(out, "{sexp}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{constant, escape_ocaml_string, switch_key};
+    use super::{Sexp, constant, escape_ocaml_string, switch_key};
     use crate::lambda::lam_constant::Constant;
+
+    #[test]
+    fn sexp_layout_indents_multi_item_lists() {
+        let sexp = Sexp::list(vec![
+            Sexp::atom("a"),
+            Sexp::list(vec![Sexp::atom("b"), Sexp::atom("c")]),
+            Sexp::list(vec![Sexp::list(vec![Sexp::atom("d"), Sexp::atom("e")])]),
+            Sexp::list(vec![]),
+        ]);
+        assert_eq!(sexp.to_string(), "(a\n  (b\n    c)\n  ((d\n    e))\n  ())");
+    }
 
     #[test]
     fn indexed_printer_matches_recursive_output_without_materializing_for_print() {

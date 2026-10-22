@@ -6,39 +6,7 @@ use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_beta_reduce_indexed::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_pass_count::UsedInfo;
-
-#[derive(Default)]
-pub(crate) struct OccurrenceTable {
-    entries: AHashMap<Ident, usize>,
-    values: Vec<UsedInfo>,
-}
-
-impl OccurrenceTable {
-    pub(crate) fn get(&self, id: &Ident) -> UsedInfo {
-        self.entries
-            .get(id)
-            .map(|index| self.values[*index])
-            .unwrap_or_default()
-    }
-
-    fn bind(&mut self, id: &Ident) -> usize {
-        let index = self.values.len();
-        self.values.push(UsedInfo::default());
-        self.entries.insert(*id, index);
-        index
-    }
-
-    fn used(&self, id: &Ident) -> bool {
-        self.get(id).times > 0
-    }
-
-    fn absorb(&mut self, index: usize, other: UsedInfo) {
-        let info = &mut self.values[index];
-        info.times = info.times.saturating_add(other.times);
-        info.captured |= other.captured;
-    }
-}
+use crate::lambda::lam_pass_count::{OccurrenceTable, UsedInfo};
 
 type LocalTable = AHashMap<Ident, usize>;
 

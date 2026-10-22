@@ -183,19 +183,16 @@ impl LambdaCompiler {
             return None;
         }
 
-        if !self.cmj_constant_cache.contains_key(module.id.name()) {
-            let constants = self
-                .module_path_resolver
-                .as_ref()
-                .and_then(|resolver| resolver.module_cmj_export_constants(module.id.name()));
-            self.cmj_constant_cache
-                .insert(module.id.name().to_string(), constants);
-        }
-
-        let constants = self
-            .cmj_constant_cache
-            .get(module.id.name())
-            .and_then(|constants| constants.as_ref())?;
+        let resolver = &self.module_path_resolver;
+        let constants = super::lam_compile::cached_cmj_table(
+            &mut self.cmj_constant_cache,
+            module.id.name(),
+            || {
+                resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.module_cmj_export_constants(module.id.name()))
+            },
+        )?;
         let constant = constants.get(field_name).copied()?;
         Some(Self::cmj_export_constant_expr(constant))
     }

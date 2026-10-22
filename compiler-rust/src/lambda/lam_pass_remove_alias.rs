@@ -134,63 +134,10 @@ fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> 
 /// entries for their fresh let-bound parameters (lam_beta_reduce.ml:66-73).
 /// Without this, blocks introduced by beta-reduced functor arguments remain
 /// opaque to subsequent `field_flatten_get` lookups.
-pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
-    simplify_alias_owned(meta, lam.clone())
-}
-
-/// Owned form of [`simplify_alias`]. The behavioral branch order remains the
-/// OCaml `Lam_pass_remove_alias.simplify_alias` order
-/// (compiler/core/lam_pass_remove_alias.ml:50-290); only the Rust tree plumbing
-/// changes so callers that already own the previous pass output do not clone it
-/// before this pass.
-pub fn simplify_alias_owned(meta: &mut LamStats, lam: Lambda) -> Lambda {
-    let mut no_external_inline = |_: &Ident, _: &str| None;
-    simplify_alias_with_external_inline_owned(meta, lam, &mut no_external_inline)
-}
-
-pub fn simplify_alias_with_external_inline_owned(
-    meta: &mut LamStats,
-    lam: Lambda,
-    external_inline: &mut ExternalInlineResolver<'_>,
-) -> Lambda {
-    let export_idents = std::mem::take(&mut meta.export_idents);
-    let id_gen = meta.id_gen.clone();
-    let result = Simplifier {
-        ident_tbl: &mut meta.ident_tbl,
-        export_idents: &export_idents,
-        id_gen: &id_gen,
-        jsx_preserve: false,
-        external_inline,
-    }
-    .simpl_owned(lam);
-    meta.export_idents = export_idents;
-    result
-}
-
-/// Same as [`simplify_alias`] but threads the JSX preservation flag — a port
-/// of OCaml's `Js_config.jsx_preserve` global. The 7432-tagged Pjs_call arm
-/// inside `simpl` only fires when this flag is true (lam_pass_remove_alias.ml:54-62).
-pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: bool) -> Lambda {
-    simplify_alias_with_jsx_owned(meta, lam.clone(), jsx_preserve)
-}
-
-/// Owned form of [`simplify_alias_with_jsx`], following
-/// `compiler/core/lam_pass_remove_alias.ml:50-290` with the same JSX preserve
-/// guard at `lam_pass_remove_alias.ml:54-62`.
-pub fn simplify_alias_with_jsx_owned(
-    meta: &mut LamStats,
-    lam: Lambda,
-    jsx_preserve: bool,
-) -> Lambda {
-    let mut no_external_inline = |_: &Ident, _: &str| None;
-    simplify_alias_with_jsx_and_external_inline_owned(
-        meta,
-        lam,
-        jsx_preserve,
-        &mut no_external_inline,
-    )
-}
-
+///
+/// `jsx_preserve` ports OCaml's `Js_config.jsx_preserve` global: the
+/// 7432-tagged Pjs_call arm only fires when it is true
+/// (lam_pass_remove_alias.ml:54-62).
 pub fn simplify_alias_with_jsx_and_external_inline_owned(
     meta: &mut LamStats,
     lam: Lambda,

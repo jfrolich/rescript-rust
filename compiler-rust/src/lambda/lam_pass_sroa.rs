@@ -133,11 +133,18 @@ fn fields_for_block(
     if field_count == 1 {
         return vec![*block];
     }
-    let names: Option<Vec<String>> = match info {
-        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => (fields.len()
-            == field_count)
-            .then(|| fields.iter().map(|(name, _)| name.clone()).collect()),
-        TagInfo::RecordExt { fields, .. } => (fields.len() == field_count).then(|| fields.clone()),
+    let named = |name: &str| id_gen.create(&format!("{}_{}", block.name(), name));
+    match info {
+        TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+            if fields.len() == field_count {
+                return fields.iter().map(|(name, _)| named(name)).collect();
+            }
+        }
+        TagInfo::RecordExt { fields, .. } => {
+            if fields.len() == field_count {
+                return fields.iter().map(|name| named(name)).collect();
+            }
+        }
         TagInfo::Tuple
         | TagInfo::Constructor { .. }
         | TagInfo::PolyVar(_)
@@ -145,15 +152,9 @@ fn fields_for_block(
         | TagInfo::ModuleExport(_)
         | TagInfo::Extension
         | TagInfo::Some
-        | TagInfo::SomeNotNested => None,
-    };
-    match names {
-        None => fallback(),
-        Some(names) => names
-            .iter()
-            .map(|name| id_gen.create(&format!("{}_{}", block.name(), name)))
-            .collect(),
+        | TagInfo::SomeNotNested => {}
     }
+    fallback()
 }
 
 /// `Lam_pass_sroa.replace`: replace a non-escaping local block with

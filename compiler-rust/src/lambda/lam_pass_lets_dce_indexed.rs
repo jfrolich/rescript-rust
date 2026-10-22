@@ -9,7 +9,8 @@ use crate::lambda::lam_beta_reduce_indexed::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_indexed_helpers::{append_rebuilt, append_refine_let};
-use crate::lambda::lam_pass_count_indexed::{OccurrenceTable, collect_occurs};
+use crate::lambda::lam_pass_count::OccurrenceTable;
+use crate::lambda::lam_pass_count_indexed::collect_occurs;
 use crate::lambda::lam_pass_eliminate_ref_indexed::eliminate_ref;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 

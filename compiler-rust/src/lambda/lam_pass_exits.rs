@@ -298,14 +298,14 @@ fn subst_helper_owned(
                     l
                 })
                 .collect();
-            if let Some((xs, handler)) = subst.get(&i).cloned() {
+            if let Some((xs, handler)) = subst.get(&i) {
                 // Rename xs to fresh ys (lam_pass_exits.ml:193-197).
                 let ys: Vec<Ident> = xs.iter().map(|x| x.rename(id_gen)).collect();
                 let mut env = HashMap::new();
                 for (x, y) in xs.iter().zip(ys.iter()) {
                     env.insert(*x, Lambda::Lvar(*y));
                 }
-                let body = subst_lambda(&env, handler);
+                let body = subst_lambda(&env, handler.clone());
                 // fold_right2 ys ls' body (fun y l r -> Lambda.let_ Strict y l r)
                 let mut result = body;
                 for (y, l) in ys.into_iter().zip(ls.into_iter()).rev() {

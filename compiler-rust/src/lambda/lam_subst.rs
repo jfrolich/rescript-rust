@@ -16,17 +16,6 @@ use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo};
 /// A substitution mapping identifiers to Lambda expressions.
 pub type Subst = HashMap<Ident, Lambda>;
 
-/// Apply a substitution to a Lambda expression.
-///
-/// This replaces free variables that appear in the substitution with their
-/// corresponding Lambda expressions. Bound variables are not affected.
-///
-/// # Arguments
-/// * `s` - The substitution mapping
-/// * `lam` - The Lambda expression to substitute into
-///
-/// # Returns
-/// A new Lambda expression with substitutions applied.
 /// `Lambda_traverse.subst_lambda` (lambda_traverse.ml:235-241): replace
 /// variables and rebuild, through the smart constructors of
 /// `shallow_map_sharing`, only the nodes whose children changed.
@@ -45,6 +34,9 @@ pub fn subst_lambda(s: &Subst, lam: Lambda) -> Lambda {
     go(s, lam).0
 }
 
+/// Apply a substitution to a Lambda expression, rebuilding every node with
+/// raw constructors (no smart-constructor folding, unlike [`subst_lambda`]).
+/// Bound variables are not affected.
 pub fn subst(s: &Subst, lam: &Lambda) -> Lambda {
     if s.is_empty() {
         return lam.clone();
@@ -188,20 +180,16 @@ pub fn make_subst(ids: &[Ident], exprs: &[Lambda]) -> Subst {
 }
 
 /// Create a single-binding substitution.
-pub fn singleton(id: Ident, expr: Lambda) -> Subst {
+#[cfg(test)]
+fn singleton(id: Ident, expr: Lambda) -> Subst {
     let mut s = HashMap::new();
     s.insert(id, expr);
     s
 }
 
-/// Extend a substitution with a new binding.
-pub fn extend(mut s: Subst, id: Ident, expr: Lambda) -> Subst {
-    s.insert(id, expr);
-    s
-}
-
 /// Apply a single substitution [id -> expr] to a Lambda.
-pub fn subst_single(id: &Ident, expr: &Lambda, lam: &Lambda) -> Lambda {
+#[cfg(test)]
+fn subst_single(id: &Ident, expr: &Lambda, lam: &Lambda) -> Lambda {
     let s = singleton(*id, expr.clone());
     subst(&s, lam)
 }

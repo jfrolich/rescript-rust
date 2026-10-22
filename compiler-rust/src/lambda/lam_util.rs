@@ -11,7 +11,7 @@ use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
-use crate::lambda::{Apply, Lambda, PrimInfo, lam_analysis};
+use crate::lambda::{Apply, Lambda, lam_analysis};
 use crate::location::Location;
 
 /// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
@@ -35,45 +35,14 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
         {
             true
         }
-        Lambda::Lprim(__prim2)
-            if matches!(__prim2.as_ref(), PrimInfo {
-            primitive: Primitive::Pfield(_, dbg_info),
-            args,
-            ..
-        } if matches!(
-            dbg_info,
-            crate::lambda::lam_compat::FieldDbgInfo::Module { .. }
-        ) && args.len() == 1
-            && matches!(args[0], Lambda::LglobalModule(_) | Lambda::Lvar(_))) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::Pfield(_, _dbg_info),
-                args: _,
-                ..
-            } = __prim2.as_ref()
-            else {
-                unreachable!()
-            };
-
-            true
-        }
-        Lambda::Lprim(__prim1)
-            if matches!(__prim1.as_ref(), PrimInfo {
-            primitive: Primitive::PsomeNotNest,
-            args,
-            ..
-        } if args.len() == 1) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::PsomeNotNest,
-                args,
-                ..
-            } = __prim1.as_ref()
-            else {
-                unreachable!()
-            };
-            is_safe_to_alias(&args[0])
-        }
+        Lambda::Lprim(prim) => match (&prim.primitive, prim.args.as_slice()) {
+            (
+                Primitive::Pfield(_, crate::lambda::lam_compat::FieldDbgInfo::Module { .. }),
+                [Lambda::LglobalModule(_) | Lambda::Lvar(_)],
+            ) => true,
+            (Primitive::PsomeNotNest, [arg]) => is_safe_to_alias(arg),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -119,22 +88,11 @@ fn refine_let_parts(
 
         // (Prim) `let[k] x = e in prim p [x]` -> `prim p [e]`, when `p` is not
         // a block constructor (lam_util.ml:105-111).
-        (_, _, Lambda::Lprim(__prim0))
-            if matches!(__prim0.as_ref(), PrimInfo {
-                primitive,
-                args,
-                loc,
-            } if args.len() == 1
-            && matches!(&args[0], Lambda::Lvar(w) if w == &param)
-            && !is_block_constructor(primitive)) =>
+        (_, _, Lambda::Lprim(prim))
+            if matches!(prim.args.as_slice(), [Lambda::Lvar(w)] if w == &param)
+                && !is_block_constructor(&prim.primitive) =>
         {
-            let PrimInfo {
-                primitive,
-                args: _,
-                loc,
-            } = __prim0.as_ref();
-
-            Lambda::prim(primitive.clone(), vec![arg], *loc)
+            Lambda::prim(prim.primitive.clone(), vec![arg], prim.loc)
         }
 
         // (Call) `let[k] x = e in fn(x)` -> `fn(e)`, when fn does not capture

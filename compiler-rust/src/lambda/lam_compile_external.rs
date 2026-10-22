@@ -607,10 +607,12 @@ impl LambdaCompiler {
     ) -> (Expression, Option<Expression>) {
         let (values, effect) =
             self.lower_external_arg_values_and_effect(raw_arg, arg_label, arg_type);
-        match values.as_slice() {
-            [value] => (value.clone(), effect),
-            [] => panic!("object field lowering expected one JS arg for {arg_type:?}"),
-            _ => panic!(
+        match <[Expression; 1]>::try_from(values) {
+            Ok([value]) => (value, effect),
+            Err(values) if values.is_empty() => {
+                panic!("object field lowering expected one JS arg for {arg_type:?}")
+            }
+            Err(values) => panic!(
                 "object field lowering expected one JS arg, got {:?}",
                 values
             ),
@@ -1036,18 +1038,19 @@ impl LambdaCompiler {
                 self.add_external_effect(effect, expr)
             }
             DeclKind::DeclSend { name } => {
-                let Some((receiver, rest)) = args.split_first() else {
+                let mut args = args.into_iter();
+                let Some(receiver) = args.next() else {
                     unreachable!("@send external called without a receiver")
                 };
                 let (rest_args, effect) = self.assemble_external_args(
                     arg_types.get(1..).unwrap_or(&[]),
-                    rest.to_vec(),
+                    args.collect(),
                     splice,
                 );
                 self.add_external_effect(
                     effect,
                     Expression::call(
-                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name),
+                        self.static_index(self.apply_scoped_access(receiver, scopes), name),
                         rest_args,
                         call_info,
                     ),
@@ -1055,11 +1058,11 @@ impl LambdaCompiler {
             }
             DeclKind::DeclGet { name } => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver] => {
-                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name)
+                let expr = match <[Expression; 1]>::try_from(assembled) {
+                    Ok([receiver]) => {
+                        self.static_index(self.apply_scoped_access(receiver, scopes), name)
                     }
-                    _ => panic!(
+                    Err(_) => panic!(
                         "Internal compiler error: @get external called with wrong number of arguments. Expected exactly one object argument."
                     ),
                 };
@@ -1067,59 +1070,45 @@ impl LambdaCompiler {
             }
             DeclKind::DeclSet { name } => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver, value] => Expression::bin(
+                let expr = match <[Expression; 2]>::try_from(assembled) {
+                    Ok([receiver, value]) => Expression::bin(
                         BinOp::Eq,
-                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name),
-                        value.clone(),
+                        self.static_index(self.apply_scoped_access(receiver, scopes), name),
+                        value,
                     ),
-                    _ => unreachable!("@set external takes an object and a value"),
+                    Err(_) => unreachable!("@set external takes an object and a value"),
                 };
                 self.add_external_effect(effect, expr)
             }
             DeclKind::DeclGetIndex => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
-                        Box::new(self.apply_scoped_access(receiver.clone(), scopes)),
-                        Box::new(index.clone()),
+                let expr = match <[Expression; 2]>::try_from(assembled) {
+                    Ok([receiver, index]) => Expression::new(ExpressionDesc::ArrayIndex(
+                        Box::new(self.apply_scoped_access(receiver, scopes)),
+                        Box::new(index),
                     )),
-                    _ => unreachable!("@get_index external takes an object and an index"),
+                    Err(_) => unreachable!("@get_index external takes an object and an index"),
                 };
                 self.add_external_effect(effect, expr)
             }
             DeclKind::DeclSetIndex => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver, index, value] => Expression::bin(
+                let expr = match <[Expression; 3]>::try_from(assembled) {
+                    Ok([receiver, index, value]) => Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::ArrayIndex(
-                            Box::new(self.apply_scoped_access(receiver.clone(), scopes)),
-                            Box::new(index.clone()),
+                            Box::new(self.apply_scoped_access(receiver, scopes)),
+                            Box::new(index),
                         )),
-                        value.clone(),
+                        value,
                     ),
-                    _ => unreachable!("@set_index external takes an object, an index and a value"),
+                    Err(_) => {
+                        unreachable!("@set_index external takes an object, an index and a value")
+                    }
                 };
                 self.add_external_effect(effect, expr)
             }
         }
-    }
-
-    pub(crate) fn compile_plain_js_call(
-        &self,
-        prim_name: &str,
-        args: Vec<Expression>,
-        transformed_jsx: bool,
-    ) -> Expression {
-        Expression::call(
-            Expression::var(Ident::create_persistent(prim_name)),
-            args,
-            CallInfo {
-                call_transformed_jsx: transformed_jsx,
-                ..CallInfo::default()
-            },
-        )
     }
 
     /// `[import(...).then(m => m.<p0>.<p1>...)]`

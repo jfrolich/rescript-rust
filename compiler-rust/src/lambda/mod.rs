@@ -222,7 +222,7 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
                     && fields
                         .iter()
                         .enumerate()
-                        .all(|(i, (name, _))| i.to_string() == *name)
+                        .all(|(i, (name, _))| is_decimal_index(name, i))
                 {
                     ValueKind::IsArray
                 } else {
@@ -235,6 +235,15 @@ fn runtime_value_kind(c: &Constant) -> ValueKind {
             ValueKind::UnknownValue
         }
     }
+}
+
+/// `name = string_of_int i` without allocating: canonical decimal digits
+/// (no sign, no leading zeros) spelling exactly `i`.
+fn is_decimal_index(name: &str, i: usize) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_digit())
+        && (name == "0" || !name.starts_with('0'))
+        && name.parse::<usize>() == Ok(i)
 }
 
 /// OCaml `float_of_string` for the spellings a literal tag can carry.

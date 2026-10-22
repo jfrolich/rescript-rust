@@ -35,19 +35,13 @@ enum IndexedGroup {
 
 impl IndexedGroup {
     fn roots(&self) -> impl Iterator<Item = NodeId> + '_ {
-        let single = match self {
-            Self::Single(_, root) | Self::Nop(root) => Some(*root),
-            Self::Recursive(_) => None,
+        let (single, recursive) = match self {
+            Self::Single(_, root) | Self::Nop(root) => (Some(*root), &[][..]),
+            Self::Recursive(bindings) => (None, bindings.as_slice()),
         };
-        single.into_iter().chain(
-            match self {
-                Self::Recursive(bindings) => Some(bindings.as_slice()),
-                _ => None,
-            }
+        single
             .into_iter()
-            .flatten()
-            .map(|(_, root)| *root),
-        )
+            .chain(recursive.iter().map(|(_, root)| *root))
     }
 }
 
@@ -85,10 +79,6 @@ pub(crate) struct IndexedHoistedWarning {
     pub(crate) is_error: bool,
 }
 
-/// One owning pre-JS result. All node handles are private and remain paired
-/// with `context`; M6 can add owner-scoped JS traversal methods without
-/// exposing a caller-provided root. The same generator is retained for later
-/// JS temporaries.
 pub(crate) enum IndexedDiagnosticGroup {
     Single(LetKind, Ident, Lambda),
     Recursive(Vec<(Ident, Lambda)>),
@@ -105,6 +95,10 @@ pub(crate) struct IndexedCmjExports {
     pub(crate) constants: AHashMap<String, CmjExportConstant>,
 }
 
+/// One owning pre-JS result. All node handles are private and remain paired
+/// with `context`; M6 can add owner-scoped JS traversal methods without
+/// exposing a caller-provided root. The same generator is retained for later
+/// JS temporaries.
 pub(crate) struct IndexedPreJsBackend {
     context: IndexedLambdaContext,
     groups: Vec<(Option<Ident>, IndexedGroup)>,
@@ -390,18 +384,8 @@ impl IndexedPreJsBackend {
     }
 }
 
-fn extract_export_idents(lambda: &Lambda) -> Vec<Ident> {
-    match lambda {
-        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
-        Lambda::Lsequence(_, body) => extract_export_idents(body),
-        Lambda::Lprim(info) => match &info.primitive {
-            Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _) => exports.clone(),
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
-    }
-}
-
+/// `Lam_coercion.flatten`, returning the groups in source order (OCaml
+/// conses them and reverses later).
 fn flatten(
     store: &IndexedLambda,
     node: NodeId,
@@ -411,12 +395,12 @@ fn flatten(
         NodeView::Let(kind, id, value, body) => {
             let id = *id;
             let (value, mut groups) = flatten(store, value, acc);
-            groups.insert(0, (Some(id), IndexedGroup::Single(kind, value)));
+            groups.push((Some(id), IndexedGroup::Single(kind, value)));
             flatten(store, body, groups)
         }
         NodeView::LetRec(bindings, body) => {
             let mut groups = acc;
-            groups.insert(0, (None, IndexedGroup::Recursive(bindings.to_vec())));
+            groups.push((None, IndexedGroup::Recursive(bindings.to_vec())));
             flatten(store, body, groups)
         }
         NodeView::Sequence(left, right) => {
@@ -425,7 +409,7 @@ fn flatten(
                 store.view(left),
                 NodeView::Var(_) | NodeView::Const(_) | NodeView::Function(_, _, _, _, _)
             ) {
-                groups.insert(0, (None, IndexedGroup::Nop(left)));
+                groups.push((None, IndexedGroup::Nop(left)));
             }
             flatten(store, right, groups)
         }
@@ -577,68 +561,59 @@ fn remove_dead_groups(
     exports: &[Ident],
     groups: Vec<(Option<Ident>, IndexedGroup)>,
 ) -> Vec<(Option<Ident>, IndexedGroup)> {
-    let mut free_by_ident = Vec::<(Ident, Vec<Ident>)>::new();
-    let mut initial = exports.to_vec();
+    let mut free_by_ident = AHashMap::<Ident, Vec<Ident>>::new();
+    let mut initial = Vec::new();
     for (id, group) in &groups {
         match group {
             IndexedGroup::Single(kind, root) => {
                 let id = id.as_ref().expect("single group has an identifier");
-                free_by_ident.push((*id, pass_free_variables(store, *root)));
+                free_by_ident.insert(*id, pass_free_variables(store, *root));
                 if matches!(kind, LetKind::Strict | LetKind::Variable) {
-                    initial.insert(0, *id);
+                    initial.push(*id);
                 }
             }
             IndexedGroup::Recursive(bindings) => {
                 for (id, value) in bindings {
-                    free_by_ident.push((*id, pass_free_variables(store, *value)));
+                    free_by_ident.insert(*id, pass_free_variables(store, *value));
                     if !matches!(store.view(*value), NodeView::Function(_, _, _, _, _)) {
-                        initial.insert(0, *id);
+                        initial.push(*id);
                     }
                 }
             }
             IndexedGroup::Nop(root) => {
                 if !no_side_effects(store, *root) {
-                    for id in pass_free_variables(store, *root) {
-                        initial.insert(0, id);
-                    }
+                    initial.extend(pass_free_variables(store, *root));
                 }
             }
         }
     }
-    fn dfs(id: &Ident, free_by_ident: &[(Ident, Vec<Ident>)], visited: &mut Vec<Ident>) {
-        if id.is_global() || id.is_js() || visited.iter().any(|seen| seen.same(id)) {
+    fn dfs(id: &Ident, free_by_ident: &AHashMap<Ident, Vec<Ident>>, visited: &mut AHashSet<Ident>) {
+        if id.is_global() || id.is_js() || !visited.insert(*id) {
             return;
         }
-        visited.push(*id);
-        let free = free_by_ident
-            .iter()
-            .rev()
-            .find_map(|(key, free)| key.same(id).then_some(free))
-            .unwrap_or_else(|| {
-                panic!(
-                    "indexed Lam_dce missing local binding {}/{}",
-                    id.name(),
-                    id.stamp()
-                )
-            });
+        let free = free_by_ident.get(id).unwrap_or_else(|| {
+            panic!(
+                "indexed Lam_dce missing local binding {}/{}",
+                id.name(),
+                id.stamp()
+            )
+        });
         for dependency in free {
             dfs(dependency, free_by_ident, visited);
         }
     }
-    let mut visited = Vec::new();
-    for id in &initial {
+    // OCaml conses each root onto the export list, so visit the most
+    // recently collected roots first.
+    let mut visited = AHashSet::new();
+    for id in initial.iter().rev().chain(exports) {
         dfs(id, &free_by_ident, &mut visited);
     }
     groups
         .into_iter()
         .filter_map(|(id, group)| match group {
-            IndexedGroup::Single(_, _)
-                if !visited.iter().any(|seen| seen.same(id.as_ref().unwrap())) =>
-            {
-                None
-            }
+            IndexedGroup::Single(_, _) if !visited.contains(id.as_ref().unwrap()) => None,
             IndexedGroup::Recursive(mut bindings) => {
-                bindings.retain(|(id, _)| visited.iter().any(|seen| seen.same(id)));
+                bindings.retain(|(id, _)| visited.contains(id));
                 (!bindings.is_empty()).then_some((id, IndexedGroup::Recursive(bindings)))
             }
             group => Some((id, group)),
@@ -652,7 +627,7 @@ fn coerce_and_group(
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Result<(Vec<(Option<Ident>, IndexedGroup)>, Vec<(Ident, NodeId)>), IndexedPreJsError> {
     let root = context.current_root();
-    let (export_block, reverse_input) = flatten(context.store(), root, Vec::new());
+    let (export_block, input_groups) = flatten(context.store(), root, Vec::new());
     let original_exports = context.metadata().exports.clone();
     let lambda_exports = match context.store().view(export_block) {
         NodeView::Prim(Primitive::Pmakeblock(_, _), args, _) => args.to_vec(),
@@ -678,7 +653,7 @@ fn coerce_and_group(
         match context.store().view(value) {
             NodeView::Var(id) if id.name() == original.name() => {
                 let id = *id;
-                export_list.insert(0, id);
+                export_list.push(id);
                 if id.stamp() != original.stamp() {
                     export_set.remove(&original);
                     export_set.insert(id);
@@ -693,13 +668,9 @@ fn coerce_and_group(
                         .ident_tbl
                         .insert(newid, kind);
                 }
-                export_list.insert(0, newid);
-                export_map.insert(0, (newid, value));
-                coercions.insert(
-                    0,
-                    (Some(newid), IndexedGroup::Single(LetKind::Alias, value)),
-                );
-                let _ = source;
+                export_list.push(newid);
+                export_map.push((newid, value));
+                coercions.push((Some(newid), IndexedGroup::Single(LetKind::Alias, value)));
             }
             _ => {
                 let newid = original.rename(id_gen);
@@ -718,23 +689,25 @@ fn coerce_and_group(
                         .ident_tbl
                         .insert(newid, IndexedIdKind::FunctionId { arity, lambda });
                 }
-                export_list.insert(0, newid);
-                export_map.insert(0, (newid, value));
-                coercions.insert(
-                    0,
-                    (Some(newid), IndexedGroup::Single(LetKind::Strict, value)),
-                );
-                let _ = original;
+                export_list.push(newid);
+                export_map.push((newid, value));
+                coercions.push((Some(newid), IndexedGroup::Single(LetKind::Strict, value)));
             }
         }
     }
 
+    // The loop above ran right-to-left; restore source order.
+    export_list.reverse();
+    export_map.reverse();
+    coercions.reverse();
+
     context.metadata_mut_for_backend().exports = export_list.clone();
     context.metadata_mut_for_backend().export_idents = export_set.clone();
 
-    let mut groups = coercions;
-    for group in reverse_input {
-        if let (Some(id), IndexedGroup::Single(_, root)) = &group
+    // OCaml folds the reversed input list, consing each group in front of
+    // the coercions; export-map updates follow that reverse order.
+    for group in input_groups.iter().rev() {
+        if let (Some(id), IndexedGroup::Single(_, root)) = group
             && export_set.contains(id)
         {
             if let Some((_, existing)) = export_map.iter_mut().find(|(key, _)| key.same(id)) {
@@ -743,8 +716,9 @@ fn coerce_and_group(
                 export_map.push((*id, *root));
             }
         }
-        groups.insert(0, group);
     }
+    let mut groups = input_groups;
+    groups.extend(coercions);
     let groups = remove_dead_groups(context.store(), &export_list, groups);
     Ok((groups, export_map))
 }
@@ -777,10 +751,7 @@ fn group_side_effect_reason(
     None
 }
 
-fn collect_group_bindings(
-    _store: &IndexedLambda,
-    groups: &[(Option<Ident>, IndexedGroup)],
-) -> AHashMap<Ident, NodeId> {
+fn collect_group_bindings(groups: &[(Option<Ident>, IndexedGroup)]) -> AHashMap<Ident, NodeId> {
     let mut bindings = AHashMap::new();
     for (id, group) in groups {
         match group {
@@ -865,7 +836,7 @@ fn add_hoisted_aliases(
     warning_config: &WarningConfig,
     warning_sink: &mut Option<&mut dyn FnMut(&IndexedHoistedWarning)>,
 ) -> Result<(Vec<HoistedExport>, Vec<IndexedHoistedWarning>), IndexedPreJsError> {
-    let group_map = collect_group_bindings(context.store(), groups);
+    let group_map = collect_group_bindings(groups);
     let exported_modules = context
         .metadata()
         .exports
@@ -921,18 +892,7 @@ fn add_hoisted_aliases(
             misplaced(&mut warnings, item);
             continue;
         }
-        let name = item
-            .path
-            .iter()
-            .map(|part| {
-                if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
-                    &part[2..part.len() - 1]
-                } else {
-                    part.as_str()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("$");
+        let name = crate::lambda::lam_compile_main::hoisted_export_name(&item.path);
         let js_name = crate::js_ir::printer::convert_ident_name(&name);
         if !occupied.insert(js_name) {
             let loc = if matches!(
@@ -959,7 +919,6 @@ fn add_hoisted_aliases(
             ));
         }
         aliases.insert(0, (alias_id, access, item.path.clone(), name));
-        let _ = target;
     }
     // `js_hoisted_aliases` returns reverse source order. The next fold conses
     // again, then groups/exports use `List.rev`, leaving those aliases in
@@ -1276,7 +1235,9 @@ mod tests {
     ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
         let mut inline = |_: &Ident, _: &str| None;
         let mut arity = |_: &Ident, _: &str| None;
-        let exports = extract_export_idents(&lambda);
+        let exports = crate::lambda::lam_compile_main::module_export_ids(&lambda)
+            .map(<[Ident]>::to_vec)
+            .unwrap_or_default();
         optimize_for_pre_js_indexed(
             lambda,
             exports,
@@ -1688,7 +1649,9 @@ mod tests {
         extras.insert(extra.clone());
         let mut inline = |_: &Ident, _: &str| None;
         let mut arity = |_: &Ident, _: &str| None;
-        let exports = extract_export_idents(&input);
+        let exports = crate::lambda::lam_compile_main::module_export_ids(&input)
+            .map(<[Ident]>::to_vec)
+            .unwrap_or_default();
         let result = optimize_for_pre_js_indexed(
             input,
             exports,

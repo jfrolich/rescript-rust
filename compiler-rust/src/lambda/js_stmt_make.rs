@@ -3,7 +3,7 @@
 //! Port of `js_stmt_make.ml` — block termination analysis, return
 //! expression extraction, and output-finishing predicates.
 
-use crate::js_ir::{Block, Expression, StatementDesc};
+use crate::js_ir::{Block, Expression, Statement, StatementDesc};
 
 pub(crate) fn block_terminates(block: &Block) -> bool {
     block.last().is_some_and(statement_terminates)
@@ -14,8 +14,8 @@ pub(crate) fn block_terminates(block: &Block) -> bool {
 /// single-element list whose sole statement is a `Return`. No effect prefix
 /// allowed. Used by `compile_test_return_block_with_fallback` to mirror
 /// OCaml's rule-4 fold exactly.
-pub(crate) fn strict_single_return_expr(block: &Block) -> Option<&Expression> {
-    let [stmt] = block.as_slice() else {
+pub(crate) fn strict_single_return_expr(block: &[Statement]) -> Option<&Expression> {
+    let [stmt] = block else {
         return None;
     };
     match &stmt.desc {
