@@ -447,7 +447,7 @@ fn indexed_while_exit_labels_are_lazy_and_shared_by_the_current_loop() {
         let root = context.current_root();
         let mut owner = IndexedJsConsumer::new(&mut compiler, &mut context);
         let compiled = owner.while_loop(root, &mut expression, &mut |owner, child| {
-            assert!(owner.compiler.loop_stack[0].label().is_none());
+            assert!(owner.compiler.loop_stack[0].is_none());
             owner.compiler.switch_depth += 1;
             let first = owner.loop_exit(child);
             let second = owner.loop_exit(child);
@@ -466,7 +466,7 @@ fn indexed_while_exit_labels_are_lazy_and_shared_by_the_current_loop() {
         }
         assert!(owner.compiler.loop_stack.is_empty());
         assert_eq!(owner.compiler.switch_depth, 0);
-        assert_eq!(owner.compiler.loop_label_counter.get(), 1);
+        assert_eq!(owner.compiler.loop_label_counter, 1);
     }
 }
 
@@ -483,7 +483,7 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
     );
     compiler.switch_depth = 3;
     compiler.try_body_depth = 4;
-    let outer_frame = compiler.push_loop();
+    compiler.push_loop();
     let id = Ident::new("arg", 41, IdentFlags::from_bits_truncate(0x2b));
     let mut context = IndexedLambdaContext::from_lambda(
         Lambda::function_(
@@ -526,11 +526,8 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
     assert_eq!(owner.compiler.switch_depth, 3);
     assert_eq!(owner.compiler.try_body_depth, 4);
     assert!(owner.compiler.return_unit_stack.is_empty());
-    owner.compiler.ensure_loop_label(&outer_frame);
-    assert_eq!(
-        owner.compiler.loop_stack[0].label().as_deref(),
-        Some("loop_0")
-    );
+    owner.compiler.ensure_current_loop_label();
+    assert_eq!(owner.compiler.loop_stack[0].as_deref(), Some("loop_0"));
     assert_eq!(generator.current_stamp(), 900);
     let js = print_expression(&compiled.expr);
     assert!(js.contains("async"), "{js}");

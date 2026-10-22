@@ -585,8 +585,6 @@ fn import_attributes_keeps_exported_alias_bindings_before_log_calls_like_snapsho
 }
 
 #[test]
-#[test]
-#[test]
 fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("inline_string_test");
     assert!(
@@ -706,7 +704,6 @@ fn forward_ref_regress_keeps_props_ref_wrapper_materialized_like_snapshot() {
     );
 }
 
-#[test]
 #[test]
 fn offset_keeps_exported_module_alias_placeholder_before_local_module_block_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("offset");

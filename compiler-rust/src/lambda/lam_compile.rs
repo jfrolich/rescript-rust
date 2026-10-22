@@ -6,7 +6,6 @@
 //! that can be extended with more advanced codegen passes.
 
 use ahash::{AHashMap, AHashSet};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
@@ -199,7 +198,7 @@ pub(crate) struct FallthroughReturnHandler {
 pub(crate) struct TailLoopState {
     pub(crate) tail_targets: Vec<Ident>,
     pub(crate) params: Vec<Ident>,
-    pub(crate) new_params: HashMap<Ident, Ident>,
+    pub(crate) new_params: AHashMap<Ident, Ident>,
     pub(crate) triggered: bool,
 }
 
@@ -208,7 +207,7 @@ impl TailLoopState {
         Self {
             tail_targets,
             params,
-            new_params: HashMap::new(),
+            new_params: AHashMap::new(),
             triggered: false,
         }
     }
@@ -324,7 +323,7 @@ impl std::ops::Deref for LambdaIdGenerator {
 
 struct SavedFunctionScope {
     switch_depth: i32,
-    loop_stack: Vec<crate::lambda::lam_compile_context::LoopFrame>,
+    loop_stack: Vec<Option<String>>,
     static_handlers: Vec<StaticHandler>,
     static_jump_handlers: Vec<StaticJumpHandler>,
     fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
@@ -353,21 +352,21 @@ pub struct LambdaCompiler {
     /// compiler/core/lam_stats_export.ml:53-63 and
     /// compiler/core/js_cmj_format.ml:120-128.
     pub(crate) cmj_constant_cache:
-        HashMap<String, Option<Arc<AHashMap<String, CmjExportConstant>>>>,
-    pub(crate) cmj_arity_cache: HashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>,
+        AHashMap<String, Option<Arc<AHashMap<String, CmjExportConstant>>>>,
+    pub(crate) cmj_arity_cache: AHashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>,
     /// Same intentional cache family as above, but for exported lambda bodies.
     /// Keep this paired with the constant/arity caches so repeated cross-module
     /// inline probes do not re-read the same `.cmj` metadata
     /// (`query_external_id_info` in compiler/core/lam_compile.ml:234-244,
     /// 274-279).
-    pub(crate) cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
+    pub(crate) cmj_lambda_cache: AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     /// Non-constant `persistent_closed_lambda` exports recorded for
     /// cross-module inlining (compiler/core/lam_stats_export.ml:53-89).
     pub(crate) cmj_export_lambdas: AHashMap<String, Lambda>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
-    pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
+    pub(crate) external_module_ids: AHashMap<ExternalModuleCacheKey, Ident>,
     /// Modules registered by dynamic imports (`Lam_compile_primitive`'s
     /// `Pimport` registers them in `Lam_compile_env.cached_tbl`), which feed
     /// `populate_required_modules` like every other cached module.
@@ -382,15 +381,15 @@ pub struct LambdaCompiler {
     /// `lambda_cxt.switch_depth`. Used to decide whether a `Lbreak` /
     /// `Lcontinue` must emit a labeled JS `break`/`continue`.
     pub(crate) switch_depth: i32,
-    /// Stack of enclosing loops, innermost first. Each entry is the
+    /// Stack of enclosing loops, innermost last. Each entry is the
     /// loop's lazily-allocated label slot (mirrors OCaml's
     /// `loop_frame`). Pushed when compiling `Lwhile`/`Lfor` bodies and
     /// popped after.
-    pub(crate) loop_stack: Vec<crate::lambda::lam_compile_context::LoopFrame>,
-    /// Counter shared across the whole compilation unit, used to mint
-    /// unique JS labels (`loop_0`, `loop_1`, ...) on demand. Mirrors
-    /// OCaml's `loop_label_counter`.
-    pub(crate) loop_label_counter: std::rc::Rc<std::cell::Cell<i32>>,
+    pub(crate) loop_stack: Vec<Option<String>>,
+    /// Counter used to mint unique JS labels (`loop_0`, `loop_1`, ...)
+    /// on demand; reset per top-level group. Mirrors OCaml's
+    /// `loop_label_counter`.
+    pub(crate) loop_label_counter: i32,
     diagnostic: Option<LambdaDiagnostic>,
 }
 
@@ -445,10 +444,17 @@ impl LambdaCompiler {
             .collect()
     }
 
-    /// Create a new compiler.
+    /// A standalone compiler, as unit tests build one.
+    ///
+    /// OCaml draws every identifier from one `Ident.currentstamp`. A real
+    /// compilation seeds the generator past every stamp in its input before
+    /// lowering; here the input's identifiers come from `Ident::create_local`
+    /// at arbitrary times, so the generator starts far above that counter and
+    /// its temporaries never share a stamp (and so `Ident::same`) with them.
     pub fn new() -> Self {
+        const STANDALONE_START_STAMP: i32 = 1 << 24;
         Self::with_generator_and_options(
-            LambdaIdGenerator::Owned(IdGenerator::new()),
+            LambdaIdGenerator::Owned(IdGenerator::with_start_stamp(STANDALONE_START_STAMP)),
             None,
             false,
             true,
@@ -470,15 +476,15 @@ impl LambdaCompiler {
             check_div_by_zero,
             cross_module_inline,
             source_map_enabled: false,
-            cmj_constant_cache: HashMap::new(),
-            cmj_arity_cache: HashMap::new(),
-            cmj_lambda_cache: HashMap::new(),
+            cmj_constant_cache: AHashMap::new(),
+            cmj_arity_cache: AHashMap::new(),
+            cmj_lambda_cache: AHashMap::new(),
             cmj_export_constants: AHashMap::new(),
             cmj_export_lambdas: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
             hoisted_functions: Vec::new(),
             if_return_finished: AHashMap::new(),
-            external_module_ids: HashMap::new(),
+            external_module_ids: AHashMap::new(),
             dynamic_import_modules: Vec::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -487,7 +493,7 @@ impl LambdaCompiler {
             try_body_depth: 0,
             switch_depth: 0,
             loop_stack: Vec::new(),
-            loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
+            loop_label_counter: 0,
             diagnostic: None,
         }
     }
@@ -628,39 +634,33 @@ impl LambdaCompiler {
                 let jsx_preserve = self.jsx_preserve;
                 let module_path_resolver = self.module_path_resolver.as_ref();
                 let cross_module_inline = self.cross_module_inline;
-                let mut cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
-                    HashMap::new();
-                let mut cmj_arity_cache: HashMap<
+                let mut cmj_lambda_cache: AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
+                    AHashMap::new();
+                let mut cmj_arity_cache: AHashMap<
                     String,
                     Option<Arc<AHashMap<String, CmjExportArity>>>,
-                > = HashMap::new();
+                > = AHashMap::new();
                 let mut external_inline = |module_id: &Ident, field_name: &str| {
                     if !cross_module_inline {
                         return None;
                     }
-                    if !cmj_lambda_cache.contains_key(module_id.name()) {
-                        let lambdas = module_path_resolver.as_ref().and_then(|resolver| {
+                    cached_cmj_table(&mut cmj_lambda_cache, module_id.name(), || {
+                        module_path_resolver.as_ref().and_then(|resolver| {
                             resolver.module_cmj_export_lambdas(module_id.name())
-                        });
-                        cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
-                    }
-                    cmj_lambda_cache
-                        .get(module_id.name())
-                        .and_then(|exports| exports.as_ref())
-                        .and_then(|exports| exports.get(field_name).cloned())
+                        })
+                    })?
+                    .get(field_name)
+                    .cloned()
                 };
                 let mut external_arity = |module_id: &Ident, field_name: &str| {
-                    if !cmj_arity_cache.contains_key(module_id.name()) {
-                        let arities = module_path_resolver.as_ref().and_then(|resolver| {
+                    cached_cmj_table(&mut cmj_arity_cache, module_id.name(), || {
+                        module_path_resolver.as_ref().and_then(|resolver| {
                             resolver.module_cmj_export_arities(module_id.name())
-                        });
-                        cmj_arity_cache.insert(module_id.name().to_string(), arities);
-                    }
-                    cmj_arity_cache
-                        .get(module_id.name())
-                        .and_then(|exports| exports.as_ref())
-                        .and_then(|exports| exports.get(field_name).cloned())
-                        .map(cmj_export_arity_to_external)
+                        })
+                    })?
+                    .get(field_name)
+                    .cloned()
+                    .map(cmj_export_arity_to_external)
                 };
                 crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_and_meta_owned(
                     lam,
@@ -900,7 +900,7 @@ impl LambdaCompiler {
         }
         self.id_gen.set_current_stamp(max_stamp);
 
-        let mut declared = HashSet::new();
+        let mut declared = AHashSet::new();
         collect_declared_idents(block, &mut declared);
         let block_ended = block_terminates(block);
 
@@ -1111,19 +1111,14 @@ impl LambdaCompiler {
             return None;
         }
 
-        if !self.cmj_lambda_cache.contains_key(module.id.name()) {
-            let lambdas = self
-                .module_path_resolver
+        let resolver = &self.module_path_resolver;
+        cached_cmj_table(&mut self.cmj_lambda_cache, module.id.name(), || {
+            resolver
                 .as_ref()
-                .and_then(|resolver| resolver.module_cmj_export_lambdas(module.id.name()));
-            self.cmj_lambda_cache
-                .insert(module.id.name().to_string(), lambdas);
-        }
-
-        self.cmj_lambda_cache
-            .get(module.id.name())
-            .and_then(|exports| exports.as_ref())
-            .and_then(|exports| exports.get(field_name).cloned())
+                .and_then(|resolver| resolver.module_cmj_export_lambdas(module.id.name()))
+        })?
+        .get(field_name)
+        .cloned()
     }
 
     fn resolve_cmj_module_field_lambda(
@@ -1146,21 +1141,13 @@ impl LambdaCompiler {
             return None;
         }
 
-        if !self.cmj_arity_cache.contains_key(module.id.name()) {
-            let arities = self
-                .module_path_resolver
+        let resolver = &self.module_path_resolver;
+        let arities = cached_cmj_table(&mut self.cmj_arity_cache, module.id.name(), || {
+            resolver
                 .as_ref()
-                .and_then(|resolver| resolver.module_cmj_export_arities(module.id.name()));
-            self.cmj_arity_cache
-                .insert(module.id.name().to_string(), arities);
-        }
-
-        match self
-            .cmj_arity_cache
-            .get(module.id.name())
-            .and_then(|exports| exports.as_ref())
-            .and_then(|exports| exports.get(field_name))
-        {
+                .and_then(|resolver| resolver.module_cmj_export_arities(module.id.name()))
+        })?;
+        match arities.get(field_name) {
             Some(CmjExportArity::Single(arity)) => Some(arity.clone()),
             Some(CmjExportArity::Submodule(_)) | None => None,
         }
@@ -1830,10 +1817,9 @@ impl LambdaCompiler {
                 // a fresh loop frame is pushed before compiling the body;
                 // its label is filled in lazily if a nested switch needs
                 // labeled break/continue.
-                let frame = self.push_loop();
+                self.push_loop();
                 let body_block = self.compile_block(body);
-                self.pop_loop();
-                let label = frame.label();
+                let label = self.pop_loop();
                 Compiled {
                     prelude: vec![Statement::while_with_label(label, cond_expr, body_block)],
                     expr: Expression::undefined(false),
@@ -1857,13 +1843,12 @@ impl LambdaCompiler {
                 // OCaml: see compiler/core/lam_compile.ml `Lbreak` arm.
                 // When inside a switch, target the enclosing loop with a
                 // labeled `break` so we don't break out of the switch.
-                let frame = self
-                    .loop_stack
-                    .first()
-                    .cloned()
-                    .expect("Lbreak outside a loop — typecore should reject this");
+                assert!(
+                    !self.loop_stack.is_empty(),
+                    "Lbreak outside a loop — typecore should reject this"
+                );
                 let stmt = if self.switch_depth > 0 {
-                    let label = self.ensure_loop_label(&frame);
+                    let label = self.ensure_current_loop_label();
                     Statement::break_label(Some(label))
                 } else {
                     Statement::break_()
@@ -1874,13 +1859,12 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lcontinue => {
-                let frame = self
-                    .loop_stack
-                    .first()
-                    .cloned()
-                    .expect("Lcontinue outside a loop — typecore should reject this");
+                assert!(
+                    !self.loop_stack.is_empty(),
+                    "Lcontinue outside a loop — typecore should reject this"
+                );
                 let stmt = if self.switch_depth > 0 {
-                    let label = self.ensure_loop_label(&frame);
+                    let label = self.ensure_current_loop_label();
                     Statement::continue_label(Some(label))
                 } else {
                     Statement::continue_()
@@ -1961,45 +1945,42 @@ impl LambdaCompiler {
     /// from `loop_0`, so cross-group labels never collide and the JS
     /// labels reset between unrelated declarations.
     pub(crate) fn with_fresh_loop_label_counter<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved = std::mem::replace(
-            &mut self.loop_label_counter,
-            std::rc::Rc::new(std::cell::Cell::new(0)),
-        );
+        let saved = std::mem::replace(&mut self.loop_label_counter, 0);
         let result = f(self);
         self.loop_label_counter = saved;
         result
     }
 
     /// Push a fresh loop frame onto the stack (mirrors OCaml's
-    /// `push_loop`). The returned frame can be queried for a label
-    /// after the body has been compiled — `label()` returns `Some` only
-    /// if [`Self::ensure_loop_label`] was called from inside the body.
-    pub(crate) fn push_loop(&mut self) -> crate::lambda::lam_compile_context::LoopFrame {
-        let frame = crate::lambda::lam_compile_context::LoopFrame::default();
-        self.loop_stack.insert(0, frame.clone());
-        frame
+    /// `push_loop`). Its label slot is filled only if
+    /// [`Self::ensure_current_loop_label`] is called from inside the body.
+    pub(crate) fn push_loop(&mut self) {
+        self.loop_stack.push(None);
     }
 
-    /// Pop the innermost loop frame.
-    pub(crate) fn pop_loop(&mut self) {
-        self.loop_stack.remove(0);
+    /// Pop the innermost loop frame, returning its label if one was
+    /// allocated while compiling the body.
+    pub(crate) fn pop_loop(&mut self) -> Option<String> {
+        self.loop_stack
+            .pop()
+            .expect("pop_loop without a matching push_loop")
     }
 
-    /// Lazily allocate a JS label for `frame`. Mirrors OCaml's
-    /// `ensure_loop_label`. Idempotent: subsequent calls return the
-    /// same label.
-    pub(crate) fn ensure_loop_label(
-        &self,
-        frame: &crate::lambda::lam_compile_context::LoopFrame,
-    ) -> String {
-        if let Some(existing) = frame.label() {
-            return existing;
+    /// Lazily allocate a JS label for the innermost loop frame. Mirrors
+    /// OCaml's `ensure_loop_label`. Idempotent: subsequent calls return
+    /// the same label.
+    pub(crate) fn ensure_current_loop_label(&mut self) -> String {
+        let next_id = self.loop_label_counter;
+        let slot = self
+            .loop_stack
+            .last_mut()
+            .expect("loop label requested outside a loop");
+        if let Some(existing) = slot {
+            return existing.clone();
         }
-        let next_id = self.loop_label_counter.get();
-        self.loop_label_counter.set(next_id + 1);
+        self.loop_label_counter = next_id + 1;
         let label = format!("loop_{next_id}");
-        // We can mutate the frame's label slot through the shared Rc.
-        frame.set_label(label.clone());
+        *slot = Some(label.clone());
         label
     }
 
@@ -2017,10 +1998,9 @@ impl LambdaCompiler {
         // Push a fresh loop frame before compiling the body so any
         // nested `Lbreak`/`Lcontinue` resolves against this for-loop.
         // See OCaml `push_loop` in compiler/core/lam_compile.ml.
-        let frame = self.push_loop();
+        self.push_loop();
         let body_block = self.compile_block(body);
-        self.pop_loop();
-        let loop_label = frame.label();
+        let loop_label = self.pop_loop();
 
         let mut prelude = start_compiled.prelude;
         if block_terminates(&prelude) {
@@ -2117,10 +2097,9 @@ impl LambdaCompiler {
             self.fresh_ident("_for_of")
         };
 
-        let frame = self.push_loop();
+        self.push_loop();
         let body_block = self.compile_block(body);
-        self.pop_loop();
-        let label = frame.label();
+        let label = self.pop_loop();
 
         let stmt = if await_kw {
             Statement::for_await_of(label, emitted_id, iterable_compiled.expr, body_block)
@@ -2160,7 +2139,7 @@ impl LambdaCompiler {
                 &group,
                 &recursive_functions,
             );
-            let recursive_function_ids: HashSet<_> =
+            let recursive_function_ids: AHashSet<_> =
                 recursive_function_tail_targets.keys().cloned().collect();
             let mut declarations = vec![];
             let mut effects = vec![];
@@ -2197,8 +2176,8 @@ impl LambdaCompiler {
         all_bindings: &[(Ident, Lambda)],
         group: &[usize],
         tail_targets: &[Ident],
-        recursive_functions: &HashMap<Ident, LFunction>,
-        recursive_function_ids: &HashSet<Ident>,
+        recursive_functions: &AHashMap<Ident, LFunction>,
+        recursive_function_ids: &AHashSet<Ident>,
     ) -> (Block, Block) {
         if let Some(func) = recursive_function_binding_value(expr) {
             return (
@@ -2976,28 +2955,11 @@ impl LambdaCompiler {
                 // entries goes through the multi-handler explicit-jump arm
                 // (lam_compile.ml:1000-1010 for `EffectCall tail_type`).
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
-                if crate::debug_flags::debug_staticcatch_return() {
-                    eprintln!(
-                        "[staticcatch-return] label={label} path=flatten-multi count={} bindings={} body_kind={} handler_kind={}",
-                        handlers.len(),
-                        bindings.len(),
-                        staticcatch_debug_kind(body),
-                        staticcatch_debug_kind(handler),
-                    );
-                }
                 self.compile_multi_staticcatch_return_block(&handlers, flat_body)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
             {
-                if crate::debug_flags::debug_staticcatch_return() {
-                    eprintln!(
-                        "[staticcatch-return] label={label} path=fallthrough bindings={} body_kind={} handler_kind={}",
-                        bindings.len(),
-                        staticcatch_debug_kind(body),
-                        staticcatch_debug_kind(handler),
-                    );
-                }
                 self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
@@ -3005,14 +2967,6 @@ impl LambdaCompiler {
                     body, *label, bindings, handler,
                 ) =>
             {
-                if crate::debug_flags::debug_staticcatch_return() {
-                    eprintln!(
-                        "[staticcatch-return] label={label} path=pseudo-fallthrough bindings={} body_kind={} handler_kind={}",
-                        bindings.len(),
-                        staticcatch_debug_kind(body),
-                        staticcatch_debug_kind(handler),
-                    );
-                }
                 self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
@@ -3026,14 +2980,6 @@ impl LambdaCompiler {
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && no_static_raise_in_handler_like_ocaml(handler) =>
             {
-                if crate::debug_flags::debug_staticcatch_return() {
-                    eprintln!(
-                        "[staticcatch-return] label={label} path=nested-fallthrough bindings={} body_kind={} handler_kind={}",
-                        bindings.len(),
-                        staticcatch_debug_kind(body),
-                        staticcatch_debug_kind(handler),
-                    );
-                }
                 self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
@@ -3042,19 +2988,6 @@ impl LambdaCompiler {
                     || self.try_body_depth > 0
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
-                if crate::debug_flags::debug_staticcatch_return() {
-                    eprintln!(
-                        "[staticcatch-return] label={label} path={} bindings={} body_kind={} handler_kind={}",
-                        if requires_explicit_jump {
-                            "explicit-jump"
-                        } else {
-                            "inline-handler"
-                        },
-                        bindings.len(),
-                        staticcatch_debug_kind(body),
-                        staticcatch_debug_kind(handler),
-                    );
-                }
                 if requires_explicit_jump {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
                 } else if no_static_raise_in_handler_like_ocaml(handler)
@@ -4707,61 +4640,6 @@ impl LambdaCompiler {
         Some(result)
     }
 
-    fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
-        if crate::debug_flags::debug_take_return_tail() {
-            let rendered = crate::js_ir::print_block(&block);
-            if rendered.contains("Invalid_argument")
-                || rendered.contains("RE_EXN_ID === A")
-                || rendered.contains("RE_EXN_ID === B")
-            {
-                eprintln!("[take-return-tail]\n{rendered}\n");
-            }
-        }
-
-        let mut prefix = block.clone();
-        let Some(last) = prefix.pop() else {
-            return Err(block);
-        };
-        let Statement {
-            desc: StatementDesc::Return(mut expr),
-            ..
-        } = last
-        else {
-            return Err(block);
-        };
-
-        if matches!(expr.desc, ExpressionDesc::Undefined { .. }) && !prefix.is_empty() {
-            return Err(block);
-        }
-
-        if let [stmt] = prefix.as_slice() {
-            if let StatementDesc::If(cond, then_block, else_block) = &stmt.desc {
-                if else_block.is_empty() {
-                    if let Ok(then_expr) = self.take_return_tail_expr(then_block.clone()) {
-                        return Ok(Expression::cond(cond.clone(), then_expr, expr));
-                    }
-                    return Err(block);
-                }
-            }
-        }
-
-        // OCaml reaches `return cond ? (effect, value) : fallback` here for
-        // simple effectful success branches, and `js_pass_flatten` later turns
-        // that back into the checked-in positive `if/else` shape.
-        for stmt in prefix.into_iter().rev() {
-            let Statement {
-                desc: StatementDesc::Exp(effect),
-                ..
-            } = stmt
-            else {
-                return Err(block);
-            };
-            expr = js_seq(effect, expr);
-        }
-
-        Ok(expr)
-    }
-
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let key = then_ as *const Lambda as usize;
         self.if_return_finished.insert(key, false);
@@ -4854,17 +4732,6 @@ impl LambdaCompiler {
         then_fallback: Block,
         else_fallback: Block,
     ) -> Block {
-        if crate::debug_flags::debug_compile_test_return() {
-            let cond_text = crate::js_ir::print_expression(&cond);
-            if cond_text.contains("RE_EXN_ID") || cond_text.contains("_1 === \"x\"") {
-                eprintln!(
-                    "[compile-test-return]\ncond: {cond_text}\nthen:\n{}\nelse:\n{}\n",
-                    crate::js_ir::print_block(&then_fallback),
-                    crate::js_ir::print_block(&else_fallback),
-                );
-            }
-        }
-
         // OCaml's `S.if_` rule 4 (js_stmt_make.ml:244-246) folds to
         // `return_stmt (E.econd e ret_ifso ret_ifnot)` ONLY when both
         // branches are `[Return _]` — a strictly-single-Return statement each.
@@ -5744,11 +5611,6 @@ impl LambdaCompiler {
         Some(lam_subst::subst(&subst, &handler.handler))
     }
 
-    fn staticcatch_requires_explicit_jump(&self, bindings: &[Ident], handler: &Lambda) -> bool {
-        let _ = bindings;
-        self.lambda_requires_explicit_staticcatch_jump(handler)
-    }
-
     fn return_staticcatch_requires_explicit_jump(
         &self,
         label: i32,
@@ -6588,31 +6450,18 @@ fn lambda_is_unconditional_exit(lam: &Lambda) -> bool {
     matches!(lam, Lambda::Lbreak | Lambda::Lcontinue)
 }
 
-fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
-    match lam {
-        Lambda::LstaticCatch(_, _, _) => "staticcatch",
-        Lambda::LstaticRaise(_, _) => "staticraise",
-        Lambda::LifThenElse(_, _, _) => "if",
-        Lambda::Lswitch(_, _) => "switch",
-        Lambda::LstringSwitch(_, _, _) => "stringswitch",
-        Lambda::Llet(_, _, _, _) => "let",
-        Lambda::Lsequence(_, _) => "sequence",
-        Lambda::LtryWith(_, _, _) => "trywith",
-        Lambda::Lprim(_) => "prim",
-        Lambda::Lconst(_) => "const",
-        Lambda::Lvar(_) => "var",
-        Lambda::Lapply(_) => "apply",
-        Lambda::Lfunction(_) => "function",
-        Lambda::Lletrec(_, _) => "letrec",
-        Lambda::Lwhile(_, _) => "while",
-        Lambda::Lfor(_, _, _, _, _) => "for",
-        Lambda::Lfor_of(_, _, _) => "for_of",
-        Lambda::Lfor_await_of(_, _, _) => "for_await_of",
-        Lambda::Lbreak => "break",
-        Lambda::Lcontinue => "continue",
-        Lambda::Lassign(_, _) => "assign",
-        Lambda::LglobalModule(_) => "global_module",
+/// Per-module `.cmj` export table lookup through a memo table that also
+/// caches misses, so each module is read from the resolver at most once.
+pub(crate) fn cached_cmj_table<'a, T>(
+    cache: &'a mut AHashMap<String, Option<Arc<T>>>,
+    module_name: &str,
+    load: impl FnOnce() -> Option<Arc<T>>,
+) -> Option<&'a T> {
+    if !cache.contains_key(module_name) {
+        let table = load();
+        cache.insert(module_name.to_string(), table);
     }
+    cache.get(module_name)?.as_deref()
 }
 
 fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
@@ -6627,7 +6476,7 @@ fn recursive_binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize
         .iter()
         .enumerate()
         .map(|(index, (id, _))| (*id, index))
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
 
     // OCaml's `Lam_scc.preprocess_deps` builds `node_vec` with
     // `Array.make ... (Vec_int.empty ())`, so every slot aliases the same
@@ -6750,7 +6599,7 @@ fn recursive_binding_groups(
     }
 }
 
-fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
+fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> AHashMap<Ident, LFunction> {
     bindings
         .iter()
         .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (*id, func)))
@@ -6760,7 +6609,7 @@ fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, L
 fn recursive_function_bindings_in_group(
     bindings: &[(Ident, Lambda)],
     group: &[usize],
-) -> HashMap<Ident, LFunction> {
+) -> AHashMap<Ident, LFunction> {
     group
         .iter()
         .filter_map(|&index| {
@@ -6772,7 +6621,7 @@ fn recursive_function_bindings_in_group(
 
 fn recursive_function_binding_alias_target(
     expr: &Lambda,
-    recursive_functions: &HashMap<Ident, LFunction>,
+    recursive_functions: &AHashMap<Ident, LFunction>,
 ) -> Option<Ident> {
     let lookup = |target: &Ident| {
         recursive_functions
@@ -6949,7 +6798,7 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
 
 fn direct_recursive_function_tail_targets(
     bindings: &[(Ident, Lambda)],
-) -> HashMap<Ident, Vec<Ident>> {
+) -> AHashMap<Ident, Vec<Ident>> {
     let recursive_functions = recursive_function_bindings(bindings);
     direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
 }
@@ -6957,9 +6806,9 @@ fn direct_recursive_function_tail_targets(
 fn direct_recursive_function_tail_targets_with_group(
     bindings: &[(Ident, Lambda)],
     group: &[usize],
-    recursive_functions: &HashMap<Ident, LFunction>,
-) -> HashMap<Ident, Vec<Ident>> {
-    let mut tail_targets: HashMap<Ident, Vec<Ident>> = recursive_functions
+    recursive_functions: &AHashMap<Ident, LFunction>,
+) -> AHashMap<Ident, Vec<Ident>> {
+    let mut tail_targets: AHashMap<Ident, Vec<Ident>> = recursive_functions
         .keys()
         .cloned()
         .map(|id| {
@@ -6982,9 +6831,9 @@ fn direct_recursive_function_tail_targets_with_group(
 
 fn direct_recursive_function_tail_targets_with_bindings(
     bindings: &[(Ident, Lambda)],
-    recursive_functions: &HashMap<Ident, LFunction>,
-) -> HashMap<Ident, Vec<Ident>> {
-    let mut tail_targets: HashMap<Ident, Vec<Ident>> = recursive_functions
+    recursive_functions: &AHashMap<Ident, LFunction>,
+) -> AHashMap<Ident, Vec<Ident>> {
+    let mut tail_targets: AHashMap<Ident, Vec<Ident>> = recursive_functions
         .keys()
         .cloned()
         .map(|id| {

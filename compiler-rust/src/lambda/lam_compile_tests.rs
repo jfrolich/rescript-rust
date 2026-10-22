@@ -34,22 +34,16 @@ pub(super) fn write_ast_source_stub(ast_path: &std::path::Path, source_path: &st
     fs::write(ast_path, bytes).expect("failed to write ast source stub");
 }
 
-fn compile_checked_in_test_file_to_js_inner(module_name: &str) -> String {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root")
-        .to_path_buf();
-    let source_path = repo_root
-        .join("tests")
-        .join("tests")
-        .join("src")
-        .join(format!("{module_name}.res"));
-    let output_path = repo_root
-        .join("tests")
-        .join("tests")
-        .join("src")
-        .join(format!("{module_name}.mjs"));
-    let options = crate::driver::CompilerOptions {
+        .to_path_buf()
+}
+
+/// Compiler options resolving against the checked-in test package and runtime.
+fn test_compiler_options(repo_root: &std::path::Path) -> crate::driver::CompilerOptions {
+    crate::driver::CompilerOptions {
         include_paths: vec![
             repo_root
                 .join("tests")
@@ -69,9 +63,30 @@ fn compile_checked_in_test_file_to_js_inner(module_name: &str) -> String {
                 .join("@rescript")
                 .join("runtime"),
         ),
+        ..crate::driver::CompilerOptions::default()
+    }
+}
+
+/// Run `f` on a thread with a 32 MiB stack, as deep fixtures need it.
+fn on_big_stack<T: Send + 'static>(name: String, f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .name(name)
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .expect("failed to spawn compiler test thread")
+        .join()
+        .expect("compiler test thread panicked")
+}
+
+fn compile_checked_in_test_file_to_js_inner(module_name: &str) -> String {
+    let repo_root = repo_root();
+    let src_dir = repo_root.join("tests").join("tests").join("src");
+    let source_path = src_dir.join(format!("{module_name}.res"));
+    let output_path = src_dir.join(format!("{module_name}.mjs"));
+    let options = crate::driver::CompilerOptions {
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: Some(output_path),
-        ..crate::driver::CompilerOptions::default()
+        ..test_compiler_options(&repo_root)
     };
 
     crate::driver::compile_file_to_js_with_options(&source_path, &options)
@@ -80,56 +95,22 @@ fn compile_checked_in_test_file_to_js_inner(module_name: &str) -> String {
 
 pub(super) fn compile_checked_in_test_file_to_js(module_name: &str) -> String {
     let module_name = module_name.to_string();
-    std::thread::Builder::new()
-        .name(format!("compile_checked_in_test_file_to_js:{module_name}"))
-        .stack_size(32 * 1024 * 1024)
-        .spawn(move || compile_checked_in_test_file_to_js_inner(&module_name))
-        .expect("failed to spawn compiler fixture test thread")
-        .join()
-        .expect("compiler fixture test thread panicked")
-}
-
-fn compile_test_source_to_js_inner(source: &str, filename: &str) -> anyhow::Result<String> {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .to_path_buf();
-    let options = crate::driver::CompilerOptions {
-        include_paths: vec![
-            repo_root
-                .join("tests")
-                .join("tests")
-                .join("lib")
-                .join("ocaml"),
-            repo_root
-                .join("tests")
-                .join("dependencies")
-                .join("rescript-react")
-                .join("lib")
-                .join("ocaml"),
-        ],
-        runtime_path: Some(
-            repo_root
-                .join("node_modules")
-                .join("@rescript")
-                .join("runtime"),
-        ),
-        ..crate::driver::CompilerOptions::default()
-    };
-
-    crate::driver::compile_source_to_js_with_options(source, filename, &options)
+    on_big_stack(
+        format!("compile_checked_in_test_file_to_js:{module_name}"),
+        move || compile_checked_in_test_file_to_js_inner(&module_name),
+    )
 }
 
 pub(super) fn compile_test_source_to_js(source: &str, filename: &str) -> anyhow::Result<String> {
     let source = source.to_string();
     let filename = filename.to_string();
-    std::thread::Builder::new()
-        .name(format!("compile_test_source_to_js:{filename}"))
-        .stack_size(32 * 1024 * 1024)
-        .spawn(move || compile_test_source_to_js_inner(&source, &filename))
-        .expect("failed to spawn compiler source test thread")
-        .join()
-        .expect("compiler source test thread panicked")
+    on_big_stack(format!("compile_test_source_to_js:{filename}"), move || {
+        crate::driver::compile_source_to_js_with_options(
+            &source,
+            &filename,
+            &test_compiler_options(&repo_root()),
+        )
+    })
 }
 
 pub(super) fn find_variable_initializer<'a>(
@@ -498,102 +479,6 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn test_compile_constant_int() {
-    let mut compiler = LambdaCompiler::new();
-    let lam = Lambda::const_(Constant::int(7));
-    let program = compiler.compile_program(&lam);
-    assert!(!program.block.is_empty());
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_upto_subint_one_finish_to_ocaml_exclusive_for_range() {
-    let mut compiler = LambdaCompiler::new();
-    let i = Ident::create_local("i");
-    let xs = Ident::create_local("xs");
-    let lam = Lambda::for_(
-        i,
-        Lambda::const_(Constant::int(0)),
-        Lambda::prim(
-            Primitive::Psubint,
-            vec![Lambda::var(xs), Lambda::const_(Constant::int(1))],
-            Location::none(),
-        ),
-        crate::lambda::DirectionFlag::Upto,
-        Lambda::unit(),
-    );
-
-    let compiled = compiler.compile_expr(&lam);
-    let rendered = print_block(&compiled.prelude);
-
-    assert_eq!(rendered.trim(), "for (let i = 0; i < xs; ++i) {}");
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_for_bounds_preludes_in_ocaml_order_when_start_expr_is_pure() {
-    let mut compiler = LambdaCompiler::new();
-    let i = Ident::create_local("i");
-    let probe = Ident::create_local("probe");
-    let probe_finish = Ident::create_local("probe_finish");
-    let lam = Lambda::for_(
-        i,
-        Lambda::seq(
-            Lambda::assign(probe, Lambda::const_(Constant::int(1))),
-            Lambda::const_(Constant::int(0)),
-        ),
-        Lambda::seq(
-            Lambda::assign(probe_finish, Lambda::const_(Constant::int(2))),
-            Lambda::const_(Constant::int(1)),
-        ),
-        crate::lambda::DirectionFlag::Upto,
-        Lambda::unit(),
-    );
-
-    let compiled = compiler.compile_expr(&lam);
-    let rendered = print_block(&compiled.prelude);
-
-    assert_eq!(
-        rendered.trim(),
-        "probe = 1;\n\nprobe_finish = 2;\n\nfor (let i = 0; i <= 1; ++i) {}"
-    );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_effectful_for_start_out_of_initializer_when_finish_has_prelude() {
-    let mut compiler = LambdaCompiler::new();
-    let i = Ident::create_local("i");
-    let probe_finish = Ident::create_local("probe_finish");
-    let lam = Lambda::for_(
-        i,
-        Lambda::prim(
-            Primitive::PrawJsCode(JsRawInfo {
-                code: "start()".to_string(),
-                is_stmt: false,
-            }),
-            vec![],
-            Location::none(),
-        ),
-        Lambda::seq(
-            Lambda::assign(probe_finish, Lambda::const_(Constant::int(2))),
-            Lambda::const_(Constant::int(1)),
-        ),
-        crate::lambda::DirectionFlag::Upto,
-        Lambda::unit(),
-    );
-
-    let compiled = compiler.compile_expr(&lam);
-    let rendered = print_block(&compiled.prelude);
-
-    assert_eq!(
-        rendered.trim(),
-        "let i = (start());\n\nprobe_finish = 2;\n\nfor (; i <= 1; ++i) {}"
-    );
-}
-
-#[test]
 fn compile_raw_js_trims_outer_whitespace_before_js_ir_printing() {
     let mut compiler = LambdaCompiler::new();
     let lam = Lambda::prim(
@@ -959,60 +844,6 @@ fn compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml(
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn compile_module_primitives_require_primitive_module_runtime_import() {
-    let mut compiler = LambdaCompiler::new();
-    let module_slot = Ident::create_local("point");
-    let lam = Lambda::let_(
-        LetKind::Strict,
-        module_slot,
-        Lambda::prim(
-            Primitive::PinitMod,
-            vec![
-                Lambda::const_(Constant::int(1)),
-                Lambda::const_(Constant::string("shape")),
-            ],
-            Location::none(),
-        ),
-        Lambda::seq(
-            Lambda::unit(),
-            Lambda::prim(
-                Primitive::PupdateMod,
-                vec![
-                    Lambda::const_(Constant::string("shape")),
-                    Lambda::var(module_slot),
-                    Lambda::const_(Constant::string("value")),
-                ],
-                Location::none(),
-            ),
-        ),
-    );
-
-    let deps = compiler.compile_deps_program(&lam);
-    assert!(
-        deps.modules.iter().any(|module| {
-            module.kind == Kind::Runtime && module.id.name() == "Primitive_module"
-        })
-    );
-
-    let resolver = ModulePathResolver::from_compile_options(
-        None,
-        Some(std::path::Path::new("/tmp/module_primitive.mjs")),
-        None,
-        None,
-        None,
-        None,
-        false,
-    );
-    let rendered = print_deps_program(&deps, Some(&resolver));
-    assert!(rendered.contains(
-        "import * as Primitive_module from \"@rescript/runtime/lib/es6/Primitive_module.js\";"
-    ));
-    assert!(rendered.contains("let point = Primitive_module.init(1, \"shape\");"));
-    assert!(rendered.contains("Primitive_module.update(\"shape\", point, \"value\");"));
-}
-
-#[test]
 fn compile_int_order_uses_primitive_int_compare() {
     let mut compiler = LambdaCompiler::new();
     let left = Ident::create_local("left");
@@ -1341,21 +1172,6 @@ fn compile_obj_tag_uses_caml_block_tag_access_like_ocaml() {
 
     assert!(compiled.prelude.is_empty());
     assert_eq!(print_expression(&compiled.expr), "value.TAG");
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn compile_obj_size_uses_caml_block_length_like_ocaml() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr(&Lambda::prim(
-        Primitive::Pobjsize,
-        vec![Lambda::var(value)],
-        Location::none(),
-    ));
-
-    assert!(compiled.prelude.is_empty());
-    assert_eq!(print_expression(&compiled.expr), "value.length");
 }
 
 #[test]
@@ -1902,142 +1718,6 @@ fn compile_deps_program_reuses_same_name_export_targets() {
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn compile_deps_program_preserves_toplevel_binding_order_during_shake() {
-    let mut compiler = LambdaCompiler::new();
-    let first = Ident::create_local("first");
-    let second = Ident::create_local("second");
-    let lam = Lambda::let_(
-        LetKind::Strict,
-        first,
-        Lambda::const_(Constant::int(3)),
-        Lambda::let_(
-            LetKind::Strict,
-            second,
-            Lambda::const_(Constant::int(4)),
-            Lambda::prim(
-                Primitive::Pmakeblock(
-                    TagInfo::ModuleExport(vec![first, second]),
-                    Mutable::Immutable,
-                ),
-                vec![Lambda::var(first), Lambda::var(second)],
-                Location::none(),
-            ),
-        ),
-    );
-
-    let deps = compiler.compile_deps_program(&lam);
-
-    let [first_export, second_export] = deps.program.exports.as_slice() else {
-        panic!("expected two exports");
-    };
-    assert!(first_export.same(&first));
-    assert!(second_export.same(&second));
-
-    let [first_stmt, second_stmt] = deps.program.block.as_slice() else {
-        panic!("expected the retained bindings to stay in the OCaml shake order");
-    };
-
-    match &first_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
-                    ..
-                }),
-            ..
-        }) => assert!(ident.same(&first)),
-        other => panic!("expected the earlier retained binding first, got {other:?}"),
-    }
-
-    match &second_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 4, .. }),
-                    ..
-                }),
-            ..
-        }) => assert!(ident.same(&second)),
-        other => panic!("expected the later retained binding second, got {other:?}"),
-    }
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn compile_deps_program_keeps_exported_constant_binding_before_exported_alias_of_same_constant_like_test_small()
- {
-    let mut compiler = LambdaCompiler::new();
-    let fib = Ident::create_local("fib");
-    let u = Ident::create_local("u");
-    let lam = Lambda::let_(
-        LetKind::Strict,
-        fib,
-        Lambda::const_(Constant::int(3)),
-        Lambda::let_(
-            LetKind::Strict,
-            u,
-            Lambda::var(fib),
-            Lambda::prim(
-                Primitive::Pmakeblock(TagInfo::ModuleExport(vec![fib, u]), Mutable::Immutable),
-                vec![Lambda::var(fib), Lambda::var(u)],
-                Location::none(),
-            ),
-        ),
-    );
-
-    let deps = compiler.compile_deps_program(&lam);
-
-    let rendered = print_deps_program(&deps, None);
-
-    let [first_export, second_export] = deps.program.exports.as_slice() else {
-        panic!("expected two exports");
-    };
-    assert!(
-        first_export.same(&fib),
-        "expected fib to remain the first export, exports={:?}\n{rendered}",
-        deps.program.exports
-    );
-    assert!(
-        second_export.same(&u),
-        "expected u to remain the second export, exports={:?}\n{rendered}",
-        deps.program.exports
-    );
-
-    let [first_stmt, second_stmt] = deps.program.block.as_slice() else {
-        panic!("expected the preserved constant binding plus its exported alias");
-    };
-
-    match &first_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
-                    ..
-                }),
-            ..
-        }) => assert!(ident.same(&fib)),
-        other => panic!("expected fib = 3 to remain first, got {other:?}\n{rendered}"),
-    }
-
-    match &second_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
-                    ..
-                }),
-            ..
-        }) => assert!(ident.same(&u)),
-        other => panic!("expected u = 3 to remain second, got {other:?}\n{rendered}"),
-    }
-}
-
-#[test]
 fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block_export() {
     let mut compiler = LambdaCompiler::new();
     let f = Ident::create_local("f");
@@ -2443,61 +2123,6 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
         }
         other => panic!("expected the late literal export binding third, got {other:?}"),
     }
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
-    let mut compiler = LambdaCompiler::new();
-    let exported = Ident::create_local("foo");
-    let export_block = Lambda::prim(
-        Primitive::Pmakeblock(TagInfo::ModuleExport(vec![exported]), Mutable::Immutable),
-        vec![Lambda::var(exported)],
-        Location::none(),
-    );
-    let lam = Lambda::let_(
-        LetKind::Strict,
-        exported,
-        Lambda::const_(Constant::int(1)),
-        Lambda::seq(
-            Lambda::assign(exported, Lambda::const_(Constant::int(2))),
-            export_block,
-        ),
-    );
-
-    let deps = compiler.compile_deps_program(&lam);
-
-    let [exported_ident] = deps.program.exports.as_slice() else {
-        panic!("expected a single export after the trailing effect");
-    };
-    assert!(exported_ident.same(&exported));
-
-    assert!(
-        deps.program.block.iter().any(|stmt| matches!(
-            &stmt.desc,
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Bin(
-                    BinOp::Eq,
-                    left,
-                    right,
-                ),
-                ..
-            }) if matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(VIdent::Id(id)),
-                    ..
-                } if id.same(&exported)
-            ) && matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
-                    ..
-                }
-            )
-        )),
-        "expected the trailing assignment effect to remain in the program block"
-    );
 }
 
 #[test]
@@ -3023,177 +2648,6 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn int_switch_expressions_assign_branch_values_into_the_result_temp() {
-    let mut compiler = LambdaCompiler::new();
-    let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lswitch(
-        Box::new(Lambda::var(scrutinee)),
-        Box::new(LambdaSwitch {
-            sw_consts_full: true,
-            sw_consts: vec![
-                (
-                    crate::lambda::SwitchKey::Int(0),
-                    Lambda::const_(Constant::int(1)),
-                ),
-                (
-                    crate::lambda::SwitchKey::Int(1),
-                    Lambda::const_(Constant::int(2)),
-                ),
-            ],
-            sw_blocks_full: false,
-            sw_blocks: vec![],
-            sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
-            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        }),
-    ));
-
-    let [declare, switch_stmt] = compiled.prelude.as_slice() else {
-        panic!("expected a declaration and switch statement");
-    };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
-        panic!("expected the switch temporary declaration");
-    };
-    assert_eq!(result.name(), "tmp");
-    let StatementDesc::IntSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
-        panic!("expected an integer switch with a default block");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-    assert!(matches!(
-        compiled.expr,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(result)
-    ));
-
-    let expected_cases = [(0, 1_i32), (1, 2_i32)];
-    for ((tag, clause), (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
-        assert_eq!(*tag, expected_tag);
-        assert_switch_case_assigns_int_result(&clause.body, result, expected_value);
-    }
-    assert_switch_case_assigns_int_result(default_block, result, 3);
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn string_switch_expressions_assign_branch_values_into_the_result_temp() {
-    let mut compiler = LambdaCompiler::new();
-    let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::LstringSwitch(
-        Box::new(Lambda::var(scrutinee)),
-        vec![
-            ("linux".to_string(), Lambda::const_(Constant::int(1))),
-            ("darwin".to_string(), Lambda::const_(Constant::int(2))),
-        ],
-        Some(Box::new(Lambda::const_(Constant::int(3)))),
-    ));
-
-    let [declare, switch_stmt] = compiled.prelude.as_slice() else {
-        panic!("expected a declaration and string switch statement");
-    };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
-        panic!("expected the string switch temporary declaration");
-    };
-    assert_eq!(result.name(), "tmp");
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
-        panic!("expected a string switch with a default block");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-    assert!(matches!(
-        compiled.expr,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(result)
-    ));
-
-    let expected_cases = [("linux", 1_i32), ("darwin", 2_i32)];
-    for (clause, (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
-        assert_eq!(
-            clause.tag_type,
-            SwitchCaseTag::String(expected_tag.to_string())
-        );
-        assert_switch_case_assigns_int_result(&clause.clause.body, result, expected_value);
-    }
-    assert_switch_case_assigns_int_result(default_block, result, 3);
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates() {
-    let mut compiler = LambdaCompiler::new();
-    let scrutinee = Ident::create_local("scrutinee");
-    let compiled = compiler.compile_expr(&Lambda::Lswitch(
-        Box::new(Lambda::var(scrutinee)),
-        Box::new(LambdaSwitch {
-            sw_consts_full: false,
-            sw_consts: vec![
-                (
-                    crate::lambda::SwitchKey::Int(0),
-                    Lambda::const_(Constant::int(1)),
-                ),
-                (
-                    crate::lambda::SwitchKey::Int(1),
-                    Lambda::const_(Constant::int(1)),
-                ),
-                (
-                    crate::lambda::SwitchKey::Int(2),
-                    Lambda::const_(Constant::int(2)),
-                ),
-            ],
-            sw_blocks_full: false,
-            sw_blocks: vec![],
-            sw_failaction: Some(Box::new(Lambda::const_(Constant::int(2)))),
-            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-        }),
-    ));
-
-    let [declare, switch_stmt] = compiled.prelude.as_slice() else {
-        panic!("expected a declaration and switch statement");
-    };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
-        panic!("expected the switch temporary declaration");
-    };
-    let StatementDesc::IntSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
-        panic!("expected an integer switch with a default block");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-    assert_eq!(
-        clauses.len(),
-        2,
-        "expected the default-duplicate case to be filtered"
-    );
-    assert_eq!(clauses[0].0, 0);
-    assert!(
-        clauses[0].1.body.is_empty(),
-        "expected the first grouped case to fall through"
-    );
-    assert!(!clauses[0].1.should_break);
-    assert_eq!(clauses[1].0, 1);
-    assert_switch_case_assigns_int_result(&clauses[1].1.body, result, 1);
-    assert_switch_case_assigns_int_result(default_block, result, 2);
-}
-
-#[test]
 fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
@@ -3247,98 +2701,6 @@ fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group
     assert!(!clauses[1].1.should_break);
     assert_eq!(clauses[2].0, 2);
     assert_switch_case_assigns_int_result(&clauses[2].1.body, result, 2);
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn runtime_test_return_bodies_share_trailing_return_outside_inner_test() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let yes_seen = Ident::create_local("yes_seen");
-    let no_seen = Ident::create_local("no_seen");
-    let yes_branch = Lambda::seq(
-        Lambda::Lassign(yes_seen, Box::new(Lambda::const_(Constant::int(1)))),
-        Lambda::unit(),
-    );
-    let no_branch = Lambda::seq(
-        Lambda::Lassign(no_seen, Box::new(Lambda::const_(Constant::int(0)))),
-        Lambda::unit(),
-    );
-    let block = LambdaCompiler::normalize_runtime_test_return_body(
-        compiler
-            .compile_small_string_switch_return(
-                Expression::var(value),
-                &[(SwitchCaseTag::Int(10), &yes_branch)],
-                Some(&no_branch),
-                false,
-            )
-            .expect("expected the small switch fast path"),
-    );
-
-    let [ret] = block.as_slice() else {
-        panic!("expected one conditional return");
-    };
-    let StatementDesc::Return(Expression {
-        desc: ExpressionDesc::Cond(test, then_expr, else_expr),
-        ..
-    }) = &ret.desc
-    else {
-        panic!("expected the runtime-test body to use one conditional return");
-    };
-    assert!(matches!(
-        &test.as_ref().desc,
-        ExpressionDesc::Bin(op, left, right)
-            if matches!(
-                op,
-                BinOp::EqEqEq | BinOp::NotEqEq
-            ) && matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&value)
-            ) && matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 10, .. }),
-                    ..
-                }
-            )
-    ));
-    assert!(matches!(
-        &then_expr.as_ref().desc,
-        ExpressionDesc::Seq(first, second)
-            if matches!(
-                first.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
-                    ..
-                }
-            ) && matches!(
-                second.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Undefined { is_unit: true },
-                    ..
-                }
-            )
-    ));
-    assert!(matches!(
-        &else_expr.as_ref().desc,
-        ExpressionDesc::Seq(first, second)
-            if matches!(
-                first.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
-                    ..
-                }
-            ) && matches!(
-                second.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Undefined { is_unit: true },
-                    ..
-                }
-            )
-    ));
 }
 
 #[test]
@@ -3440,98 +2802,6 @@ fn string_switch_effects_group_non_adjacent_equal_cases_like_ocaml_stable_group(
     assert!(!clauses[1].clause.should_break);
     assert_eq!(clauses[2].tag_type, SwitchCaseTag::String("C".to_string()));
     assert_effect_assignment_writes_int(&clauses[2].clause.body, &captured, 2);
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn let_bindings_lower_string_switches_directly_into_the_declared_binding() {
-    let mut compiler = LambdaCompiler::new();
-    let version = Ident::create_local("version");
-    let scrutinee = Ident::create_local("platform");
-    let program = compiler.compile_program(&Lambda::Llet(
-        LetKind::Strict,
-        version,
-        Box::new(Lambda::LstringSwitch(
-            Box::new(Lambda::var(scrutinee)),
-            vec![
-                ("linux".to_string(), Lambda::const_(Constant::int(1))),
-                ("darwin".to_string(), Lambda::const_(Constant::int(2))),
-            ],
-            Some(Box::new(Lambda::const_(Constant::int(3)))),
-        )),
-        Box::new(Lambda::var(version)),
-    ));
-
-    let [declare, switch_stmt] = program.block.as_slice() else {
-        panic!("expected a declaration followed by a string switch");
-    };
-    let StatementDesc::Variable(VariableDeclaration {
-        ident, value: None, ..
-    }) = &declare.desc
-    else {
-        panic!("expected an uninitialized binding declaration");
-    };
-    assert!(ident.same(&version));
-
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
-        panic!("expected a direct string switch statement");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-
-    let expected_cases = [("linux", 1_i32), ("darwin", 2_i32)];
-    for (clause, (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
-        assert_eq!(
-            clause.tag_type,
-            SwitchCaseTag::String(expected_tag.to_string())
-        );
-        assert_switch_case_assigns_int_result(&clause.clause.body, &version, expected_value);
-    }
-    assert_switch_default_assigns_int_result(default_block, &version, 3);
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn single_case_string_switches_with_default_lower_to_conditional_assignment() {
-    let mut compiler = LambdaCompiler::new();
-    let scrutinee = Ident::create_local("platform");
-    let compiled = compiler.compile_expr(&Lambda::LstringSwitch(
-        Box::new(Lambda::var(scrutinee)),
-        vec![("linux".to_string(), Lambda::const_(Constant::int(1)))],
-        Some(Box::new(Lambda::const_(Constant::int(2)))),
-    ));
-
-    let [declare, assign] = compiled.prelude.as_slice() else {
-        panic!("expected a declaration followed by one assignment");
-    };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
-        panic!("expected the string switch temporary declaration");
-    };
-    let StatementDesc::Exp(Expression {
-        desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
-        ..
-    }) = &assign.desc
-    else {
-        panic!("expected the lowered switch to assign into the result temp");
-    };
-    assert!(matches!(
-        left.as_ref(),
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(result)
-    ));
-    let ExpressionDesc::Cond(cond, then_expr, else_expr) = &right.as_ref().desc else {
-        panic!("expected the assignment RHS to be a conditional expression");
-    };
-    assert_string_equality_check(cond, Some(&scrutinee), None, "linux");
-    assert_int_expr(then_expr, 1);
-    assert_int_expr(else_expr, 2);
 }
 
 pub(super) fn gpr_1438_switch_cases(
@@ -3699,72 +2969,6 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
         rendered,
         "// Generated by ReScript, PLEASE EDIT WITH CARE\n\n\nfunction actionKey(key, a, b, c, d, e) {\n  switch (key) {\n    case 98 :\n      return c;\n    case 106 :\n      return d;\n    case 107 :\n      return e;\n    case 116 :\n      return b;\n    case 99 :\n    case 118 :\n      return a;\n  }\n  return param => {};\n}\n\nexport {\n  actionKey,\n}\n/* No side effect */\n"
     );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn nested_let_values_preserve_declaration_context_for_wrapped_string_switches() {
-    let mut compiler = LambdaCompiler::new();
-    let version = Ident::create_local("version");
-    let match_id = Ident::create_local("match");
-    let scrutinee = Ident::create_local("platform");
-    let program = compiler.compile_program(&Lambda::Llet(
-        LetKind::Strict,
-        version,
-        Box::new(Lambda::let_(
-            LetKind::Strict,
-            match_id,
-            Lambda::var(scrutinee),
-            Lambda::LstaticCatch(
-                Box::new(Lambda::LstringSwitch(
-                    Box::new(Lambda::var(match_id)),
-                    vec![
-                        ("linux".to_string(), Lambda::const_(Constant::int(1))),
-                        ("darwin".to_string(), Lambda::const_(Constant::int(2))),
-                    ],
-                    Some(Box::new(Lambda::static_raise(1, Vec::new()))),
-                )),
-                (1, vec![]),
-                Box::new(Lambda::const_(Constant::int(3))),
-            ),
-        )),
-        Box::new(Lambda::var(version)),
-    ));
-
-    let [version_decl, switch_stmt] = program.block.as_slice() else {
-        panic!(
-            "expected simplification to inline the nested binding into a declaration and switch"
-        );
-    };
-
-    let StatementDesc::Variable(VariableDeclaration {
-        ident, value: None, ..
-    }) = &version_decl.desc
-    else {
-        panic!("expected an uninitialized declaration for the outer binding");
-    };
-    assert!(ident.same(&version));
-
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
-        panic!("expected the outer declaration context to reach the string switch");
-    };
-    assert!(matches!(
-        test,
-        Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        } if id.same(&scrutinee)
-    ));
-
-    let expected_cases = [("linux", 1_i32), ("darwin", 2_i32)];
-    for (clause, (expected_tag, expected_value)) in clauses.iter().zip(expected_cases) {
-        assert_eq!(
-            clause.tag_type,
-            SwitchCaseTag::String(expected_tag.to_string())
-        );
-        assert_switch_case_assigns_int_result(&clause.clause.body, &version, expected_value);
-    }
-    assert_switch_default_assigns_int_result(default_block, &version, 3);
 }
 
 #[test]
@@ -4026,67 +3230,6 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn unit_return_function_body_keeps_positive_effect_guard_before_js_passes() {
-    let mut compiler = LambdaCompiler::new();
-    let cond = Ident::create_local("cond");
-    let seen = Ident::create_local("seen");
-    let body = Lambda::LifThenElse(
-        Box::new(Lambda::var(cond)),
-        Box::new(Lambda::Lassign(
-            seen,
-            Box::new(Lambda::const_(Constant::int(1))),
-        )),
-        Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
-    );
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
-        arity: 2,
-        params: vec![cond, seen],
-        body: Box::new(body),
-        attr: crate::lambda::FunctionAttribute {
-            return_unit: true,
-            ..Default::default()
-        },
-    })));
-
-    let Expression {
-        desc: ExpressionDesc::Fun { body, .. },
-        ..
-    } = compiled.expr
-    else {
-        panic!("expected a function expression");
-    };
-
-    let [if_stmt] = body.as_slice() else {
-        panic!("expected a single if statement in the function body");
-    };
-    let StatementDesc::If(_, then_block, else_block) = &if_stmt.desc else {
-        panic!("expected a direct positive guard, got {if_stmt:#?}");
-    };
-    assert!(matches!(
-        then_block.as_slice(),
-        [
-            Statement {
-                desc: StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
-                    ..
-                }),
-                ..
-            },
-            Statement {
-                desc: StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Undefined { .. },
-                    ..
-                }),
-                ..
-            }
-        ]
-    ));
-    assert!(else_block.is_empty());
-}
-
-#[test]
 fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
     let mut compiler = LambdaCompiler::new();
     let effect = Ident::create_local("effect");
@@ -4342,154 +3485,6 @@ fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
         !rendered.contains("if (cond) {"),
         "unexpected positive guard for local/while unit tail:\n{rendered}"
     );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn function_return_blocks_lower_effectful_sequands_without_a_result_temp() {
-    let mut compiler = LambdaCompiler::new();
-    let cond = Ident::create_local("cond");
-    let branch = Ident::create_local("branch");
-    let compiled = compiler.compile_expr(&Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-        loc: crate::location::Location::none(),
-        arity: 1,
-        params: vec![cond],
-        body: Box::new(Lambda::prim(
-            Primitive::Psequand,
-            vec![
-                Lambda::var(cond),
-                Lambda::let_(
-                    LetKind::Strict,
-                    branch,
-                    Lambda::const_(Constant::int(1)),
-                    Lambda::var(branch),
-                ),
-            ],
-            Location::none(),
-        )),
-        attr: crate::lambda::FunctionAttribute::default(),
-    })));
-
-    let Expression {
-        desc: ExpressionDesc::Fun { body, .. },
-        ..
-    } = compiled.expr
-    else {
-        panic!("expected a function expression");
-    };
-
-    let [stmt] = body.as_slice() else {
-        panic!("expected a single short-circuit lowering statement");
-    };
-    match &stmt.desc {
-        StatementDesc::If(test, then_block, else_block) => {
-            assert!(matches!(
-                test,
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&cond)
-            ));
-
-            let [branch_decl, branch_return] = then_block.as_slice() else {
-                panic!("expected the right-hand branch declaration and return");
-            };
-            let StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value:
-                    Some(Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                        ..
-                    }),
-                ..
-            }) = &branch_decl.desc
-            else {
-                panic!("expected the right-hand branch local declaration");
-            };
-            assert!(ident.same(&branch));
-            assert!(matches!(
-                branch_return,
-                Statement {
-                    desc: StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    }),
-                    ..
-                } if id.same(&branch)
-            ));
-
-            let [else_return] = else_block.as_slice() else {
-                panic!("expected a single false return in the else branch");
-            };
-            assert!(matches!(
-                else_return,
-                Statement {
-                    desc: StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Bool(false),
-                        ..
-                    }),
-                    ..
-                }
-            ));
-        }
-        StatementDesc::Block(block) => {
-            let [guard_if, branch_decl, branch_return] = block.as_slice() else {
-                panic!("expected a guarded false-return plus the right-hand branch");
-            };
-            let StatementDesc::If(test, then_block, else_block) = &guard_if.desc else {
-                panic!("expected the short-circuit false-return guard");
-            };
-            assert!(matches!(
-                test,
-                Expression {
-                    desc: ExpressionDesc::JsNot(inner),
-                    ..
-                } if matches!(
-                    &inner.desc,
-                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.same(&cond)
-                )
-            ));
-            assert!(else_block.is_empty());
-            let [guard_return] = then_block.as_slice() else {
-                panic!("expected the false-return guard body");
-            };
-            assert!(matches!(
-                guard_return,
-                Statement {
-                    desc: StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Bool(false),
-                        ..
-                    }),
-                    ..
-                }
-            ));
-
-            let StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value:
-                    Some(Expression {
-                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
-                        ..
-                    }),
-                ..
-            }) = &branch_decl.desc
-            else {
-                panic!("expected the right-hand branch local declaration");
-            };
-            assert!(ident.same(&branch));
-            assert!(matches!(
-                branch_return,
-                Statement {
-                    desc: StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    }),
-                    ..
-                } if id.same(&branch)
-            ));
-        }
-        _ => panic!("expected direct return-position short-circuit lowering"),
-    }
 }
 
 #[test]
@@ -5760,29 +4755,6 @@ pub(super) fn assert_tag_field_access(expr: &Expression, ident: &Ident) {
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn drops_pure_sequence_prefixes_in_effect_contexts() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let lam = Lambda::Lsequence(
-        Box::new(Lambda::const_(Constant::int(1))),
-        Box::new(Lambda::var(value)),
-    );
-    let program = compiler.compile_program(&lam);
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        }) => assert!(id.same(&value)),
-        other => panic!("expected pure sequence prefix to be removed, got {other:?}"),
-    }
-}
-
-#[test]
 fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
     let mut compiler = LambdaCompiler::new();
     let callback = Ident::create_local("callback");
@@ -6484,73 +5456,6 @@ fn js_flatten_pass_splits_function_return_sequences_into_statements() {
             ..
         }) => {}
         other => panic!("expected return undefined after flattening, got {other:?}"),
-    }
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn js_flatten_pass_turns_conditional_effects_into_if_statements() {
-    let then_callback = Ident::create_local("thenCallback");
-    let else_callback = Ident::create_local("elseCallback");
-    let deps = apply_js_flatten_pass(DepsProgram {
-        program: Program::new(
-            vec![Statement::exp(Expression::cond(
-                Expression::bool(true),
-                Expression::call(Expression::var(then_callback), vec![], CallInfo::default()),
-                Expression::call(Expression::var(else_callback), vec![], CallInfo::default()),
-            ))],
-            vec![],
-        ),
-        modules: vec![],
-        side_effect: None,
-    });
-
-    let [stmt] = deps.program.block.as_slice() else {
-        panic!("expected one top-level statement");
-    };
-    let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
-        panic!("expected conditional effect to lower to an if statement");
-    };
-    assert!(matches!(test.desc, ExpressionDesc::Bool(true)));
-
-    let [then_stmt] = then_block.as_slice() else {
-        panic!("expected one statement in then branch");
-    };
-    let [else_stmt] = else_block.as_slice() else {
-        panic!("expected one statement in else branch");
-    };
-
-    match &then_stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) => {
-            assert!(args.is_empty());
-            assert!(matches!(
-                func.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&then_callback)
-            ));
-        }
-        other => panic!("expected then branch effect call, got {other:?}"),
-    }
-    match &else_stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Call(func, args, _),
-            ..
-        }) => {
-            assert!(args.is_empty());
-            assert!(matches!(
-                func.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&else_callback)
-            ));
-        }
-        other => panic!("expected else branch effect call, got {other:?}"),
     }
 }
 
@@ -7352,105 +6257,6 @@ fn js_flatten_and_mark_dead_keeps_direct_object_property_reads_materialized_like
             "expected the direct object property projection to stay materialized, got {other:?}"
         ),
     }
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
-    let list = Ident::create_local("list");
-    let deps = apply_js_flatten_and_mark_dead_pass(
-        DepsProgram {
-            program: Program::new(
-                vec![Statement::variable(VariableDeclaration {
-                    ident: list,
-                    value: Some(Expression::new(ExpressionDesc::CamlBlock(
-                        vec![
-                            Expression::number(Number::int(2)),
-                            Expression::new(ExpressionDesc::CamlBlock(
-                                vec![
-                                    Expression::number(Number::int(3)),
-                                    Expression::number(Number::int(0)),
-                                ],
-                                MutableFlag::Immutable,
-                                Box::new(TagInfo::Constructor {
-                                    name: "::".to_string(),
-                                    num_nonconst: 1,
-                                    runtime: Box::new(crate::types::TaggedBlock {
-                                        tag: crate::types::VariantTag {
-                                            name: "::".to_string(),
-                                            literal: None,
-                                        },
-                                        tag_name: None,
-                                    }),
-                                }),
-                            )),
-                        ],
-                        MutableFlag::Immutable,
-                        Box::new(TagInfo::Constructor {
-                            name: "::".to_string(),
-                            num_nonconst: 1,
-                            runtime: Box::new(crate::types::TaggedBlock {
-                                tag: crate::types::VariantTag {
-                                    name: "::".to_string(),
-                                    literal: None,
-                                },
-                                tag_name: None,
-                            }),
-                        }),
-                    ))),
-                    property: LetKind::Strict,
-                    ident_info: IdentInfo::default(),
-                })],
-                vec![],
-            ),
-            modules: vec![],
-            side_effect: None,
-        },
-        false,
-    );
-
-    let [stmt] = deps.program.block.as_slice() else {
-        panic!("expected the list binding to remain");
-    };
-
-    let StatementDesc::Variable(VariableDeclaration {
-        ident,
-        value:
-            Some(Expression {
-                desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
-                ..
-            }),
-        ..
-    }) = &stmt.desc
-    else {
-        panic!("expected the pure nested list binding to stay inline");
-    };
-    assert!(ident.same(&list));
-    assert!(matches!(
-        items.as_slice(),
-        [
-            Expression {
-                desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
-                ..
-            },
-            Expression {
-                desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _),
-                ..
-            }
-        ] if matches!(
-            inner.as_slice(),
-            [
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
-                    ..
-                },
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                    ..
-                }
-            ]
-        )
-    ));
 }
 
 #[test]
@@ -8314,58 +7120,6 @@ b := b.contents + tmp
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_paddint_with_int32_coercion() {
-    let mut compiler = LambdaCompiler::new();
-    let lhs = Ident::create_local("lhs");
-    let rhs = Ident::create_local("rhs");
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Paddint,
-        vec![Lambda::var(lhs), Lambda::var(rhs)],
-        Location::none(),
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Bor, left, right),
-            ..
-        }) => {
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                    ..
-                }
-            ));
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Plus, lhs_expr, rhs_expr),
-                    ..
-                }
-                if matches!(
-                    lhs_expr.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&lhs)
-                ) && matches!(
-                    rhs_expr.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&rhs)
-                )
-            ));
-        }
-        other => panic!("expected `lhs + rhs | 0`, got {other:?}"),
-    }
-}
-
-#[test]
 fn lassign_expression_lowers_to_statement_prelude_and_unit_value() {
     let mut compiler = LambdaCompiler::new();
     let cell = Ident::create_local("cell");
@@ -8473,104 +7227,6 @@ fn typeof_folding_matches_ocaml_js_exp_make_for_supported_literals() {
         ))),
         "\"object\""
     );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn typeof_literal_comparisons_fold_like_ocaml_string_equal() {
-    assert_eq!(
-        print_expression(&raw_typeof_comparison(
-            Expression::number(Number::int(3)),
-            BinOp::NotEqEq,
-            "number",
-        )),
-        "false"
-    );
-    assert_eq!(
-        print_expression(&raw_typeof_comparison(
-            Expression::string("x"),
-            BinOp::EqEqEq,
-            "object",
-        )),
-        "false"
-    );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_plsrint_with_int32_coercion() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let shift = Ident::create_local("shift");
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Plsrint,
-        vec![Lambda::var(value), Lambda::var(shift)],
-        Location::none(),
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    match &stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Bin(BinOp::Bor, left, right),
-            ..
-        }) => {
-            assert!(matches!(
-                right.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Number(Number::Int { i: 0, .. }),
-                    ..
-                }
-            ));
-            assert!(matches!(
-                left.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Lsr, value_expr, shift_expr),
-                    ..
-                }
-                if matches!(
-                    value_expr.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&value)
-                ) && matches!(
-                    shift_expr.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                        ..
-                    } if id.same(&shift)
-                )
-            ));
-        }
-        other => panic!("expected `value >>> shift | 0`, got {other:?}"),
-    }
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_plsrint_zero_shift_as_identity() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let program = compiler.compile_program(&Lambda::prim(
-        Primitive::Plsrint,
-        vec![Lambda::var(value), Lambda::const_(Constant::int(0))],
-        Location::none(),
-    ));
-
-    let [stmt] = program.block.as_slice() else {
-        panic!("expected a single expression statement");
-    };
-    // OCaml `Plsrint` special-cases literal zero shifts before `to_int32`
-    // (`compiler/core/lam_compile_primitive.ml:264-267`).
-    assert!(matches!(
-        &stmt.desc,
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-            ..
-        }) if id.same(&value)
-    ));
 }
 
 #[test]
@@ -8826,108 +7482,6 @@ fn lowers_pnull_undefined_to_opt_non_inline_operand_to_primitive_option_from_nul
         print_expression(&compiled.expr),
         "Primitive_option.fromNullable(\"value\")"
     );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block() {
-    let mut compiler = LambdaCompiler::new();
-    let global = Ident::create_persistent("value");
-    let exported = Ident::create_local("wrapped");
-    let lam = Lambda::let_(
-        LetKind::Strict,
-        exported,
-        Lambda::prim(
-            Primitive::Psome,
-            vec![Lambda::var(global)],
-            Location::none(),
-        ),
-        Lambda::prim(
-            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![exported]), Mutable::Immutable),
-            vec![Lambda::var(exported)],
-            Location::none(),
-        ),
-    );
-
-    let deps = compiler.compile_deps_program(&lam);
-    assert!(
-        deps.modules.iter().any(|module| {
-            module.kind == Kind::Runtime && module.id.name() == "Primitive_option"
-        })
-    );
-
-    let resolver = ModulePathResolver::from_compile_options(
-        None,
-        Some(std::path::Path::new("/tmp/wrapped.mjs")),
-        None,
-        None,
-        None,
-        None,
-        false,
-    );
-    let rendered = print_deps_program(&deps, Some(&resolver));
-    assert!(rendered.contains(
-        "import * as Primitive_option from \"@rescript/runtime/lib/es6/Primitive_option.js\";"
-    ));
-    assert!(rendered.contains("let wrapped = Primitive_option.some(value);"));
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn lowers_pfield_cons_to_hd_tl_properties() {
-    let mut compiler = LambdaCompiler::new();
-    let list = Ident::create_local("list");
-    let head_program = compiler.compile_program(&Lambda::prim(
-        Primitive::Pfield(0, FieldDbgInfo::Cons),
-        vec![Lambda::var(list)],
-        Location::none(),
-    ));
-    let tail_program = compiler.compile_program(&Lambda::prim(
-        Primitive::Pfield(1, FieldDbgInfo::Cons),
-        vec![Lambda::var(list)],
-        Location::none(),
-    ));
-
-    let [head_stmt] = head_program.block.as_slice() else {
-        panic!("expected a single expression statement for head");
-    };
-    let [tail_stmt] = tail_program.block.as_slice() else {
-        panic!("expected a single expression statement for tail");
-    };
-
-    match &head_stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::StaticIndex(target, field, _),
-            ..
-        }) => {
-            assert_eq!(field, "hd");
-            assert!(matches!(
-                target.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&list)
-            ));
-        }
-        other => panic!("expected head access to lower to `.hd`, got {other:?}"),
-    }
-
-    match &tail_stmt.desc {
-        StatementDesc::Exp(Expression {
-            desc: ExpressionDesc::StaticIndex(target, field, _),
-            ..
-        }) => {
-            assert_eq!(field, "tl");
-            assert!(matches!(
-                target.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&list)
-            ));
-        }
-        other => panic!("expected tail access to lower to `.tl`, got {other:?}"),
-    }
 }
 
 #[test]
@@ -9430,85 +7984,6 @@ fn js_shake_pass_removes_unused_pure_toplevel_bindings_and_statements() {
 }
 
 #[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn js_shake_pass_keeps_export_dependencies_and_impure_bindings() {
-    let dep = Ident::create_local("dep");
-    let exported = Ident::create_local("exported");
-    let callback = Ident::create_local("callback");
-    let side = Ident::create_local("side");
-    let deps = apply_js_shake_pass(DepsProgram {
-        program: Program::new(
-            vec![
-                Statement::variable(VariableDeclaration {
-                    ident: dep,
-                    value: Some(Expression::number(Number::int(1))),
-                    property: LetKind::Strict,
-                    ident_info: IdentInfo::default(),
-                }),
-                Statement::variable(VariableDeclaration {
-                    ident: exported,
-                    value: Some(Expression::var(dep)),
-                    property: LetKind::Strict,
-                    ident_info: IdentInfo::default(),
-                }),
-                Statement::variable(VariableDeclaration {
-                    ident: side,
-                    value: Some(Expression::call(
-                        Expression::var(callback),
-                        vec![],
-                        CallInfo::default(),
-                    )),
-                    property: LetKind::Strict,
-                    ident_info: IdentInfo::default(),
-                }),
-            ],
-            vec![exported],
-        ),
-        modules: vec![],
-        side_effect: None,
-    });
-
-    let [side_stmt, exported_stmt, dep_stmt] = deps.program.block.as_slice() else {
-        panic!("expected the dependency chain and impure binding to remain");
-    };
-
-    match &side_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Call(func, args, _),
-                    ..
-                }),
-            ..
-        }) => {
-            assert!(ident.same(&side));
-            assert!(args.is_empty());
-            assert!(matches!(
-                func.as_ref(),
-                Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                } if id.same(&callback)
-            ));
-        }
-        other => panic!("expected the impure binding to remain first, got {other:?}"),
-    }
-    match &exported_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-            assert!(ident.same(&exported));
-        }
-        other => panic!("expected the exported binding to remain in the middle, got {other:?}"),
-    }
-    match &dep_stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-            assert!(ident.same(&dep));
-        }
-        other => panic!("expected the dependency binding to remain last, got {other:?}"),
-    }
-}
-
-#[test]
 fn one_unit_arg_functions_lower_to_zero_arg_js_functions() {
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&Lambda::function_(
@@ -9758,76 +8233,6 @@ fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like
             ..
         } if id.same(&xx)
     ));
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn acyclic_letrec_singletons_lower_like_lam_scc_plain_lets() {
-    let mut compiler = LambdaCompiler::new();
-    let a = Ident::create_local("a");
-    let b = Ident::create_local("b");
-    let lam = Lambda::letrec(
-        vec![
-            (
-                a,
-                Lambda::prim(
-                    Primitive::Pmakeblock(
-                        TagInfo::record(
-                            vec![("inner".to_string(), false)],
-                            crate::parser::ast::MutableFlag::Immutable,
-                        ),
-                        Mutable::Immutable,
-                    ),
-                    vec![Lambda::prim(
-                        Primitive::Pmakeblock(
-                            TagInfo::record(
-                                vec![("value".to_string(), false)],
-                                crate::parser::ast::MutableFlag::Immutable,
-                            ),
-                            Mutable::Immutable,
-                        ),
-                        vec![Lambda::const_(Constant::int(1))],
-                        Location::none(),
-                    )],
-                    Location::none(),
-                ),
-            ),
-            (
-                b,
-                Lambda::prim(
-                    Primitive::Pmakeblock(
-                        TagInfo::record(
-                            vec![("next".to_string(), false)],
-                            crate::parser::ast::MutableFlag::Immutable,
-                        ),
-                        Mutable::Immutable,
-                    ),
-                    vec![Lambda::var(a)],
-                    Location::none(),
-                ),
-            ),
-        ],
-        Lambda::unit(),
-    );
-
-    let rendered = print_block(&compiler.compile_expr(&lam).prelude);
-
-    assert!(
-        rendered.contains("let a = {"),
-        "expected the non-recursive singleton to lower as a plain let:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("let b = {"),
-        "expected the dependent singleton to lower as a plain let:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("let a;") && !rendered.contains("let b;"),
-        "unexpected recursive placeholder declaration remained:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("Primitive_object.updateDummy"),
-        "acyclic singletons should not go through dummy-object updates:\n{rendered}"
-    );
 }
 
 #[test]
@@ -10428,94 +8833,6 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
     assert!(
         !rendered.contains("return loop("),
         "unexpected recursive call remained in named-variant switch lowering:\n{rendered}"
-    );
-}
-
-#[test]
-#[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
-fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
-    let mut compiler = LambdaCompiler::new();
-    let odd = Ident::create_local("odd");
-    let even = Ident::create_local("even");
-    let z = Ident::create_local("z");
-    let y = Ident::create_local("y");
-    let lam = Lambda::letrec(
-        vec![
-            (
-                odd,
-                Lambda::function_(
-                    1,
-                    vec![z],
-                    Lambda::Lapply(Box::new(Apply {
-                        ap_func: Box::new(Lambda::var(even)),
-                        ap_args: vec![Lambda::const_(Constant::int(32))],
-                        ap_info: ApInfo {
-                            loc: Location::none(),
-                            inlined: InlineAttribute::Default,
-                            status: ApplyStatus::Na,
-                        },
-                        ap_transformed_jsx: false,
-                    })),
-                    FunctionAttribute::default(),
-                    crate::location::Location::none(),
-                ),
-            ),
-            (
-                even,
-                Lambda::function_(
-                    1,
-                    vec![y],
-                    Lambda::Lapply(Box::new(Apply {
-                        ap_func: Box::new(Lambda::var(odd)),
-                        ap_args: vec![Lambda::var(y)],
-                        ap_info: ApInfo {
-                            loc: Location::none(),
-                            inlined: InlineAttribute::Default,
-                            status: ApplyStatus::Na,
-                        },
-                        ap_transformed_jsx: false,
-                    })),
-                    FunctionAttribute::default(),
-                    crate::location::Location::none(),
-                ),
-            ),
-        ],
-        Lambda::var(odd),
-    );
-
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
-    let Lambda::Lletrec(bindings, _) = &simplified else {
-        panic!("expected simplified alias test to stay a letrec, got {simplified:?}");
-    };
-    let tail_targets = direct_recursive_function_tail_targets(bindings);
-    let odd_targets = tail_targets
-        .get(&odd)
-        .cloned()
-        .unwrap_or_else(|| panic!("expected tail targets for odd, got {tail_targets:?}"));
-    assert!(
-        odd_targets.iter().any(|target| target.same(&odd))
-            && odd_targets.iter().any(|target| target.same(&even)),
-        "expected odd tail targets to include the same-group alias, got {odd_targets:?}\nsimplified:\n{}",
-        crate::lambda::lam_print::lambda_to_string(&simplified)
-    );
-    let compiled = compiler.compile_expr(&simplified);
-    let rendered = if compiled.prelude.is_empty() {
-        print_expression(&compiled.expr)
-    } else {
-        print_block(&compiled.prelude)
-    };
-
-    assert!(
-        rendered.contains("while (true)"),
-        "expected same-group function aliases to lower through the tail loop:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("let even = odd;"),
-        "expected the recursive alias binding to collapse to a direct alias:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("return even("),
-        "unexpected recursive alias call remained in the emitted JS:\n{rendered}"
     );
 }
 
