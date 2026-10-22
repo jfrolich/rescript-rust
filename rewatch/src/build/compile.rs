@@ -1715,10 +1715,14 @@ pub fn compile(
     Ok((compile_errors, compile_warnings, num_compiled_modules))
 }
 
-static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();
+/// Resolved runtime path per project root. Keyed by root so a later project
+/// in the same process (watch reinit, tests, tooling) resolves its own.
+static RUNTIME_PATH_MEMO: OnceLock<Mutex<AHashMap<PathBuf, PathBuf>>> = OnceLock::new();
 
 pub fn get_runtime_path(package_config: &Config, project_context: &ProjectContext) -> Result<PathBuf> {
-    if let Some(p) = RUNTIME_PATH_MEMO.get() {
+    let memo = RUNTIME_PATH_MEMO.get_or_init(Default::default);
+    let root = project_context.get_root_path();
+    if let Some(p) = memo.lock().unwrap().get(root) {
         return Ok(p.clone());
     }
 
@@ -1732,8 +1736,12 @@ pub fn get_runtime_path(package_config: &Config, project_context: &ProjectContex
         },
     }?;
 
-    let _ = RUNTIME_PATH_MEMO.set(resolved.clone());
-    Ok(resolved)
+    Ok(memo
+        .lock()
+        .unwrap()
+        .entry(root.to_path_buf())
+        .or_insert(resolved)
+        .clone())
 }
 
 pub fn get_runtime_path_args(
