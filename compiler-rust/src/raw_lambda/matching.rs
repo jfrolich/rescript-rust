@@ -1630,35 +1630,30 @@ pub fn ctx_match(ctx: &[Ctx<'_>], pss: &Matrix<'_>) -> bool {
 /// sorted in descending order by exit number.
 pub type Jumps<'p> = Vec<(i32, Vec<Ctx<'p>>)>;
 
+/// Position of the entry for exit number `i` in the descending table, if
+/// present. Like OCaml's `Jumps.extract`, the scan stops at the first entry
+/// whose exit number is not greater than `i`.
+fn jumps_position(i: i32, jumps: &Jumps<'_>) -> Option<usize> {
+    jumps
+        .iter()
+        .position(|(j, _)| *j <= i)
+        .filter(|&p| jumps[p].0 == i)
+}
+
 /// Extract the contexts for exit number i, returning (extracted, remaining).
-pub fn jumps_extract<'p>(i: i32, jumps: &Jumps<'p>) -> (Vec<Ctx<'p>>, Jumps<'p>) {
-    match jumps.split_first() {
-        None => (Vec::new(), Vec::new()),
-        Some(((j, pss), rem)) => {
-            if i == *j {
-                (pss.clone(), rem.to_vec())
-            } else if *j < i {
-                (Vec::new(), jumps.to_vec())
-            } else {
-                let (r, mut remaining) = jumps_extract(i, &rem.to_vec());
-                remaining.insert(0, (*j, pss.clone()));
-                (r, remaining)
-            }
-        }
+pub fn jumps_extract<'p>(i: i32, mut jumps: Jumps<'p>) -> (Vec<Ctx<'p>>, Jumps<'p>) {
+    match jumps_position(i, &jumps) {
+        Some(p) => (jumps.remove(p).1, jumps),
+        None => (Vec::new(), jumps),
     }
 }
 
-/// Remove the entry for exit number i.
-pub fn jumps_remove<'p>(i: i32, jumps: &Jumps<'p>) -> Jumps<'p> {
-    match jumps.split_first() {
-        None => Vec::new(),
-        Some(((j, _), rem)) if i == *j => rem.to_vec(),
-        Some((x, rem)) => {
-            let mut result = vec![x.clone()];
-            result.extend(jumps_remove(i, &rem.to_vec()));
-            result
-        }
+/// Remove the (first) entry for exit number i.
+pub fn jumps_remove<'p>(i: i32, mut jumps: Jumps<'p>) -> Jumps<'p> {
+    if let Some(p) = jumps.iter().position(|(j, _)| *j == i) {
+        jumps.remove(p);
     }
+    jumps
 }
 
 /// Empty jump table.
@@ -1683,60 +1678,54 @@ pub fn jumps_singleton<'p>(i: i32, ctx: Vec<Ctx<'p>>) -> Jumps<'p> {
 /// Add contexts for exit number i to the jump table.
 /// Maintains descending sort order and merges with get_mins when
 /// the exit number already exists.
-pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, jumps: Jumps<'p>) -> Jumps<'p> {
+pub fn jumps_add<'p>(i: i32, pss: Vec<Ctx<'p>>, mut jumps: Jumps<'p>) -> Jumps<'p> {
     if pss.is_empty() {
         return jumps;
     }
-    fn add<'p>(i: i32, pss: Vec<Ctx<'p>>, jumps: &[(i32, Vec<Ctx<'p>>)]) -> Jumps<'p> {
-        match jumps.split_first() {
-            None => vec![(i, pss)],
-            Some(((j, qss), rem)) => {
-                if *j > i {
-                    let mut result = vec![(*j, qss.clone())];
-                    result.extend(add(i, pss, rem));
-                    result
-                } else if *j < i {
-                    let mut result = vec![(i, pss)];
-                    result.extend(jumps.to_vec());
-                    result
-                } else {
-                    // Same exit number: merge with get_mins
-                    let mut combined = pss;
-                    combined.extend(qss.iter().cloned());
-                    let mut result = vec![(i, get_mins(le_ctx, combined))];
-                    result.extend(rem.to_vec());
-                    result
-                }
-            }
+    match jumps.iter().position(|(j, _)| *j <= i) {
+        None => jumps.push((i, pss)),
+        Some(p) if jumps[p].0 < i => jumps.insert(p, (i, pss)),
+        Some(p) => {
+            // Same exit number: merge with get_mins.
+            let qss = std::mem::take(&mut jumps[p].1);
+            let mut combined = pss;
+            combined.extend(qss);
+            jumps[p].1 = get_mins(le_ctx, combined);
         }
     }
-    add(i, pss, &jumps)
+    jumps
 }
 
 /// Union of two jump tables.
 /// Maintains descending sort order and merges contexts with get_mins.
-pub fn jumps_union<'p>(env1: &Jumps<'p>, env2: &Jumps<'p>) -> Jumps<'p> {
-    match (env1.split_first(), env2.split_first()) {
-        (None, _) => env2.clone(),
-        (_, None) => env1.clone(),
-        (Some(((i1, pss1), rem1)), Some(((i2, pss2), rem2))) => {
-            if i1 == i2 {
-                let mut combined = pss1.clone();
-                combined.extend(pss2.iter().cloned());
-                let mut result = vec![(*i1, get_mins(le_ctx, combined))];
-                result.extend(jumps_union(&rem1.to_vec(), &rem2.to_vec()));
-                result
-            } else if i1 > i2 {
-                let mut result = vec![(*i1, pss1.clone())];
-                result.extend(jumps_union(&rem1.to_vec(), env2));
-                result
-            } else {
-                let mut result = vec![(*i2, pss2.clone())];
-                result.extend(jumps_union(env1, &rem2.to_vec()));
-                result
+pub fn jumps_union<'p>(env1: Jumps<'p>, env2: Jumps<'p>) -> Jumps<'p> {
+    let mut result = Vec::with_capacity(env1.len() + env2.len());
+    let mut env1 = env1.into_iter().peekable();
+    let mut env2 = env2.into_iter().peekable();
+    loop {
+        let (i1, i2) = match (env1.peek(), env2.peek()) {
+            (None, _) => {
+                result.extend(env2);
+                break;
             }
+            (_, None) => {
+                result.extend(env1);
+                break;
+            }
+            (Some((i1, _)), Some((i2, _))) => (*i1, *i2),
+        };
+        if i1 == i2 {
+            let (_, mut combined) = env1.next().expect("peeked");
+            let (_, pss2) = env2.next().expect("peeked");
+            combined.extend(pss2);
+            result.push((i1, get_mins(le_ctx, combined)));
+        } else if i1 > i2 {
+            result.extend(env1.next());
+        } else {
+            result.extend(env2.next());
         }
     }
+    result
 }
 
 /// Merge adjacent pairs of jump tables (used by jumps_unions).
@@ -1748,7 +1737,7 @@ fn merge<'p>(envs: Vec<Jumps<'p>>) -> Vec<Jumps<'p>> {
     let mut iter = envs.into_iter();
     loop {
         match (iter.next(), iter.next()) {
-            (Some(e1), Some(e2)) => result.push(jumps_union(&e1, &e2)),
+            (Some(e1), Some(e2)) => result.push(jumps_union(e1, e2)),
             (Some(e1), None) => {
                 result.push(e1);
                 break;
@@ -1769,8 +1758,8 @@ pub fn jumps_unions<'p>(envs: Vec<Jumps<'p>>) -> Jumps<'p> {
 }
 
 /// Map a function over the context lists in a jump table.
-pub fn jumps_map<'p>(f: impl Fn(Vec<Ctx<'p>>) -> Vec<Ctx<'p>>, env: &Jumps<'p>) -> Jumps<'p> {
-    env.iter().map(|(i, pss)| (*i, f(pss.clone()))).collect()
+pub fn jumps_map<'p>(f: impl Fn(Vec<Ctx<'p>>) -> Vec<Ctx<'p>>, env: Jumps<'p>) -> Jumps<'p> {
+    env.into_iter().map(|(i, pss)| (i, f(pss))).collect()
 }
 
 // ============================================================================
@@ -6890,7 +6879,7 @@ fn combine_constant<'p>(
             next_raise_count,
         ),
     };
-    (lambda1, jumps_union(&local_jumps, &total))
+    (lambda1, jumps_union(local_jumps, total))
 }
 
 /// Split case list into constant and non-constant constructor cases.
@@ -7156,7 +7145,7 @@ fn combine_constructor<'p>(
                 RawLambda::Llet(LetKind::Alias, tag, Box::new(arg), Box::new(tests))
             }
         };
-        (lambda1, jumps_union(&local_jumps, &total1))
+        (lambda1, jumps_union(local_jumps, total1))
     } else {
         // Regular concrete type
         let reference = match cstr.cstr_kind {
@@ -7280,7 +7269,7 @@ fn combine_constructor<'p>(
                 apply_handlers(result, handlers)
             }
         };
-        (lambda1, jumps_union(&local_jumps, &total1))
+        (lambda1, jumps_union(local_jumps, total1))
     }
 }
 
@@ -7575,7 +7564,7 @@ fn combine_variant<'p>(
             }
         }
     };
-    (lambda1, jumps_union(&local_jumps, &total1))
+    (lambda1, jumps_union(local_jumps, total1))
 }
 
 /// Combine array matching results.
@@ -7617,7 +7606,7 @@ fn combine_array<'p>(
             switch_result,
         )
     };
-    (lambda1, jumps_union(&local_jumps, &total1))
+    (lambda1, jumps_union(local_jumps, total1))
 }
 
 // ============================================================================
@@ -7656,7 +7645,7 @@ fn compile_list<'p, K: Clone>(
             // and the jump totals in reverse-success order, so push
             // results linearly and reverse only the totals once.
             compiled.push((key, lambda1));
-            totals.push(jumps_map(|c| ctx_combine(pa, &c), &total1));
+            totals.push(jumps_map(|c| ctx_combine(pa, &c), total1));
             new_pats.push(cell.pat);
         }
     }
@@ -7708,7 +7697,7 @@ fn compile_orhandlers<'p>(
                                     pa,
                                     compile_fun,
                                     body,
-                                    jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                                    jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
                                     ctx,
                                     rem,
                                 )
@@ -7729,8 +7718,8 @@ fn compile_orhandlers<'p>(
                                     Box::new(handler_i),
                                 ),
                                 jumps_union(
-                                    &jumps_remove(*i, &total_r),
-                                    &jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                                    jumps_remove(*i, total_r),
+                                    jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
                                 ),
                                 ctx,
                                 rem,
@@ -7926,10 +7915,14 @@ fn c_rec<'p>(
     match rest.split_first() {
         None => Ok((body, total_body)),
         Some(((i, pm), rem)) => {
-            let (ctx_i, total_rem) = jumps_extract(*i, &total_body);
-            if ctx_i.is_empty() {
+            // OCaml `if ctx_i = [] then c_rec body total_body rem`: keep the
+            // original table when nothing (non-empty) is extracted.
+            let has_ctx_i =
+                jumps_position(*i, &total_body).is_some_and(|p| !total_body[p].1.is_empty());
+            if !has_ctx_i {
                 c_rec(comp_fun, partial, ctx, arg, body, total_body, rem)
             } else {
+                let (ctx_i, total_rem) = jumps_extract(*i, total_body);
                 let this_partial = if rem.is_empty() {
                     *partial
                 } else {
@@ -7942,7 +7935,7 @@ fn c_rec<'p>(
                         ctx,
                         arg,
                         RawLambda::LstaticCatch(Box::new(body), (*i, Vec::new()), Box::new(li)),
-                        jumps_union(&total_i, &total_rem),
+                        jumps_union(total_i, total_rem),
                         rem,
                     ),
                     Err(Unused) => c_rec(
@@ -8294,7 +8287,7 @@ fn do_compile_matching<'p>(
                 inside,
                 next_raise_count,
             )?;
-            Ok((lam, jumps_map(|c| ctx_rshift(&c), &total)))
+            Ok((lam, jumps_map(|c| ctx_rshift(&c), total)))
         }
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
             let (lam, total) = compile_match(
@@ -8348,7 +8341,7 @@ fn compile_no_test<'p>(
         &cell.pm,
         next_raise_count,
     )?;
-    Ok((lambda, jumps_map(|c| up_ctx(&c), &total)))
+    Ok((lambda, jumps_map(|c| up_ctx(&c), total)))
 }
 
 /// Wrapper for compile_test that handles the type-specific divide and combine.
@@ -9586,6 +9579,47 @@ pub fn for_multiple_match(
 
 #[cfg(test)]
 mod tests {
+    fn empty_ctxs<'p>(n: usize) -> Vec<super::Ctx<'p>> {
+        (0..n)
+            .map(|_| super::Ctx {
+                left: Vec::new(),
+                right: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn keys(jumps: &super::Jumps<'_>) -> Vec<(i32, usize)> {
+        jumps.iter().map(|(i, pss)| (*i, pss.len())).collect()
+    }
+
+    #[test]
+    fn jumps_tables_stay_sorted_descending_and_merge_equal_exits() {
+        use super::*;
+        let a: Jumps<'_> = vec![(9, empty_ctxs(1)), (5, empty_ctxs(2)), (1, empty_ctxs(1))];
+        let b: Jumps<'_> = vec![(7, empty_ctxs(1)), (5, empty_ctxs(1)), (0, empty_ctxs(3))];
+        // Equal empty contexts are mutually `le_ctx`, so get_mins keeps one.
+        let u = jumps_union(a.clone(), b);
+        assert_eq!(keys(&u), vec![(9, 1), (7, 1), (5, 1), (1, 1), (0, 3)]);
+
+        let added = jumps_add(6, empty_ctxs(2), a.clone());
+        assert_eq!(keys(&added), vec![(9, 1), (6, 2), (5, 2), (1, 1)]);
+        let added = jumps_add(5, empty_ctxs(1), a.clone());
+        assert_eq!(keys(&added), vec![(9, 1), (5, 1), (1, 1)]);
+        let added = jumps_add(-3, empty_ctxs(1), a.clone());
+        assert_eq!(keys(&added), vec![(9, 1), (5, 2), (1, 1), (-3, 1)]);
+        assert_eq!(keys(&jumps_add(4, Vec::new(), a.clone())), keys(&a));
+
+        let (ctx, rest) = jumps_extract(5, a.clone());
+        assert_eq!(ctx.len(), 2);
+        assert_eq!(keys(&rest), vec![(9, 1), (1, 1)]);
+        let (ctx, rest) = jumps_extract(4, a.clone());
+        assert!(ctx.is_empty());
+        assert_eq!(keys(&rest), keys(&a));
+
+        assert_eq!(keys(&jumps_remove(1, a.clone())), vec![(9, 1), (5, 2)]);
+        assert_eq!(keys(&jumps_remove(3, a.clone())), keys(&a));
+    }
+
     #[test]
     fn resolve_shared_actions_replaces_every_shared_action() {
         use super::*;
