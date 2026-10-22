@@ -6753,14 +6753,9 @@ pub fn call_switcher(
         })
         .collect();
 
-    crate::raw_lambda::switch::zyva_with_shared_actions(
-        edges,
-        arg,
-        &cases,
-        acts,
-        sw_dispatch,
-        &mut || bump_raise_count(next_raise_count, "matching::call_switcher"),
-    )
+    crate::raw_lambda::switch::zyva_with_shared_actions(edges, arg, &cases, acts, &mut || {
+        bump_raise_count(next_raise_count, "matching::call_switcher")
+    })
 }
 
 // ============================================================================

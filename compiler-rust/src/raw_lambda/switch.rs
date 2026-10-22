@@ -11,8 +11,7 @@
 //! - S.K. Kannan and T.A. Proebsting, "Correction to Producing Good Code
 //!   for the Case Statement", SPE Vol. 24(2) (Feb 1994)
 
-use std::collections::HashMap;
-
+use crate::fast_hash::AHashMap;
 use crate::lambda::{Comparison, Constant, LetKind, Primitive};
 use crate::location::Location;
 use crate::raw_lambda::{RawLambda, RawLambdaSwitch, RawPrimInfo};
@@ -67,158 +66,6 @@ fn actions_for_cases(actions: Vec<RawLambda>, cases: &[(i32, i32, usize)]) -> Ve
             }
         })
         .collect()
-}
-
-/// Action store that deduplicates actions by structural key.
-/// Port of OCaml's `Switch.Store`.
-pub struct ActionStore {
-    /// Maps action key -> (must_share, index)
-    map: HashMap<u64, (bool, usize)>,
-    /// Stored actions in order: (must_share, action)
-    acts: Vec<(bool, RawLambda)>,
-    next: usize,
-}
-
-impl Default for ActionStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ActionStore {
-    pub fn new() -> Self {
-        ActionStore {
-            map: HashMap::new(),
-            acts: Vec::new(),
-            next: 0,
-        }
-    }
-
-    fn add(&mut self, must_share: bool, act: RawLambda) -> usize {
-        let i = self.next;
-        self.acts.push((must_share, act));
-        self.next += 1;
-        i
-    }
-
-    fn store(&mut self, must_share: bool, act: RawLambda) -> usize {
-        if let Some(key) = make_lambda_key(&act) {
-            if let Some(&(shared, i)) = self.map.get(&key) {
-                if !shared {
-                    self.map.insert(key, (true, i));
-                }
-                return i;
-            }
-            let i = self.add(must_share, act);
-            self.map.insert(key, (must_share, i));
-            i
-        } else {
-            self.add(must_share, act)
-        }
-    }
-
-    /// Store an action, returning its index. Actions with the same key
-    /// get the same index and become shared.
-    pub fn act_store(&mut self, act: RawLambda) -> usize {
-        self.store(false, act)
-    }
-
-    /// Store an action that will always be shared.
-    pub fn act_store_shared(&mut self, act: RawLambda) -> usize {
-        self.store(true, act)
-    }
-
-    /// Retrieve all stored actions with sharing information.
-    pub fn act_get_shared(self) -> Vec<Shared<RawLambda>> {
-        let ActionStore { map, acts, .. } = self;
-        let mut share_flags: Vec<bool> = acts.iter().map(|(shared, _)| *shared).collect();
-
-        // Mark actions that are shared in the map
-        for (_, (shared, i)) in map {
-            if shared {
-                if let Some(flag) = share_flags.get_mut(i) {
-                    *flag = true;
-                }
-            }
-        }
-        acts.into_iter()
-            .zip(share_flags)
-            .map(|((_, act), shared)| {
-                if shared {
-                    Shared::Shared(act)
-                } else {
-                    Shared::Single(act)
-                }
-            })
-            .collect()
-    }
-}
-
-/// Simple structural key for lambda expressions (for deduplication).
-fn make_lambda_key(lam: &RawLambda) -> Option<u64> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    fn hash_lambda(lam: &RawLambda, h: &mut DefaultHasher) -> bool {
-        match lam.peel() {
-            RawLambda::Lvar(id) => {
-                0u8.hash(h);
-                id.name().hash(h);
-                id.stamp().hash(h);
-                true
-            }
-            RawLambda::Lconst(c) => {
-                1u8.hash(h);
-                match c {
-                    Constant::Int { i, .. } => {
-                        0u8.hash(h);
-                        i.hash(h);
-                    }
-                    Constant::Char(c) => {
-                        1u8.hash(h);
-                        c.hash(h);
-                    }
-                    Constant::String(s) => {
-                        2u8.hash(h);
-                        s.hash(h);
-                    }
-                    Constant::Float(f) => {
-                        3u8.hash(h);
-                        f.hash(h);
-                    }
-                    _ => return false,
-                }
-                true
-            }
-            RawLambda::LstaticRaise(i, args) if args.is_empty() => {
-                2u8.hash(h);
-                i.hash(h);
-                true
-            }
-            RawLambda::Lprim(info) => {
-                3u8.hash(h);
-                std::mem::discriminant(&info.primitive).hash(h);
-                for arg in &info.args {
-                    if !hash_lambda(arg, h) {
-                        return false;
-                    }
-                }
-                true
-            }
-            RawLambda::LifThenElse(c, t, e) => {
-                4u8.hash(h);
-                hash_lambda(c, h) && hash_lambda(t, h) && hash_lambda(e, h)
-            }
-            _ => false,
-        }
-    }
-
-    let mut hasher = DefaultHasher::new();
-    if hash_lambda(lam, &mut hasher) {
-        Some(hasher.finish())
-    } else {
-        None
-    }
 }
 
 // ── SArg implementation ───────────────────────────────────────────────
@@ -324,13 +171,7 @@ fn make_if(cond: RawLambda, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
 }
 
 /// Build an Lswitch from a mapping table.
-fn build_lswitch(
-    arg: RawLambda,
-    tbl: &[usize],
-    acts: Vec<RawLambda>,
-    offset: i32,
-    _sw_dispatch: Option<crate::lambda::SwitchDispatch>,
-) -> RawLambda {
+fn build_lswitch(arg: RawLambda, tbl: &[usize], acts: Vec<RawLambda>, offset: i32) -> RawLambda {
     let cases_for_counts: Vec<(i32, i32, usize)> = tbl
         .iter()
         .enumerate()
@@ -518,7 +359,7 @@ fn coupe_inter(
     (low, high, inside, outside)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Kind {
     Kvalue(usize),
     Kinter(usize),
@@ -583,14 +424,14 @@ const INTER_LIMIT: i32 = 1 << 16;
 
 /// The main switch compiler. Handles memoization and test optimization.
 struct SwitchCompiler {
-    memo: HashMap<Vec<Kind>, (TRet, (CTests, CTests))>,
+    memo: AHashMap<Vec<Kind>, (TRet, (CTests, CTests))>,
     ok_inter: bool,
 }
 
 impl SwitchCompiler {
     fn new(ok_inter: bool) -> Self {
         SwitchCompiler {
-            memo: HashMap::new(),
+            memo: AHashMap::default(),
             ok_inter,
         }
     }
@@ -918,181 +759,89 @@ fn make_if_ne(arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> Raw
 
 /// Build clusters and generate the final test tree.
 /// This combines comp_clusters, make_clusters, and c_test.
+///
+/// OCaml `compiler/ml/switch.ml` stores cluster actions as closures over
+/// `ctx`; `ctx.off` stays 0 and `ctx.arg` is the original scrutinee for the
+/// whole `do_zyva` run, so dense cluster switches are built on `arg` directly.
 fn build_clustered_test(
     compiler: &mut SwitchCompiler,
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
     arg: &RawLambda,
-    sw_dispatch: &Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let (n_clusters, k) = compiler.comp_clusters(cases);
-    let len = cases.len();
 
-    // Build cluster cases and their actions
     let mut cluster_cases = vec![(0i32, 0i32, 0usize); n_clusters];
     let mut cluster_actions: Vec<RawLambda> = Vec::new();
+    // Original action index -> cluster action index, for single-case clusters.
+    let mut single_act_map: AHashMap<usize, usize> = AHashMap::default();
 
-    // Track which original action indices map to which cluster action indices
-    let mut single_act_map: HashMap<usize, usize> = HashMap::new();
-    let mut next_cluster_act = 0usize;
-
-    // Process clusters from right to left (matching OCaml's recursive zyva)
-    fn build_clusters(
-        j: usize,
-        ir: usize,
-        cases: &[(i32, i32, usize)],
-        actions: &[RawLambda],
-        k: &[usize],
-        sw_dispatch: &Option<crate::lambda::SwitchDispatch>,
-        cluster_cases: &mut [(i32, i32, usize)],
-        cluster_actions: &mut Vec<RawLambda>,
-        single_act_map: &mut HashMap<usize, usize>,
-        next_cluster_act: &mut usize,
-        compiler: &mut SwitchCompiler,
-    ) {
+    // Process clusters from right to left (matching OCaml's recursive zyva).
+    let mut j = cases.len() - 1;
+    let mut ir = n_clusters - 1;
+    loop {
         let i = k[j];
-        if i == j {
-            // Single case - map to original action
-            let (l, h, act) = cases[i];
-            let act_index = if let Some(&idx) = single_act_map.get(&act) {
-                idx
-            } else {
-                let idx = *next_cluster_act;
-                single_act_map.insert(act, idx);
-                cluster_actions.push(actions[act].clone());
-                *next_cluster_act += 1;
-                idx
-            };
-            cluster_cases[ir] = (l, h, act_index);
+        let (l, _, _) = cases[i];
+        let (_, h, _) = cases[j];
+        let act_index = if i == j {
+            let act = cases[i].2;
+            *single_act_map.entry(act).or_insert_with(|| {
+                let mut action = actions[act].clone();
+                unit_switch_arg_fixup(&mut action, arg);
+                cluster_actions.push(action);
+                cluster_actions.len() - 1
+            })
         } else {
-            // Range [i..j] - build a dense switch
-            let (l, _, _) = cases[i];
-            let (_, h, _) = cases[j];
-            let (ll, _, _) = cases[i];
-            let (_, hh, _) = cases[j];
-            let size = (hh - ll + 1) as usize;
-            let mut tbl = vec![0usize; size];
-            let mut act_map_inner: HashMap<usize, usize> = HashMap::new();
-            let mut index = 0usize;
-
-            for kk in i..=j {
-                let (lo, hi, act) = cases[kk];
-                let idx = if let Some(&idx) = act_map_inner.get(&act) {
-                    idx
-                } else {
-                    let idx = index;
-                    act_map_inner.insert(act, idx);
-                    index += 1;
-                    idx
+            // Range [i..j]: build a dense switch.
+            let mut tbl = vec![0usize; (h - l + 1) as usize];
+            // Original action indices in first-seen order.
+            let mut switch_act_ids: Vec<usize> = Vec::new();
+            for &(lo, hi, act) in &cases[i..=j] {
+                let idx = match switch_act_ids.iter().position(|&a| a == act) {
+                    Some(idx) => idx,
+                    None => {
+                        switch_act_ids.push(act);
+                        switch_act_ids.len() - 1
+                    }
                 };
-                for slot in (lo - ll) as usize..=(hi - ll) as usize {
-                    tbl[slot] = idx;
-                }
+                tbl[(lo - l) as usize..=(hi - l) as usize].fill(idx);
             }
-
-            let mut acts_ordered: Vec<(usize, usize)> = act_map_inner.into_iter().collect();
-            acts_ordered.sort_by_key(|&(_, idx)| idx);
-            let switch_acts: Vec<RawLambda> = acts_ordered
+            let switch_acts: Vec<RawLambda> = switch_act_ids
                 .iter()
-                .map(|&(act_idx, _)| actions[act_idx].clone())
+                .map(|&act| actions[act].clone())
                 .collect();
-
-            // Build the switch action inline
-            let switch_lam = build_lswitch(
-                // arg will be filled in during c_test when this action is used
-                // We need to use a marker... but c_test just uses actions[idx].clone()
-                // Actually c_test passes arg directly. The switch needs the actual arg.
-                // In OCaml, cluster actions are closures: fun ctx -> make_switch ...
-                // In Rust, we can't do closures easily. Instead, we store the switch template
-                // and rebuild with the correct arg during c_test.
-                // Hmm, but c_test generates comparison trees that reference actions directly.
-                // The simplest approach: just pass arg into actions during c_test.
-                //
-                // Actually, looking at OCaml more carefully: the actions in c_test are
-                // `fun ctx -> ...` closures. For single-case clusters, they ignore ctx and
-                // return the action directly. For multi-case clusters, they use ctx.arg to
-                // build the switch. Since ctx.arg == arg at the top level, and c_test doesn't
-                // change ctx.arg (only ctx.off changes... wait, ctx.off is always 0 in do_zyva).
-                //
-                // Actually ctx.off stays 0 through the whole computation. And ctx.arg is the
-                // original arg. So for cluster switches, we can just use arg directly.
-                // But we don't have arg here. Let me restructure.
-                RawLambda::unit(), // placeholder
-                &tbl,
-                switch_acts,
-                ll, // offset will be adjusted
-                sw_dispatch.clone(),
-            );
-            // Store as cluster action - but we need arg...
-            // We'll store the template info and apply arg later
-            let idx = *next_cluster_act;
-            // Actually, let's store a special marker and fix up later
-            cluster_actions.push(switch_lam);
-            *next_cluster_act += 1;
-            cluster_cases[ir] = (l, h, idx);
+            cluster_actions.push(build_lswitch(arg.clone(), &tbl, switch_acts, l));
+            cluster_actions.len() - 1
+        };
+        cluster_cases[ir] = (l, h, act_index);
+        if i == 0 {
+            break;
         }
-
-        if i > 0 {
-            build_clusters(
-                i - 1,
-                ir - 1,
-                cases,
-                actions,
-                k,
-                sw_dispatch,
-                cluster_cases,
-                cluster_actions,
-                single_act_map,
-                next_cluster_act,
-                compiler,
-            );
-        }
-    }
-
-    build_clusters(
-        len - 1,
-        n_clusters - 1,
-        cases,
-        actions,
-        &k,
-        sw_dispatch,
-        &mut cluster_cases,
-        &mut cluster_actions,
-        &mut single_act_map,
-        &mut next_cluster_act,
-        compiler,
-    );
-
-    // Now we need c_test to use the arg for switch actions.
-    // The issue is that switch cluster actions need the arg, but c_test stores actions
-    // as pre-built RawLambda. In OCaml they're closures.
-    //
-    // Solution: we'll do a post-pass to fix up any switch actions that used a placeholder arg.
-    // OR: store the switch templates separately and handle them in c_test.
-    //
-    // Simplest correct approach: since ctx.off is always 0 and ctx.arg is always the same arg,
-    // we can just substitute the real arg into the built switches now.
-
-    // Fix up cluster actions that are switches with placeholder args
-    for act in cluster_actions.iter_mut() {
-        fix_switch_arg(act, arg);
+        j = i - 1;
+        ir -= 1;
     }
 
     let mut cluster_actions = actions_for_cases(cluster_actions, &cluster_cases);
     compiler.c_test(0, arg, &cluster_cases, &mut cluster_actions)
 }
 
-/// Fix up any Lswitch nodes that have a unit placeholder as their arg.
-fn fix_switch_arg(lam: &mut RawLambda, real_arg: &RawLambda) {
+/// Replace the scrutinee of a single-case cluster action that is itself an
+/// `Lswitch` on the unit constant with `real_arg`.
+///
+/// This is a leftover of an earlier placeholder-based construction of dense
+/// cluster switches and has no OCaml counterpart (`switch.ml` invokes single
+/// actions unchanged). It is kept so output stays byte-identical; it only
+/// fires for an action whose own scrutinee is literally `()`.
+fn unit_switch_arg_fixup(lam: &mut RawLambda, real_arg: &RawLambda) {
     if matches!(lam, RawLambda::Lshared(_))
         && matches!(lam.peel(), RawLambda::Lswitch(switch_arg, _) if switch_arg.is_unit())
     {
         *lam = std::mem::replace(lam, RawLambda::Lbreak).unshare();
     }
-    if let RawLambda::Lswitch(switch_arg, _) = lam {
-        if switch_arg.is_unit() {
-            **switch_arg = real_arg.clone();
-        }
+    if let RawLambda::Lswitch(switch_arg, _) = lam
+        && switch_arg.is_unit()
+    {
+        **switch_arg = real_arg.clone();
     }
 }
 
@@ -1140,23 +889,6 @@ fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawL
 
 // ── Public API ────────────────────────────────────────────────────────
 
-/// Main entry point: compile an integer switch into an optimal comparison tree.
-///
-/// Port of OCaml's `Switcher.zyva` / `Switch.Make.zyva`.
-pub fn zyva(
-    edges: (i32, i32),
-    arg: RawLambda,
-    cases: &[(i32, i32, usize)],
-    store: ActionStore,
-    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
-    next_raise: &mut dyn FnMut() -> i32,
-) -> RawLambda {
-    assert!(!cases.is_empty());
-
-    let shared_actions = store.act_get_shared();
-    zyva_with_shared_actions(edges, arg, cases, shared_actions, sw_dispatch, next_raise)
-}
-
 /// Main entry point when the caller already owns the action array.
 ///
 /// This preserves the exact indices embedded in `cases`, matching OCaml's
@@ -1166,7 +898,6 @@ pub fn zyva_with_shared_actions(
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
     shared_actions: Vec<Shared<RawLambda>>,
-    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     assert!(!cases.is_empty());
@@ -1177,205 +908,6 @@ pub fn zyva_with_shared_actions(
     let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
     let mut compiler = SwitchCompiler::new(ok_inter);
 
-    let result = build_clustered_test(&mut compiler, cases, &actions, &arg, &sw_dispatch);
+    let result = build_clustered_test(&mut compiler, cases, &actions, &arg);
     wrap_handlers(result, handlers)
-}
-
-/// Compile a test sequence (for string switches and variant constants).
-/// Port of OCaml's `Switcher.test_sequence`.
-pub fn test_sequence(
-    arg: RawLambda,
-    cases: &[(i32, i32, usize)],
-    store: ActionStore,
-    next_raise: &mut dyn FnMut() -> i32,
-) -> RawLambda {
-    assert!(!cases.is_empty());
-
-    let shared_actions = store.act_get_shared();
-    let (handlers, actions) = abstract_shared(shared_actions, next_raise);
-
-    let mut compiler = SwitchCompiler::new(false);
-    let mut actions = actions_for_cases(actions, cases);
-    let result = compiler.c_test(0, &arg, cases, &mut actions);
-    wrap_handlers(result, handlers)
-}
-
-// ── Interval conversion (port of matching.ml's as_interval) ───────────
-
-/// Convert sorted (int, action) pairs with a fail action into intervals.
-pub fn as_interval_canfail(
-    fail: RawLambda,
-    low: i32,
-    high: i32,
-    sorted: &[(i32, RawLambda)],
-) -> (Vec<(i32, i32, usize)>, ActionStore) {
-    let mut store = ActionStore::new();
-    let fail_idx = store.act_store(fail);
-    assert_eq!(fail_idx, 0);
-
-    fn nofail_rec(
-        cur_low: i32,
-        cur_high: i32,
-        cur_act: usize,
-        rest: &[(i32, RawLambda)],
-        high: i32,
-        store: &mut ActionStore,
-    ) -> Vec<(i32, i32, usize)> {
-        if rest.is_empty() {
-            if cur_high == high {
-                vec![(cur_low, cur_high, cur_act)]
-            } else {
-                vec![(cur_low, cur_high, cur_act), (cur_high + 1, high, 0)]
-            }
-        } else {
-            let (i, ref act_i) = rest[0];
-            let act_index = store.act_store(act_i.clone());
-            if cur_high + 1 == i {
-                if act_index == cur_act {
-                    nofail_rec(cur_low, i, cur_act, &rest[1..], high, store)
-                } else if act_index == 0 {
-                    let mut r = vec![(cur_low, i - 1, cur_act)];
-                    r.extend(fail_rec(i, i, &rest[1..], high, store));
-                    r
-                } else {
-                    let mut r = vec![(cur_low, i - 1, cur_act)];
-                    r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
-                    r
-                }
-            } else if act_index == 0 {
-                let mut r = vec![(cur_low, cur_high, cur_act)];
-                r.extend(fail_rec(cur_high + 1, cur_high + 1, rest, high, store));
-                r
-            } else {
-                let mut r = vec![(cur_low, cur_high, cur_act), (cur_high + 1, i - 1, 0)];
-                r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
-                r
-            }
-        }
-    }
-
-    fn fail_rec(
-        cur_low: i32,
-        cur_high: i32,
-        rest: &[(i32, RawLambda)],
-        high: i32,
-        store: &mut ActionStore,
-    ) -> Vec<(i32, i32, usize)> {
-        if rest.is_empty() {
-            vec![(cur_low, cur_high, 0)]
-        } else {
-            let (i, ref act_i) = rest[0];
-            let index = store.act_store(act_i.clone());
-            if index == 0 {
-                fail_rec(cur_low, i, &rest[1..], high, store)
-            } else {
-                let mut r = vec![(cur_low, i - 1, 0)];
-                r.extend(nofail_rec(i, i, index, &rest[1..], high, store));
-                r
-            }
-        }
-    }
-
-    let intervals = if sorted.is_empty() {
-        vec![(low, high, 0)]
-    } else {
-        let (i, ref act_i) = sorted[0];
-        let index = store.act_store(act_i.clone());
-        if index == 0 {
-            fail_rec(low, i, &sorted[1..], high, &mut store)
-        } else if low < i {
-            let mut r = vec![(low, i - 1, 0)];
-            r.extend(nofail_rec(i, i, index, &sorted[1..], high, &mut store));
-            r
-        } else {
-            nofail_rec(i, i, index, &sorted[1..], high, &mut store)
-        }
-    };
-
-    (intervals, store)
-}
-
-/// Convert sorted (int, action) pairs (no fail) into intervals.
-pub fn as_interval_nofail(sorted: &[(i32, RawLambda)]) -> (Vec<(i32, i32, usize)>, ActionStore) {
-    let mut store = ActionStore::new();
-
-    let has_hole = sorted.windows(2).any(|w| w[1].0 > w[0].0 + 1);
-
-    fn i_rec(
-        cur_low: i32,
-        cur_high: i32,
-        cur_act: usize,
-        rest: &[(i32, RawLambda)],
-        store: &mut ActionStore,
-    ) -> Vec<(i32, i32, usize)> {
-        if rest.is_empty() {
-            vec![(cur_low, cur_high, cur_act)]
-        } else {
-            let (i, ref act) = rest[0];
-            let act_index = store.act_store(act.clone());
-            if act_index == cur_act {
-                i_rec(cur_low, i, cur_act, &rest[1..], store)
-            } else {
-                let mut r = vec![(cur_low, cur_high, cur_act)];
-                r.extend(i_rec(i, i, act_index, &rest[1..], store));
-                r
-            }
-        }
-    }
-
-    if sorted.is_empty() {
-        return (Vec::new(), store);
-    }
-
-    let (i, ref act) = sorted[0];
-    let act_index = if has_hole {
-        store.act_store_shared(act.clone())
-    } else {
-        store.act_store(act.clone())
-    };
-    assert_eq!(act_index, 0);
-    let intervals = i_rec(i, i, act_index, &sorted[1..], &mut store);
-    (intervals, store)
-}
-
-/// Build intervals from a sorted int-lambda list.
-pub fn as_interval(
-    fail: Option<RawLambda>,
-    low: i32,
-    high: i32,
-    sorted: &[(i32, RawLambda)],
-) -> ((i32, i32), Vec<(i32, i32, usize)>, ActionStore) {
-    let edges = get_edges(low, high, sorted);
-    let (intervals, store) = match fail {
-        None => as_interval_nofail(sorted),
-        Some(fail_act) => as_interval_canfail(fail_act, low, high, sorted),
-    };
-    (edges, intervals, store)
-}
-
-fn get_edges(low: i32, high: i32, sorted: &[(i32, RawLambda)]) -> (i32, i32) {
-    if sorted.is_empty() {
-        (low, high)
-    } else {
-        let first = sorted[0].0;
-        let last = sorted.last().unwrap().0;
-        (first, last)
-    }
-}
-
-/// High-level entry point matching OCaml's `call_switcher`.
-pub fn call_switcher(
-    fail: Option<RawLambda>,
-    arg: RawLambda,
-    low: i32,
-    high: i32,
-    int_lambda_list: &[(i32, RawLambda)],
-    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
-    next_raise: &mut dyn FnMut() -> i32,
-) -> RawLambda {
-    let mut sorted = int_lambda_list.to_vec();
-    sorted.sort_by_key(|(i, _)| *i);
-
-    let (edges, cases, store) = as_interval(fail, low, high, &sorted);
-    zyva(edges, arg, &cases, store, sw_dispatch, next_raise)
 }
