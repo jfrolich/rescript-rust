@@ -4749,10 +4749,8 @@ fn compare_definition_record_labels(
                 expected_label.ld_id.name()
             ));
         }
-        let expected_runtime_name =
-            crate::types::includemod::label_declaration_runtime_name(expected_label);
-        let actual_runtime_name =
-            crate::types::includemod::label_declaration_runtime_name(actual_label);
+        let expected_runtime_name = expected_label.declaration_name();
+        let actual_runtime_name = actual_label.declaration_name();
         if expected_runtime_name != actual_runtime_name {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",

@@ -7,8 +7,7 @@
 //! The main function is `modtypes` which checks if one module type is
 //! a subtype of another.
 
-#![allow(unused_variables)]
-#![allow(dead_code)]
+use std::cell::Cell;
 
 use crate::diagnostics::Warning;
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -780,15 +779,6 @@ fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDesc
     crate::types::printtyp::print_out_sig_item(&tree)
 }
 
-fn format_value_description_with_weak_names(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    desc: &ValueDescription,
-    _weak_names: bool,
-) -> String {
-    format_value_description(type_ctx, id, desc)
-}
-
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
     let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_type_declaration(
         id,
@@ -796,15 +786,6 @@ fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclar
         RecStatus::TrecNot,
     );
     crate::types::printtyp::print_out_sig_item(&tree)
-}
-
-fn format_type_declaration_with_weak_names(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    decl: &TypeDeclaration,
-    _weak_names: bool,
-) -> String {
-    format_type_declaration(type_ctx, id, decl)
 }
 
 fn format_extension_constructor(
@@ -909,12 +890,6 @@ fn strip_pos_hints(path: &Path) -> Path {
 // Module Type Inclusion
 // ============================================================================
 
-/// Check if `mty_impl` is a subtype of `mty_sig` (implementation matches signature).
-///
-/// Returns a coercion that can be applied to convert the implementation
-/// to the signature type.
-use std::cell::Cell;
-
 thread_local! {
     static MODTYPES_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -967,6 +942,10 @@ fn with_local_pident_module_type<R>(
     }
 }
 
+/// Check if `mty_impl` is a subtype of `mty_sig` (implementation matches signature).
+///
+/// Returns a coercion that can be applied to convert the implementation
+/// to the signature type.
 pub fn modtypes(
     type_ctx: &TypeContext,
     env: &Env,
@@ -1386,7 +1365,7 @@ fn modtypes_inner(
         // first (includemod.ml:237, 262-273).
 
         // Identifier implementation matches signature
-        (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
+        (ModuleType::MtyIdent(path), ModuleType::MtySignature(_)) => {
             if let Some(result) =
                 with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
                     modtypes_inner(
@@ -2367,63 +2346,6 @@ fn substitute_constructor_arguments_paths(
     }
 }
 
-fn substitute_constructor_declaration_paths(
-    type_ctx: &TypeContext,
-    constructor: &ConstructorDeclaration,
-    subst: &InclusionSubst,
-) -> ConstructorDeclaration {
-    let mut substituted = constructor.clone();
-    substituted.cd_args =
-        substitute_constructor_arguments_paths(type_ctx, &constructor.cd_args, subst);
-    substituted.cd_res = constructor
-        .cd_res
-        .map(|ty| substitute_value_type_paths(type_ctx, ty, subst));
-    substituted
-}
-
-fn substitute_type_kind_paths(
-    type_ctx: &TypeContext,
-    kind: &TypeKind,
-    subst: &InclusionSubst,
-) -> TypeKind {
-    match kind {
-        TypeKind::TypeAbstract => TypeKind::TypeAbstract,
-        TypeKind::TypeOpen => TypeKind::TypeOpen,
-        TypeKind::TypeRecord(labels, repr) => TypeKind::TypeRecord(
-            labels
-                .iter()
-                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
-                .collect(),
-            repr.clone(),
-        ),
-        TypeKind::TypeVariant(constructors, layout) => TypeKind::TypeVariant(
-            constructors
-                .iter()
-                .map(|constructor| {
-                    substitute_constructor_declaration_paths(type_ctx, constructor, subst)
-                })
-                .collect(),
-            *layout,
-        ),
-    }
-}
-
-fn substitute_type_inlined_paths(
-    type_ctx: &TypeContext,
-    inlined: &TypeInlinedType,
-    subst: &InclusionSubst,
-) -> TypeInlinedType {
-    match inlined {
-        TypeInlinedType::Record { type_name, labels } => TypeInlinedType::Record {
-            type_name: type_name.clone(),
-            labels: labels
-                .iter()
-                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
-                .collect(),
-        },
-    }
-}
-
 fn collect_constructor_argument_types(args: &ConstructorArguments, types: &mut Vec<TypeExprRef>) {
     match args {
         ConstructorArguments::CstrTuple(items) => types.extend(items.iter().copied()),
@@ -2651,24 +2573,6 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
         ),
         Path::Papply(functor, arg) => Path::Papply(
             std::sync::Arc::new(substitute_module_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
-        ),
-    }
-}
-
-fn substitute_type_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = subst.type_paths.get(path) {
-        return replacement;
-    }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_type_path(functor, subst)),
             std::sync::Arc::new(substitute_module_path(arg, subst)),
         ),
     }
@@ -3287,8 +3191,8 @@ fn compare_record_declarations_with_param_map(
         ) {
             warnings.push(warning);
         }
-        let impl_runtime_name = label_declaration_runtime_name(impl_label);
-        let sig_runtime_name = label_declaration_runtime_name(sig_label);
+        let impl_runtime_name = impl_label.declaration_name();
+        let sig_runtime_name = sig_label.declaration_name();
         if impl_runtime_name != sig_runtime_name {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",
@@ -3369,12 +3273,6 @@ fn type_decl_mismatch(
         expected: expected.clone(),
         detail: detail.into(),
     }
-}
-
-fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
-    decl.type_attributes
-        .iter()
-        .any(|attr| attr.attr_name.txt == name)
 }
 
 fn type_decl_tag_name(type_ctx: &TypeContext, decl: &TypeDeclaration) -> Option<String> {
@@ -3912,15 +3810,6 @@ fn compare_variant_declarations(
     }
 
     None
-}
-
-pub(crate) fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    // `Record_runtime.declaration_name`.
-    label.declaration_name()
-}
-
-fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_runtime_name.clone()
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
