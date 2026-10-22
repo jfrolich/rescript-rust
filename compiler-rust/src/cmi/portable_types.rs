@@ -644,10 +644,13 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
-    let (sig, type_graph) = serialize_signature(ps.ps_sig.as_ref(), ctx, arena);
+    // File-name indices used by the signatures' locations: only those names
+    // need to travel with them (`remap_signature_file_names`).
+    let mut file_names = crate::fast_hash::AHashSet::new();
+    let (sig, type_graph) = serialize_signature(ps.ps_sig.as_ref(), ctx, arena, &mut file_names);
     let raw = ctx
         .find_raw_module_sig(&ps.ps_name)
-        .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena));
+        .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena, &mut file_names));
     let (raw_ps_sig, raw_type_graph) = match raw {
         Some((sig, graph)) => (Some(sig), Some(graph)),
         None => (None, None),
@@ -660,17 +663,20 @@ pub fn serialize_pers_struct(
         ps_crcs: ps.ps_crcs.clone(),
         ps_sig: sig,
         raw_ps_sig,
-        cmi_longident_names: ctx.snapshot_cmi_longident_names(),
+        cmi_longident_names: ctx.snapshot_cmi_longident_names(file_names),
         type_graph,
         raw_type_graph,
         fingerprint,
     }
 }
 
+/// Serialize `sig`, adding the raw file-name indices of its locations to
+/// `file_names`.
 fn serialize_signature(
     sig: &Signature,
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
+    file_names: &mut crate::fast_hash::AHashSet<u32>,
 ) -> (Signature, PortableTypeGraph) {
     let mut ser = TypeGraphSerializer {
         ctx,
@@ -685,7 +691,7 @@ fn serialize_signature(
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
-    ser.remap_signature_locations(&mut sig);
+    ser.remap_signature_locations(&mut sig, file_names);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
@@ -709,9 +715,18 @@ struct TypeGraphSerializer<'a> {
 
 impl<'a> TypeGraphSerializer<'a> {
     /// Remap the file names of every location in a signature (declarations
-    /// and attributes) to names portable across contexts.
-    fn remap_signature_locations(&mut self, sig: &mut Signature) {
-        crate::types::decl::for_each_signature_location(sig, &mut |loc| self.remap_loc(loc));
+    /// and attributes) to names portable across contexts, recording the
+    /// resulting raw indices in `file_names`.
+    fn remap_signature_locations(
+        &mut self,
+        sig: &mut Signature,
+        file_names: &mut crate::fast_hash::AHashSet<u32>,
+    ) {
+        crate::types::decl::for_each_signature_location(sig, &mut |loc| {
+            self.remap_loc(loc);
+            file_names.insert(loc.loc_start.file_name.raw());
+            file_names.insert(loc.loc_end.file_name.raw());
+        });
     }
 
     /// Declaration locations name their file through the source arena's
