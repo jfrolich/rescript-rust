@@ -179,8 +179,11 @@ pub(crate) struct Printtyp<'a> {
     /// where every lookup fails.
     printing_env_lookup_type: Option<Box<dyn Fn(&str) -> Option<Path> + 'a>>,
     /// Types added to the printing environment by `tree_of_signature_rec`
-    /// (`Env.add_signature`), most recent last.
+    /// (`Env.add_signature`), most recent last. Only the first
+    /// `signature_types_visible` entries are in scope; later entries are
+    /// members of the recursive type group being printed.
     signature_types: Vec<(String, Path)>,
+    signature_types_visible: usize,
     /// `printing_context.inlined_types` while printing a type declaration.
     inlined_types: Option<Vec<crate::types::decl::TypeInlinedType>>,
     /// Qualified prefixes of the persistent-unit signatures being printed,
@@ -206,6 +209,7 @@ impl<'a> Printtyp<'a> {
             unique_names: Vec::new(),
             printing_env_lookup_type: None,
             signature_types: Vec::new(),
+            signature_types_visible: 0,
             inlined_types: None,
             unit_prefixes: Vec::new(),
         }
@@ -230,8 +234,7 @@ impl<'a> Printtyp<'a> {
         if !(id.is_persistent() && matches!(id.name(), "Pervasives" | "Stdlib")) {
             return false;
         }
-        if let Some((_, found)) = self
-            .signature_types
+        if let Some((_, found)) = self.signature_types[..self.signature_types_visible]
             .iter()
             .rev()
             .find(|(name, _)| name == s.as_str())
@@ -1095,7 +1098,7 @@ impl<'a> Printtyp<'a> {
                 ),
             },
             TypeKind::TypeVariant(cstrs, layout_ref) => {
-                let layout = self.ctx.variant_layout(*layout_ref).clone();
+                let layout = self.ctx.variant_layout(*layout_ref);
                 let unboxed = boxed_unboxed || layout.configuration().unboxed;
                 let constructors = cstrs
                     .iter()
@@ -1378,19 +1381,22 @@ impl<'a> Printtyp<'a> {
         sg: &[crate::types::decl::SignatureItem],
     ) -> Vec<OutSigItem> {
         use crate::types::decl::{RecStatus, SignatureItem};
-        let saved = self.signature_types.clone();
-        let mut env_types = saved.clone();
+        // `signature_types` is used as a stack: entries past the visible
+        // prefix belong to an enclosing recursive group and are set aside
+        // while this signature is printed.
+        let saved_visible = self.signature_types_visible;
+        let hidden = self.signature_types.split_off(saved_visible);
         let mut in_type_group = false;
         let mut trees = Vec::new();
         for item in sg {
             in_type_group = match (in_type_group, item) {
                 (true, SignatureItem::SigType(_, _, RecStatus::TrecNext)) => true,
                 (_, SignatureItem::SigType(_, _, RecStatus::TrecNot | RecStatus::TrecFirst)) => {
-                    self.signature_types = env_types.clone();
+                    self.signature_types_visible = self.signature_types.len();
                     true
                 }
                 _ => {
-                    self.signature_types = env_types.clone();
+                    self.signature_types_visible = self.signature_types.len();
                     false
                 }
             };
@@ -1398,10 +1404,13 @@ impl<'a> Printtyp<'a> {
                 trees.push(tree);
             }
             if let SignatureItem::SigType(id, _, _) = item {
-                env_types.push((id.name().to_string(), Path::Pident(*id)));
+                self.signature_types
+                    .push((id.name().to_string(), Path::Pident(*id)));
             }
         }
-        self.signature_types = saved;
+        self.signature_types.truncate(saved_visible);
+        self.signature_types.extend(hidden);
+        self.signature_types_visible = saved_visible;
         trees
     }
 
