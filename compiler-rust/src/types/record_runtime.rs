@@ -23,7 +23,7 @@ pub fn check_duplicated_labels(
     arena: &ParseArena,
     labels: &[LabelDeclaration],
 ) -> Option<(String, LocIdx)> {
-    let mut coll: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut coll: crate::fast_hash::AHashSet<&str> = crate::fast_hash::AHashSet::default();
     for label in labels {
         let txt = arena.get_string(label.pld_name.txt);
         if coll.contains(txt) && txt != "..." {
@@ -36,12 +36,12 @@ pub fn check_duplicated_labels(
             coll.contains(semantic)
                 .then(|| (semantic.to_string(), name.loc))
         });
-        coll.insert(txt.to_string());
+        coll.insert(txt);
         if clash.is_some() {
             return clash;
         }
         if let Some(name) = &label.pld_runtime_name {
-            coll.insert(name.txt.semantic().to_string());
+            coll.insert(name.txt.semantic());
         }
     }
     None

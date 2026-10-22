@@ -1937,7 +1937,7 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
     for item in sig.iter().rev() {
         match item {
             SignatureItem::SigValue(id, _) => {
-                if seen_values.insert(id.name().to_string()) {
+                if seen_values.insert(id.name()) {
                     simplified.push(item.clone());
                 }
             }
