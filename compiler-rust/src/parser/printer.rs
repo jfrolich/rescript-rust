@@ -11,7 +11,6 @@ use crate::parser::comment_table::{CommentTable, PosRange, walk_signature, walk_
 use crate::parser::doc::Doc;
 use crate::parser::longident::Longident;
 use crate::parser::token::Token;
-// (HashMap import removed - unused)
 
 // ============================================================================
 // Printer State
@@ -587,16 +586,6 @@ fn print_leading_comments(
     print_leading_comments_with(doc, leading_comments, &full_loc)
 }
 
-/// Get the first leading comment for a location, if any.
-/// Uses position-based keys like OCaml's Location.t.
-pub fn get_first_leading_comment<'a>(
-    cmt_tbl: &'a CommentTable,
-    loc: LocIdx,
-    arena: &ParseArena,
-) -> Option<&'a Comment> {
-    cmt_tbl.get_first_leading_comment(loc, arena)
-}
-
 // ============================================================================
 // List Printing
 // ============================================================================
@@ -630,7 +619,7 @@ where
     for node in nodes {
         let loc = get_loc(node);
 
-        let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
+        let start_pos = match cmt_tbl.get_first_leading_comment(loc, arena) {
             Some(comment) => comment.loc().loc_start,
             None => *arena.loc_start(loc),
         };
@@ -699,7 +688,7 @@ where
         let loc = get_loc(node);
 
         // Determine separator based on line distance
-        let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
+        let start_pos = match cmt_tbl.get_first_leading_comment(loc, arena) {
             Some(comment) => comment.loc().loc_start,
             None => *arena.loc_start(loc),
         };
@@ -877,17 +866,6 @@ pub fn print_poly_var_ident(txt: &str) -> Doc {
 pub fn print_string_loc(sloc: &StringLoc, cmt_tbl: &mut CommentTable, arena: &ParseArena) -> Doc {
     let doc = print_ident(arena.get_string(sloc.txt));
     print_comments(doc, cmt_tbl, sloc.loc, arena)
-}
-
-/// Print a longident location.
-/// Print a longident location with escaping (for value identifiers).
-pub fn print_longident_loc(
-    lid: &crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    let doc = print_lident(arena, arena.get_longident(lid.txt));
-    print_comments(doc, cmt_tbl, lid.loc, arena)
 }
 
 /// Print a longident location without escaping (for module paths).
@@ -1105,9 +1083,8 @@ pub fn print_expression(
         e
     };
     let printed_expression = match &*e.pexp_desc {
-        ExpressionDesc::Pexp_braces(braces) => {
-            print_expression(state, arena.get_expr(braces.expr), cmt_tbl, arena)
-        }
+        // Every `Pexp_braces` layer was unwrapped above.
+        ExpressionDesc::Pexp_braces(_) => unreachable!("braces are unwrapped above"),
         // (__x) => f(a, __x, c) -----> f(a, _, c)
         ExpressionDesc::Pexp_fun(fun_inner)
             if {
@@ -1797,7 +1774,7 @@ fn print_pattern_args(
         [arg] => {
             let arg = arena.get_pat(*arg);
             let arg_doc = print_pattern(state, arg, cmt_tbl, arena);
-            let should_hug = is_huggable_pattern(arg);
+            let should_hug = parsetree_viewer::is_huggable_pattern(arg);
             Doc::concat(vec![
                 Doc::lparen(),
                 if should_hug {
@@ -2178,7 +2155,7 @@ fn parameters_should_hug(parameters: &[parsetree_viewer::FunParam<'_>]) -> bool 
                 default_expr: None,
                 pat,
             },
-        ] if attrs.is_empty() => is_huggable_pattern(pat),
+        ] if attrs.is_empty() => parsetree_viewer::is_huggable_pattern(pat),
         _ => false,
     }
 }
@@ -3117,11 +3094,6 @@ fn print_value_bindings_with_rec(
     )
 }
 
-/// Check if an expression is an array of tuples (for dict detection)
-fn is_tuple_array(arena: &ParseArena, expr: &Expression) -> bool {
-    parsetree_viewer::is_tuple_array(arena, expr)
-}
-
 /// Try to print dict{} syntax for Primitive_dict.make([("key", value), ...])
 fn try_print_dict_expr(
     state: &PrinterState,
@@ -3143,7 +3115,7 @@ fn try_print_dict_expr(
                     if args.len() == 1 {
                         if let (ArgLabel::Nolabel, key_values) = &args[0] {
                             let key_values = arena.get_expr(*key_values);
-                            if is_tuple_array(arena, key_values) {
+                            if parsetree_viewer::is_tuple_array(arena, key_values) {
                                 return Some(print_dict_expr(
                                     state, expr, key_values, cmt_tbl, arena,
                                 ));
@@ -5107,17 +5079,6 @@ fn has_comment_below(cmt_tbl: &CommentTable, loc: LocIdx, arena: &ParseArena) ->
 // Pattern Printing
 // ============================================================================
 
-/// Print a pattern with comments.
-pub fn print_pattern_with_comments(
-    state: &PrinterState,
-    pat: &Pattern,
-    cmt_tbl: &mut CommentTable,
-    arena: &ParseArena,
-) -> Doc {
-    let doc = print_pattern(state, pat, cmt_tbl, arena);
-    print_comments(doc, cmt_tbl, pat.ppat_loc, arena)
-}
-
 /// Print a pattern.
 pub fn print_pattern(
     state: &PrinterState,
@@ -5370,18 +5331,6 @@ pub fn print_pattern(
     print_comments(doc, cmt_tbl, pat.ppat_loc, arena)
 }
 
-/// Check if a pattern is "huggable" (can be printed without line breaks).
-fn is_huggable_pattern(pat: &Pattern) -> bool {
-    matches!(
-        &*pat.ppat_desc,
-        PatternDesc::Ppat_array(_)
-            | PatternDesc::Ppat_tuple(_)
-            | PatternDesc::Ppat_record(_)
-            | PatternDesc::Ppat_variant(_)
-            | PatternDesc::Ppat_construct(_, _)
-    )
-}
-
 /// Print list pattern.
 fn print_list_pattern(
     state: &PrinterState,
@@ -5395,8 +5344,8 @@ fn print_list_pattern(
         &*tail.ppat_desc,
         PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]")
     );
-    let should_hug =
-        matches!(patterns.as_slice(), [single] if is_huggable_pattern(single)) && tail_is_nil;
+    let should_hug = matches!(patterns.as_slice(), [single] if parsetree_viewer::is_huggable_pattern(single))
+        && tail_is_nil;
     let mut docs: Vec<Doc> = Vec::with_capacity(patterns.len());
     for p in &patterns {
         docs.push(print_pattern(state, p, cmt_tbl, arena));
@@ -5489,7 +5438,7 @@ fn print_record_pattern(
                     let doc = Doc::group(Doc::concat(vec![
                         label,
                         Doc::text(":"),
-                        if is_huggable_pattern(field_pat) {
+                        if parsetree_viewer::is_huggable_pattern(field_pat) {
                             Doc::concat(vec![Doc::space(), rhs_doc])
                         } else {
                             Doc::indent(Doc::concat(vec![Doc::line(), rhs_doc]))
