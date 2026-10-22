@@ -3955,7 +3955,7 @@ fn parse_module_type_declaration(
 }
 
 /// Parse attributes (including doc comments which become res.doc attributes).
-fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
+pub(super) fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
     // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
     // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
     p.leave_breadcrumb(super::grammar::Grammar::Attribute);
