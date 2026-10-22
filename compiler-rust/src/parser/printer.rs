@@ -272,28 +272,10 @@ pub fn print_lident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> 
 // Comment Printing
 // ============================================================================
 
-/// Trim leading/trailing spaces (not newlines) from comment text.
-/// This matches OCaml's Comment.trim_spaces which only trims ' ' characters.
-fn trim_spaces(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    if len == 0 {
-        return s;
-    }
-
-    // Find start (skip leading spaces only)
-    let mut start = 0;
-    while start < len && bytes[start] == b' ' {
-        start += 1;
-    }
-
-    // Find end (skip trailing spaces only)
-    let mut end = len;
-    while end > start && bytes[end - 1] == b' ' {
-        end -= 1;
-    }
-
-    if start < end { &s[start..end] } else { "" }
+/// OCaml `String.trim`: strips only ' ', '\t', '\n', '\r' and '\012'
+/// (form feed), unlike Rust's Unicode-aware `str::trim`.
+fn ocaml_string_trim(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'))
 }
 
 /// Print multiline comment content with proper formatting.
@@ -306,11 +288,11 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
     match lines.len() {
         0 => Doc::text("/* */"),
         1 => {
-            let trimmed = trim_spaces(lines[0]);
+            let trimmed = Comment::trim_spaces(lines[0]);
             Doc::concat(vec![Doc::text("/* "), Doc::text(trimmed), Doc::text(" */")])
         }
         _ => {
-            let first_line = trim_spaces(lines[0]);
+            let first_line = Comment::trim_spaces(lines[0]);
             let rest = &lines[1..];
 
             // Helper function similar to OCaml's indent_stars
@@ -320,7 +302,7 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
                 let mut docs = Vec::new();
 
                 for (i, line) in lines.iter().enumerate() {
-                    let trimmed = line.trim();
+                    let trimmed = ocaml_string_trim(line);
                     let is_last = i == lines.len() - 1;
 
                     if is_last {
@@ -339,7 +321,7 @@ fn print_multiline_comment_content(txt: &str) -> Doc {
                         } else {
                             Doc::nil()
                         };
-                        let content = trim_spaces(txt);
+                        let content = Comment::trim_spaces(txt);
                         return (Doc::concat(vec![Doc::text(content), trailing_space]), true);
                     }
                 }
@@ -10201,6 +10183,21 @@ fn add_braces(doc: Doc, force_break: bool) -> Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_comment_star_lines_use_ocaml_string_trim() {
+        // res_printer.ml:135-140 trims lines with `String.trim`, which strips
+        // tabs but not a no-break space, so the second comment is not
+        // star-aligned.
+        assert_eq!(
+            print_multiline_comment_content("first\n\t* second\n").to_string(80),
+            "/* first\n * second\n */"
+        );
+        assert_eq!(
+            print_multiline_comment_content("first\n\u{a0}* second\n ").to_string(80),
+            "/* first\n\u{a0}* second\n */"
+        );
+    }
 
     #[test]
     fn test_classify_ident_content() {
