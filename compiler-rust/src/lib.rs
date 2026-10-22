@@ -11,26 +11,24 @@
 //! - [`CompilerConfig`] - Immutable configuration shared across compilations
 //! - [`CompilationContext`] - Per-compilation context with ID generation and diagnostics
 //! - [`TypeContext`] - Per-type-checking context owning the type-node arena
-//! - [`ModuleCache`] - Thread-safe cache for compiled module interfaces
 //!
 //! # Concurrency Model
 //!
 //! Multiple files can be compiled in parallel because:
 //! 1. No global mutable state - all state is in explicit contexts
 //! 2. Each compilation gets its own `CompilationContext`
-//! 3. Only the cross-compilation [`ModuleCache`] and configuration are shared
-//!    (behind `Arc`/`DashMap`); compiler data inside a compilation lives in
-//!    per-compilation arenas addressed by indices, not `Rc`/`Arc`
+//! 3. Only the configuration is shared (behind `Arc`); compiler data inside a
+//!    compilation lives in per-compilation arenas addressed by indices, not
+//!    `Rc`/`Arc`
 //!
 //! ```rust,ignore
-//! use rescript_compiler::{CompilationContext, CompilerConfig, ModuleCache};
+//! use rescript_compiler::{CompilationContext, CompilerConfig};
 //! use rayon::prelude::*;
 //!
 //! let config = Arc::new(CompilerConfig::default());
-//! let cache = Arc::new(ModuleCache::new());
 //!
 //! modules.par_iter().map(|module| {
-//!     let ctx = CompilationContext::new(config.clone(), cache.clone());
+//!     let ctx = CompilationContext::new(config.clone(), &module.path);
 //!     ctx.compile_module(module)
 //! }).collect()
 //! ```
@@ -45,7 +43,6 @@ pub mod ast_helper_type;
 pub mod ast_payload;
 pub mod binary_ast;
 pub mod binser;
-pub mod cache;
 /// CMI file loading infrastructure.
 pub mod cmi;
 pub mod config;
@@ -81,8 +78,6 @@ pub mod types;
 pub mod wasm_vfs;
 
 // Re-exports for convenience
-#[cfg(feature = "native")]
-pub use cache::ModuleCache;
 pub use config::CompilerConfig;
 #[cfg(feature = "native")]
 pub use context::CompilationContext;

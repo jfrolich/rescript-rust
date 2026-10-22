@@ -2361,7 +2361,6 @@ dependencies = [
  "anyhow",
  "boa_engine",
  "clap",
- "dashmap",
  "elsa",
  "env_logger 0.11.11",
  "hashbrown 0.15.5",

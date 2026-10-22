@@ -23,8 +23,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-#[cfg(feature = "native")]
-use crate::cache::ModuleCache;
 use crate::config::CompilerConfig;
 use crate::diagnostics::DiagnosticsContext;
 use crate::ident::{Ident, IdentFlags};
@@ -275,12 +273,11 @@ fn derive_output_prefix(path: &str) -> String {
 /// # Example
 ///
 /// ```rust
-/// use rescript_compiler::{CompilationContext, CompilerConfig, ModuleCache};
+/// use rescript_compiler::{CompilationContext, CompilerConfig};
 /// use std::sync::Arc;
 ///
 /// let config = Arc::new(CompilerConfig::default());
-/// let cache = Arc::new(ModuleCache::new());
-/// let ctx = CompilationContext::new(config, cache, "src/MyModule.res");
+/// let ctx = CompilationContext::new(config, "src/MyModule.res");
 ///
 /// let id = ctx.create_ident("x");
 /// assert_eq!(id.name(), "x");
@@ -290,8 +287,6 @@ fn derive_output_prefix(path: &str) -> String {
 pub struct CompilationContext {
     /// Compiler configuration (immutable, shared).
     config: Arc<CompilerConfig>,
-    /// Module cache (thread-safe, shared).
-    module_cache: Arc<ModuleCache>,
     /// ID generator for this compilation.
     id_gen: IdGenerator,
     /// Source file information.
@@ -303,14 +298,9 @@ pub struct CompilationContext {
 #[cfg(feature = "native")]
 impl CompilationContext {
     /// Create a new compilation context for a source file.
-    pub fn new(
-        config: Arc<CompilerConfig>,
-        module_cache: Arc<ModuleCache>,
-        input_file: impl Into<String>,
-    ) -> Self {
+    pub fn new(config: Arc<CompilerConfig>, input_file: impl Into<String>) -> Self {
         Self {
             config,
-            module_cache,
             id_gen: IdGenerator::new(),
             source: SourceContext::new(input_file),
             diagnostics: DiagnosticsContext::new(),
@@ -322,13 +312,11 @@ impl CompilationContext {
     /// Useful when you need to control stamp generation.
     pub fn with_id_gen(
         config: Arc<CompilerConfig>,
-        module_cache: Arc<ModuleCache>,
         id_gen: IdGenerator,
         input_file: impl Into<String>,
     ) -> Self {
         Self {
             config,
-            module_cache,
             id_gen,
             source: SourceContext::new(input_file),
             diagnostics: DiagnosticsContext::new(),
@@ -339,12 +327,6 @@ impl CompilationContext {
     #[inline]
     pub fn config(&self) -> &CompilerConfig {
         &self.config
-    }
-
-    /// Get the module cache.
-    #[inline]
-    pub fn module_cache(&self) -> &ModuleCache {
-        &self.module_cache
     }
 
     /// Get the ID generator.
@@ -453,8 +435,7 @@ mod tests {
     #[cfg(feature = "native")]
     fn test_compilation_context() {
         let config = Arc::new(CompilerConfig::default());
-        let cache = Arc::new(ModuleCache::new());
-        let ctx = CompilationContext::new(config, cache, "test.res");
+        let ctx = CompilationContext::new(config, "test.res");
 
         let id1 = ctx.create_ident("x");
         let id2 = ctx.create_ident("y");
