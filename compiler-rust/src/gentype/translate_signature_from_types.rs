@@ -75,7 +75,7 @@ pub fn translate_module_declaration_from_types(
     match &module_declaration.md_type {
         ModuleType::MtySignature(signature) => {
             let name = id.name();
-            crate::gentype::translation::combine(&translate_signature_from_types(
+            crate::gentype::translation::combine(translate_signature_from_types(
                 ctx,
                 arena,
                 config,

@@ -32,14 +32,7 @@ pub fn get_import_type_unique_name(import_type: &code_item::ImportType) -> Strin
     )
 }
 
-pub fn import_type_compare(
-    i1: &code_item::ImportType,
-    i2: &code_item::ImportType,
-) -> std::cmp::Ordering {
-    get_import_type_unique_name(i1).cmp(&get_import_type_unique_name(i2))
-}
-
-pub fn combine(translations: &[T]) -> T {
+pub fn combine(translations: Vec<T>) -> T {
     let mut import_types = Vec::new();
     let mut code_items = Vec::new();
     let mut type_declarations = Vec::new();
@@ -50,9 +43,9 @@ pub fn combine(translations: &[T]) -> T {
         type_declarations: item_type_declarations,
     } in translations
     {
-        import_types.extend(item_import_types.clone());
-        code_items.extend(item_code_items.clone());
-        type_declarations.extend(item_type_declarations.clone());
+        import_types.extend(item_import_types);
+        code_items.extend(item_code_items);
+        type_declarations.extend(item_type_declarations);
     }
 
     T {

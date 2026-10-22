@@ -308,7 +308,7 @@ pub fn translate_typed_artifact(
     };
     crate::gentype::translation::add_type_declarations_from_module_equations(
         &type_env,
-        crate::gentype::translation::combine(&translations),
+        crate::gentype::translation::combine(translations),
     )
 }
 
@@ -396,7 +396,7 @@ pub fn typed_artifact_translate_type_declarations(
     };
     crate::gentype::translation::add_type_declarations_from_module_equations(
         &type_env,
-        crate::gentype::translation::combine(&translations),
+        crate::gentype::translation::combine(translations),
     )
 }
 

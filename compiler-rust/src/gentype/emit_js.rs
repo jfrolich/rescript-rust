@@ -999,10 +999,23 @@ pub fn emit_translation_as_string(
 
     let mut import_types = import_types_from_type_declarations;
     import_types.extend(translation.import_types.clone());
-    import_types.sort_by(crate::gentype::translation::import_type_compare);
-    import_types.dedup_by(|i1, i2| {
-        crate::gentype::translation::import_type_compare(i1, i2) == std::cmp::Ordering::Equal
-    });
+    // Sort and dedup by the unique name (OCaml's import_type_compare), computed once per import
+    // type. The sort is stable and dedup keeps the first of equal keys.
+    let mut keyed_import_types: Vec<_> = import_types
+        .into_iter()
+        .map(|import_type| {
+            (
+                crate::gentype::translation::get_import_type_unique_name(&import_type),
+                import_type,
+            )
+        })
+        .collect();
+    keyed_import_types.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    keyed_import_types.dedup_by(|(k1, _), (k2, _)| k1 == k2);
+    let import_types: Vec<_> = keyed_import_types
+        .into_iter()
+        .map(|(_, import_type)| import_type)
+        .collect();
     let (env, emitters) = emit_import_types(
         config,
         emitters,
