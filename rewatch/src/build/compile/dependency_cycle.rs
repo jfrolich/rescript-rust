@@ -2,7 +2,7 @@ use super::super::build_types::*;
 use crate::helpers;
 use ahash::AHashSet;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     path::Path,
 };
 
@@ -44,7 +44,7 @@ fn find_shortest_cycle(modules: &[(&String, &AHashSet<String>)]) -> Vec<String> 
         neighbors.sort();
         *graph.get_mut(*name).unwrap() = neighbors;
     }
-    // Remove all nodes in the graph that have no incoming edges
+    // Remove all nodes in the graph that have no outgoing edges
     graph.retain(|_, deps| !deps.is_empty());
 
     // OPTIMIZATION 1: Start with nodes that are more likely to be in cycles
@@ -60,58 +60,47 @@ fn find_shortest_cycle(modules: &[(&String, &AHashSet<String>)]) -> Vec<String> 
     // OPTIMIZATION 2: Keep track of the current shortest cycle length for early termination
     let mut current_shortest_length = usize::MAX;
 
-    // OPTIMIZATION 3: Cache nodes that have been checked and don't have cycles
-    let mut no_cycle_cache: HashSet<String> = HashSet::new();
-
     // Try BFS from each node to find the shortest cycle
     for start_node in start_nodes {
-        // Skip nodes that we know don't have cycles
-        if no_cycle_cache.contains(start_node) {
-            continue;
-        }
-
         // Skip nodes with no incoming edges
         if in_degrees.get(&start_node).is_none_or(|&d| d == 0) {
-            no_cycle_cache.insert(start_node.clone());
             continue;
         }
 
-        if let Some(cycle) = find_cycle_bfs(start_node, &graph, current_shortest_length) {
-            if shortest_cycle.is_empty() || cycle.len() < shortest_cycle.len() {
-                shortest_cycle = cycle.clone();
-                current_shortest_length = cycle.len();
+        if let Some(cycle) = find_cycle_bfs(start_node, &graph, current_shortest_length)
+            && (shortest_cycle.is_empty() || cycle.len() < shortest_cycle.len())
+        {
+            current_shortest_length = cycle.len();
+            shortest_cycle = cycle;
 
-                // OPTIMIZATION 4: If we find a very short cycle (length <= 3), we can stop early
-                // as it's unlikely to find a shorter one
-                if cycle.len() <= 3 {
-                    break;
-                }
+            // OPTIMIZATION 3: If we find a very short cycle (length <= 3), we
+            // stop early; a shorter (2-node) cycle may still exist, so this is
+            // the shortest found so far, not necessarily the shortest overall.
+            if current_shortest_length <= 3 {
+                break;
             }
-        } else {
-            // Cache this node as not having a cycle
-            no_cycle_cache.insert(start_node.to_string());
         }
     }
 
     shortest_cycle
 }
 
-fn find_cycle_bfs(
-    start: &String,
-    graph: &HashMap<&String, Vec<&String>>,
+fn find_cycle_bfs<'a>(
+    start: &'a String,
+    graph: &HashMap<&'a String, Vec<&'a String>>,
     max_length: usize,
 ) -> Option<Vec<String>> {
     // Use a BFS to find the shortest cycle
-    let mut queue = VecDeque::new();
+    let mut queue: VecDeque<&'a String> = VecDeque::new();
     // Store node -> (distance, parent)
-    let mut visited: HashMap<String, (usize, Option<String>)> = HashMap::new();
+    let mut visited: HashMap<&'a String, (usize, Option<&'a String>)> = HashMap::new();
 
     // Initialize with start node
-    visited.insert(start.clone(), (0, None));
-    queue.push_back(start.clone());
+    visited.insert(start, (0, None));
+    queue.push_back(start);
 
     while let Some(current) = queue.pop_front() {
-        let (dist, _) = *visited.get(&current).unwrap();
+        let (dist, _) = visited[current];
 
         // OPTIMIZATION: Early termination if we've gone too far
         // If we're already at max_length, we won't find a shorter cycle from here
@@ -120,20 +109,18 @@ fn find_cycle_bfs(
         }
 
         // Check all neighbors
-        if let Some(neighbors) = graph.get(&current) {
-            for neighbor in neighbors.iter() {
+        if let Some(neighbors) = graph.get(current) {
+            for &neighbor in neighbors.iter() {
                 // If we found the start node again, we have a cycle
-                let neighbor: &String = neighbor;
                 if neighbor == start {
                     // Reconstruct the cycle
-                    let mut path = Vec::new();
-                    path.push(start.clone());
+                    let mut path = vec![start.clone()];
 
                     // Backtrack from current to start using parent pointers
-                    let mut curr = current.clone();
-                    while curr != *start {
+                    let mut curr = current;
+                    while curr != start {
                         path.push(curr.clone());
-                        curr = visited.get(&curr).unwrap().1.clone().unwrap();
+                        curr = visited[curr].1.unwrap();
                     }
 
                     return Some(path);
@@ -141,8 +128,8 @@ fn find_cycle_bfs(
 
                 // If not visited, add to queue
                 if !visited.contains_key(neighbor) {
-                    visited.insert(neighbor.clone(), (dist + 1, Some(current.clone())));
-                    queue.push_back(neighbor.clone());
+                    visited.insert(neighbor, (dist + 1, Some(current)));
+                    queue.push_back(neighbor);
                 }
             }
         }
