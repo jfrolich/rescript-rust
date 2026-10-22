@@ -15801,7 +15801,7 @@ fn type_record(
         // with nothing in scope is unbound.
         if record_opath_ty.is_none()
             && matches!(resolved_lid, Longident::Lident(_))
-            && env.find_all_labels(field_name).is_empty()
+            && env.find_label(field_name).is_err()
         {
             let resolved_lid = resolved_lid.clone();
             return Err(TypeCoreError::UnboundRecordField {
