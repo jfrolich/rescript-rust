@@ -2052,7 +2052,7 @@ fn print_expr_fun_parameters(
                 default_expr: None,
                 pat,
             },
-        ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
+        ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(&*pat.ppat_desc, PatternDesc::Ppat_any) =>
         {
             let doc = if has_constraint {
@@ -2071,7 +2071,7 @@ fn print_expr_fun_parameters(
                 default_expr: None,
                 pat,
             },
-        ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
+        ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(&*pat.ppat_desc, PatternDesc::Ppat_var(_))
             && pat.ppat_attributes.is_empty() =>
         {
@@ -2090,7 +2090,7 @@ fn print_expr_fun_parameters(
                 default_expr: None,
                 pat,
             },
-        ] if parsetree_viewer::filter_parsing_attrs_slice(arena, attrs).is_empty()
+        ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(
                 &*pat.ppat_desc,
                 PatternDesc::Ppat_construct(lid, args)
@@ -2548,20 +2548,13 @@ fn print_ternary_expression(
     };
 
     // Print attributes - ternary handles its own attributes
-    let attrs: Vec<&Attribute> = e.pexp_attributes.iter().collect();
-
     // Check if any of the printable attributes need parens wrapping
-    let collected_attrs: Attributes = attrs.iter().map(|a| (*a).clone()).collect();
-    let needs_parens = parsetree_viewer::filter_parsing_attrs(arena, &collected_attrs)
-        .iter()
-        .any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
+    let needs_parens = e.pexp_attributes.iter().any(|attr| {
+        !parsetree_viewer::is_parsing_attr(arena, attr)
+            && parsetree_viewer::is_printable_attribute(arena, attr)
+    });
 
-    let attrs_doc = print_attributes(
-        state,
-        &attrs.into_iter().cloned().collect::<Vec<_>>(),
-        cmt_tbl,
-        arena,
-    );
+    let attrs_doc = print_attributes(state, e.pexp_attributes.as_slice(), cmt_tbl, arena);
     Doc::concat(vec![
         attrs_doc,
         if needs_parens {
@@ -4346,7 +4339,7 @@ fn print_binary_expression(
     if operator == "->"
         && !(parsetree_viewer::is_binary_expression(arena, lhs)
             || parsetree_viewer::is_binary_expression(arena, rhs)
-            || !parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes).is_empty())
+            || parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()))
     {
         let lhs_has_comment_below = has_comment_below(cmt_tbl, lhs.pexp_loc, arena);
         let lhs_doc = print_binary_operand(
@@ -4432,12 +4425,14 @@ fn print_binary_expression(
         ]),
         force_pipe_breaks && operator == "->",
     );
-    let printable = parsetree_viewer::filter_printable_attributes(arena, &expr.pexp_attributes);
-    let mut printable_expr = expr.clone();
-    printable_expr.pexp_attributes = printable.into_iter().cloned().collect();
+    // `binary_expr` of the expression restricted to its printable attributes.
+    let has_printable_attrs = expr
+        .pexp_attributes
+        .iter()
+        .any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
     Doc::group(Doc::concat(vec![
         print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena),
-        match parens::binary_expr(arena, &printable_expr) {
+        match parens::binary_expr_with_attrs(arena, expr, has_printable_attrs) {
             ParenKind::Braced(braces) => print_braces(doc, expr, braces, arena),
             ParenKind::Parenthesized => add_parens(doc),
             ParenKind::Nothing => doc,

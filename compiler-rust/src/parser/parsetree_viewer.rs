@@ -986,18 +986,27 @@ pub fn filter_parsing_attrs_slice<'a>(
 ) -> Vec<&'a Attribute> {
     attrs
         .iter()
-        .filter(|attr| {
-            !matches!(
-                arena.get_string(attr.0.txt),
-                "res.iflet"
-                    | "res.ternary"
-                    | "res.await"
-                    | "res.patVariantSpread"
-                    | "res.dictPattern"
-                    | "res.dictSpread"
-            )
-        })
+        .filter(|attr| !is_parsing_attr(arena, attr))
         .collect()
+}
+
+/// Whether `attr` is one of the parser-internal markers that
+/// `filter_parsing_attrs` drops.
+pub fn is_parsing_attr(arena: &ParseArena, attr: &Attribute) -> bool {
+    matches!(
+        arena.get_string(attr.0.txt),
+        "res.iflet"
+            | "res.ternary"
+            | "res.await"
+            | "res.patVariantSpread"
+            | "res.dictPattern"
+            | "res.dictSpread"
+    )
+}
+
+/// `filter_parsing_attrs attrs <> []`, without building the filtered list.
+pub fn has_non_parsing_attrs(arena: &ParseArena, attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| !is_parsing_attr(arena, attr))
 }
 
 /// Check if an attribute is printable (not an internal parsing attribute).
@@ -1011,17 +1020,6 @@ pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
 /// Check if attributes contain any printable attributes.
 pub fn has_printable_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|a| is_printable_attribute(arena, a))
-}
-
-/// Filter to only printable attributes.
-pub fn filter_printable_attributes<'a>(
-    arena: &ParseArena,
-    attrs: &'a Attributes,
-) -> Vec<&'a Attribute> {
-    attrs
-        .iter()
-        .filter(|a| is_printable_attribute(arena, a))
-        .collect()
 }
 
 /// Check if expression has any attributes (excluding internal parsing ones).

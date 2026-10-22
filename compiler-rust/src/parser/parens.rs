@@ -91,8 +91,7 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
     }
 
     // Check for parsing attrs
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-    if !filtered.is_empty() {
+    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
         return ParenKind::Parenthesized;
     }
 
@@ -152,8 +151,7 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-    if !filtered.is_empty() {
+    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
         return ParenKind::Parenthesized;
     }
 
@@ -427,8 +425,7 @@ fn assert_or_await_expr_rhs_inner(
     in_await: bool,
     expr: &Expression,
 ) -> ParenKind {
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-    if !filtered.is_empty() {
+    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
         return ParenKind::Parenthesized;
     }
 
@@ -488,8 +485,7 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    let filtered = parsetree_viewer::filter_parsing_attrs(arena, &expr.pexp_attributes);
-    if !filtered.is_empty() {
+    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
         return ParenKind::Parenthesized;
     }
 
@@ -671,11 +667,17 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
 /// Check if binary expression needs parentheses/braces.
 pub fn binary_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
+    binary_expr_with_attrs(arena, expr, !expr.pexp_attributes.is_empty())
+}
+
+/// [`binary_expr`] for `expr` with its attributes replaced by a list that is
+/// non-empty iff `has_attrs`; only that emptiness is read.
+pub fn binary_expr_with_attrs(arena: &ParseArena, expr: &Expression, has_attrs: bool) -> ParenKind {
     if let Some(kind) = braces_from_attr(arena, expr) {
         return kind;
     }
 
-    if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
+    if has_attrs && parsetree_viewer::is_binary_expression(arena, expr) {
         ParenKind::Parenthesized
     } else {
         ParenKind::Nothing
