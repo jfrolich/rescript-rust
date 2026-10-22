@@ -1138,12 +1138,7 @@ impl IndexedLambdaContext {
         &self.metadata
     }
 
-    #[cfg(test)]
     pub(crate) fn metadata_mut(&mut self) -> &mut IndexedLamStats {
-        &mut self.metadata
-    }
-
-    pub(crate) fn metadata_mut_for_backend(&mut self) -> &mut IndexedLamStats {
         &mut self.metadata
     }
 
@@ -1372,33 +1367,15 @@ impl IndexedLambdaContext {
             .append_compat_lambda(Lambda::Lfunction(Box::new(function)))
     }
 
-    /// Splits the owner-held state needed by consumer-side indexed beta.
-    /// This deliberately reuses the optimizer's metadata and native hash
-    /// capacity after grouping has consumed `optimizer_root`.
-    pub(crate) fn backend_beta_parts_mut(
-        &mut self,
-    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
+    /// Splits the owner-held store, metadata, and native `Hash_ident` bucket
+    /// count. Optimizer passes and consumer-side indexed beta (after grouping
+    /// has consumed `optimizer_root`) share the same state.
+    pub(crate) fn parts_mut(&mut self) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
         (
             &mut self.store,
             &mut self.metadata,
             &mut self.beta_hash_bucket_count,
         )
-    }
-
-    pub(crate) fn optimizer_parts_mut(
-        &mut self,
-    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
-        (
-            &mut self.store,
-            &mut self.metadata,
-            &mut self.beta_hash_bucket_count,
-        )
-    }
-
-    pub(crate) fn alias_parts_mut(
-        &mut self,
-    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
-        self.optimizer_parts_mut()
     }
 
     #[cfg(test)]

@@ -324,7 +324,7 @@ impl IndexedLambdaContext {
     pub fn simplify_lets(&mut self) {
         let root = self.current_root();
         let root = {
-            let (store, _, beta_hash_capacity) = self.optimizer_parts_mut();
+            let (store, _, beta_hash_capacity) = self.parts_mut();
             let occurrences = collect_occurs(store, root, beta_hash_capacity);
             simplify(
                 store,
@@ -544,7 +544,7 @@ mod tests {
         );
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.simplify_lets();
-        let (_, _, capacity) = context.optimizer_parts_mut();
+        let (_, _, capacity) = context.parts_mut();
         assert_eq!(*capacity, 64);
         assert_exact(
             &context.materialize(),

@@ -1211,7 +1211,7 @@ impl LambdaCompiler {
         let (_, parameter_map) =
             is_closed_with_map_indexed(context.store(), &exports, &params, body);
         let mut diagnostics = IndexedBetaDiagnostics::default();
-        let (store, metadata, beta_hash_bucket_count) = context.backend_beta_parts_mut();
+        let (store, metadata, beta_hash_bucket_count) = context.parts_mut();
         propagate_beta_reduce_with_map_indexed(
             store,
             metadata,
