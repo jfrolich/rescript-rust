@@ -5,11 +5,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
-type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, String>;
+use crate::gentype::paths::concat;
 
-fn concat(left: &str, right: &str) -> String {
-    Path::new(left).join(right).to_string_lossy().to_string()
-}
+type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, String>;
 
 pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
     // Mirrors compiler/gentype/ModuleResolver.ml:6-20.
