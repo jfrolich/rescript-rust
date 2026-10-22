@@ -7277,47 +7277,33 @@ fn combine_constructor<'p>(
 /// Equivalent to OCaml's `Polyvar_pattern_match.convert`.
 ///
 /// Groups entries that have the same lambda action together, producing a list
-/// of `(hash_names, action)` pairs sorted by first occurrence (stamp).
-fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, String)>, RawLambda)> {
-    // Group by normalized action equality, matching OCaml's make_key-based sharing.
-    // Each entry gets a stamp (its original index) for stable sorting.
-    struct Entry {
-        stamp: usize,
-        hash_names: Vec<(i32, String)>,
-        act: RawLambda,
-        key: Option<String>,
-    }
+/// of `(hash_names, action)` pairs in order of first occurrence.
+fn convert_polyvar_list(
+    xs: Vec<(i32, (String, RawLambda))>,
+) -> Vec<(Vec<(i32, String)>, RawLambda)> {
+    // Group by normalized action equality, matching OCaml's make_key-based
+    // sharing. Groups are created in first-occurrence order.
+    let mut groups: Vec<(Vec<(i32, String)>, RawLambda)> = Vec::new();
+    let mut group_of_key: HashMap<String, usize> = HashMap::new();
 
-    let mut entries: Vec<Entry> = Vec::new();
-
-    for (i, (hash, (name, act))) in xs.iter().enumerate() {
-        let key = make_key_string(act);
-        let found_idx = key.as_ref().and_then(|key| {
-            entries
-                .iter()
-                .position(|e| e.key.as_ref().is_some_and(|existing| existing == key))
-        });
-        if let Some(idx) = found_idx {
-            entries[idx].hash_names.push((*hash, name.clone()));
-        } else {
-            entries.push(Entry {
-                stamp: i,
-                hash_names: vec![(*hash, name.clone())],
-                act: act.clone(),
-                key,
-            });
+    for (hash, (name, act)) in xs {
+        match make_key_string(&act) {
+            Some(key) => match group_of_key.get(&key) {
+                Some(&idx) => groups[idx].0.push((hash, name)),
+                None => {
+                    group_of_key.insert(key, groups.len());
+                    groups.push((vec![(hash, name)], act));
+                }
+            },
+            None => groups.push((vec![(hash, name)], act)),
         }
     }
 
-    entries.sort_by_key(|e| e.stamp);
-    entries
-        .into_iter()
-        .map(|mut e| {
-            // Sort hashes descending within each group to match OCaml's Switcher.test_sequence ordering
-            e.hash_names.sort_by(|a, b| b.0.cmp(&a.0));
-            (e.hash_names, e.act)
-        })
-        .collect()
+    for (hash_names, _) in &mut groups {
+        // Sort hashes descending within each group to match OCaml's Switcher.test_sequence ordering
+        hash_names.sort_by(|a, b| b.0.cmp(&a.0));
+    }
+    groups
 }
 
 /// Create a disjunction of equality tests for polyvar hash values.
@@ -7360,39 +7346,24 @@ fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
 fn polyvar_if_chain(
     fail: Option<RawLambda>,
     arg: &RawLambda,
-    int_lambda_list: &[(i32, (String, RawLambda))],
+    int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
-    let converted = convert_polyvar_list(int_lambda_list);
-    match (converted.split_first(), &fail) {
-        (Some(((_, default_act), rest)), &None) => {
-            // No fail: first action is default, rest are if-then-else
-            rest.iter()
-                .rev()
-                .fold(default_act.clone(), |acc, (hash_names, act)| {
-                    let predicate = or_list_polyvar(arg, hash_names);
-                    RawLambda::LifThenElse(
-                        Box::new(predicate),
-                        Box::new(act.clone()),
-                        Box::new(acc),
-                    )
-                })
-        }
-        (_, Some(fail_act)) => {
-            // With fail: fail is default, all entries are if-then-else
+    let mut converted = convert_polyvar_list(int_lambda_list).into_iter();
+    // Without a fail action the first action is the default and the rest are
+    // if-then-else; with one, fail is the default and every entry is tested.
+    let default = match fail {
+        Some(fail_act) => fail_act,
+        None => {
             converted
-                .iter()
-                .rev()
-                .fold(fail_act.clone(), |acc, (hash_names, act)| {
-                    let predicate = or_list_polyvar(arg, hash_names);
-                    RawLambda::LifThenElse(
-                        Box::new(predicate),
-                        Box::new(act.clone()),
-                        Box::new(acc),
-                    )
-                })
+                .next()
+                .expect("polyvar_if_chain: empty list with no fail")
+                .1
         }
-        (None, &None) => panic!("polyvar_if_chain: empty list with no fail"),
-    }
+    };
+    converted.rev().fold(default, |acc, (hash_names, act)| {
+        let predicate = or_list_polyvar(arg, &hash_names);
+        RawLambda::LifThenElse(Box::new(predicate), Box::new(act), Box::new(acc))
+    })
 }
 
 /// Make a test sequence for variant constant matching.
@@ -7400,8 +7371,7 @@ fn polyvar_if_chain(
 fn make_test_sequence_variant_constant(
     fail: Option<RawLambda>,
     arg: RawLambda,
-    int_lambda_list: &[(i32, (String, RawLambda))],
-    _next_raise_count: &mut i32,
+    int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
     polyvar_if_chain(fail, &arg, int_lambda_list)
 }
@@ -7409,12 +7379,9 @@ fn make_test_sequence_variant_constant(
 /// Call switcher for variant constant matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constant`.
 fn call_switcher_variant_constant(
-    _loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
-    int_lambda_list: &[(i32, (String, RawLambda))],
-    _names: Option<crate::lambda::SwitchDispatch>,
-    _next_raise_count: &mut i32,
+    int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
     polyvar_if_chain(fail, &arg, int_lambda_list)
 }
@@ -7426,9 +7393,7 @@ fn call_switcher_variant_constr(
     loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
-    int_lambda_list: &[(i32, (String, RawLambda))],
-    names: Option<crate::lambda::SwitchDispatch>,
-    next_raise_count: &mut i32,
+    int_lambda_list: Vec<(i32, (String, RawLambda))>,
 ) -> RawLambda {
     let v = ctx_ref.create_ident("variant");
     RawLambda::Llet(
@@ -7440,12 +7405,9 @@ fn call_switcher_variant_constr(
             loc,
         }))),
         Box::new(call_switcher_variant_constant(
-            loc,
             fail,
             RawLambda::Lvar(v),
             int_lambda_list,
-            names,
-            next_raise_count,
         )),
     )
 }
@@ -7454,7 +7416,6 @@ fn call_switcher_variant_constr(
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant<'p>(
     ctx_ref: &TypeContext,
-    names: Option<crate::lambda::SwitchDispatch>,
     loc: Location,
     row: &RowDesc,
     arg: RawLambda,
@@ -7466,7 +7427,6 @@ fn combine_variant<'p>(
         Jumps<'p>,
         Vec<&'p Pattern>,
     ),
-    next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let (tag_lambda_list, total1, _pats) = c_div;
     let row = btype::row_repr(ctx_ref, row);
@@ -7518,50 +7478,26 @@ fn combine_variant<'p>(
         act
     } else {
         let (consts, nonconsts) = split_variant_cases(tag_lambda_list);
-        match (consts.as_slice(), nonconsts.as_slice()) {
-            ([(_, (_, act1))], [(_, (_, act2))]) if fail.is_none() => {
-                test_int_or_block(arg, act1.clone(), act2.clone())
+        if consts.len() == 1 && nonconsts.len() == 1 && fail.is_none() {
+            let (_, (_, act1)) = consts.into_iter().next().expect("one constant case");
+            let (_, (_, act2)) = nonconsts.into_iter().next().expect("one block case");
+            test_int_or_block(arg, act1, act2)
+        } else if nonconsts.is_empty() {
+            // One can compare integers and pointers
+            make_test_sequence_variant_constant(fail, arg, consts)
+        } else if consts.is_empty() {
+            let lam =
+                call_switcher_variant_constr(ctx_ref, loc, fail.clone(), arg.clone(), nonconsts);
+            // One must not dereference integers
+            match fail {
+                None => lam,
+                Some(fail) => test_int_or_block(arg, fail, lam),
             }
-            (_, []) => {
-                // One can compare integers and pointers
-                make_test_sequence_variant_constant(fail, arg, &consts, next_raise_count)
-            }
-            ([], _) => {
-                let lam = call_switcher_variant_constr(
-                    ctx_ref,
-                    loc,
-                    fail.clone(),
-                    arg.clone(),
-                    &nonconsts,
-                    names,
-                    next_raise_count,
-                );
-                // One must not dereference integers
-                match fail {
-                    None => lam,
-                    Some(fail) => test_int_or_block(arg, fail, lam),
-                }
-            }
-            _ => {
-                let lam_const = call_switcher_variant_constant(
-                    loc,
-                    fail.clone(),
-                    arg.clone(),
-                    &consts,
-                    names.clone(),
-                    next_raise_count,
-                );
-                let lam_nonconst = call_switcher_variant_constr(
-                    ctx_ref,
-                    loc,
-                    fail,
-                    arg.clone(),
-                    &nonconsts,
-                    names,
-                    next_raise_count,
-                );
-                test_int_or_block(arg, lam_const, lam_nonconst)
-            }
+        } else {
+            let lam_const = call_switcher_variant_constant(fail.clone(), arg.clone(), consts);
+            let lam_nonconst =
+                call_switcher_variant_constr(ctx_ref, loc, fail, arg.clone(), nonconsts);
+            test_int_or_block(arg, lam_const, lam_nonconst)
         }
     };
     (lambda1, jumps_union(local_jumps, total1))
@@ -8242,7 +8178,6 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_variant(_, _, _row_ref) => {
-                    let names: Option<crate::lambda::SwitchDispatch> = None;
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let row_desc =
@@ -8254,10 +8189,9 @@ fn do_compile_matching<'p>(
                         arena,
                         partial,
                         &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
-                        &|ctx, def, c_div, nrc| {
+                        &|ctx, def, c_div, _nrc| {
                             combine_variant(
                                 ctx_ref,
-                                names.clone(),
                                 loc,
                                 &row_desc2,
                                 arg_clone.clone(),
@@ -8265,7 +8199,6 @@ fn do_compile_matching<'p>(
                                 ctx,
                                 def,
                                 c_div,
-                                nrc,
                             )
                         },
                         ctx,
