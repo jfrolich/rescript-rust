@@ -1,24 +1,8 @@
-//! Diagnostics types for warnings and errors.
+//! Warning types and warning configuration.
 //!
-//! This module provides the infrastructure for collecting and reporting
-//! compilation diagnostics. Unlike the OCaml implementation which uses
-//! global refs (`Warnings.current`, `Warnings.nerrors`), all state is
-//! contained in a `DiagnosticsContext` that is passed through compilation.
-//!
-//! # Example
-//!
-//! ```rust
-//! use rescript_compiler::diagnostics::{DiagnosticsContext, Warning, WarningConfig};
-//! use rescript_compiler::location::Location;
-//!
-//! let mut ctx = DiagnosticsContext::new();
-//!
-//! // Report a warning
-//! ctx.warn(Warning::UnusedVariable { name: "x".to_string() }, Location::none());
-//!
-//! // Check for warnings
-//! assert!(ctx.has_warnings());
-//! ```
+//! [`Warning`] mirrors OCaml's `Warnings.t`; [`WarningConfig`] holds the
+//! active/error state that OCaml keeps in the global `Warnings.current`
+//! ref, so each compilation can carry its own copy.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -649,11 +633,6 @@ impl WarningConfig {
         self.disabled = true;
     }
 
-    /// Enable all warnings.
-    pub fn enable_all(&mut self) {
-        self.disabled = false;
-    }
-
     /// Check if a warning is active.
     pub fn is_active(&self, warning: &Warning) -> bool {
         if self.disabled {
@@ -818,167 +797,6 @@ fn letter_warnings(letter: char) -> Vec<usize> {
     }
 }
 
-/// A reported diagnostic (warning or error).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Diagnostic {
-    /// The warning or error.
-    pub kind: DiagnosticKind,
-    /// Location in source.
-    pub location: Location,
-    /// Whether this is treated as an error.
-    pub is_error: bool,
-}
-
-/// The kind of diagnostic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DiagnosticKind {
-    /// A warning.
-    Warning(Warning),
-    /// A compilation error.
-    Error(CompileError),
-}
-
-/// Compilation error types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompileError {
-    /// Error message.
-    pub message: String,
-    /// Sub-errors for more context.
-    pub sub: Vec<CompileError>,
-    /// Alternative message for highlighted output.
-    pub if_highlight: String,
-}
-
-impl CompileError {
-    /// Create a simple error.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            sub: Vec::new(),
-            if_highlight: String::new(),
-        }
-    }
-
-    /// Create an error with sub-errors.
-    pub fn with_sub(message: impl Into<String>, sub: Vec<CompileError>) -> Self {
-        Self {
-            message: message.into(),
-            sub,
-            if_highlight: String::new(),
-        }
-    }
-}
-
-impl fmt::Display for CompileError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-/// Diagnostics context for collecting warnings and errors.
-///
-/// This replaces the global state in `Warnings` (`current`, `nerrors`, etc.).
-/// Each compilation gets its own `DiagnosticsContext`.
-#[derive(Debug, Default)]
-pub struct DiagnosticsContext {
-    /// Warning configuration.
-    config: WarningConfig,
-    /// Collected diagnostics.
-    diagnostics: Vec<Diagnostic>,
-    /// Number of errors (warnings treated as errors count).
-    error_count: usize,
-    /// Whether any warnings were reported.
-    has_warnings: bool,
-}
-
-impl DiagnosticsContext {
-    /// Create a new diagnostics context.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create with custom warning configuration.
-    pub fn with_config(config: WarningConfig) -> Self {
-        Self {
-            config,
-            ..Default::default()
-        }
-    }
-
-    /// Get the warning configuration.
-    pub fn config(&self) -> &WarningConfig {
-        &self.config
-    }
-
-    /// Get mutable access to the warning configuration.
-    pub fn config_mut(&mut self) -> &mut WarningConfig {
-        &mut self.config
-    }
-
-    /// Report a warning.
-    pub fn warn(&mut self, warning: Warning, location: Location) {
-        if !self.config.is_active(&warning) {
-            return;
-        }
-
-        self.has_warnings = true;
-        let is_error = self.config.is_error(&warning);
-        if is_error {
-            self.error_count += 1;
-        }
-
-        self.diagnostics.push(Diagnostic {
-            kind: DiagnosticKind::Warning(warning),
-            location,
-            is_error,
-        });
-    }
-
-    /// Report an error.
-    pub fn error(&mut self, error: CompileError, location: Location) {
-        self.error_count += 1;
-        self.diagnostics.push(Diagnostic {
-            kind: DiagnosticKind::Error(error),
-            location,
-            is_error: true,
-        });
-    }
-
-    /// Check if any warnings were reported.
-    pub fn has_warnings(&self) -> bool {
-        self.has_warnings
-    }
-
-    /// Check if any errors were reported.
-    pub fn has_errors(&self) -> bool {
-        self.error_count > 0
-    }
-
-    /// Get the number of errors.
-    pub fn error_count(&self) -> usize {
-        self.error_count
-    }
-
-    /// Get all diagnostics.
-    pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
-    }
-
-    /// Take all diagnostics, leaving the context empty.
-    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
-        self.error_count = 0;
-        self.has_warnings = false;
-        std::mem::take(&mut self.diagnostics)
-    }
-
-    /// Reset the diagnostics context.
-    pub fn reset(&mut self) {
-        self.diagnostics.clear();
-        self.error_count = 0;
-        self.has_warnings = false;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,37 +860,5 @@ mod tests {
         for i in 1..=10 {
             assert!(!config.active[i]);
         }
-    }
-
-    #[test]
-    fn test_diagnostics_context() {
-        let mut ctx = DiagnosticsContext::new();
-
-        ctx.warn(
-            Warning::UnusedVariable {
-                name: "x".to_string(),
-            },
-            Location::none(),
-        );
-
-        assert!(ctx.has_warnings());
-        assert!(!ctx.has_errors());
-        assert_eq!(ctx.diagnostics().len(), 1);
-    }
-
-    #[test]
-    fn test_diagnostics_error() {
-        let mut ctx = DiagnosticsContext::new();
-
-        ctx.error(CompileError::new("test error"), Location::none());
-
-        assert!(ctx.has_errors());
-        assert_eq!(ctx.error_count(), 1);
-    }
-
-    #[test]
-    fn test_diagnostics_context_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<DiagnosticsContext>();
     }
 }

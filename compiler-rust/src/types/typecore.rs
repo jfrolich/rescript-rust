@@ -8,7 +8,6 @@
 //! Type checking is performed in a context that contains:
 //! - A [`TypeContext`] for allocating type expressions
 //! - An [`Env`] for looking up bindings
-//! - A [`DiagnosticsContext`] for collecting errors
 //!
 //! The main entry points are:
 //! - [`type_expression`] - type check a top-level expression
