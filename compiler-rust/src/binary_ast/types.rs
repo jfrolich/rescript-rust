@@ -122,40 +122,40 @@ impl<T: Marshal> Marshal for parse_arena::Located<T> {
 // ========== AST Node Index Types ==========
 //
 // These Marshal implementations look up the actual AST node from the arena
-// and delegate to the node's own Marshal implementation. We clone the looked-up
-// node to avoid borrowing conflicts with the mutable writer.
+// and delegate to the node's own Marshal implementation. The arena borrow is
+// independent of the writer borrow, so nodes are marshalled in place.
 
 impl Marshal for ExprIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        let expr = w.get_arena().get_expr(*self).clone();
+        let expr = w.get_arena().get_expr(*self);
         w.with_current_expr_idx(*self, |w| expr.marshal(w));
     }
 }
 
 impl Marshal for PatIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        let pat = w.get_arena().get_pat(*self).clone();
+        let pat = w.get_arena().get_pat(*self);
         pat.marshal(w);
     }
 }
 
 impl Marshal for CoreTypeIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        let ct = w.get_arena().get_core_type(*self).clone();
+        let ct = w.get_arena().get_core_type(*self);
         ct.marshal(w);
     }
 }
 
 impl Marshal for ModExprIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        let me = w.get_arena().get_mod_expr(*self).clone();
+        let me = w.get_arena().get_mod_expr(*self);
         me.marshal(w);
     }
 }
 
 impl Marshal for ModTypeIdx {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        let mt = w.get_arena().get_mod_type(*self).clone();
+        let mt = w.get_arena().get_mod_type(*self);
         mt.marshal(w);
     }
 }

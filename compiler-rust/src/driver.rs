@@ -57,8 +57,7 @@ const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
     "`let?` is only supported in let bindings targeting the `result` or `option` type.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
-const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
+use crate::binary_ast::writer::{AST_IMPL_MAGIC_NUMBER, AST_INTF_MAGIC_NUMBER};
 
 #[derive(Debug)]
 pub struct UserDiagnostic {
@@ -1865,7 +1864,7 @@ pub fn apply_external_structure_ppxs(
         &ppxs,
         filename,
         |path| {
-            crate::binary_ast::writer::write_external_ppx_input0(
+            crate::binary_ast::writer::write_external_ppx_input(
                 path,
                 filename,
                 arena,
@@ -1926,7 +1925,7 @@ pub fn apply_external_signature_ppxs(
         &ppxs,
         filename,
         |path| {
-            crate::binary_ast::writer::write_external_ppx_input0(
+            crate::binary_ast::writer::write_external_ppx_input(
                 path,
                 filename,
                 arena,

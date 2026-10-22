@@ -370,7 +370,6 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
-    // Create allocator in its own scope to ensure proper cleanup
     let allocator = Allocator::default();
     let source_type = SourceType::default();
 
@@ -433,8 +432,6 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
         Err(_) => JsExpClassification::JsExpUnknown,
     };
 
-    // Explicitly drop allocator before returning (though this should happen anyway)
-    drop(allocator);
     result
 }
 
@@ -588,16 +585,13 @@ fn starts_with_keyword(code: &str, keyword: &str) -> bool {
     let Some(after_keyword) = trimmed.strip_prefix(keyword) else {
         return false;
     };
-    !after_keyword
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    !after_keyword.chars().next().is_some_and(valid_js_char)
 }
 
 fn js_identifier_end(code: &str, start: usize) -> usize {
     let mut end = start;
     for (offset, ch) in code[start..].char_indices() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+        if valid_js_char(ch) {
             end = start + offset + ch.len_utf8();
         } else {
             break;
@@ -610,11 +604,7 @@ fn flow_like_function_expression_parse_warning(code: &str) -> Option<(String, us
     let trimmed = code.trim_start();
     let leading = code.len() - trimmed.len();
     let after_function = trimmed.strip_prefix("function")?;
-    if after_function
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-    {
+    if after_function.chars().next().is_some_and(valid_js_char) {
         return None;
     }
 
@@ -649,7 +639,7 @@ fn flow_like_function_expression_parse_warning(code: &str) -> Option<(String, us
                 None
             }
         }
-        Some(ch) if ch.is_ascii_alphabetic() || ch == '_' || ch == '$' => {
+        Some(ch) if valid_first_js_char(ch) => {
             let ident_end = js_identifier_end(code, token_offset);
             let after_ident = code.get(ident_end..)?;
             let after_ident_trimmed = after_ident.trim_start();
@@ -755,11 +745,7 @@ fn first_non_whitespace_after_keyword(code: &str, keyword: &str) -> Option<(usiz
     let trimmed = code.trim_start();
     let leading = code.len() - trimmed.len();
     let after_keyword = trimmed.strip_prefix(keyword)?;
-    if after_keyword
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-    {
+    if after_keyword.chars().next().is_some_and(valid_js_char) {
         return None;
     }
 
@@ -1056,22 +1042,40 @@ fn builtin_warning_attribute_spec(
     }
 }
 
+/// The floating attributes (`@@attr`) at the start of a structure.
+fn leading_structure_attributes(structure: &[StructureItem]) -> impl Iterator<Item = &Attribute> {
+    structure.iter().map_while(|item| match &*item.pstr_desc {
+        StructureItemDesc::Pstr_attribute(attr) => Some(&**attr),
+        _ => None,
+    })
+}
+
+/// The floating attributes (`@@attr`) at the start of a signature.
+fn leading_signature_attributes(signature: &[SignatureItem]) -> impl Iterator<Item = &Attribute> {
+    signature.iter().map_while(|item| match &*item.psig_desc {
+        SignatureItemDesc::Psig_attribute(attr) => Some(&**attr),
+        _ => None,
+    })
+}
+
+fn collect_builtin_warning_attributes<'a>(
+    attrs: impl Iterator<Item = &'a Attribute>,
+    arena: &ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    for attr in attrs {
+        collect_builtin_warning_attribute(attr, arena, &mut warnings);
+    }
+    warnings
+}
+
 /// Mirrors `Bs_ast_invariant.iter_warnings_on_stru`: only leading floating
 /// structure attributes are checked before frontend rewriting.
 pub fn collect_leading_builtin_warning_attributes(
     structure: &[StructureItem],
     arena: &ParseArena,
 ) -> Vec<PpxWarning> {
-    let mut warnings = Vec::new();
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_attribute(attr) => {
-                collect_builtin_warning_attribute(attr, arena, &mut warnings);
-            }
-            _ => break,
-        }
-    }
-    warnings
+    collect_builtin_warning_attributes(leading_structure_attributes(structure), arena)
 }
 
 /// Mirrors `Bs_ast_invariant.iter_warnings_on_stru` at
@@ -1081,18 +1085,9 @@ pub fn collect_leading_builtin_warning_attribute_specs(
     structure: &[StructureItem],
     arena: &ParseArena,
 ) -> Vec<WarningAttributeSpec> {
-    let mut specs = Vec::new();
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_attribute(attr) => {
-                if let Some(spec) = builtin_warning_attribute_spec(attr, arena) {
-                    specs.push(spec);
-                }
-            }
-            _ => break,
-        }
-    }
-    specs
+    leading_structure_attributes(structure)
+        .filter_map(|attr| builtin_warning_attribute_spec(attr, arena))
+        .collect()
 }
 
 /// Mirrors `Bs_ast_invariant.iter_warnings_on_sigi` at
@@ -1101,16 +1096,7 @@ pub fn collect_leading_builtin_warning_signature_attributes(
     signature: &[SignatureItem],
     arena: &ParseArena,
 ) -> Vec<PpxWarning> {
-    let mut warnings = Vec::new();
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_attribute(attr) => {
-                collect_builtin_warning_attribute(attr, arena, &mut warnings);
-            }
-            _ => break,
-        }
-    }
-    warnings
+    collect_builtin_warning_attributes(leading_signature_attributes(signature), arena)
 }
 
 /// Mirrors `Bs_ast_invariant.iter_warnings_on_sigi` for interface files.
@@ -1118,18 +1104,9 @@ pub fn collect_leading_builtin_warning_signature_attribute_specs(
     signature: &[SignatureItem],
     arena: &ParseArena,
 ) -> Vec<WarningAttributeSpec> {
-    let mut specs = Vec::new();
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_attribute(attr) => {
-                if let Some(spec) = builtin_warning_attribute_spec(attr, arena) {
-                    specs.push(spec);
-                }
-            }
-            _ => break,
-        }
-    }
-    specs
+    leading_signature_attributes(signature)
+        .filter_map(|attr| builtin_warning_attribute_spec(attr, arena))
+        .collect()
 }
 
 fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {
@@ -1376,39 +1353,23 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 }
 
-/// OCaml `Ast_config.iter_on_config_str` marks the first leading `@@config`.
-fn mark_leading_config_structure(items: &[StructureItem], arena: &ParseArena) {
-    for item in items {
-        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
-            return;
-        };
-        if arena.get_string(attr.0.txt) == "config" {
-            arena.mark_used_attribute(attr);
-            return;
-        }
-    }
-}
-
-fn mark_leading_config_signature(items: &[SignatureItem], arena: &ParseArena) {
-    for item in items {
-        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
-            return;
-        };
-        if arena.get_string(attr.0.txt) == "config" {
-            arena.mark_used_attribute(attr);
-            return;
-        }
-    }
-}
-
-/// Mark the leading `@@config` (OCaml `Ast_config.process_str`), which runs
-/// before the builtin mapper.
+/// Mark the first leading `@@config` used (OCaml `Ast_config.iter_on_config_str`
+/// via `Ast_config.process_str`), which runs before the builtin mapper.
 pub fn mark_config_attributes_structure(items: &[StructureItem], arena: &ParseArena) {
-    mark_leading_config_structure(items, arena);
+    mark_first_config_attribute(leading_structure_attributes(items), arena);
 }
 
 pub fn mark_config_attributes_signature(items: &[SignatureItem], arena: &ParseArena) {
-    mark_leading_config_signature(items, arena);
+    mark_first_config_attribute(leading_signature_attributes(items), arena);
+}
+
+fn mark_first_config_attribute<'a>(
+    mut attrs: impl Iterator<Item = &'a Attribute>,
+    arena: &ParseArena,
+) {
+    if let Some(attr) = attrs.find(|attr| arena.get_string(attr.0.txt) == "config") {
+        arena.mark_used_attribute(attr);
+    }
 }
 
 /// OCaml `Bs_ast_invariant.emit_external_warnings_on_structure`: the warnings
@@ -1480,12 +1441,7 @@ fn spec_of_ptyp_warning(typ: &CoreType, arena: &ParseArena, warnings: &mut Vec<P
 fn type_ffi_attr_count(typ: &CoreType, arena: &ParseArena) -> usize {
     typ.ptyp_attributes
         .iter()
-        .filter(|(attr_name, _)| {
-            matches!(
-                arena.get_string(attr_name.txt),
-                "string" | "int" | "ignore" | "unwrap"
-            )
-        })
+        .filter(|(attr_name, _)| ffi_type_attr_name(arena.get_string(attr_name.txt)).is_some())
         .count()
 }
 
@@ -1533,7 +1489,7 @@ fn is_js_regex_literal(s: &str) -> bool {
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
 fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Vec<Param>, usize) {
-    let (args, _result) = list_of_arrow(typ, arena);
+    let args = list_of_arrow_args(typ, arena);
 
     let mut param_specs: Vec<Param> = Vec::new();
     let mut arity = 0;
@@ -1541,23 +1497,21 @@ fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Vec<Param>, usiz
     // When all args are constants but arity > 0, it appends a trailing unit param.
     let mut has_runtime_args = false;
 
-    for arg in &args {
+    for arg in args.iter() {
         let (label_noname, arg_type, keeps_runtime_arg) = match &arg.lbl {
             ArgLabel::Optional(_) => {
-                let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = get_opt_arg_type_unchecked(false, &arg_typ, arena);
+                let arg_type =
+                    get_opt_arg_type_unchecked(false, arena.get_core_type(arg.typ), arena);
                 // Optional args are never Arg_cst and are kept in `args`.
                 (LabelNoname::ArgOptional, arg_type, true)
             }
             ArgLabel::Labelled(_) => {
-                let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = refine_arg_type(false, &arg_typ, arena);
+                let arg_type = refine_arg_type(false, arena.get_core_type(arg.typ), arena);
                 let keeps_runtime_arg = !matches!(arg_type, Attr::ArgCst(_));
                 (LabelNoname::ArgLabel, arg_type, keeps_runtime_arg)
             }
             ArgLabel::Nolabel => {
-                let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = refine_arg_type(true, &arg_typ, arena);
+                let arg_type = refine_arg_type(true, arena.get_core_type(arg.typ), arena);
                 let keeps_runtime_arg = !matches!(arg_type, Attr::ArgCst(_));
                 (LabelNoname::ArgEmpty, arg_type, keeps_runtime_arg)
             }
@@ -2283,8 +2237,7 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
         // Check for @as attribute on the type
         for attr in &typ.ptyp_attributes {
             let (attr_name, payload) = attr;
-            let name = arena.get_string(attr_name.txt).to_string();
-            if name == "as" {
+            if arena.get_string(attr_name.txt) == "as" {
                 // OCaml `iter_process_bs_string_or_int_as` marks the first @as used.
                 arena.mark_used_attribute(attr);
                 // Try int first (mirrors OCaml's is_single_int check first)
@@ -2308,32 +2261,29 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
 /// Check for @string, @int, @unwrap, @ignore attributes on a type.
 /// Returns `Some(attr_type)` if found, `None` otherwise.
 /// Mirrors OCaml's iter_process_bs_string_int_unwrap_uncurry.
-fn check_type_ffi_attrs(typ: &CoreType, arena: &ParseArena) -> Option<&'static str> {
-    for (attr_name, _) in &typ.ptyp_attributes {
-        let name = arena.get_string(attr_name.txt);
-        match name {
-            "string" => return Some("string"),
-            "int" => return Some("int"),
-            "ignore" => return Some("ignore"),
-            "unwrap" => return Some("unwrap"),
-            _ => {}
-        }
+/// The FFI type attributes (`@string`, `@int`, `@ignore`, `@unwrap`).
+fn ffi_type_attr_name(name: &str) -> Option<&'static str> {
+    match name {
+        "string" => Some("string"),
+        "int" => Some("int"),
+        "ignore" => Some("ignore"),
+        "unwrap" => Some("unwrap"),
+        _ => None,
     }
-    None
+}
+
+fn check_type_ffi_attrs(typ: &CoreType, arena: &ParseArena) -> Option<&'static str> {
+    typ.ptyp_attributes
+        .iter()
+        .find_map(|(attr_name, _)| ffi_type_attr_name(arena.get_string(attr_name.txt)))
 }
 
 fn external_type_ffi_attr(typ: &CoreType, arena: &ParseArena) -> PpxResult<Option<&'static str>> {
     let mut found = Vec::new();
     for (attr_name, _) in &typ.ptyp_attributes {
-        let name = arena.get_string(attr_name.txt);
-        let attr = match name {
-            "string" => "string",
-            "int" => "int",
-            "ignore" => "ignore",
-            "unwrap" => "unwrap",
-            _ => continue,
-        };
-        found.push((attr, attr_name.loc));
+        if let Some(attr) = ffi_type_attr_name(arena.get_string(attr_name.txt)) {
+            found.push((attr, attr_name.loc));
+        }
     }
     if found.len() > 1 {
         let names = found
@@ -2982,15 +2932,21 @@ fn is_user_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
 /// - Always descend for the first arrow (acc is empty)
 /// - For subsequent arrows, only descend if arity is None
 fn list_of_arrow(typ: &CoreType, arena: &ParseArena) -> (Vec<TypeArg>, CoreType) {
+    let result = match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(inner) => arena.get_core_type(inner.1).clone(),
+        _ => typ.clone(),
+    };
+    (list_of_arrow_args(typ, arena).into_owned(), result)
+}
+
+/// The argument half of [`list_of_arrow`], borrowed instead of cloned.
+fn list_of_arrow_args<'a>(
+    typ: &'a CoreType,
+    arena: &'a ParseArena,
+) -> std::borrow::Cow<'a, [TypeArg]> {
     match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, ret, arity) = &**inner;
-            (
-                arena.nary_arrow_args(arg, *arity).into_owned(),
-                arena.get_core_type(*ret).clone(),
-            )
-        }
-        _ => (Vec::new(), typ.clone()),
+        CoreTypeDesc::Ptyp_arrow(inner) => arena.nary_arrow_args(&inner.0, inner.2),
+        _ => std::borrow::Cow::Borrowed(&[]),
     }
 }
 
@@ -3113,8 +3069,7 @@ fn process_obj_type(
             ArgLabel::Labelled(label_loc) => {
                 // Labeled args: check for @as("alias") and arg type
                 let label_name = arena.get_string(label_loc.txt).to_string();
-                let field_name =
-                    get_as_string_attr(&arg.attrs, arena).unwrap_or_else(|| label_name.clone());
+                let field_name = get_as_string_attr(&arg.attrs, arena).unwrap_or(label_name);
 
                 let arg_typ = arena.get_core_type(arg.typ).clone();
                 let arg_type = refine_arg_type(false, &arg_typ, arena);
@@ -3202,8 +3157,7 @@ fn process_obj_type(
             ArgLabel::Optional(label_loc) => {
                 // Optional args: add to result_types with Js.undefined wrapper
                 let label_name = arena.get_string(label_loc.txt).to_string();
-                let field_name =
-                    get_as_string_attr(&arg.attrs, arena).unwrap_or_else(|| label_name.clone());
+                let field_name = get_as_string_attr(&arg.attrs, arena).unwrap_or(label_name);
 
                 let arg_typ = arena.get_core_type(arg.typ).clone();
                 let arg_type = get_opt_arg_type_unchecked(false, &arg_typ, arena);
@@ -4048,34 +4002,6 @@ fn build_external_decl(desc: &ExternalDesc, prim_name: &str, arity: usize) -> Ex
     }
 }
 
-/// Check if an external value description has relative paths that require
-/// wrapping in Pstr_include to prevent cross-module inlining.
-fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> bool {
-    let Some(PrimitiveRepr::PrimName(prim_name)) = &vd.pval_prim else {
-        return false;
-    };
-    let prim_name = arena.get_string(*prim_name).to_string();
-    if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
-        return false;
-    }
-    let vd_type = arena.get_core_type(vd.pval_type).clone();
-    let (_params, arity) = build_arg_type_specs(&vd_type, arena);
-    let (args, _result_type) = list_of_arrow(&vd_type, arena);
-    let no_arguments = args.is_empty();
-    let desc = parse_external_attrs(
-        &vd.pval_attributes,
-        prim_name.as_str(),
-        no_arguments,
-        vd.pval_loc,
-        arena,
-    );
-    if desc.mk_obj {
-        return false;
-    }
-    let decl = build_external_decl(&desc, prim_name.as_str(), arity);
-    check_decl(&decl, prim_name.as_str(), vd.pval_loc).unwrap_or(false)
-}
-
 /// Check if a path string is a package-relative path (starts with "./" or "../").
 fn is_package_relative_path(s: &str) -> bool {
     s.starts_with("./") || s.starts_with("../")
@@ -4094,7 +4020,7 @@ fn valid_ident(s: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
-    valid_js_char(first) && valid_first_js_char(first) && chars.all(valid_js_char)
+    valid_first_js_char(first) && chars.all(valid_js_char)
 }
 
 fn validate_global_name(name: &str, loc: LocIdx) -> PpxResult<()> {
@@ -4186,6 +4112,10 @@ fn check_decl(decl: &ExternalDecl, prim_name: &str, loc: LocIdx) -> PpxResult<bo
 pub struct EncodedExternal {
     pub pval_prim: Option<PrimitiveRepr>,
     pub pval_attributes: Vec<Attribute>,
+    /// The FFI references a package-relative path, so the external must be
+    /// wrapped in `Pstr_include` to prevent cross-module inlining
+    /// (ast_external.ml lines 78-98).
+    pub has_relative_path: bool,
 }
 
 /// Filter out ReScript FFI attributes (they're consumed by encoding)
@@ -4212,6 +4142,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         return EncodedExternal {
             pval_prim: vd.pval_prim.clone(),
             pval_attributes: vd.pval_attributes.to_vec(),
+            has_relative_path: false,
         };
     };
     let prim_name = arena.get_string(*prim_name).to_string();
@@ -4220,6 +4151,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         return EncodedExternal {
             pval_prim: vd.pval_prim.clone(),
             pval_attributes: vd.pval_attributes.to_vec(),
+            has_relative_path: false,
         };
     }
 
@@ -4229,8 +4161,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
     // no_arguments = arg_types_ty = [] in OCaml: checks if there are ANY arrow args,
     // regardless of ignored. Use list_of_arrow directly.
-    let (args, _result_type) = list_of_arrow(&vd_type, arena);
-    let no_arguments = args.is_empty();
+    let no_arguments = list_of_arrow_args(&vd_type, arena).is_empty();
 
     let desc = parse_external_attrs(
         &vd.pval_attributes,
@@ -4240,16 +4171,20 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
         arena,
     );
 
-    let ffi = if desc.mk_obj {
+    let (ffi, has_relative_path) = if desc.mk_obj {
         // @obj external: build FfiObjCreate with field names
-        build_obj_ffi_type(&vd_type, arena)
+        (build_obj_ffi_type(&vd_type, arena), false)
     } else {
+        let decl = build_external_decl(&desc, prim_name.as_str(), arity);
+        // `check_ffi` reports whether the FFI references a package-relative
+        // path; validation errors were already reported by
+        // `validate_external_attribute_errors`.
+        let has_relative_path = check_decl(&decl, prim_name.as_str(), vd.pval_loc).unwrap_or(false);
         // `check_return_wrapper` keeps the declared wrapper; whether a
         // unit-returning call is replaced by unit is decided at translation.
-        ExternalFfi::FfiBs(
-            params,
-            desc.return_wrapper,
-            build_external_decl(&desc, prim_name.as_str(), arity),
+        (
+            ExternalFfi::FfiBs(params, desc.return_wrapper, decl),
+            has_relative_path,
         )
     };
 
@@ -4262,6 +4197,7 @@ pub fn encode_external(vd: &ValueDescription, arena: &mut ParseArena) -> Encoded
             spec: Box::new(ffi),
         }),
         pval_attributes: filtered_attrs,
+        has_relative_path,
     }
 }
 
@@ -4284,11 +4220,9 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> ExternalFfi {
             }
             ArgLabel::Labelled(label_loc) => {
                 let label_name = arena.get_string(label_loc.txt).to_string();
-                let field_name =
-                    get_as_string_attr(&arg.attrs, arena).unwrap_or_else(|| label_name.clone());
+                let field_name = get_as_string_attr(&arg.attrs, arena).unwrap_or(label_name);
 
-                let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = refine_arg_type(false, &arg_typ, arena);
+                let arg_type = refine_arg_type(false, arena.get_core_type(arg.typ), arena);
 
                 match arg_type {
                     Attr::Ignore => {
@@ -4298,15 +4232,9 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> ExternalFfi {
                             obj_arg_label: Label::ObjEmpty,
                         });
                     }
-                    Attr::ArgCst(_) => {
-                        // @as(_) constant: add obj_label but not to arg_types
-                        obj_params.push(ObjParam {
-                            obj_arg_type: arg_type,
-                            obj_arg_label: Label::ObjLabel { name: field_name },
-                        });
-                    }
                     _ => {
-                        // Regular arg
+                        // Regular arg, or an @as(_) constant (`Attr::ArgCst`),
+                        // which also gets an obj_label.
                         obj_params.push(ObjParam {
                             obj_arg_type: arg_type,
                             obj_arg_label: Label::ObjLabel { name: field_name },
@@ -4316,11 +4244,10 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> ExternalFfi {
             }
             ArgLabel::Optional(label_loc) => {
                 let label_name = arena.get_string(label_loc.txt).to_string();
-                let field_name =
-                    get_as_string_attr(&arg.attrs, arena).unwrap_or_else(|| label_name.clone());
+                let field_name = get_as_string_attr(&arg.attrs, arena).unwrap_or(label_name);
 
-                let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = get_opt_arg_type_unchecked(false, &arg_typ, arena);
+                let arg_type =
+                    get_opt_arg_type_unchecked(false, arena.get_core_type(arg.typ), arena);
 
                 match arg_type {
                     Attr::Ignore => {
@@ -4337,12 +4264,9 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> ExternalFfi {
                                 let lid = &inner.0;
                                 let longident = arena.get_longident(lid.txt);
                                 if let Longident::Lident(s) = longident {
-                                    let name = arena.get_string(*s);
-                                    // is_builtin_rank0_type
-                                    matches!(
-                                        name,
-                                        "int" | "float" | "string" | "bool" | "unit" | "exn"
-                                    )
+                                    // OCaml `ast_external_process.ml` process_obj uses
+                                    // `Ast_core_type.is_builtin_rank0_type`.
+                                    is_builtin_rank0_type_name(arena.get_string(*s))
                                 } else {
                                     false
                                 }
@@ -6389,11 +6313,14 @@ fn rewrite_core_type_default(typ: &CoreType, arena: &mut ParseArena) -> CoreType
 /// `Primitive_js_extern.Callback.arityN`.
 fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     if let CoreTypeDesc::Ptyp_arrow(inner) = &*typ.ptyp_desc {
-        let (_arg, _ret, arity) = &**inner;
+        let (arg, _ret, arity) = &**inner;
         if has_this_attr(&typ.ptyp_attributes, arena) {
+            // OCaml `ast_core_type_class_type.ml` typ_mapper passes
+            // `~arity:(List.length params)`; arrows synthesized without a
+            // recorded arity fall back to their n-ary parameter count.
             let arity_num = arena
                 .get_arity(*arity)
-                .expect("@this attribute requires an uncurried arrow with arity");
+                .unwrap_or_else(|| arena.nary_arrow_args(arg, *arity).len() as i32);
             let meth_type = rewrite_core_type_default(typ, arena);
             let callback = arena.ppx_js_oo_callback_lid();
             let callback_arity =
@@ -10614,12 +10541,10 @@ fn handle_deriving_type(
     tdcls: &[TypeDeclaration],
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
-    if tdcls.is_empty() {
-        return vec![item.clone()];
-    }
-
     // Get the last type declaration's attributes (where @deriving should be)
-    let last_tdcl = tdcls.last().unwrap();
+    let Some(last_tdcl) = tdcls.last() else {
+        return vec![item.clone()];
+    };
     let (actions, new_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
 
     // `process_derive_type` gives `bs_deriving = Some actions` for any
@@ -11197,7 +11122,6 @@ fn handle_abstract_tdcl(
     arena: &mut ParseArena,
 ) -> (TypeDeclaration, Vec<ValueDescription>) {
     let loc = tdcl.ptype_loc;
-    let _type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
     let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
 
     let is_private = matches!(tdcl.ptype_private, PrivateFlag::Private);
@@ -13177,11 +13101,8 @@ fn rewrite_structure_item_no_spice(
                     pval_loc: vd.pval_loc,
                 };
 
-                // Check if FFI has relative paths before encoding
-                // (need to build FFI type to check, same as encode_external does)
-                let no_inline = check_external_relative(&rewritten_vd, arena);
-
                 let encoded = encode_external(&rewritten_vd, arena);
+                let no_inline = encoded.has_relative_path;
                 // OCaml's FFI processing (ast_external_process.ml handle_attributes)
                 // reconstructs the arrow type with ptyp_loc = pval_loc.
                 // For @obj externals, also reconstructs Ptyp_any -> Ptyp_object.
@@ -13956,6 +13877,46 @@ let f = value => {
         assert_eq!(
             arena.get_string(arena.get_longident(first_rhs).last_idx()),
             "x"
+        );
+    }
+
+    fn obj_optional_label_nested_flags(source: &str) -> Vec<(String, bool)> {
+        let (mut arena, structure) = parse_structure(source);
+        let StructureItemDesc::Pstr_primitive(vd) = &*structure[0].pstr_desc else {
+            panic!("expected external");
+        };
+        let encoded = encode_external(vd, &mut arena);
+        let Some(PrimitiveRepr::PrimFfi { spec, .. }) = encoded.pval_prim else {
+            panic!("expected encoded FFI primitive");
+        };
+        let ExternalFfi::FfiObjCreate(params) = *spec else {
+            panic!("expected @obj creation");
+        };
+        params
+            .into_iter()
+            .filter_map(|param| match param.obj_arg_label {
+                Label::ObjOptional {
+                    name,
+                    for_sure_no_nested_option,
+                } => Some((name, for_sure_no_nested_option)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn obj_optional_builtin_rank0_types_include_char_like_ocaml() {
+        // OCaml `Ast_core_type.is_builtin_rank0_type` includes "char".
+        let flags = obj_optional_label_nested_flags(
+            "@obj external mk: (~c: char=?, ~i: int=?, ~o: option<int>=?, unit) => _ = \"\"",
+        );
+        assert_eq!(
+            flags,
+            [
+                ("c".to_string(), true),
+                ("i".to_string(), true),
+                ("o".to_string(), false)
+            ]
         );
     }
 

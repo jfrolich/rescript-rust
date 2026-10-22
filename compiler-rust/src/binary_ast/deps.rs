@@ -9,6 +9,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use indexmap::IndexSet;
+
+use crate::intern::StrIdx;
 use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
 };
@@ -65,8 +68,13 @@ pub fn extract_signature_deps(arena: &ParseArena, signature: &[SignatureItem]) -
 struct DependencyCollector<'a> {
     arena: &'a ParseArena,
     deps: BTreeSet<String>,
-    /// Bound module names (from letmodule, module, etc.) that should not be added as dependencies
-    bound_modules: HashSet<String>,
+    /// Bound module names (from letmodule, module, etc.) that should not be added as dependencies.
+    ///
+    /// Insertion-ordered so a module scope can be unwound by truncation: every
+    /// scope only removes names it inserted itself, and scopes nest, so the names
+    /// bound inside a scope are exactly the entries past its starting length
+    /// (see [`DependencyCollector::with_module_scope`]).
+    bound_modules: IndexSet<String>,
     /// For locally-bound modules, track names introduced by their inner structure/signature.
     /// Used to model OCaml `open_module` behavior (`open M` brings submodules into scope).
     module_members: HashMap<String, HashSet<String>>,
@@ -80,7 +88,7 @@ impl<'a> DependencyCollector<'a> {
         Self {
             arena,
             deps: BTreeSet::new(),
-            bound_modules: HashSet::new(),
+            bound_modules: IndexSet::new(),
             module_members: HashMap::new(),
             error_extension: None,
         }
@@ -92,6 +100,24 @@ impl<'a> DependencyCollector<'a> {
             && matches!(self.arena.get_string(ext.0.txt), "error" | "ocaml.error")
         {
             self.error_extension = Some(ext.clone());
+        }
+    }
+
+    /// Run `f` in a module scope: names it binds do not escape into the
+    /// enclosing scope and are returned as the module's members.
+    ///
+    /// Mirrors OCaml's functional `bv` threading in `add_module_binding` /
+    /// `add_modtype_binding`, without cloning the bound set.
+    fn with_module_scope(&mut self, f: impl FnOnce(&mut Self)) -> HashSet<String> {
+        let outer_len = self.bound_modules.len();
+        f(self);
+        self.bound_modules.drain(outer_len..).collect()
+    }
+
+    fn record_module_members(&mut self, name: StrIdx, nested_members: HashSet<String>) {
+        if !nested_members.is_empty() {
+            let module_name = self.arena.get_string(name).to_string();
+            self.module_members.insert(module_name, nested_members);
         }
     }
 
@@ -155,11 +181,18 @@ impl<'a> DependencyCollector<'a> {
     /// Add a module reference from a Longident (full path).
     /// This is used for module-level references like `open Foo` or `include Bar`.
     fn add_longident_full(&mut self, lid: &Longident) {
-        // Get the root module name
-        let parts = lid.flatten_idx();
-        if let Some(first) = parts.first() {
+        // Get the root module name (the head of `Longident.flatten`, where an
+        // application contributes its functor path).
+        let mut head = lid;
+        let first = loop {
+            match head {
+                Longident::Lident(s) => break *s,
+                Longident::Ldot(prefix, _) | Longident::Lapply(prefix, _) => head = prefix,
+            }
+        };
+        {
             // Look up the string content
-            let first_str = self.arena.get_string(*first);
+            let first_str = self.arena.get_string(first);
             // Only add if it starts with uppercase (module reference)
             // Lowercase identifiers are local bindings
             // Also skip if it's a bound module name (from letmodule, etc.)
@@ -168,6 +201,7 @@ impl<'a> DependencyCollector<'a> {
                 .next()
                 .is_some_and(|c| c.is_ascii_uppercase())
                 && !self.bound_modules.contains(first_str)
+                && !self.deps.contains(first_str)
             {
                 self.deps.insert(first_str.to_string());
             }
@@ -218,9 +252,9 @@ impl<'a> DependencyCollector<'a> {
         self.add_longident_full(lid);
     }
 
-    fn lident_simple_name(&self, lid_idx: LidentIdx) -> Option<String> {
+    fn lident_simple_name(&self, lid_idx: LidentIdx) -> Option<&'a str> {
         match self.arena.get_longident(lid_idx) {
-            Longident::Lident(name_idx) => Some(self.arena.get_string(*name_idx).to_string()),
+            Longident::Lident(name_idx) => Some(self.arena.get_string(*name_idx)),
             _ => None,
         }
     }
@@ -232,15 +266,18 @@ impl<'a> DependencyCollector<'a> {
             return Vec::new();
         };
 
-        let Some(members) = self.module_members.get(&opened_module) else {
+        let Some(members) = self.module_members.get(opened_module) else {
             return Vec::new();
         };
 
-        let members: Vec<String> = members.iter().cloned().collect();
-        members
-            .into_iter()
-            .filter(|name| self.bound_modules.insert(name.clone()))
-            .collect()
+        let mut newly_bound = Vec::new();
+        for name in members {
+            if !self.bound_modules.contains(name.as_str()) {
+                self.bound_modules.insert(name.clone());
+                newly_bound.push(name.clone());
+            }
+        }
+        newly_bound
     }
 
     // ========== Structure ==========
@@ -297,19 +334,9 @@ impl<'a> DependencyCollector<'a> {
                 // Nested module bindings inside that body must NOT leak into outer scope.
                 // Keep the body traversal for dependency collection, then restore outer
                 // bindings before adding the module's own binding at this level.
-                let outer_bound_modules = self.bound_modules.clone();
-                self.add_module_binding(mb);
-                let nested_members: HashSet<String> = self
-                    .bound_modules
-                    .difference(&outer_bound_modules)
-                    .cloned()
-                    .collect();
-                self.bound_modules = outer_bound_modules;
+                let nested_members = self.with_module_scope(|this| this.add_module_binding(mb));
                 self.bound_modules.insert(module_name);
-                if !nested_members.is_empty() {
-                    let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
-                    self.module_members.insert(module_name, nested_members);
-                }
+                self.record_module_members(mb.pmb_name.txt, nested_members);
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 // First bind all module names so they're not added as dependencies
@@ -321,18 +348,8 @@ impl<'a> DependencyCollector<'a> {
                 for mb in &**mbs {
                     // Match OCaml's functional scoping: nested bindings inside each
                     // module body do not escape the recursive-module item scope.
-                    let outer_bound_modules = self.bound_modules.clone();
-                    self.add_module_binding(mb);
-                    let nested_members: HashSet<String> = self
-                        .bound_modules
-                        .difference(&outer_bound_modules)
-                        .cloned()
-                        .collect();
-                    self.bound_modules = outer_bound_modules;
-                    if !nested_members.is_empty() {
-                        let module_name = self.arena.get_string(mb.pmb_name.txt).to_string();
-                        self.module_members.insert(module_name, nested_members);
-                    }
+                    let nested_members = self.with_module_scope(|this| this.add_module_binding(mb));
+                    self.record_module_members(mb.pmb_name.txt, nested_members);
                 }
             }
             StructureItemDesc::Pstr_modtype(mtd) => {
@@ -384,18 +401,8 @@ impl<'a> DependencyCollector<'a> {
                 self.bound_modules.insert(module_name);
                 // Like OCaml `add_modtype_binding`, nested signature bindings are local
                 // to this module declaration and must not leak to outer scope.
-                let outer_bound_modules = self.bound_modules.clone();
-                self.add_module_declaration(md);
-                let nested_members: HashSet<String> = self
-                    .bound_modules
-                    .difference(&outer_bound_modules)
-                    .cloned()
-                    .collect();
-                self.bound_modules = outer_bound_modules;
-                if !nested_members.is_empty() {
-                    let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
-                    self.module_members.insert(module_name, nested_members);
-                }
+                let nested_members = self.with_module_scope(|this| this.add_module_declaration(md));
+                self.record_module_members(md.pmd_name.txt, nested_members);
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 // First bind all module names
@@ -405,18 +412,9 @@ impl<'a> DependencyCollector<'a> {
                 }
                 // Then process all module declarations
                 for md in &**mds {
-                    let outer_bound_modules = self.bound_modules.clone();
-                    self.add_module_declaration(md);
-                    let nested_members: HashSet<String> = self
-                        .bound_modules
-                        .difference(&outer_bound_modules)
-                        .cloned()
-                        .collect();
-                    self.bound_modules = outer_bound_modules;
-                    if !nested_members.is_empty() {
-                        let module_name = self.arena.get_string(md.pmd_name.txt).to_string();
-                        self.module_members.insert(module_name, nested_members);
-                    }
+                    let nested_members =
+                        self.with_module_scope(|this| this.add_module_declaration(md));
+                    self.record_module_members(md.pmd_name.txt, nested_members);
                 }
             }
             SignatureItemDesc::Psig_modtype(mtd) => {
@@ -478,7 +476,7 @@ impl<'a> DependencyCollector<'a> {
                 let body = *body;
                 self.add_expr_idx(body);
                 for name in &newly_added {
-                    self.bound_modules.remove(name);
+                    self.bound_modules.shift_remove(name);
                 }
             }
             ExpressionDesc::Pexp_fun(inner) => {
@@ -488,14 +486,12 @@ impl<'a> DependencyCollector<'a> {
                 // names through the parameter list, before visiting the body.
                 // The parser-facing parameter list lives in a sparse side table;
                 // only the first parameter is kept in the compact node payload.
-                let nary_params: Vec<crate::parser::ast::FunParam> =
-                    match self.arena.stored_nary_fun_params(inner) {
-                        Some(params) => params.to_vec(),
-                        None => Vec::new(),
-                    };
+                let arena = self.arena;
+                let nary_params: &'a [crate::parser::ast::FunParam] =
+                    arena.stored_nary_fun_params(inner).unwrap_or(&[]);
                 if !nary_params.is_empty() {
                     let mut newly_added: Vec<String> = Vec::new();
-                    for param in &nary_params {
+                    for param in nary_params {
                         if let Some(default) = param.p_default {
                             self.add_expr_idx(default);
                         }
@@ -508,7 +504,7 @@ impl<'a> DependencyCollector<'a> {
                     }
                     self.add_expr_idx(inner.rhs);
                     for name in newly_added {
-                        self.bound_modules.remove(&name);
+                        self.bound_modules.shift_remove(&name);
                     }
                     return;
                 }
@@ -534,7 +530,7 @@ impl<'a> DependencyCollector<'a> {
                 let rhs = *rhs;
                 self.add_expr_idx(rhs);
                 for name in &newly_added {
-                    self.bound_modules.remove(name);
+                    self.bound_modules.shift_remove(name);
                 }
             }
             ExpressionDesc::Pexp_apply(inner) => {
@@ -706,7 +702,7 @@ impl<'a> DependencyCollector<'a> {
                 let body = *body;
                 self.add_expr_idx(body);
                 if newly_added {
-                    self.bound_modules.remove(&module_name);
+                    self.bound_modules.shift_remove(&module_name);
                 }
             }
             ExpressionDesc::Pexp_letexception(inner) => {
@@ -741,7 +737,7 @@ impl<'a> DependencyCollector<'a> {
                 let body = *body;
                 self.add_expr_idx(body);
                 for name in &newly_opened_members {
-                    self.bound_modules.remove(name);
+                    self.bound_modules.shift_remove(name);
                 }
             }
             ExpressionDesc::Pexp_extension(ext) => {
@@ -1099,7 +1095,7 @@ impl<'a> DependencyCollector<'a> {
                 let body = *body;
                 self.add_mod_expr_idx(body);
                 if newly_added {
-                    self.bound_modules.remove(&param_name);
+                    self.bound_modules.shift_remove(&param_name);
                 }
             }
             ModuleExprDesc::Pmod_apply(me1, me2) => {
@@ -1157,7 +1153,7 @@ impl<'a> DependencyCollector<'a> {
                 let mt2 = *mt2;
                 self.add_mod_type_idx(mt2);
                 if newly_added {
-                    self.bound_modules.remove(&param_name);
+                    self.bound_modules.shift_remove(&param_name);
                 }
             }
             ModuleTypeDesc::Pmty_with(inner) => {
@@ -1339,7 +1335,7 @@ impl<'a> DependencyCollector<'a> {
         // pc_rhs is ExprIdx
         self.add_expr_idx(case.pc_rhs);
         for name in &newly_added {
-            self.bound_modules.remove(name);
+            self.bound_modules.shift_remove(name);
         }
     }
 

@@ -89,25 +89,12 @@ fn marshal_ptyp_var_desc(name: &str, loc: LocIdx, w: &mut MarshalWriter<'_>) {
     }
 }
 
-fn has_braces_attr(attrs: &Attributes, w: &MarshalWriter<'_>) -> bool {
+/// Whether any attribute in `attrs` is named one of `names`.
+fn has_attr(attrs: &Attributes, w: &MarshalWriter<'_>, names: &[&str]) -> bool {
     let arena = w.get_arena();
     attrs
         .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "res.braces")
-}
-
-fn has_ternary_attr(attrs: &Attributes, w: &MarshalWriter<'_>) -> bool {
-    let arena = w.get_arena();
-    attrs
-        .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "res.ternary")
-}
-
-fn has_await_attr(attrs: &Attributes, w: &MarshalWriter<'_>) -> bool {
-    let arena = w.get_arena();
-    attrs
-        .iter()
-        .any(|(name, _)| arena.get_string(name.txt) == "res.await")
+        .any(|(name, _)| names.contains(&arena.get_string(name.txt)))
 }
 
 fn should_share_singleton_attr_list(name: &str) -> bool {
@@ -301,9 +288,12 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
 }
 
 fn is_external_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
-    if !is_raw_expansion_expr(expr, w) {
-        return false;
-    }
+    is_raw_expansion_expr(expr, w) && is_external_raw_expansion_body(expr, w)
+}
+
+/// The `%external`-specific half of [`is_external_raw_expansion_expr`], for
+/// callers that already know `expr` is a raw expansion.
+fn is_external_raw_expansion_body(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let ExpressionDesc::Pexp_letmodule(lm_inner) = &*expr.pexp_desc else {
         return false;
     };
@@ -964,8 +954,7 @@ impl Marshal for CoreType {
             let allow_tyvar_share =
                 is_none_loc_idx(self.ptyp_loc, w) || w.in_letmodule_expr() || w.in_module_typeof();
             if self.ptyp_attributes.is_empty() && allow_tyvar_share {
-                let key = (name.to_string(), self.ptyp_loc);
-                if let Some(&obj_idx) = w.tyvar_core_type_table_get(&key) {
+                if let Some(obj_idx) = w.tyvar_core_type_table_get(name, self.ptyp_loc) {
                     let d = w.obj_counter() - obj_idx;
                     w.write_shared_ref(d);
                     return;
@@ -977,7 +966,7 @@ impl Marshal for CoreType {
                 marshal_ptyp_var_desc(name, self.ptyp_loc, w);
                 self.ptyp_loc.marshal(w);
                 marshal_attributes(&self.ptyp_attributes, w, false, false, share_empty_pstr);
-                w.tyvar_core_type_table_insert(key, obj_idx);
+                w.tyvar_core_type_table_insert(name, self.ptyp_loc, obj_idx);
                 return;
             }
         }
@@ -1297,7 +1286,7 @@ impl Marshal for ExpressionRecordField {
 impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let is_raw_expansion = is_raw_expansion_expr(self, w);
-        let is_external_raw_expansion = is_external_raw_expansion_expr(self, w);
+        let is_external_raw_expansion = is_raw_expansion && is_external_raw_expansion_body(self, w);
         let is_external_ext = is_external_ext_expr(self, w);
         if is_external_raw_expansion {
             if let Some(obj_idx) = w.raw_expansion_expr(self.pexp_loc) {
@@ -1345,10 +1334,10 @@ impl Marshal for Expression {
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)
         );
         let has_braces_or_ternary =
-            has_braces_attr(&self.pexp_attributes, w) || has_ternary_attr(&self.pexp_attributes, w);
+            has_attr(&self.pexp_attributes, w, &["res.braces", "res.ternary"]);
         let rewritten_await_letmodule = matches!(
             &*self.pexp_desc,
-            ExpressionDesc::Pexp_letmodule(inner) if has_await_attr(&w.get_arena().get_mod_expr((**inner).1).pmod_attributes, w)
+            ExpressionDesc::Pexp_letmodule(inner) if has_attr(&w.get_arena().get_mod_expr((**inner).1).pmod_attributes, w, &["res.await"])
         );
         let rewritten_expr = w.get_arena().is_rewritten_expr_loc(self.pexp_loc);
         let share_singleton_attr_tuple = share_attrs;
@@ -1772,8 +1761,7 @@ impl Marshal for ValueBinding {
             .value_constraint(self.pvb_pat)
             .cloned()
             .marshal(w);
-        let share_empty_pstr = if has_braces_attr(&self.pvb_attributes, w)
-            || has_ternary_attr(&self.pvb_attributes, w)
+        let share_empty_pstr = if has_attr(&self.pvb_attributes, w, &["res.braces", "res.ternary"])
         {
             Some(EmptyPayloadShareKind::ParserAttr)
         } else {
@@ -1902,7 +1890,7 @@ impl Marshal for ModuleExpr {
         w.write_block_header(0, 3);
         self.pmod_desc.marshal(w);
         self.pmod_loc.marshal(w);
-        let share_empty_pstr = if has_await_attr(&self.pmod_attributes, w)
+        let share_empty_pstr = if has_attr(&self.pmod_attributes, w, &["res.await"])
             && (w.in_letmodule_expr() || w.in_module_typeof())
         {
             Some(EmptyPayloadShareKind::ParserAttr)

@@ -182,15 +182,6 @@ impl<'a> Mapper<'a> {
         self.arena.get_longident(idx)
     }
 
-    /// Create an OldLocated from text and location index
-    #[allow(dead_code)]
-    fn mkloc<T>(&mut self, txt: T, loc: LocIdx) -> OldLocated<T> {
-        OldLocated {
-            txt,
-            loc: self.loc(loc),
-        }
-    }
-
     // ========== Arena index lookup helpers ==========
     // These methods look up an arena-indexed AST node and map it.
     // We clone the looked-up node to avoid borrow conflicts (`self.arena` is `&mut`).
@@ -238,57 +229,11 @@ impl<'a> Mapper<'a> {
 
     // ========== Helper functions ==========
 
-    #[allow(dead_code)]
-    fn mk_optional_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
-        (
-            OldLocated::new("res.optional".to_string(), self.loc(loc)),
-            pt0::Payload::PStr(vec![]),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn mk_async_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
-        (
-            OldLocated::new("res.async".to_string(), self.loc(loc)),
-            pt0::Payload::PStr(vec![]),
-        )
-    }
-
     fn mk_await_attr(&mut self) -> pt0::Attribute {
         let loc = self.arena.none_loc();
         (
             OldLocated::new("res.await".to_string(), self.loc(loc)),
             pt0::Payload::PStr(vec![]),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn mk_partial_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
-        (
-            OldLocated::new("res.partial".to_string(), self.loc(loc)),
-            pt0::Payload::PStr(vec![]),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn mk_arity_attr(&mut self, arity: usize, loc: LocIdx) -> pt0::Attribute {
-        let full_loc = self.loc(loc);
-        (
-            OldLocated::new("res.arity".to_string(), full_loc),
-            pt0::Payload::PStr(vec![pt0::StructureItem {
-                pstr_desc: pt0::StructureItemDesc::Eval(
-                    pt0::Expression {
-                        pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::Integer(
-                            arity.to_string(),
-                            None,
-                        )),
-                        pexp_loc: full_loc,
-                        pexp_attributes: vec![],
-                    },
-                    vec![],
-                ),
-                pstr_loc: full_loc,
-            }]),
         )
     }
 
