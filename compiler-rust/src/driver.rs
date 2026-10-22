@@ -12223,7 +12223,7 @@ fn compile_source_to_js_with_options_inner(
             &env,
             &typed_structure,
             options,
-            Some(has_resi),
+            has_resi,
         )
     });
     let mut raw_converter =
@@ -12529,15 +12529,15 @@ fn build_name_based_coercion(
     // position, then advances only for runtime components. That lets primitive
     // implementations satisfy regular interface values via Tcoerce_primitive.
     // See compiler/ml/includemod.ml:313-342 and 381-390.
-    let mut impl_name_to_component: std::collections::HashMap<String, (usize, &SignatureItem)> =
-        std::collections::HashMap::new();
+    let mut impl_name_to_component: ahash::AHashMap<&str, (usize, &SignatureItem)> =
+        ahash::AHashMap::new();
     let mut runtime_pos = 0usize;
     for item in impl_sig {
         match item {
             SignatureItem::SigValue(id, _)
             | SignatureItem::SigModule(id, _, _)
             | SignatureItem::SigTypext(id, _, _) => {
-                impl_name_to_component.insert(id.name().to_string(), (runtime_pos, item));
+                impl_name_to_component.insert(id.name(), (runtime_pos, item));
             }
             _ => {}
         }
@@ -12559,10 +12559,10 @@ fn build_name_based_coercion(
         let name = match item {
             SignatureItem::SigValue(id, _)
             | SignatureItem::SigModule(id, _, _)
-            | SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+            | SignatureItem::SigTypext(id, _, _) => id.name(),
             _ => continue,
         };
-        if let Some(&(pos, impl_item)) = impl_name_to_component.get(&name) {
+        if let Some(&(pos, impl_item)) = impl_name_to_component.get(name) {
             let coercion = match (item, impl_item) {
                 (
                     SignatureItem::SigValue(_, sig_desc),
@@ -12590,7 +12590,7 @@ fn build_name_based_coercion(
                 _ => ModuleCoercion::Tcoerce_none,
             };
             coercions.push((pos, coercion));
-            runtime_fields.push(name);
+            runtime_fields.push(name.to_string());
         }
     }
 
@@ -12692,7 +12692,6 @@ fn format_compunit_mismatch_report(
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The result of checking an implementation against its interface: OCaml's
 /// one `Includemod.compunit` call gives both the coercion Translmod uses and
 /// the inclusion warnings (typemod.ml:1742-1758).
@@ -12701,6 +12700,7 @@ struct CompunitInclusion {
     warnings: Vec<crate::diagnostics::Warning>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_compunit_inclusion_for_errors(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -12726,14 +12726,7 @@ fn check_compunit_inclusion_for_errors(
     let Some(pers) = &mut tctx.persistent_env else {
         return Ok(None);
     };
-    let source_dir = std::path::Path::new(source_file)
-        .parent()
-        .map(|d| d.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    if !pers.load_path_contains(&source_dir) {
-        pers.add_load_path(source_dir);
-    }
-    let _ = pers.find_pers_struct(&module_name, type_ctx);
+    load_interface_unit(pers, source_file, &module_name, type_ctx);
     // In-process, the interface was saved without a `.cmi`; its raw `ps_sig`
     // travels with the registered portable structure.
     let raw_in_process_sig = if pers.is_in_process_mode() {
@@ -12805,7 +12798,7 @@ fn compute_raw_implementation_coercion(
     env: &Env,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
-    known_has_interface: Option<bool>,
+    has_resi: bool,
 ) -> crate::types::typedtree::ModuleCoercion {
     let Some(source_file) = &options.source_filename else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
@@ -12815,8 +12808,6 @@ fn compute_raw_implementation_coercion(
     }
 
     let impl_sig = &typed_structure.str_type;
-    let has_resi = known_has_interface
-        .unwrap_or_else(|| std::path::Path::new(&format!("{source_file}i")).exists());
     if !has_resi {
         // The no-interface coercion is computed at the Typemod boundary before
         // signature normalization and passed through to Lambda translation.
@@ -12830,14 +12821,7 @@ fn compute_raw_implementation_coercion(
     let Some(pers) = &mut tctx.persistent_env else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     };
-    let source_dir = std::path::Path::new(source_file)
-        .parent()
-        .map(|d| d.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    if !pers.load_path_contains(&source_dir) {
-        pers.add_load_path(source_dir);
-    }
-    let _ = pers.find_pers_struct(&module_name, type_ctx);
+    load_interface_unit(pers, source_file, &module_name, type_ctx);
     let target_sig = match pers.read_raw_sig_shared(&module_name, type_ctx) {
         Some(sig) => sig,
         None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
@@ -12855,23 +12839,31 @@ fn compute_raw_implementation_coercion(
     );
     report_compunit_inclusion_warnings(tctx, inclusion_warnings);
 
-    match inclusion_result {
-        Ok(cc) => cc,
-        Err(_) if has_resi => {
-            // compunit can fail when the OCaml-built CMI has different type stamps
-            // than what Rust's type-checker produces. In that case, fall back to a
-            // name-based structural coercion that at least filters the export block
-            // to match the interface's set of exported items. This ensures functors
-            // and other implementation-only items are excluded from the module export
-            // block, matching OCaml's behavior.
-            build_name_based_coercion(impl_sig, &target_sig)
-        }
-        Err(_) => crate::types::typedtree::ModuleCoercion::Tcoerce_none,
-    }
+    // If compunit fails, fall back to a name-based structural coercion that at
+    // least filters the export block to the interface's exported items, so
+    // functors and other implementation-only items stay out of the module
+    // export block.
+    inclusion_result.unwrap_or_else(|_| build_name_based_coercion(impl_sig, &target_sig))
 }
 
-/// Type-check an interface file and dump typed sexp if requested.
-/// Interface files (.resi) don't produce JS output, only .cmi files.
+/// Make the unit's own interface loadable: add the source directory to the
+/// load path and load its persistent structure.
+fn load_interface_unit(
+    pers: &mut PersistentEnv,
+    source_file: &str,
+    module_name: &str,
+    type_ctx: &TypeContext,
+) {
+    let source_dir = std::path::Path::new(source_file)
+        .parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if !pers.load_path_contains(&source_dir) {
+        pers.add_load_path(source_dir);
+    }
+    let _ = pers.find_pers_struct(module_name, type_ctx);
+}
+
 /// Output of [`run_interface_frontend`].
 pub struct InterfaceFrontend {
     pub signature: Signature,
@@ -13462,17 +13454,8 @@ fn apply_moregen_constraints(
             Some(p) => p,
             None => return,
         };
-        // Temporarily add source dir to load path
-        let source_dir = std::path::Path::new(source_file)
-            .parent()
-            .map(|d| d.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let already_in_path = pers.load_path_contains(&source_dir);
-        if !already_in_path {
-            pers.add_load_path(source_dir.clone());
-        }
         // Ensure the module is loaded first (for side effects like registering types)
-        let _ = pers.find_pers_struct(&module_name, type_ctx);
+        load_interface_unit(pers, source_file, &module_name, type_ctx);
         // Then read raw sig without path substitution for moregen
         let result = pers.read_raw_sig_shared(&module_name, type_ctx);
         match result {
@@ -15545,7 +15528,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 &env,
                 &typed_structure,
                 options,
-                Some(has_interface),
+                has_interface,
             ),
         };
         let mut raw_converter =
