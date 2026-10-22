@@ -23357,23 +23357,6 @@ impl Env {
             result
         }
 
-        fn raw_signature_for_persistent_path(
-            path: &Path,
-            pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-            ctx: &crate::types::context::TypeContext,
-        ) -> Option<crate::types::decl::Signature> {
-            if let Path::Pident(id) = path
-                && id.is_persistent()
-            {
-                pers_env
-                    .as_mut()?
-                    .read_raw_sig_shared(id.name(), ctx)
-                    .map(|sig| sig.as_ref().clone())
-            } else {
-                None
-            }
-        }
-
         fn resolve_path(
             env: &Env,
             path: &Path,
@@ -28445,18 +28428,6 @@ pub(crate) fn copy_resolved_module_signature_for_path(
     )
 }
 
-pub(crate) fn copy_module_signature_in_resolved_path(
-    parent_module_path: &Path,
-    module_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<(Path, crate::types::decl::Signature)> {
-    let (_, access_path, _) =
-        lookup_module_in_resolved_path(parent_module_path, module_name, env, pers_env, ctx)?;
-    copy_resolved_module_signature_for_path(&access_path, env, pers_env, ctx)
-}
-
 pub(crate) fn lookup_modtype_in_resolved_path(
     parent_module_path: &Path,
     modtype_name: &str,
@@ -28618,129 +28589,6 @@ fn lookup_type_in_resolved_path_with_cache_mode(
         },
     )
     .flatten()
-}
-
-fn lookup_type_decl_in_resolved_path_with_cache_mode(
-    parent_module_path: &Path,
-    type_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-    cache_mode: ComponentLookupApi,
-) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    if let Some((_, _, decl)) =
-        ctx.find_resolved_module_type(env.scope_id(), parent_module_path, type_name)
-    {
-        return Some(decl);
-    }
-
-    if let Path::Pident(id) = parent_module_path
-        && id.is_persistent()
-    {
-        let find_in_sig = |sig: &crate::types::decl::Signature| {
-            sig.iter().find_map(|item| match item {
-                crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
-                    if sig_id.name() == type_name =>
-                {
-                    Some((*sig_id, sig_decl.clone()))
-                }
-                _ => None,
-            })
-        };
-        let found = ctx
-            .with_raw_module_sig(id.name(), find_in_sig)
-            .flatten()
-            .or_else(|| {
-                pers_env
-                    .as_mut()
-                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
-                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
-            })
-            .or_else(|| {
-                let mut pers = ctx.persistent_env_clone()?;
-                pers.find_pers_struct(id.name(), ctx)
-                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
-            });
-        if let Some((found_id, decl)) = found {
-            // OCaml compiler/ml/env.ml:781-813 performs descriptor lookup
-            // through the persistent unit's component table. This declaration-
-            // only Rust helper can read the same finalized persistent
-            // signature directly without forcing child-module component views.
-            if cache_mode.publishes() {
-                ctx.register_resolved_module_type(
-                    env.scope_id(),
-                    parent_module_path,
-                    type_name,
-                    parent_module_path.clone(),
-                    found_id,
-                    decl.clone(),
-                );
-            }
-            return Some(decl);
-        }
-    }
-
-    with_resolved_module_components_for_path_with_cache_mode(
-        parent_module_path,
-        env,
-        pers_env,
-        ctx,
-        cache_mode,
-        |components| {
-            components.lookup_type(type_name).map(|(id, decl)| {
-                let decl = decl.clone();
-                // OCaml compiler/ml/env.ml:800-813 type lookup uses component
-                // descriptors from env.ml:781-793; explicit Rust probe callers
-                // keep that descriptor view out of the normal lookup cache.
-                if cache_mode.publishes() {
-                    ctx.register_resolved_module_type(
-                        env.scope_id(),
-                        parent_module_path,
-                        type_name,
-                        parent_module_path.clone(),
-                        *id,
-                        decl.clone(),
-                    );
-                }
-                decl
-            })
-        },
-    )
-    .flatten()
-}
-
-fn lookup_type_decl_in_resolved_path(
-    parent_module_path: &Path,
-    type_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    lookup_type_decl_in_resolved_path_with_cache_mode(
-        parent_module_path,
-        type_name,
-        env,
-        pers_env,
-        ctx,
-        ComponentLookupApi::FindType,
-    )
-}
-
-fn lookup_type_decl_in_resolved_path_for_probe(
-    parent_module_path: &Path,
-    type_name: &str,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    lookup_type_decl_in_resolved_path_with_cache_mode(
-        parent_module_path,
-        type_name,
-        env,
-        pers_env,
-        ctx,
-        ComponentLookupApi::ProbeModuleDescr,
-    )
 }
 
 fn rewrite_alias_pident_child_prefixes(
