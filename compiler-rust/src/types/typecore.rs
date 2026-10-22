@@ -20704,19 +20704,29 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
     }
 }
 
+/// Bound identifiers of a typed pattern in OCaml `pat_bound_idents` order.
+///
+/// OCaml compiler/ml/typedtree.ml:444-457 `bound_idents` conses each
+/// identifier onto a shared accumulator and returns it directly from
+/// `pat_bound_idents`, so the observable warning order is the cons order
+/// (reverse traversal order). typecore.ml:4652-4670 iterates that list when
+/// registering unused-binding checks.
+fn typed_pattern_bound_idents(pat: &Pattern) -> Vec<(&Ident, &str, LocIdx)> {
+    let mut out = Vec::new();
+    collect_typed_pattern_idents(pat, &mut out);
+    out.reverse();
+    out
+}
+
+/// Collects bound identifiers in traversal order.
 fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, &'a str, LocIdx)>) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
-            // OCaml compiler/ml/typedtree.ml:444-457 `bound_idents`
-            // conses each identifier onto a shared accumulator and returns it
-            // directly from `pat_bound_idents`, so the observable warning order
-            // is the cons order, not traversal append order. typecore.ml:4652-4670
-            // iterates that list when registering unused-binding checks.
-            out.insert(0, (id, id.name(), name.loc));
+            out.push((id, id.name(), name.loc));
         }
         PatternDesc::Tpat_alias(inner, id, name) => {
             collect_typed_pattern_idents(inner, out);
-            out.insert(0, (id, id.name(), name.loc));
+            out.push((id, id.name(), name.loc));
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
             for item in items {
@@ -20733,14 +20743,11 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
         }
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
-                out.insert(
-                    0,
-                    (
-                        &rest.rest_ident,
-                        rest.rest_name.txt.as_str(),
-                        rest.rest_name.loc,
-                    ),
-                );
+                out.push((
+                    &rest.rest_ident,
+                    rest.rest_name.txt.as_str(),
+                    rest.rest_name.loc,
+                ));
             }
             for (_, _, field_pat, _) in fields {
                 collect_typed_pattern_idents(field_pat, out);
@@ -21925,9 +21932,7 @@ fn type_let_bindings(
                         let mut usage = tctx.type_ctx.usage();
                         (usage.new_cell(), usage.new_let_slot())
                     };
-                    let mut bound = Vec::new();
-                    collect_typed_pattern_idents(typed_pat, &mut bound);
-                    for (id, name, _) in bound {
+                    for (id, name, _) in typed_pattern_bound_idents(typed_pat) {
                         let Some(pv) = pvars.iter().find(|pv| pv.id.same(id)) else {
                             continue;
                         };
