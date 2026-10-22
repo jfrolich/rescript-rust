@@ -130,117 +130,8 @@ fn raw_optional_none() -> RawLambda {
 }
 
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
-    fn collect(lam: &RawLambda, fv: &mut HashSet<Ident>) {
-        match lam {
-            RawLambda::Lshared(inner) => collect(inner, fv),
-            RawLambda::Lvar(id) => {
-                fv.insert(*id);
-            }
-            RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
-            RawLambda::Lapply(apply) => {
-                collect(&apply.ap_func, fv);
-                for arg in &apply.ap_args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::Lfunction(func) => {
-                collect(&func.body, fv);
-                for param in &func.params {
-                    fv.remove(param);
-                }
-            }
-            RawLambda::Llet(_, id, arg, body) => {
-                collect(arg, fv);
-                collect(body, fv);
-                fv.remove(id);
-            }
-            RawLambda::Lletrec(bindings, body) => {
-                collect(body, fv);
-                for (_, expr) in bindings {
-                    collect(expr, fv);
-                }
-                for (id, _) in bindings {
-                    fv.remove(id);
-                }
-            }
-            RawLambda::Lprim(info) => {
-                for arg in &info.args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::Lswitch(arg, sw) => {
-                collect(arg, fv);
-                for (_, lam) in &sw.sw_consts {
-                    collect(lam, fv);
-                }
-                for (_, lam) in &sw.sw_blocks {
-                    collect(lam, fv);
-                }
-                if let Some(fail) = &sw.sw_failaction {
-                    collect(fail, fv);
-                }
-            }
-            RawLambda::LstringSwitch(arg, cases, default) => {
-                collect(arg, fv);
-                for (_, lam) in cases {
-                    collect(lam, fv);
-                }
-                if let Some(default) = default {
-                    collect(default, fv);
-                }
-            }
-            RawLambda::LstaticRaise(_, args) => {
-                for arg in args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::LstaticCatch(body, (_, vars), handler) => {
-                collect(body, fv);
-                collect(handler, fv);
-                for var in vars {
-                    fv.remove(var);
-                }
-            }
-            RawLambda::LtryWith(body, exn, handler) => {
-                collect(body, fv);
-                collect(handler, fv);
-                fv.remove(exn);
-            }
-            RawLambda::LifThenElse(cond, ifso, ifnot) => {
-                collect(cond, fv);
-                collect(ifso, fv);
-                collect(ifnot, fv);
-            }
-            RawLambda::Lsequence(first, second) => {
-                collect(first, fv);
-                collect(second, fv);
-            }
-            RawLambda::Lwhile(cond, body) => {
-                collect(cond, fv);
-                collect(body, fv);
-            }
-            RawLambda::Lfor(var, lo, hi, _, body) => {
-                collect(lo, fv);
-                collect(hi, fv);
-                collect(body, fv);
-                fv.remove(var);
-            }
-            RawLambda::Lfor_of(var, iterable, body)
-            | RawLambda::Lfor_await_of(var, iterable, body) => {
-                collect(iterable, fv);
-                collect(body, fv);
-                fv.remove(var);
-            }
-            RawLambda::Lassign(id, expr) => {
-                collect(expr, fv);
-                fv.insert(*id);
-            }
-            RawLambda::Lbreak | RawLambda::Lcontinue => {}
-        }
-    }
-
     let mut fv = HashSet::new();
-    collect(lam, &mut fv);
+    crate::raw_lambda::collect_free_variables(lam, &mut fv);
     fv
 }
 
@@ -1875,7 +1766,7 @@ impl<'a> RawLambdaConverter<'a> {
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) =
-                    crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, env, path)
+                    crate::raw_lambda::typeopt::find_type_decl(self.type_ctx, env, path)
                 {
                     return decl.type_immediate;
                 }
