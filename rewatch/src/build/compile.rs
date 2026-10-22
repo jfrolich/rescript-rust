@@ -168,7 +168,7 @@ struct JsMetadataReadyMsg {
 
 enum WorkerMsg {
     SignatureReady(SignatureReadyMsg),
-    PreJsReady(PreJsMsg),
+    PreJsReady(Box<PreJsMsg>),
     JsMetadataReady(JsMetadataReadyMsg),
     Completed(CompletionMsg),
 }
@@ -452,13 +452,14 @@ fn compute_module_costs(
     compute_from_asts(universe, &stored_asts)
 }
 
-/// Compute the weighted critical-path priority of every module in the universe:
-/// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
 struct CompileWarning {
     module_name: String,
     package_name: String,
     warning: String,
 }
+
+/// Compute the weighted critical-path priority of every module in the universe:
+/// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
 /// Runs a reverse-topological sweep from leaves to roots. Modules stuck in a
 /// cycle get priority 0, and the actual cycle is diagnosed later by
 /// `dependency_cycle::find` when the dispatcher detects a stall.
@@ -585,7 +586,7 @@ fn compile_one(
                 let is_clean_interface = interface_generation_before.is_some()
                     && interface_generation_before == interface_generation_after;
                 msg.is_clean = is_clean_interface;
-                WorkerMsg::PreJsReady(msg)
+                WorkerMsg::PreJsReady(Box::new(msg))
             }
             Err(err) => WorkerMsg::Completed(CompletionMsg {
                 module_name: module_name.to_string(),
@@ -1187,6 +1188,7 @@ pub fn compile(
                             );
                         }
                         WorkerMsg::PreJsReady(msg) => {
+                            let msg = *msg;
                             if let Some(counters) = scheduler_counters.as_mut() {
                                 counters.pre_js_ready += 1;
                             }
@@ -4158,7 +4160,6 @@ fn finish_in_process_js_inner(
             Some(&mut metadata_hook),
         )
     }));
-    drop(metadata_hook);
     let mut compile_result = match compile_result {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
@@ -4451,13 +4452,13 @@ fn compile_file(
                 ..
             }) = &module.source_type
             {
-                let _ = std::fs::copy(
+                std::fs::copy(
                     Path::new(&package.path).join(path),
                     package.get_build_path().join(path),
                 )
                 .expect("copying source file failed");
 
-                let _ = std::fs::copy(
+                std::fs::copy(
                     Path::new(&package.path).join(path),
                     package
                         .get_ocaml_build_path()
@@ -4470,13 +4471,13 @@ fn compile_file(
                 ..
             }) = &module.source_type
             {
-                let _ = std::fs::copy(
+                std::fs::copy(
                     Path::new(&package.path).join(path),
                     package.get_build_path().join(path),
                 )
                 .expect("copying source file failed");
 
-                let _ = std::fs::copy(
+                std::fs::copy(
                     Path::new(&package.path).join(path),
                     package
                         .get_ocaml_build_path()
@@ -4503,7 +4504,7 @@ fn compile_file(
                     );
 
                     if source.exists() {
-                        let _ = std::fs::copy(&source, &destination).expect("copying source file failed");
+                        std::fs::copy(&source, &destination).expect("copying source file failed");
                     }
 
                     let mut source_map = source.clone().into_os_string();
