@@ -6542,51 +6542,43 @@ fn check_record_fields(
             .iter()
             .find(|field1| field1.ld_id.name() == field2.ld_id.name())
         else {
-            issues.insert(
-                0,
-                RecordFieldSubtypeViolation::FieldMissing {
-                    label: field2.ld_id.name().to_string(),
-                },
-            );
+            issues.push(RecordFieldSubtypeViolation::FieldMissing {
+                label: field2.ld_id.name().to_string(),
+            });
             continue;
         };
 
         if field1.ld_optional != field2.ld_optional {
-            issues.insert(
-                0,
-                RecordFieldSubtypeViolation::OptionalMismatch {
-                    label: field1.ld_id.name().to_string(),
-                    left_optional: field1.ld_optional,
-                    right_optional: field2.ld_optional,
-                },
-            );
+            issues.push(RecordFieldSubtypeViolation::OptionalMismatch {
+                label: field1.ld_id.name().to_string(),
+                left_optional: field1.ld_optional,
+                right_optional: field2.ld_optional,
+            });
         }
 
         if label_declaration_runtime_name(field1) != label_declaration_runtime_name(field2) {
-            issues.insert(
-                0,
-                RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
-                    label: field1.ld_id.name().to_string(),
-                    left_as: label_declaration_as_name(field1),
-                    right_as: label_declaration_as_name(field2),
-                },
-            );
+            issues.push(RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
+                label: field1.ld_id.name().to_string(),
+                left_as: field1.ld_runtime_name.clone(),
+                right_as: field2.ld_runtime_name.clone(),
+            });
         }
 
         field_types1.push(field1.ld_type);
         field_types2.push(field2.ld_type);
     }
 
+    // Issues are accumulated by prepending (OCaml list cons order).
+    issues.reverse();
     (issues, field_types1, field_types2)
 }
 
-fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    // `Record_runtime.declaration_name`.
-    label.declaration_name()
-}
-
-fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_runtime_name.clone()
+/// `Record_runtime.declaration_name`, without allocating.
+fn label_declaration_runtime_name(label: &LabelDeclaration) -> &str {
+    label
+        .ld_runtime_name
+        .as_deref()
+        .unwrap_or_else(|| label.ld_id.name())
 }
 
 fn expand_head_with_mode(
