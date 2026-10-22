@@ -194,7 +194,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 popen_lid: lid,
                 popen_override: override_flag,
                 popen_loc: loc,
-                popen_attributes: attrs.clone(),
+                popen_attributes: attrs,
             })))
         }
         Token::Let { unwrap } => {
@@ -224,14 +224,8 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 );
             }
             // Pass start_pos_idx to enable position sharing with structure_item
-            let (bindings, _binding_loc_idx) = parse_let_bindings(
-                p,
-                start_pos_idx,
-                let_end_pos_idx,
-                rec_flag,
-                attrs.clone(),
-                unwrap,
-            );
+            let (bindings, _binding_loc_idx) =
+                parse_let_bindings(p, start_pos_idx, let_end_pos_idx, rec_flag, attrs, unwrap);
             parse_newline_or_semicolon_structure(p);
             // Don't share LocIdx - OCaml creates separate Location objects for pstr_loc and pvb_loc.
             // The internal positions (PosIdx) are shared, but the Location records themselves are separate.
@@ -263,8 +257,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         Token::External => {
             p.next();
             // Use item_start_idx (which equals start_pos_idx) to share position with pstr_loc
-            let (vd, inline_types) =
-                parse_external_value_description(p, attrs.clone(), item_start_idx);
+            let (vd, inline_types) = parse_external_value_description(p, attrs, item_start_idx);
             parse_newline_or_semicolon_structure(p);
             if inline_types.is_empty() {
                 Some(StructureItemDesc::Pstr_primitive(Box::new(vd)))
@@ -287,8 +280,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             // Capture start position BEFORE consuming 'exception' for accurate location
             let exception_start_idx = p.start_pos_idx();
             p.next();
-            let ext =
-                parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx), false);
+            let ext = parse_extension_constructor(p, attrs, Some(exception_start_idx), false);
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_exception(Box::new(ext)))
         }
@@ -308,12 +300,9 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 let expr = super::expr::parse_expr_with_operand(p, pack_expr);
                 parse_newline_or_semicolon_structure(p);
                 let expr_idx = p.arena_mut().push_expr(expr);
-                Some(StructureItemDesc::Pstr_eval(Box::new((
-                    expr_idx,
-                    attrs.clone(),
-                ))))
+                Some(StructureItemDesc::Pstr_eval(Box::new((expr_idx, attrs))))
             } else {
-                let def = parse_module_definition(p, module_start_idx, attrs.clone());
+                let def = parse_module_definition(p, module_start_idx, attrs);
                 parse_newline_or_semicolon_structure(p);
                 def
             };
@@ -332,7 +321,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 IncludeDeclaration {
                     pincl_mod: mod_expr_idx,
                     pincl_loc: p.mk_loc_idx_to_prev_end(include_start_idx),
-                    pincl_attributes: attrs.clone(),
+                    pincl_attributes: attrs,
                 },
             )))
         }
@@ -374,7 +363,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_extension(Box::new((
                 (id, payload),
-                attrs.clone(),
+                attrs,
             ))))
         }
         _ => {
@@ -383,10 +372,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 let expr = expr::parse_expr(p);
                 parse_newline_or_semicolon_structure(p);
                 let expr_idx = p.arena_mut().push_expr(expr);
-                Some(StructureItemDesc::Pstr_eval(Box::new((
-                    expr_idx,
-                    attrs.clone(),
-                ))))
+                Some(StructureItemDesc::Pstr_eval(Box::new((expr_idx, attrs))))
             } else if let Some(attr) = attrs.first() {
                 // OCaml: when attrs are present but no valid item follows,
                 // report the "Did you forget to attach" error and produce exprhole
@@ -402,10 +388,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                 let expr = expr::parse_expr(p);
                 parse_newline_or_semicolon_structure(p);
                 let expr_idx = p.arena_mut().push_expr(expr);
-                Some(StructureItemDesc::Pstr_eval(Box::new((
-                    expr_idx,
-                    attrs.clone(),
-                ))))
+                Some(StructureItemDesc::Pstr_eval(Box::new((expr_idx, attrs))))
             } else {
                 // OCaml compiler/syntax/src/res_core.ml:6789-6798 returns
                 // None for an unrecognized structure-item token; the
@@ -721,7 +704,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 popen_lid: lid,
                 popen_override: override_flag,
                 popen_loc: loc,
-                popen_attributes: attrs.clone(),
+                popen_attributes: attrs,
             })))
         }
         Token::Let { unwrap } => {
@@ -738,7 +721,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 p.next();
             }
             p.begin_region();
-            let vd = parse_sign_let_desc(p, attrs.clone());
+            let vd = parse_sign_let_desc(p, attrs);
             parse_newline_or_semicolon_signature(p);
             p.end_region();
             Some(SignatureItemDesc::Psig_value(Box::new(vd)))
@@ -771,8 +754,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::External => {
             p.next();
             // Use start_pos_idx to share position with psig_loc
-            let (vd, inline_types) =
-                parse_external_value_description(p, attrs.clone(), start_pos_idx);
+            let (vd, inline_types) = parse_external_value_description(p, attrs, start_pos_idx);
             parse_newline_or_semicolon_signature(p);
             if inline_types.is_empty() {
                 Some(SignatureItemDesc::Psig_value(Box::new(vd)))
@@ -795,8 +777,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             // Capture start position BEFORE consuming 'exception' for accurate location
             let exception_start_idx = p.start_pos_idx();
             p.next();
-            let ext =
-                parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx), false);
+            let ext = parse_extension_constructor(p, attrs, Some(exception_start_idx), false);
             parse_newline_or_semicolon_signature(p);
             Some(SignatureItemDesc::Psig_exception(Box::new(ext)))
         }
@@ -807,19 +788,19 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             p.next();
             let result = if p.token == Token::Typ {
                 p.next();
-                let mtd = parse_module_type_declaration(p, attrs.clone(), false);
+                let mtd = parse_module_type_declaration(p, attrs, false);
                 // No parse_newline_or_semicolon_signature for module type - matches OCaml
                 Some(SignatureItemDesc::Psig_modtype(Box::new(mtd)))
             } else if p.token == Token::Rec {
                 p.next();
                 // For recursive modules, OCaml's pmd_loc includes attributes BEFORE 'module rec'
                 // OCaml passes start_pos (captured BEFORE attributes) to parse_rec_module_spec
-                let mds = parse_rec_module_declarations(p, attrs.clone(), start_pos_idx);
+                let mds = parse_rec_module_declarations(p, attrs, start_pos_idx);
                 parse_newline_or_semicolon_signature(p);
                 Some(SignatureItemDesc::Psig_recmodule(Box::new(mds)))
             } else {
                 // For non-recursive modules, location starts at name (not 'module')
-                let md = parse_module_declaration(p, attrs.clone());
+                let md = parse_module_declaration(p, attrs);
                 parse_newline_or_semicolon_signature(p);
                 Some(SignatureItemDesc::Psig_module(Box::new(md)))
             };
@@ -835,7 +816,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 IncludeDescription {
                     pincl_mod: mod_type_idx,
                     pincl_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-                    pincl_attributes: attrs.clone(),
+                    pincl_attributes: attrs,
                 },
             )))
         }
@@ -870,10 +851,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::PercentPercent => {
             let ext = parse_extension(p, true);
             parse_newline_or_semicolon_signature(p);
-            Some(SignatureItemDesc::Psig_extension(Box::new((
-                ext,
-                attrs.clone(),
-            ))))
+            Some(SignatureItemDesc::Psig_extension(Box::new((ext, attrs))))
         }
         _ => {
             // OCaml: when attrs are present but no valid item follows, report the error
