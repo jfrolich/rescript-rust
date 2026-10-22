@@ -16,6 +16,15 @@ use super::grammar::Grammar;
 use super::scanner::Scanner;
 use super::token::Token;
 
+/// An inline record type extracted while parsing a type declaration:
+/// its name, location, kind and type parameters.
+pub type InlineTypeEntry = (
+    StrIdx,
+    LocIdx,
+    super::ast::TypeKind,
+    Vec<(CoreTypeIdx, super::ast::Variance)>,
+);
+
 /// Region status for error reporting.
 ///
 /// Used to avoid reporting duplicate errors in the same region.
@@ -50,14 +59,7 @@ pub struct ParserSnapshot<'src> {
     comments_len: usize,
     in_external: bool,
     current_type_name_path: Option<Vec<String>>,
-    inline_types_found: Option<
-        Vec<(
-            StrIdx,
-            LocIdx,
-            super::ast::TypeKind,
-            Vec<(CoreTypeIdx, super::ast::Variance)>,
-        )>,
-    >,
+    inline_types_found: Option<Vec<InlineTypeEntry>>,
     inline_types_params: Vec<(CoreTypeIdx, super::ast::Variance)>,
     inline_types_collect_free_type_vars: bool,
     pending_structure_len: usize,
@@ -120,14 +122,7 @@ pub struct Parser<'src> {
     pub current_type_name_path: Option<Vec<String>>,
     /// Collected inline types during type parsing.
     /// When Some, `{...}` in type positions will be extracted as inline record types.
-    pub inline_types_found: Option<
-        Vec<(
-            StrIdx,
-            LocIdx,
-            super::ast::TypeKind,
-            Vec<(CoreTypeIdx, super::ast::Variance)>,
-        )>,
-    >,
+    pub inline_types_found: Option<Vec<InlineTypeEntry>>,
     /// Type parameters from the outer type declaration for inline types.
     pub inline_types_params: Vec<(CoreTypeIdx, super::ast::Variance)>,
     /// Whether inline records should collect free type variables as parameters.

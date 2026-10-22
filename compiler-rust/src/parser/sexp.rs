@@ -107,7 +107,7 @@ impl<'a> Doc<'a> {
 
     /// Convert to string with pretty printing using stack-based algorithm
     /// This matches OCaml's Res_doc.to_string algorithm
-    fn to_string(&self) -> String {
+    fn render(&self) -> String {
         let mut out = String::new();
         let mut col: i32 = 0;
 
@@ -181,7 +181,7 @@ impl Sexp {
     }
 
     pub fn to_string(&self) -> String {
-        self.to_doc().to_string()
+        self.to_doc().render()
     }
 
     /// Convert Sexp to Doc, matching OCaml's res_ast_debugger to_doc function
@@ -194,7 +194,7 @@ impl Sexp {
             }
             Sexp::List(items) => {
                 let head = items[0].to_doc();
-                let tail: Vec<Doc> = items[1..].iter().map(|s| s.to_doc()).collect();
+                let tail: Vec<Doc<'_>> = items[1..].iter().map(|s| s.to_doc()).collect();
                 Doc::group(Doc::concat(vec![
                     Doc::text("("),
                     head,
