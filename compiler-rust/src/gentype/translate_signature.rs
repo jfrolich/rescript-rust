@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateSignature.ml:1-169.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::parse_arena::ParseArena;
 use crate::types::typedtree::{

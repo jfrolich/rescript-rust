@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Paths.ml:1-88.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use std::path::{Path, PathBuf};
 

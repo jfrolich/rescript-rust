@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Debug.ml:1-37.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 #![allow(non_upper_case_globals)]
 

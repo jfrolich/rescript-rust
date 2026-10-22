@@ -1,7 +1,4 @@
 // Port of compiler/gentype/EmitText.ml:1-13.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
-
-pub type NameGen = std::collections::HashMap<String, i32>;
 
 pub fn parens(xs: &[String]) -> String {
     format!("({})", xs.join(", "))

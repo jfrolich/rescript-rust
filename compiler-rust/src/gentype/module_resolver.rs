@@ -1,5 +1,4 @@
 // Port of compiler/gentype/ModuleResolver.ml:1-201.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::BTreeMap;
 use std::fs;

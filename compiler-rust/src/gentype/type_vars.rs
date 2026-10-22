@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TypeVars.ml:1-108.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::BTreeSet;
 

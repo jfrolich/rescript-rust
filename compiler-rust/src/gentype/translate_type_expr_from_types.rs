@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateTypeExprFromTypes.ml:1-761.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
     ArgType, Case as VariantCase, ClosedFlag, Dep, Field, Function, Ident, Label, LabelJs, Mutable,
@@ -666,21 +665,6 @@ fn function_translation(from_t: &Translation, to_t: &Translation) -> Translation
             ret_type: Box::new(to_t.type_.clone()),
             type_vars: vec![],
         }),
-    }
-}
-
-fn wrap_builtin_nullable(name: &str, param: &Translation) -> Translation {
-    let type_ = match name {
-        "Undefined" | "undefined" => Type::Option(Box::new(param.type_.clone())),
-        "Null" | "null" => Type::Null(Box::new(param.type_.clone())),
-        "Nullable" | "nullable" => Type::Nullable(Box::new(param.type_.clone())),
-        "Promise" | "promise" => Type::Promise(Box::new(param.type_.clone())),
-        "Dict" | "dict" => Type::Dict(Box::new(param.type_.clone())),
-        _ => param.type_.clone(),
-    };
-    Translation {
-        dependencies: param.dependencies.clone(),
-        type_,
     }
 }
 

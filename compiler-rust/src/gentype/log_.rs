@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Log_.ml:1-101.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use crate::location::Location;
 

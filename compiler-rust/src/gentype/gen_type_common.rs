@@ -1,5 +1,4 @@
 // Port of compiler/gentype/GenTypeCommon.ml:1-236.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{MAIN_SEPARATOR, Path};

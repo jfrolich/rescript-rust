@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Annotation.ml:1-295.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};

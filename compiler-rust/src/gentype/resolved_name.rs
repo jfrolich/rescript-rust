@@ -1,5 +1,4 @@
 // Port of compiler/gentype/ResolvedName.ml:1-59 and ResolvedName.mli:1-8.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;

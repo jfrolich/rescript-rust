@@ -1,5 +1,4 @@
 // Port of compiler/gentype/EmitJs.ml:1-711.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

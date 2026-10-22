@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateStructure.ml:1-366.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;

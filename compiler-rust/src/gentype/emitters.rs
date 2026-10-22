@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Emitters.ml:1-52 and Emitters.mli:1-9.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct T {

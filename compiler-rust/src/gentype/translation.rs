@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Translation.ml:1-217.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{Dep, Type, dep_to_string, ident_with};

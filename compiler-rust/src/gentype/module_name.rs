@@ -1,5 +1,4 @@
 // Port of compiler/gentype/ModuleName.ml:1-28 and ModuleName.mli:1-13.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use std::cmp::Ordering;
 

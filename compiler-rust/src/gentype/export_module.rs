@@ -1,5 +1,4 @@
 // Port of compiler/gentype/ExportModule.ml:1-132.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
     ClosedFlag, Field, Mutable, Optional, Type, doc_string, ident,

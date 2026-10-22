@@ -1,5 +1,4 @@
 // Port of compiler/gentype/EmitType.ml:1-455.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
     ArgType, ClosedFlag, Field, Function, Ident, Mutable, Optional, Payload, Type, Variant, ident,

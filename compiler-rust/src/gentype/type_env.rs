@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TypeEnv.ml:1-204 and TypeEnv.mli:1-23.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use std::cell::RefCell;
 use std::rc::Rc;

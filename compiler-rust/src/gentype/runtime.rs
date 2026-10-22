@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Runtime.ml:1-41 and Runtime.mli:1-16.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 pub type ModuleItem = String;
 

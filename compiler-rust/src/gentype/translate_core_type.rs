@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateCoreType.ml:1-295.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
     Case as VariantCase, ClosedFlag as GenClosedFlag, Function, Label, LabelJs, Payload, Type,

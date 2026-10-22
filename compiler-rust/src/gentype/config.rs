@@ -1,5 +1,4 @@
 // Port of compiler/gentype/GenTypeConfig.ml:1-177.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
