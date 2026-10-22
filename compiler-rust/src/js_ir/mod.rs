@@ -1089,10 +1089,13 @@ impl Expression {
     /// Create a string append expression, mirroring OCaml's
     /// `Js_exp_make.string_append` folding behavior.
     pub fn string_append(left: Expression, right: Expression) -> Self {
+        /// A string literal `a ^ b` keeping `base`'s comment and source loc.
         fn concat(base: &Expression, a: &str, b: &str) -> Expression {
-            let mut merged = base.clone();
-            merged.desc = ExpressionDesc::Str(format!("{a}{b}"));
-            merged
+            Expression {
+                desc: ExpressionDesc::Str(format!("{a}{b}")),
+                comment: base.comment.clone(),
+                source_loc: base.source_loc.clone(),
+            }
         }
         fn append(left: Expression, right: Expression) -> Expression {
             Expression {
@@ -1100,6 +1103,13 @@ impl Expression {
                 comment: None,
                 source_loc: None,
             }
+        }
+        fn is_literal(expr: &Expression) -> bool {
+            expr.string_literal_semantic().is_some()
+        }
+        fn literal(expr: &Expression) -> &str {
+            expr.string_literal_semantic()
+                .expect("checked by is_literal")
         }
 
         match (
@@ -1116,39 +1126,67 @@ impl Expression {
             }
             _ => {}
         }
-        match (&left.desc, &right.desc) {
-            (ExpressionDesc::StringAppend(a, b_expr), ExpressionDesc::StringAppend(c_expr, d)) => {
-                match (
-                    b_expr.string_literal_semantic(),
-                    c_expr.string_literal_semantic(),
-                ) {
-                    (Some(b), Some(c)) => Self::string_append(
-                        Self::string_append(a.as_ref().clone(), concat(b_expr, b, c)),
-                        d.as_ref().clone(),
-                    ),
-                    _ => append(left, right),
-                }
+
+        enum Fold {
+            /// `(a ^ "b") ^ ("c" ^ d)` -> `(a ^ "bc") ^ d`
+            Inner,
+            /// `"a" ^ ("b" ^ c)` -> `"ab" ^ c`
+            Right,
+            /// `(c ^ "b") ^ "a"` -> `c ^ "ba"`
+            Left,
+        }
+        let fold = match (&left.desc, &right.desc) {
+            (ExpressionDesc::StringAppend(_, b), ExpressionDesc::StringAppend(c, _)) => {
+                (is_literal(b) && is_literal(c)).then_some(Fold::Inner)
             }
-            (_, ExpressionDesc::StringAppend(b, c)) => {
-                match (left.string_literal_semantic(), b.string_literal_semantic()) {
-                    (Some(a), Some(b)) => {
-                        Self::string_append(concat(&left, a, b), c.as_ref().clone())
-                    }
-                    _ => append(left, right),
-                }
+            (_, ExpressionDesc::StringAppend(b, _)) => {
+                (is_literal(&left) && is_literal(b)).then_some(Fold::Right)
             }
-            (ExpressionDesc::StringAppend(c, b_expr), _) => {
-                match (
-                    b_expr.string_literal_semantic(),
-                    right.string_literal_semantic(),
-                ) {
-                    (Some(b), Some(a)) => {
-                        Self::string_append(c.as_ref().clone(), concat(b_expr, b, a))
-                    }
-                    _ => append(left, right),
-                }
+            (ExpressionDesc::StringAppend(_, b), _) => {
+                (is_literal(b) && is_literal(&right)).then_some(Fold::Left)
             }
-            _ => append(left, right),
+            _ => None,
+        };
+
+        // The folds move the untouched subtrees instead of cloning them.
+        match (fold, left.desc, right.desc) {
+            (
+                Some(Fold::Inner),
+                ExpressionDesc::StringAppend(a, b_expr),
+                ExpressionDesc::StringAppend(c_expr, d),
+            ) => {
+                let merged = concat(&b_expr, literal(&b_expr), literal(&c_expr));
+                Self::string_append(Self::string_append(*a, merged), *d)
+            }
+            (Some(Fold::Right), left_desc, ExpressionDesc::StringAppend(b, c)) => {
+                let left = Expression {
+                    desc: left_desc,
+                    comment: left.comment,
+                    source_loc: left.source_loc,
+                };
+                Self::string_append(concat(&left, literal(&left), literal(&b)), *c)
+            }
+            (Some(Fold::Left), ExpressionDesc::StringAppend(c, b_expr), right_desc) => {
+                let right = Expression {
+                    desc: right_desc,
+                    comment: right.comment,
+                    source_loc: right.source_loc,
+                };
+                Self::string_append(*c, concat(&b_expr, literal(&b_expr), literal(&right)))
+            }
+            (None, left_desc, right_desc) => append(
+                Expression {
+                    desc: left_desc,
+                    comment: left.comment,
+                    source_loc: left.source_loc,
+                },
+                Expression {
+                    desc: right_desc,
+                    comment: right.comment,
+                    source_loc: right.source_loc,
+                },
+            ),
+            _ => unreachable!("fold kind was chosen from these shapes"),
         }
     }
 
