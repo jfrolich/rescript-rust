@@ -207,14 +207,6 @@ impl Ident {
         self.flags
     }
 
-    /// Create a unique name by combining name and stamp.
-    ///
-    /// Format: `name_stamp`
-    #[inline]
-    pub fn unique_name(&self) -> String {
-        format!("{}_{}", self.name, self.stamp)
-    }
-
     /// Create a unique toplevel name.
     ///
     /// Format: `name/stamp`
@@ -302,12 +294,8 @@ impl Ident {
         }
     }
 
-    /// Rename this identifier with a new stamp from the generator.
-    ///
-    /// This creates a new identifier with the same name and flags
-    /// but a fresh stamp.
-    #[inline]
     /// Copy this identifier with a stamp reserved earlier from the generator.
+    #[inline]
     pub(crate) fn with_stamp(&self, stamp: i32) -> Self {
         Self {
             name: self.name,
@@ -316,6 +304,11 @@ impl Ident {
         }
     }
 
+    /// Rename this identifier with a new stamp from the generator.
+    ///
+    /// This creates a new identifier with the same name and flags
+    /// but a fresh stamp.
+    #[inline]
     pub fn rename(&self, id_gen: &super::context::IdGenerator) -> Self {
         let stamp = id_gen.next_stamp();
         Self {
@@ -492,10 +485,8 @@ mod tests {
         let id_gen = IdGenerator::new();
         let id = id_gen.create("foo");
 
-        let unique = id.unique_name();
         let toplevel = id.unique_toplevel_name();
 
-        assert!(unique.starts_with("foo_"));
         assert!(toplevel.starts_with("foo/"));
     }
 

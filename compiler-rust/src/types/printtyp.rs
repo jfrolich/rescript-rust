@@ -259,7 +259,7 @@ impl<'a> Printtyp<'a> {
     /// `add_unique`.
     fn add_unique(&mut self, id: &crate::ident::Ident) {
         if !self.unique_names.iter().any(|(i, _)| i.same(id)) {
-            let unique = format!("{}/{}", id.name(), id.stamp());
+            let unique = id.unique_toplevel_name();
             self.unique_names.push((*id, unique));
         }
     }
