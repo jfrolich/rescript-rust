@@ -12509,7 +12509,7 @@ fn type_match(
         gadt_lev = ctx.current_stamp();
         ctx.init_def(gadt_lev + 1000);
         let mut scoped_env = val_case_env.clone();
-        scoped_env.add_gadt_instance_level(gadt_lev, Vec::new());
+        scoped_env.add_gadt_instance_level();
         gadt_match_env = Some(scoped_env);
         gadt_match_env.as_ref().unwrap()
     } else {

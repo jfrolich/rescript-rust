@@ -13,7 +13,6 @@
 //! # Key Components
 //!
 //! - `Env` - The main environment type
-//! - `EnvSummary` - A summary of bindings for debugging
 //! - Lookup functions for values, types, and modules
 
 use super::asttypes::{MutableFlag, PrivateFlag};
@@ -129,6 +128,8 @@ pub enum EnvError {
     TypeNotFound(SmolStr),
     /// Module not found.
     ModuleNotFound(SmolStr),
+    /// Module type not found.
+    ModtypeNotFound(SmolStr),
     /// Constructor not found.
     ConstructorNotFound(SmolStr),
     /// Label not found.
@@ -161,32 +162,6 @@ pub fn check_value_name(name: &str, loc: Location) -> EnvResult<()> {
         }
     }
     Ok(())
-}
-
-// ============================================================================
-// Environment Summary
-// ============================================================================
-
-/// Summary of environment bindings.
-///
-/// This is used for debugging and for computing the environment
-/// delta when creating module interfaces.
-#[derive(Debug, Clone)]
-pub enum EnvSummary {
-    /// Empty environment.
-    Empty,
-    /// Value binding.
-    Value(Arc<EnvSummary>, Ident, Arc<ValueDescription>),
-    /// Type binding.
-    Type(Arc<EnvSummary>, Ident, Arc<TypeDeclaration>),
-    /// Module binding.
-    Module(Arc<EnvSummary>, Ident, Arc<ModuleDeclaration>),
-    /// Module type binding.
-    ModType(Arc<EnvSummary>, Ident, Arc<ModtypeDeclaration>),
-    /// Open a module.
-    Open(Arc<EnvSummary>, Path),
-    /// Functor argument.
-    FunctorArg(Arc<EnvSummary>, Ident),
 }
 
 // ============================================================================
@@ -457,15 +432,15 @@ fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) ->
     order
 }
 
+/// Same-name bindings in an Env table, oldest first. Shared so that copying a
+/// persistent-map node on insert only bumps reference counts.
+type IdBucket<T> = std::rc::Rc<Vec<(Ident, T)>>;
+
 /// A table of bindings indexed by identifier.
 ///
 /// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
 /// open is represented symbolically as an `opened` layer rather than flattening
 /// every opened binding into the same name map with an origin boolean.
-/// Same-name bindings in an Env table, oldest first. Shared so that copying a
-/// persistent-map node on insert only bumps reference counts.
-type IdBucket<T> = std::rc::Rc<Vec<(Ident, T)>>;
-
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
     current: PersistentHashMap<Name, IdBucket<T>>,
@@ -1038,10 +1013,6 @@ impl<T: Clone> Default for TycompTbl<T> {
 // The Environment
 // ============================================================================
 
-/// The typing environment.
-///
-/// This tracks all bindings visible during type checking.
-/// The environment is immutable - extending it creates a new environment.
 /// Process-wide allocator of per-thread Env id blocks.
 ///
 /// Env ids only need to be unique; they are compared for equality (abbreviation
@@ -1087,6 +1058,10 @@ struct ScopeCaches {
     module_path_requires_env_scoped: RefCell<HashMap<String, bool>>,
 }
 
+/// The typing environment.
+///
+/// This tracks all bindings visible during type checking.
+/// The environment is immutable - extending it creates a new environment.
 #[derive(Debug)]
 pub struct Env {
     /// Unique identity for this environment instance.
@@ -1130,15 +1105,6 @@ struct EnvData {
     /// Module type bindings.
     modtypes: IdTbl<Arc<ModtypeDeclaration>>,
 
-    /// Intentional Rust performance cache for active local module aliases.
-    ///
-    /// OCaml walks the current Env tables when resolving module components
-    /// (compiler/ml/env.ml:781-813, 1516-1538). Rust memoizes that derived
-    /// view per immutable Env instance because the env_lazy-backed
-    /// module-components cache key logic consults it frequently in
-    /// module-heavy files. This cache must stay derived from bindings only; it
-    /// must not become a path-spelling alias-equivalence shortcut.
-
     /// Module identifiers that are functor parameters.
     /// Mirrors OCaml `Env.functor_args` and drives aliasability checks.
     functor_args: HashSet<Ident>,
@@ -1156,20 +1122,8 @@ struct EnvData {
     /// classified as initial-env roots.
     implicit_open_roots: PersistentHashSet<String>,
 
-    /// Summary of bindings.
-    ///
-    /// OCaml keeps `Env.summary` for paths that reconstruct environment
-    /// deltas. The Rust checker does not read summaries outside this module;
-    /// all semantic lookup state lives in the binding tables below. Keep the
-    /// public accessor stable but avoid building an unused persistent chain on
-    /// every binding addition.
-    summary: EnvSummary,
-
     /// Local constraints (for GADTs).
     local_constraints: PersistentHashMap<Path, Arc<TypeDeclaration>>,
-
-    /// GADT instance levels.
-    gadt_instances: Vec<(i32, Vec<TypeExprRef>)>,
 
     /// Environment flags.
     flags: EnvFlags,
@@ -1195,10 +1149,6 @@ impl Clone for Env {
 /// Environment flags.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnvFlags {
-    /// Check for dependency cycles.
-    pub check_dependency: bool,
-    /// Allow hiding of bindings.
-    pub allow_hiding: bool,
     /// `in_signature_flag` (env.ml:388).
     pub in_signature: bool,
     /// `implicit_coercion_flag` (env.ml:389).
@@ -1263,9 +1213,7 @@ impl Env {
                 functor_args: HashSet::new(),
                 scope_caches: std::rc::Rc::default(),
                 implicit_open_roots: PersistentHashSet::default(),
-                summary: EnvSummary::Empty,
                 local_constraints: PersistentHashMap::default(),
-                gadt_instances: Vec::new(),
                 flags: EnvFlags::default(),
                 pending_open_slot: None,
             }),
@@ -1344,11 +1292,6 @@ impl Env {
             scope_id: self.scope_id,
             data: self.data.clone(),
         }
-    }
-
-    /// Get the environment summary.
-    pub fn summary(&self) -> &EnvSummary {
-        &self.data.summary
     }
 
     /// Mark this environment as changed.
@@ -1547,11 +1490,6 @@ impl Env {
 
         self.bump_id();
         true
-    }
-
-    /// Count how many value bindings exist for a given name.
-    pub fn count_value_bindings(&self, name: &str) -> usize {
-        self.data.values.find_all(name).len()
     }
 
     /// Find a value by path.
@@ -1897,13 +1835,12 @@ impl Env {
     /// Check whether a module path is rooted in a functor parameter.
     pub fn is_functor_arg_path(&self, path: &Path) -> bool {
         match path {
-            Path::Pident(id) => self.data.functor_args.iter().any(|arg| arg.same(id)),
+            Path::Pident(id) => self.data.functor_args.contains(id),
             Path::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             Path::Papply(_, _) => true,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_opened_component_layers(
         &mut self,
@@ -2212,7 +2149,7 @@ impl Env {
             .modtypes
             .find_by_name(name)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModtypeNotFound(name.into()))
     }
 
     /// Find a module type by name, returning both the identifier and declaration.
@@ -2221,7 +2158,7 @@ impl Env {
             .modtypes
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModtypeNotFound(name.into()))
     }
 
     /// Find a module type by name with the path selected by OCaml `IdTbl.find_name`.
@@ -2233,7 +2170,7 @@ impl Env {
             .modtypes
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
+            .ok_or_else(|| EnvError::ModtypeNotFound(name.into()))
     }
 
     /// Iterate over visible module type bindings.
@@ -2252,7 +2189,7 @@ impl Env {
                 .modtypes
                 .find_by_ident(id)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into())),
+                .ok_or_else(|| EnvError::ModtypeNotFound(id.name().into())),
             Path::Pdot(parent, name, _) => {
                 // Try to find the modtype through the parent module's signature.
                 // First try ident-based lookup, then name-based for stamp mismatches.
@@ -2271,9 +2208,9 @@ impl Env {
                         }
                     }
                 }
-                Err(EnvError::ModuleNotFound((*name).into()))
+                Err(EnvError::ModtypeNotFound((*name).into()))
             }
-            Path::Papply(_, _) => Err(EnvError::ModuleNotFound("(functor application)".into())),
+            Path::Papply(_, _) => Err(EnvError::ModtypeNotFound("(functor application)".into())),
         }
     }
 
@@ -2312,16 +2249,11 @@ impl Env {
             .map(|(p, d)| (p, d.as_ref()))
     }
 
-    /// Add a GADT instance level.
-    pub fn add_gadt_instance_level(&mut self, level: i32, types: Vec<TypeExprRef>) {
+    /// `Env.add_gadt_instance_level` (env.ml) returns a fresh Env record.
+    /// Rust does not track GADT instances, so only the fresh scope identity
+    /// that the scope-keyed caches observe is kept.
+    pub fn add_gadt_instance_level(&mut self) {
         self.bump_scope();
-        self.data_mut().gadt_instances.push((level, types));
-    }
-
-    /// Get GADT instance level for a type.
-    pub fn gadt_instance_level(&self, _ty: TypeExprRef) -> Option<i32> {
-        // TODO: Implement proper GADT instance tracking
-        None
     }
 
     // ========================================================================
@@ -2329,23 +2261,10 @@ impl Env {
     // ========================================================================
 
     /// Create a new environment with an additional value.
+    #[cfg(test)]
     pub fn with_value(&self, id: Ident, desc: ValueDescription) -> Env {
         let mut env = self.clone();
         env.add_value(id, desc);
-        env
-    }
-
-    /// Create a new environment with an additional type.
-    pub fn with_type(&self, id: Ident, decl: TypeDeclaration) -> Env {
-        let mut env = self.clone();
-        env.add_type(id, decl);
-        env
-    }
-
-    /// Create a new environment with an additional module.
-    pub fn with_module(&self, id: Ident, decl: ModuleDeclaration) -> Env {
-        let mut env = self.clone();
-        env.add_module(id, decl);
         env
     }
 }
@@ -2360,12 +2279,6 @@ impl Default for Env {
 // Initial Environment
 // ============================================================================
 
-/// Create the initial environment with built-in types.
-///
-/// Matches OCaml's `Predef.common_initial_env`:
-/// - Defines abstract types (int, float, string, char, bigint, etc.)
-/// - Defines variant types with constructors (bool, unit, option, list, result)
-/// - Registers constructors in the environment so they can be looked up
 /// The initial environment (OCaml `Predef.build_initial_env`,
 /// compiler/ml/predef.ml:239-424, as installed by `Env.initial_safe_string`).
 ///
