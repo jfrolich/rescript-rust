@@ -2114,7 +2114,6 @@ fn sexp_module_type_desc(
         ModuleTypeDesc::Tmty_alias(p, _) => {
             Sexp::list(vec![Sexp::atom("Tmty_alias"), sexp_path(p)])
         }
-        ModuleTypeDesc::Tmty_placeholder => Sexp::atom("<module_type>"),
     }
 }
 

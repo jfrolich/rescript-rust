@@ -26,7 +26,6 @@
 use super::asttypes::{ArgLabel, Label, PrivateFlag};
 use super::path::Path;
 use crate::parser::longident::Longident;
-use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 
@@ -105,26 +104,6 @@ impl TypeExpr {
     /// Get the unique ID.
     pub fn id(&self) -> i32 {
         self.id
-    }
-
-    /// Check if this type is at the generic level.
-    pub fn is_generic(&self) -> bool {
-        self.level.get() == GENERIC_LEVEL
-    }
-
-    /// Check if this is a type variable.
-    pub fn is_var(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tvar(_))
-    }
-
-    /// Check if this is a universal type variable.
-    pub fn is_univar(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tunivar(_))
-    }
-
-    /// Check if this is a type constructor application.
-    pub fn is_constr(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tconstr { .. })
     }
 }
 
@@ -1199,33 +1178,6 @@ impl RowFieldRef {
     }
 }
 
-// ============================================================================
-// Serialization support
-// ============================================================================
-
-/// Serializable version of TypeDesc for FFI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TypeDescSer {
-    Tvar(Option<String>),
-    Tarrow {
-        args: Vec<(ArgLabel, usize)>,
-        ret_type: usize,
-    },
-    Ttuple(Vec<usize>),
-    Tconstr {
-        path: Path,
-        args: Vec<usize>,
-    },
-    Tlink(usize),
-    Tunivar(Option<String>),
-    Tpoly {
-        body: usize,
-        vars: Vec<usize>,
-    },
-    // Simplified for now
-    Other,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,8 +1253,7 @@ mod tests {
         let ty = TypeExpr::new(TypeDesc::Tvar(Some("a".to_string())), GENERIC_LEVEL, 1);
         assert_eq!(ty.id(), 1);
         assert_eq!(ty.level(), GENERIC_LEVEL);
-        assert!(ty.is_generic());
-        assert!(ty.is_var());
+        assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(_)));
     }
 
     #[test]

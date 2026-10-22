@@ -719,19 +719,6 @@ pub struct ModuleType {
     pub mty_attributes: Attributes,
 }
 
-impl ModuleType {
-    /// Create a new placeholder module type (for backwards compat during incremental implementation).
-    pub fn placeholder() -> Self {
-        Self {
-            mty_desc: ModuleTypeDesc::Tmty_placeholder,
-            mty_type: DeclModuleType::MtySignature(std::sync::Arc::new(vec![])),
-            mty_env: EnvRef(0),
-            mty_loc: LocIdx(0),
-            mty_attributes: Attributes::new(),
-        }
-    }
-}
-
 /// Module type description (matches OCaml's `Typedtree.module_type_desc`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ModuleTypeDesc {
@@ -747,8 +734,6 @@ pub enum ModuleTypeDesc {
     Tmty_typeof(Box<ModuleExpr>),
     /// Alias: `(module M)`.
     Tmty_alias(Path, Loc<LidentIdx>),
-    /// Placeholder for incremental implementation.
-    Tmty_placeholder,
 }
 
 /// With constraint (matches OCaml's `Typedtree.with_constraint`).
@@ -1091,13 +1076,6 @@ pub struct TypedValueDescription {
     pub val_loc: LocIdx,
     /// Attributes.
     pub val_attributes: Attributes,
-}
-
-/// Signature item (placeholder).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SignatureItem {
-    // Placeholder
-    _placeholder: (),
 }
 
 /// Extension constructor.

@@ -300,8 +300,7 @@ pub fn module_type_check_annotation(
         | ModuleTypeDesc::Tmty_functor(_, _, _, _)
         | ModuleTypeDesc::Tmty_with(_, _)
         | ModuleTypeDesc::Tmty_typeof(_)
-        | ModuleTypeDesc::Tmty_alias(_, _)
-        | ModuleTypeDesc::Tmty_placeholder => false,
+        | ModuleTypeDesc::Tmty_alias(_, _) => false,
     }
 }
 

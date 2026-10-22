@@ -75,8 +75,7 @@ pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, LOWEST_LEVEL, MutabilityRef,
-    PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeDescSer, TypeExpr,
-    TypeExprRef,
+    PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 pub use variance::{Variance, VarianceFlag};
 pub use variant_runtime::{

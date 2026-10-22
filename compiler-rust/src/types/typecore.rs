@@ -11624,8 +11624,7 @@ fn collect_module_type_ident_heads(module_type: &ModuleType, ids: &mut Vec<Ident
         }
         ModuleTypeDesc::Tmty_ident(_, _)
         | ModuleTypeDesc::Tmty_signature(_)
-        | ModuleTypeDesc::Tmty_alias(_, _)
-        | ModuleTypeDesc::Tmty_placeholder => {}
+        | ModuleTypeDesc::Tmty_alias(_, _) => {}
     }
 }
 
@@ -20525,9 +20524,7 @@ fn typed_module_type_uses_ident(module_type: &ModuleType, target: &Ident) -> boo
             .sig_items
             .iter()
             .any(|item| typed_signature_item_uses_ident(item, target)),
-        ModuleTypeDesc::Tmty_ident(_, _)
-        | ModuleTypeDesc::Tmty_alias(_, _)
-        | ModuleTypeDesc::Tmty_placeholder => false,
+        ModuleTypeDesc::Tmty_ident(_, _) | ModuleTypeDesc::Tmty_alias(_, _) => false,
     }
 }
 

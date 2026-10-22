@@ -4923,9 +4923,8 @@ impl<'a> RawLambdaConverter<'a> {
     fn init_shape(&self, modl: &ModuleExpr) -> Option<(RawLambda, RawLambda)> {
         let env = self.type_ctx.get_typed_env(modl.mod_env)?;
         // Get the decl::ModuleType.
-        // First try converting the typedtree mod_type directly.
-        // If that fails (e.g., Tmty_placeholder), try extracting from
-        // Tmod_constraint wrapper or looking up in the env.
+        // First try the typedtree mod_type directly; if it is unusable, try
+        // the Tmod_constraint wrapper or look it up in the env.
         let decl_mty = self.get_decl_module_type(modl, &env);
         let decl_mty = decl_mty?;
         let shape = self.init_shape_mod(&env, &decl_mty)?;

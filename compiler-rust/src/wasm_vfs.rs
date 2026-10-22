@@ -23,11 +23,6 @@ pub fn read_file(path: &str) -> Option<String> {
     VFS.with(|vfs| vfs.borrow().get(path).cloned())
 }
 
-/// Check if a file exists in the virtual filesystem.
-pub fn file_exists(path: &str) -> bool {
-    VFS.with(|vfs| vfs.borrow().contains_key(path))
-}
-
 /// Remove a file from the virtual filesystem.
 pub fn delete_file(path: &str) {
     VFS.with(|vfs| {

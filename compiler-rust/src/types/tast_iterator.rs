@@ -410,9 +410,7 @@ pub fn walk_signature_item<I: TastIterator + ?Sized>(sub: &mut I, item: &TypedSi
 
 pub fn walk_module_type<I: TastIterator + ?Sized>(sub: &mut I, m: &ModuleType) {
     match &m.mty_desc {
-        ModuleTypeDesc::Tmty_ident(..)
-        | ModuleTypeDesc::Tmty_alias(..)
-        | ModuleTypeDesc::Tmty_placeholder => {}
+        ModuleTypeDesc::Tmty_ident(..) | ModuleTypeDesc::Tmty_alias(..) => {}
         ModuleTypeDesc::Tmty_signature(sg) => sub.signature(sg),
         ModuleTypeDesc::Tmty_functor(_, _, arg, res) => {
             if let Some(arg) = arg {
