@@ -9757,20 +9757,30 @@ fn type_decl_for_path(
     type_ctx: &TypeContext,
     path: &crate::types::Path,
 ) -> Option<crate::types::TypeDeclaration> {
+    with_type_decl_for_path(type_ctx, path, |decl| decl.clone())
+}
+
+/// Look up the declaration for `path` (by stamp, then printed path, then head
+/// name) and apply `f` to it without cloning.
+fn with_type_decl_for_path<R>(
+    type_ctx: &TypeContext,
+    path: &crate::types::Path,
+    f: impl FnOnce(&crate::types::TypeDeclaration) -> R,
+) -> Option<R> {
     if let crate::types::Path::Pident(id) = path
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
     {
-        return Some(decl.clone());
+        return Some(f(&decl));
     }
 
     if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
-        return Some(decl.clone());
+        return Some(f(&decl));
     }
 
     type_ctx
         .find_type_decl(path.head_name())
-        .map(|decl| decl.clone())
+        .map(|decl| f(&decl))
 }
 
 fn variant_constructor_string_runtime_repr(
@@ -10805,31 +10815,13 @@ fn type_is_record(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
 }
 
 fn type_path_is_record(type_ctx: &TypeContext, path: &crate::types::Path) -> bool {
-    if let crate::types::Path::Pident(id) = path
-        && id.stamp() != 0
-        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
-    {
-        return matches!(
+    with_type_decl_for_path(type_ctx, path, |decl| {
+        matches!(
             &decl.type_kind,
             crate::types::decl::TypeKind::TypeRecord(_, _)
-        );
-    }
-
-    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
-        return matches!(
-            &decl.type_kind,
-            crate::types::decl::TypeKind::TypeRecord(_, _)
-        );
-    }
-
-    type_ctx
-        .find_type_decl(path.head_name())
-        .is_some_and(|decl| {
-            matches!(
-                &decl.type_kind,
-                crate::types::decl::TypeKind::TypeRecord(_, _)
-            )
-        })
+        )
+    })
+    .unwrap_or(false)
 }
 
 fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
