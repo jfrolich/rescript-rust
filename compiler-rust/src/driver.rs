@@ -36,6 +36,9 @@ use crate::parser::ast::{
     StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
+use crate::types::printtyp::{
+    TAG_DIM as DIM, TAG_ERROR as ERROR, TAG_INFO as INFO, TAG_RESET as RESET,
+};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
@@ -4187,9 +4190,6 @@ fn format_duplicate_type_label_report(
     label: &str,
     record_name: &Option<String>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let message = if let Some(record_name) = record_name {
         format!(
             "The field {INFO}{label}{RESET} is defined several times in the record {INFO}{record_name}{RESET}. Fields can only be added once to a record."
@@ -4795,9 +4795,6 @@ fn format_unbound_type_constructor_report(
     lid: &Longident,
     alternatives: &[String],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let name = format_longident_for_report(arena, lid);
     let spellcheck_name = arena.get_string(lid.last_idx());
     if let Some(hint) = super_spellcheck_hint(spellcheck_name, alternatives) {
@@ -5378,8 +5375,6 @@ fn format_compiler_error_report_with_bare_reset_lines(
     loc: LocIdx,
     message: &str,
 ) -> String {
-    const RESET: &str = "\x1b[0m";
-
     let mut output = String::new();
 
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
@@ -5595,10 +5590,6 @@ fn format_wrong_name_report(
     alternatives: &[String],
     jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some(jsx_component_info) = jsx_component_info {
         let mut message = String::new();
         if name == "children" {
@@ -5779,9 +5770,6 @@ fn format_unbound_value_report(
     alternatives: &[String],
     module_suggestion: Option<&str>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let mut message = String::new();
     if let Some(qualifier) = qualifier {
         message.push_str("The value ");
@@ -5847,9 +5835,6 @@ fn format_unbound_module_report(
     name: &str,
     alternatives: &[String],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let mut message = if name == "Str" {
         format!(
             "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}RegExp{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
@@ -6035,9 +6020,6 @@ fn format_label_multiply_defined_report(
     label: &str,
     jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some(jsx_component_info) = jsx_component_info {
         let mut message = String::new();
         message.push_str("The prop ");
@@ -6143,10 +6125,6 @@ fn format_expr_type_clash_report(
     trace: &[(TypeExprRef, TypeExprRef)],
     context: &Option<TypeClashContext>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some((actual_arity, expected_arity)) =
         expr_type_clash_uncurried_arity_mismatch(type_ctx, trace)
     {
@@ -6547,9 +6525,6 @@ fn format_recursive_local_constraint_report(
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
@@ -6629,9 +6604,6 @@ fn format_label_mismatch_report(
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
     let message = format!(
         "The record field {} belongs to the type {ERROR}{}{RESET}\nbut is mixed here with fields of type {INFO}{}{RESET}",
         format_longident_for_report(arena, lid),
@@ -6679,8 +6651,6 @@ fn type_clash_visible_width(text: &str) -> usize {
 
 fn wrap_type_clash_headings(message: &str) -> String {
     const MARGIN: usize = 78;
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
     let mut lines = message.splitn(3, '\n');
     let Some(actual) = lines.next() else {
         return message.to_string();
@@ -6751,9 +6721,6 @@ fn append_type_clash_type_with_printer(
     message: &mut String,
     printer: &mut TypeExprPrinter<'_>,
 ) {
-    const DIM: &str = "\x1b[2m";
-    const RESET: &str = "\x1b[0m";
-
     let original_ty = ty;
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
     let ty_text = printer.format(ty);
@@ -6790,8 +6757,6 @@ fn append_type_clash_type_without_alias_expansion(
     ty: TypeExprRef,
     message: &mut String,
 ) {
-    const RESET: &str = "\x1b[0m";
-
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
     message.push_str(color);
     message.push_str(&format_type_expr(type_ctx, ty));
@@ -7041,9 +7006,6 @@ fn append_extra_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
         message.push('\n');
         message.push_str("The type constructor ");
