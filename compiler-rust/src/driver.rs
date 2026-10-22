@@ -4154,11 +4154,7 @@ fn format_compiler_error_report_for_file(filename: &str, message: &str) -> Strin
     push_compiler_report_intro(&mut output, "We've found a bug for you!");
     push_compiler_report_location(&mut output, filename);
     let message = code_frame::apply_message_styles(message);
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, &message);
     output.push('\n');
     output
 }
@@ -4387,15 +4383,7 @@ fn push_compiler_error_report_header_from_location(
     filename: &str,
     loc: &Location,
 ) {
-    push_compiler_report_intro(output, "We've found a bug for you!");
-    if !code_frame::has_printable_range(&loc.loc_start, &loc.loc_end) {
-        push_compiler_report_location(output, filename);
-    } else {
-        let location = code_frame::format_location(filename, &loc.loc_start, &loc.loc_end);
-        push_compiler_report_location(output, &location);
-        output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
-        output.push('\n');
-    }
+    push_compiler_error_report_header_from_external_location(output, Some(source), filename, loc);
 }
 
 fn push_compiler_error_report_header(
@@ -4437,11 +4425,7 @@ fn format_compiler_error_report_from_location(
     push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
 
     let message = code_frame::apply_message_styles(message);
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, &message);
     output.push('\n');
     output
 }
@@ -4485,11 +4469,7 @@ fn format_compiler_error_report_from_external_location(
         loc,
     );
 
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, message);
     output.push('\n');
     output
 }
@@ -4506,11 +4486,7 @@ fn format_compiler_error_report(
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     let message = code_frame::apply_message_styles(message);
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, &message);
     output.push('\n');
     output
 }
@@ -5899,13 +5875,19 @@ fn format_unbound_constructor_report(
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
-fn format_message_with_compiler_indentation(message: &str) -> String {
-    let mut output = String::new();
+/// Append each line of `message` indented by two spaces, as the compiler's
+/// report body prints it.
+fn push_indented_lines(output: &mut String, message: &str) {
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
         output.push('\n');
     }
+}
+
+fn format_message_with_compiler_indentation(message: &str) -> String {
+    let mut output = String::new();
+    push_indented_lines(&mut output, message);
     output
 }
 
