@@ -21048,53 +21048,54 @@ fn rec_use_discard(use_: RecUse) -> RecUse {
 
 fn rec_env_join(mut left: RecEnv, right: RecEnv) -> RecEnv {
     for (id, use_) in right {
-        left.entry(id)
-            .and_modify(|existing| {
-                *existing = rec_use_join(std::mem::take(existing), use_.clone());
-            })
-            .or_insert(use_);
+        match left.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                let existing = existing.get_mut();
+                *existing = rec_use_join(std::mem::take(existing), use_);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(use_);
+            }
+        }
     }
     left
 }
 
 fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
-    let mut vars = Vec::new();
-    let mut push_var = |id: &Ident, _name: &str, _loc: LocIdx| {
-        vars.push(*id);
-    };
-    fn collect<F: FnMut(&Ident, &str, LocIdx)>(pat: &Pattern, f: &mut F) {
+    fn collect(pat: &Pattern, vars: &mut Vec<Ident>) {
         match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, name) => f(id, id.name(), name.loc),
-            PatternDesc::Tpat_alias(inner, id, name) => {
-                collect(inner, f);
-                f(id, id.name(), name.loc);
+            PatternDesc::Tpat_var(id, _) => vars.push(*id),
+            PatternDesc::Tpat_alias(inner, id, _) => {
+                collect(inner, vars);
+                vars.push(*id);
             }
             PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
                 for item in items {
-                    collect(item, f);
+                    collect(item, vars);
                 }
             }
             PatternDesc::Tpat_construct(_, _, args) => {
                 for arg in args {
-                    collect(arg, f);
+                    collect(arg, vars);
                 }
             }
-            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, f),
+            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, vars),
             PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, field_pat, _) in fields {
-                    collect(field_pat, f);
+                    collect(field_pat, vars);
                 }
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                collect(left, f);
-                collect(right, f);
+                collect(left, vars);
+                collect(right, vars);
             }
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_constant(_)
             | PatternDesc::Tpat_variant(_, None, _) => {}
         }
     }
-    collect(pat, &mut push_var);
+    let mut vars = Vec::new();
+    collect(pat, &mut vars);
     vars
 }
 
@@ -21192,10 +21193,16 @@ fn rec_case(
     } else {
         rec_use_discard(scrutinee)
     };
-    let mut case_env = env.clone();
-    for id in rec_pattern_variables(&case.c_lhs) {
-        case_env.insert(id, scrutinee.clone());
-    }
+    let vars = rec_pattern_variables(&case.c_lhs);
+    let case_env = if vars.is_empty() {
+        std::borrow::Cow::Borrowed(env)
+    } else {
+        let mut case_env = env.clone();
+        for id in vars {
+            case_env.insert(id, scrutinee.clone());
+        }
+        std::borrow::Cow::Owned(case_env)
+    };
     rec_use_join(
         scrutinee,
         rec_use_join(
