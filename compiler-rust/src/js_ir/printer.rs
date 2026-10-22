@@ -17,7 +17,6 @@ use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
-use std::fmt::Write;
 
 #[derive(Clone, Default)]
 struct NameScope {
@@ -2608,14 +2607,6 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn previous_non_space_char_on_line(&self) -> Option<char> {
-        self.output
-            .chars()
-            .rev()
-            .take_while(|c| *c != '\n')
-            .find(|c| !c.is_whitespace())
-    }
-
     fn print_array_literal(&mut self, elements: &[Expression]) {
         self.write_char('[');
         match elements {
@@ -2945,15 +2936,6 @@ fn expression_statement_prints_anything(expr: &Expression) -> bool {
         classify_raw_js_expression_statement(expr),
         RawJsExpressionStatement::Omit
     )
-}
-
-fn member_target_needs_extra_group_indent(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Object(_, props) => props.len() > 1,
-        ExpressionDesc::Array(elements, _) => elements.len() > 1,
-        ExpressionDesc::OptionalBlock(inner, true) => member_target_needs_extra_group_indent(inner),
-        _ => false,
-    }
 }
 
 fn call_argument_needs_extra_group_indent(
@@ -3768,6 +3750,7 @@ pub fn print_expression(expr: &Expression) -> String {
     printer.into_output()
 }
 
+#[cfg(test)]
 fn print_expression_with_level(expr: &Expression, level: u8) -> String {
     let mut printer = JsPrinter::new();
     printer.print_expression(expr, level);

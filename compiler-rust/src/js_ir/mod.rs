@@ -586,8 +586,7 @@ impl ModulePathResolver {
         if package_spec
             .module_systems
             .iter()
-            .find(|info| module_system_compatible(info.module_system, self.format))
-            .is_some()
+            .any(|info| module_system_compatible(info.module_system, self.format))
         {
             PackageInfoQuery::Found
         } else {
@@ -1674,9 +1673,6 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_has_no_side_effects(tag) && values.iter().all(expression_has_no_side_effects)
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values.iter().all(expression_has_no_side_effects)
-        }
         ExpressionDesc::Call(func, args, _)
             if is_array_is_array_callee(func) && args.len() == 1 =>
         {
@@ -2718,7 +2714,8 @@ fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &
 }
 
 fn is_array_is_array_callee(expr: &Expression) -> bool {
-    match &expr.desc {
+    matches!(
+        &expr.desc,
         ExpressionDesc::StaticIndex(target, field, _)
             if field == "isArray"
                 && matches!(
@@ -2727,12 +2724,8 @@ fn is_array_is_array_callee(expr: &Expression) -> bool {
                         desc: ExpressionDesc::Var(VIdent::Id(array_ident)),
                         ..
                     } if array_ident.name() == "Array"
-                ) =>
-        {
-            true
-        }
-        _ => false,
-    }
+                )
+    )
 }
 
 fn array_is_array_var(expr: &Expression) -> Option<&VIdent> {
