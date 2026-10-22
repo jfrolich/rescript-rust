@@ -7348,12 +7348,12 @@ impl<'a> RawLambdaConverter<'a> {
                 let mut none_ids = Vec::new();
                 let args = sargs
                     .iter()
-                    .filter_map(|arg| match &arg.expression {
-                        Some(expr) => Some(self.convert_expr_raw(expr)),
+                    .map(|arg| match &arg.expression {
+                        Some(expr) => self.convert_expr_raw(expr),
                         None => {
                             let id = self.fresh_ident("none");
                             none_ids.push(id);
-                            Some(RawLambda::var(id))
+                            RawLambda::var(id)
                         }
                     })
                     .collect::<Vec<_>>();
