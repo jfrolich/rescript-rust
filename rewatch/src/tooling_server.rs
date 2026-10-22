@@ -17,7 +17,7 @@
 //!   `ERROR <length>` followed by why it failed
 
 use std::hash::{BuildHasher, Hasher};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -72,6 +72,9 @@ impl Drop for ToolingServer {
         let _ = std::fs::remove_file(&self.address_file);
     }
 }
+
+/// Upper bound on the `AUTH <token>` line; the token is 32 hex digits.
+const MAX_AUTH_LINE: u64 = 256;
 
 fn random_token() -> String {
     // `RandomState` is seeded from the operating system's randomness.
@@ -146,7 +149,16 @@ fn serve_connection(
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        // Cap the line read before authentication so an unauthenticated
+        // client cannot make the watcher buffer an unbounded line.
+        let read = if authenticated {
+            reader.read_line(&mut line)?
+        } else {
+            Read::by_ref(&mut reader)
+                .take(MAX_AUTH_LINE)
+                .read_line(&mut line)?
+        };
+        if read == 0 {
             return Ok(());
         }
         let line = line.trim_end_matches(['\r', '\n']);
