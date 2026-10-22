@@ -27,7 +27,7 @@ use crate::types::variance::Variance;
 
 use super::marshal_reader::OcamlValue;
 
-use std::collections::HashMap;
+use crate::fast_hash::AHashMap;
 
 /// Context for reading signatures, holding the type arena and a table for
 /// resolving shared type_expr references.
@@ -35,13 +35,13 @@ pub struct SigReadContext<'a> {
     /// The type context for allocating type expressions.
     pub ctx: &'a TypeContext,
     /// Map from OCaml type_expr id to TypeExprRef, for shared type references.
-    type_expr_cache: HashMap<i64, TypeExprRef>,
+    type_expr_cache: AHashMap<i64, TypeExprRef>,
     /// OCaml layout refs are shared mutable blocks. Preserve that physical
     /// sharing by mapping their marshal block identity to one TypeContext slot.
-    variant_layout_cache: HashMap<usize, crate::types::VariantLayoutRef>,
+    variant_layout_cache: AHashMap<usize, crate::types::VariantLayoutRef>,
     /// Object field mutability cells are shared `ref` blocks; keep their
     /// sharing by marshal block identity.
-    mutability_cache: HashMap<usize, MutabilityRef>,
+    mutability_cache: AHashMap<usize, MutabilityRef>,
 }
 
 impl<'a> SigReadContext<'a> {
@@ -49,9 +49,9 @@ impl<'a> SigReadContext<'a> {
     pub fn new(ctx: &'a TypeContext) -> Self {
         SigReadContext {
             ctx,
-            type_expr_cache: HashMap::new(),
-            variant_layout_cache: HashMap::new(),
-            mutability_cache: HashMap::new(),
+            type_expr_cache: AHashMap::new(),
+            variant_layout_cache: AHashMap::new(),
+            mutability_cache: AHashMap::new(),
         }
     }
 
