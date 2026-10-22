@@ -879,12 +879,7 @@ fn print_value_binding<W: Write>(
             f.string(")");
             f.space(); // @ between ) and next
             // Continue collecting newtypes and print arity when we hit a fun
-            let body = print_remaining_inline_params_with_arity(
-                f,
-                arena,
-                arena.get_expr(*inner_idx),
-                true,
-            );
+            let body = print_remaining_inline_params(f, arena, arena.get_expr(*inner_idx));
             // OCaml: pp f "=@;%a" (expression ctxt) x
             f.string("=");
             f.space();
@@ -1061,14 +1056,6 @@ fn print_label_exp_with_break<W: Write>(
     }
 }
 
-fn print_remaining_inline_params<'a, W: Write>(
-    f: &mut Formatter<W>,
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> &'a Expression {
-    print_remaining_inline_params_with_arity(f, arena, expr, false)
-}
-
 /// One `Pexp_fun` step of OCaml `pp_print_pexp_function` (pprintast.ml:1069-1086):
 /// "%s%a%s%a" async_str pp_newtypes newtypes arity_str pp_params params.
 fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, inner: &PexpFun) {
@@ -1109,12 +1096,11 @@ fn print_pexp_function_head<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, 
     }
 }
 
-/// Helper to print remaining inline params, optionally printing arity on first Pexp_fun
-fn print_remaining_inline_params_with_arity<'a, W: Write>(
+/// Helper to print the remaining inline params (`fun` heads and newtypes).
+fn print_remaining_inline_params<'a, W: Write>(
     f: &mut Formatter<W>,
     arena: &'a ParseArena,
     expr: &'a Expression,
-    need_arity: bool,
 ) -> &'a Expression {
     if !expr.pexp_attributes.is_empty() {
         return expr;
@@ -1123,7 +1109,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             print_pexp_function_head(f, arena, inner);
-            print_remaining_inline_params_with_arity(f, arena, arena.get_expr(inner.rhs), false)
+            print_remaining_inline_params(f, arena, arena.get_expr(inner.rhs))
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref inner_idx) = **inner;
@@ -1133,12 +1119,7 @@ fn print_remaining_inline_params_with_arity<'a, W: Write>(
             f.string(arena.get_string(name.txt));
             f.string(")");
             f.space(); // @ between ) and next
-            print_remaining_inline_params_with_arity(
-                f,
-                arena,
-                arena.get_expr(*inner_idx),
-                need_arity,
-            )
+            print_remaining_inline_params(f, arena, arena.get_expr(*inner_idx))
         }
         _ => expr,
     }

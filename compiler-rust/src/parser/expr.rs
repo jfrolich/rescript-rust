@@ -1097,7 +1097,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
     }
 
     // Parse attributes
-    let mut attrs = parse_attributes(p);
+    let attrs = parse_attributes(p);
 
     // Check for type parameter
     if p.token == Token::Typ {
@@ -2631,6 +2631,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
 /// - `list{1, 2, ...rest}` becomes `1 :: (2 :: rest)`
 /// - `list{...xs, ...ys}` becomes `Primitive_list.spread([xs, ys])`
 /// - `list{...xs, 1, ...ys}` becomes `Primitive_list.spread([xs, 1 :: ys])`
+///
 /// OCaml `parse_spread_expr_region_with_loc` (res_core.ml:4334-4343).
 fn parse_spread_expr_region_with_loc(
     p: &mut Parser<'_>,
@@ -3470,7 +3471,7 @@ fn remove_module_name_from_punned_field_value(p: &mut Parser<'_>, exp: Expressio
 
 /// OCaml `parse_record_expr_row` (compiler/syntax/src/res_core.ml:3440-3508).
 fn parse_record_expr_row(p: &mut Parser<'_>) -> Option<ExpressionRecordField> {
-    let mut attrs = parse_attributes(p);
+    let attrs = parse_attributes(p);
     if p.token == Token::DotDotDot {
         p.err(DiagnosticCategory::Message(
             super::core::error_messages::RECORD_EXPR_SPREAD.to_string(),

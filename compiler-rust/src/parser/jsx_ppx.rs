@@ -109,8 +109,6 @@ struct NamedType {
     loc: Location,
     /// The interior type - Ptyp_any if no explicit annotation
     interior_type: CoreType,
-    /// Whether the type was explicitly annotated (vs inferred as Ptyp_any)
-    has_explicit_type: bool,
 }
 
 /// Warning emitted by JSX transformation, mapped to warning 22 (Preprocessor warning).
@@ -1796,50 +1794,6 @@ fn add_default_value_matches(
     expr
 }
 
-/// Get the innermost body of a function expression
-fn get_function_body(arena: &ParseArena, expr: &Expression) -> Expression {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(inner) => {
-            let body = arena.nary_fun_body(inner);
-            get_function_body(arena, arena.get_expr(body))
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (_, ref body_idx) = **inner;
-            let body: &Expression = arena.get_expr(*body_idx);
-            get_function_body(arena, body)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (ref inner_idx, _) = **inner;
-            let inner: &Expression = arena.get_expr(*inner_idx);
-            get_function_body(arena, inner)
-        }
-        _ => expr.clone(),
-    }
-}
-
-/// Prefix variable names in a pattern with a string
-fn prefix_pattern_var(arena: &mut ParseArena, pat: &mut Pattern, prefix: &str) {
-    match &mut *pat.ppat_desc {
-        PatternDesc::Ppat_var(loc) => {
-            let old_txt = arena.get_string(loc.txt);
-            let new_txt = format!("{}{}", prefix, old_txt);
-            loc.txt = arena.push_string(new_txt);
-        }
-        PatternDesc::Ppat_alias(_, loc) => {
-            let old_txt = arena.get_string(loc.txt);
-            let new_txt = format!("{}{}", prefix, old_txt);
-            loc.txt = arena.push_string(new_txt);
-        }
-        PatternDesc::Ppat_constraint(inner) => {
-            let (ref mut inner_pat_idx, _) = **inner;
-            let mut inner_pat = arena.get_pat(*inner_pat_idx).clone();
-            prefix_pattern_var(arena, &mut inner_pat, prefix);
-            *inner_pat_idx = arena.push_pat(inner_pat);
-        }
-        _ => {}
-    }
-}
-
 // ============================================================================
 // Signature Item Transformation
 // ============================================================================
@@ -1926,7 +1880,6 @@ fn transform_react_component_sig(
                     attrs,
                     loc,
                     interior_type: arena.get_core_type(typ).clone(),
-                    has_explicit_type: true, // In signatures, types are always explicit
                 })
             }
         })
@@ -2068,7 +2021,6 @@ fn transform_react_component_external(
                     attrs,
                     loc,
                     interior_type: arena.get_core_type(typ).clone(),
-                    has_explicit_type: true,
                 })
             }
         })
@@ -3276,7 +3228,6 @@ fn arg_to_type(arena: &ParseArena, arg: &ExtractedArg) -> Option<NamedType> {
         label
     };
 
-    let has_explicit_type = arg.type_.is_some();
     let interior_type = arg.type_.clone().unwrap_or_else(|| CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: arg.loc,
@@ -3289,7 +3240,6 @@ fn arg_to_type(arena: &ParseArena, arg: &ExtractedArg) -> Option<NamedType> {
         attrs: arg.pattern.ppat_attributes.clone(),
         loc: arg.loc,
         interior_type,
-        has_explicit_type,
     })
 }
 
