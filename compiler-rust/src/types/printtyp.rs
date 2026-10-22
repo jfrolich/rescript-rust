@@ -2852,7 +2852,7 @@ impl<'a> Printtyp<'a> {
         let t4 = self.ctx.repr(t4);
         let d3 = (*self.ctx.get_desc(t3)).clone();
         let d4 = (*self.ctx.get_desc(t4)).clone();
-        let binding_time = |p: &Path| path_binding_time(p);
+        let binding_time = |p: &Path| p.binding_time();
         match (&d3, &d4) {
             (TypeDesc::Ttuple(l), TypeDesc::Tvar(_)) | (TypeDesc::Tvar(_), TypeDesc::Ttuple(l))
                 if l.is_empty() =>
@@ -3193,15 +3193,6 @@ impl<'a> Printtyp<'a> {
 /// `Res_printer.polyvar_ident_to_string` (`print_res_poly_identifier`).
 fn polyvar_ident_to_string(txt: &str) -> String {
     Doc::concat(vec![Doc::text("#"), print_poly_var_ident(txt)]).to_string(80)
-}
-
-/// `Path.binding_time`.
-fn path_binding_time(p: &Path) -> i32 {
-    match p {
-        Path::Pident(id) => id.stamp(),
-        Path::Pdot(p, _, _) => path_binding_time(p),
-        Path::Papply(p1, p2) => path_binding_time(p1).max(path_binding_time(p2)),
-    }
 }
 
 // ============================================================================

@@ -611,13 +611,13 @@ fn get_level_with_lookup_capture(
     // (compiler/ml/subst.ml:292), so the lookup would fall back to the
     // binding time anyway.
     if path_root_is_persistent(path) {
-        return path_binding_time(path);
+        return path.binding_time();
     }
     // `Env.find_type` answers from bindings fixed within one module scope, so
     // repeated level checks of the same path reuse the first lookup.
     let scope_id = env.scope_id();
     if let Some(found_level) = ctx.find_type_newtype_level(scope_id, path) {
-        return found_level.unwrap_or_else(|| path_binding_time(path));
+        return found_level.unwrap_or_else(|| path.binding_time());
     }
     let found_level = match path {
         Path::Pident(id) => env
@@ -645,7 +645,7 @@ fn get_level_with_lookup_capture(
         Path::Papply(_, _) => None,
     };
     ctx.register_type_newtype_level(scope_id, path, found_level);
-    found_level.unwrap_or_else(|| path_binding_time(path))
+    found_level.unwrap_or_else(|| path.binding_time())
 }
 
 pub(crate) fn path_root_is_persistent(path: &Path) -> bool {
@@ -2459,7 +2459,7 @@ fn update_level_expand_with_lookup_capture(
                 // it needs no copy unless it is recorded or expanded.
                 let persistent_level = (path_root_is_persistent(path)
                     && (pending_type_lookup_paths.is_none() || !matches!(path, Path::Pdot(..))))
-                .then(|| path_binding_time(path));
+                .then(|| path.binding_time());
                 let path_level = match persistent_level {
                     Some(path_level) => path_level,
                     None => {
@@ -2613,16 +2613,6 @@ fn update_level_children(
     Ok(())
 }
 
-/// Get the binding time of a path (matches OCaml's Path.binding_time).
-/// Returns the stamp of the root identifier.
-fn path_binding_time(path: &Path) -> i32 {
-    match path {
-        Path::Pident(id) => id.stamp(),
-        Path::Pdot(parent, _, _) => path_binding_time(parent),
-        Path::Papply(p1, p2) => std::cmp::max(path_binding_time(p1), path_binding_time(p2)),
-    }
-}
-
 /// Check if a path is "local" (non-persistent root identifier with non-zero stamp).
 /// Matches OCaml's `Path.binding_time > 0` — local module aliases and type aliases
 /// have high stamps, while persistent (CMI-loaded) modules have stamp 0.
@@ -2675,15 +2665,7 @@ fn is_predef_type_name(name: &str) -> bool {
 // Type Alias Expansion
 // ============================================================================
 
-/// Resolve a type declaration by walking through module signatures.
-///
-/// For a path like `Pdot(Pdot(Pident(Js), "Promise"), "t")`:
-/// 1. Load the root module's CMI (`Js.cmi`)
-/// 2. Find the sub-module `Promise` in its signature
-/// 3. If it's an alias, load the aliased module
-/// 4. Find type `t` in the resolved module's signature
-///
-/// Returns the type declaration and caches it in the path store.
+/// Find `<module_name>.cmi` (or its uncapitalized spelling) in the load paths.
 fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option<String> {
     let cmi_filename = format!("{}.cmi", module_name);
     for dir in load_paths {
@@ -2792,16 +2774,6 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
     }
 
     result
-}
-
-pub(crate) fn resolve_module_signature_through_cmi(
-    ctx: &TypeContext,
-    load_paths: &[std::path::PathBuf],
-    module_path: &Path,
-    visiting: &mut HashSet<Path>,
-) -> Option<super::decl::Signature> {
-    resolve_module_signature_through_cmi_shared(ctx, load_paths, module_path, visiting)
-        .map(|sig| sig.as_ref().clone())
 }
 
 fn resolve_module_signature_through_persistent_env_shared(
@@ -2935,6 +2907,15 @@ fn normalize_module_path_through_components(
     }
 }
 
+/// Resolve a type declaration by walking through module signatures.
+///
+/// For a path like `Pdot(Pdot(Pident(Js), "Promise"), "t")`:
+/// 1. Load the root module's CMI (`Js.cmi`)
+/// 2. Find the sub-module `Promise` in its signature
+/// 3. If it's an alias, load the aliased module
+/// 4. Find type `t` in the resolved module's signature
+///
+/// Returns the type declaration and caches it in the path store.
 pub(crate) fn resolve_type_item_through_modules(
     ctx: &TypeContext,
     path: &Path,
@@ -3053,9 +3034,6 @@ pub fn resolve_type_through_modules(
     resolve_type_item_through_modules(ctx, path).map(|(_, decl)| decl)
 }
 
-/// Try to expand a type alias (type abbreviation).
-///
-/// If the type is `Tconstr(path, args)` and the type declaration for `path`
 fn resolve_module_type_through_env_path(
     ctx: &TypeContext,
     env: &super::env::Env,
@@ -3081,11 +3059,9 @@ fn resolve_module_type_through_env_path(
                 if let Some(sig) = direct_persistent_env
                     .as_mut()
                     .and_then(|pers| pers.find_pers_struct(name, ctx))
-                    .map(|ps| ps.ps_sig.as_ref().clone())
+                    .map(|ps| ps.ps_sig.clone())
                 {
-                    Some(super::decl::ModuleType::MtySignature(std::sync::Arc::new(
-                        sig,
-                    )))
+                    Some(super::decl::ModuleType::MtySignature(sig))
                 } else {
                     let mut persistent_env = in_process_module_resolution_env(ctx);
                     crate::types::typecore::resolve_module_signature_for_path(
@@ -3105,15 +3081,13 @@ fn resolve_module_type_through_env_path(
                             // above so persistent module lookups share the same
                             // qualified-view source of truth as other hot callers.
                             let mut cmi_visiting = HashSet::new();
-                            resolve_module_signature_through_cmi(
+                            resolve_module_signature_through_cmi_shared(
                                 ctx,
                                 &load_paths,
                                 path,
                                 &mut cmi_visiting,
                             )
-                            .map(|signature| {
-                                super::decl::ModuleType::MtySignature(Arc::new(signature))
-                            })
+                            .map(super::decl::ModuleType::MtySignature)
                         }
                     })
                 }
@@ -3467,7 +3441,7 @@ fn strengthen_signature_for_module_access_path(
             && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
             && let Some(SignatureItem::SigType(next_id, next_decl, _)) = sig.get(index + 1)
             && next_decl.type_private == PrivateFlag::Private
-            && id.name() == format!("{}#row", next_id.name())
+            && id.name().strip_suffix("#row") == Some(next_id.name())
         {
             index += 1;
             continue;
@@ -4156,10 +4130,6 @@ fn pdot_expansion(
     mode: ExpandHeadMode,
     can_expand_decl_manifest: &dyn Fn(&super::decl::TypeDeclaration, TypeExprRef) -> bool,
 ) -> PdotExpansion {
-    // The general route looks the path up in the flat Env first; for a
-    // dotted path that result is not used, but the lookup is kept so the
-    // first expansion touches the Env exactly as before.
-    let _ = env.lookup_type(path);
     if let Some(decl) = resolve_type_through_env(ctx, env, path, true)
         && let Some(manifest) = decl.type_manifest
     {
@@ -12193,51 +12163,6 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
-    let _summarize = |ty: TypeExprRef| -> String {
-        let ty = ctx.repr(ty);
-        let desc = ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                let args_summary = args
-                    .iter()
-                    .map(|arg| {
-                        let arg = ctx.repr(*arg);
-                        let arg_desc = ctx.get_desc(arg);
-                        let kind = match &*arg_desc {
-                            TypeDesc::Tconstr { path, .. } => path.name(),
-                            TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
-                            TypeDesc::Tunivar(name) => format!("Tunivar({name:?})"),
-                            _ => format!("ty#{}", arg.0),
-                        };
-                        format!("{}:{}", arg.0, kind)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    "{}#{}@{}[{}]",
-                    path.name(),
-                    ty.0,
-                    ctx.get_level(ty),
-                    args_summary
-                )
-            }
-            TypeDesc::Tvar(name) => {
-                format!("Tvar({:?})#{}@{}", name, ty.0, ctx.get_level(ty))
-            }
-            TypeDesc::Tunivar(name) => {
-                format!("Tunivar({:?})#{}@{}", name, ty.0, ctx.get_level(ty))
-            }
-            TypeDesc::Tpoly { body, vars } => format!(
-                "Tpoly#{}@{}(body=#{} vars={})",
-                ty.0,
-                ctx.get_level(ty),
-                ctx.repr(*body).0,
-                vars.len()
-            ),
-            other => format!("{:?}#{}@{}", other, ty.0, ctx.get_level(ty)),
-        }
-    };
-
     // Match OCaml ctype.ml instance_label:
     //   let ty_res = copy lbl.lbl_res
     //   let vars, ty_arg = match repr lbl.lbl_arg with

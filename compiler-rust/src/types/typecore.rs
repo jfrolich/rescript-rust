@@ -28204,7 +28204,7 @@ fn strengthen_sig_for_module_access_path(
             && let Some(crate::types::decl::SignatureItem::SigType(next_id, next_decl, _)) =
                 sig_items.get(index + 1)
             && next_decl.type_private == crate::types::PrivateFlag::Private
-            && id.name() == format!("{}#row", next_id.name())
+            && id.name().strip_suffix("#row") == Some(next_id.name())
         {
             index += 1;
             continue;
@@ -30583,12 +30583,14 @@ fn build_module_signature_for_path(
     }
 
     let mut visiting = HashSet::new();
-    let sig = crate::types::ctype::resolve_module_signature_through_cmi(
+    let sig = crate::types::ctype::resolve_module_signature_through_cmi_shared(
         ctx,
         &load_paths,
         module_path,
         &mut visiting,
-    )?;
+    )?
+    .as_ref()
+    .clone();
     crate::types::ctype::force_generalize_signature_values(ctx, &sig);
     Some((module_path.clone(), sig))
 }
