@@ -6202,13 +6202,19 @@ fn get_edges(low: i32, high: i32, l: &[(i32, RawLambda)]) -> (i32, i32) {
     }
 }
 
+/// Remaining `(key, action)` cases, consumed front to back.
+type IntCases = std::vec::IntoIter<(i32, RawLambda)>;
+
 /// Convert a sorted int-lambda list with a fail action into intervals.
 /// Equivalent to OCaml's `as_interval_canfail`.
+///
+/// The actions are moved into the store; the recursion mirrors OCaml's
+/// list recursion with `rest` as an owning iterator.
 fn as_interval_canfail(
     fail: RawLambda,
     low: i32,
     high: i32,
-    l: &[(i32, RawLambda)],
+    l: Vec<(i32, RawLambda)>,
 ) -> (Vec<(i32, i32, usize)>, StoreExp) {
     let mut store = StoreExp::mk_store();
 
@@ -6219,78 +6225,79 @@ fn as_interval_canfail(
         cur_low: i32,
         cur_high: i32,
         cur_act: usize,
-        rest: &[(i32, RawLambda)],
+        rest: &mut IntCases,
         high: i32,
         store: &mut StoreExp,
     ) -> Vec<(i32, i32, usize)> {
-        if rest.is_empty() {
-            if cur_high == high {
+        let Some((i, act_i)) = rest.next() else {
+            return if cur_high == high {
                 vec![(cur_low, cur_high, cur_act)]
             } else {
                 vec![(cur_low, cur_high, cur_act), (cur_high + 1, high, 0)]
-            }
-        } else {
-            let (i, ref act_i) = rest[0];
-            let act_index = store.act_store(act_i.clone());
-            if cur_high + 1 == i {
-                if act_index == cur_act {
-                    nofail_rec(cur_low, i, cur_act, &rest[1..], high, store)
-                } else if act_index == 0 {
-                    let mut r = vec![(cur_low, i - 1, cur_act)];
-                    r.extend(fail_rec(i, i, &rest[1..], high, store));
-                    r
-                } else {
-                    let mut r = vec![(cur_low, i - 1, cur_act)];
-                    r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
-                    r
-                }
+            };
+        };
+        let act_index = store.act_store(act_i);
+        if cur_high + 1 == i {
+            if act_index == cur_act {
+                nofail_rec(cur_low, i, cur_act, rest, high, store)
             } else if act_index == 0 {
-                let mut r = vec![(cur_low, cur_high, cur_act)];
-                r.extend(fail_rec(cur_high + 1, cur_high + 1, rest, high, store));
+                let mut r = vec![(cur_low, i - 1, cur_act)];
+                r.extend(fail_rec(i, i, rest, high, store));
                 r
             } else {
-                let mut r = vec![(cur_low, cur_high, cur_act), (cur_high + 1, i - 1, 0)];
-                r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
+                let mut r = vec![(cur_low, i - 1, cur_act)];
+                r.extend(nofail_rec(i, i, act_index, rest, high, store));
                 r
             }
+        } else if act_index == 0 {
+            // OCaml recurses with `fail_rec (cur_high + 1) (cur_high + 1) l`,
+            // re-storing this case's action. That store hits the fail action
+            // again (index 0, already marked shared), so `fail_rec` continues
+            // as `fail_rec (cur_high + 1) i rem`.
+            let mut r = vec![(cur_low, cur_high, cur_act)];
+            r.extend(fail_rec(cur_high + 1, i, rest, high, store));
+            r
+        } else {
+            let mut r = vec![(cur_low, cur_high, cur_act), (cur_high + 1, i - 1, 0)];
+            r.extend(nofail_rec(i, i, act_index, rest, high, store));
+            r
         }
     }
 
     fn fail_rec(
         cur_low: i32,
         cur_high: i32,
-        rest: &[(i32, RawLambda)],
+        rest: &mut IntCases,
         high: i32,
         store: &mut StoreExp,
     ) -> Vec<(i32, i32, usize)> {
-        if rest.is_empty() {
-            vec![(cur_low, cur_high, 0)]
+        let Some((i, act_i)) = rest.next() else {
+            return vec![(cur_low, cur_high, 0)];
+        };
+        let index = store.act_store(act_i);
+        if index == 0 {
+            fail_rec(cur_low, i, rest, high, store)
         } else {
-            let (i, ref act_i) = rest[0];
-            let index = store.act_store(act_i.clone());
-            if index == 0 {
-                fail_rec(cur_low, i, &rest[1..], high, store)
-            } else {
-                let mut r = vec![(cur_low, i - 1, 0)];
-                r.extend(nofail_rec(i, i, index, &rest[1..], high, store));
-                r
-            }
+            let mut r = vec![(cur_low, i - 1, 0)];
+            r.extend(nofail_rec(i, i, index, rest, high, store));
+            r
         }
     }
 
-    let intervals = if l.is_empty() {
-        vec![(low, high, 0)]
-    } else {
-        let (i, ref act_i) = l[0];
-        let index = store.act_store(act_i.clone());
-        if index == 0 {
-            fail_rec(low, i, &l[1..], high, &mut store)
-        } else if low < i {
-            let mut r = vec![(low, i - 1, 0)];
-            r.extend(nofail_rec(i, i, index, &l[1..], high, &mut store));
-            r
-        } else {
-            nofail_rec(i, i, index, &l[1..], high, &mut store)
+    let mut rest = l.into_iter();
+    let intervals = match rest.next() {
+        None => vec![(low, high, 0)],
+        Some((i, act_i)) => {
+            let index = store.act_store(act_i);
+            if index == 0 {
+                fail_rec(low, i, &mut rest, high, &mut store)
+            } else if low < i {
+                let mut r = vec![(low, i - 1, 0)];
+                r.extend(nofail_rec(i, i, index, &mut rest, high, &mut store));
+                r
+            } else {
+                nofail_rec(i, i, index, &mut rest, high, &mut store)
+            }
         }
     };
 
@@ -6299,48 +6306,41 @@ fn as_interval_canfail(
 
 /// Convert a sorted int-lambda list (no fail action) into intervals.
 /// Equivalent to OCaml's `as_interval_nofail`.
-fn as_interval_nofail(l: &[(i32, RawLambda)]) -> (Vec<(i32, i32, usize)>, StoreExp) {
+fn as_interval_nofail(l: Vec<(i32, RawLambda)>) -> (Vec<(i32, i32, usize)>, StoreExp) {
     let mut store = StoreExp::mk_store();
-
-    fn some_hole(l: &[(i32, RawLambda)]) -> bool {
-        if l.len() <= 1 {
-            return false;
-        }
-        l.windows(2).any(|w| w[1].0 > w[0].0 + 1)
-    }
 
     fn i_rec(
         cur_low: i32,
         cur_high: i32,
         cur_act: usize,
-        rest: &[(i32, RawLambda)],
+        rest: &mut IntCases,
         store: &mut StoreExp,
     ) -> Vec<(i32, i32, usize)> {
-        if rest.is_empty() {
-            vec![(cur_low, cur_high, cur_act)]
+        let Some((i, act)) = rest.next() else {
+            return vec![(cur_low, cur_high, cur_act)];
+        };
+        let act_index = store.act_store(act);
+        if act_index == cur_act {
+            i_rec(cur_low, i, cur_act, rest, store)
         } else {
-            let (i, ref act) = rest[0];
-            let act_index = store.act_store(act.clone());
-            if act_index == cur_act {
-                i_rec(cur_low, i, cur_act, &rest[1..], store)
-            } else {
-                let mut r = vec![(cur_low, cur_high, cur_act)];
-                r.extend(i_rec(i, i, act_index, &rest[1..], store));
-                r
-            }
+            let mut r = vec![(cur_low, cur_high, cur_act)];
+            r.extend(i_rec(i, i, act_index, rest, store));
+            r
         }
     }
 
     assert!(!l.is_empty());
-    let (i, ref act) = l[0];
-    let has_hole = some_hole(&l[1..]);
+    // OCaml `some_hole` is applied to the tail of the list.
+    let has_hole = l[1..].windows(2).any(|w| w[1].0 > w[0].0 + 1);
+    let mut rest = l.into_iter();
+    let (i, act) = rest.next().expect("non-empty");
     let act_index = if has_hole {
-        store.act_store_shared(act.clone())
+        store.act_store_shared(act)
     } else {
-        store.act_store(act.clone())
+        store.act_store(act)
     };
     assert_eq!(act_index, 0);
-    let inters = i_rec(i, i, act_index, &l[1..], &mut store);
+    let inters = i_rec(i, i, act_index, &mut rest, &mut store);
 
     (inters, store)
 }
@@ -6363,8 +6363,8 @@ fn as_interval(
     let l = sort_int_lambda_list(l);
     let edges = get_edges(low, high, &l);
     let result = match fail {
-        None => as_interval_nofail(&l),
-        Some(act) => as_interval_canfail(act, low, high, &l),
+        None => as_interval_nofail(l),
+        Some(act) => as_interval_canfail(act, low, high, l),
     };
     (edges, result)
 }
