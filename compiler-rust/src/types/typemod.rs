@@ -141,6 +141,8 @@ fn type_decl_could_be_fixed_type(decl: &crate::parser::ast::TypeDeclaration) -> 
     ) && matches!(decl.ptype_private, crate::parser::ast::PrivateFlag::Private)
 }
 
+/// The `fixed` argument OCaml passes to `transl_simple_type` for a manifest:
+/// `no_row = not (is_fixed_type sdecl)` (typedecl.ml:703-704, 1975-1980).
 fn type_decl_manifest_uses_fixed_type_variables(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
@@ -510,8 +512,12 @@ fn rebind_constructor_arguments(
             _ => Vec::new(),
         };
         let decl = crate::types::ctype::instance_declaration(ctx, inlined);
+        // typedecl.ml:1727-1728 asserts the arities agree and lets `Unify`
+        // escape; neither can happen for a well-formed inline record.
+        debug_assert_eq!(decl.type_params.len(), tl.len());
         for (param, ty) in decl.type_params.iter().zip(tl.iter()) {
-            let _ = crate::types::ctype::unify(ctx, &mut tctx.unify_state, *param, *ty);
+            let unified = crate::types::ctype::unify(ctx, &mut tctx.unify_state, *param, *ty);
+            debug_assert!(unified.is_ok(), "rebinding inline record parameters failed");
         }
         if let crate::types::TypeKind::TypeRecord(labels, _) = decl.type_kind {
             return crate::types::ConstructorArguments::CstrRecord(labels.to_vec());
@@ -1301,6 +1307,11 @@ fn inline_record_type_params(
         .collect()
 }
 
+/// The most recently interned arena location equal to `target`.
+///
+/// Searches from the end, unlike `make_typed_spread_label`'s first-match
+/// lookup; the two are kept separate because the chosen `LocIdx` decides
+/// location sharing in serialized output.
 fn find_existing_loc_idx(arena: &ParseArena, target: &Location) -> Option<LocIdx> {
     for idx in (0..arena.locations().len()).rev() {
         let loc_idx = LocIdx(idx as u32);
@@ -2034,7 +2045,7 @@ fn rewrite_included_signature_paths_to_local(
                     );
                 }
             }
-            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+            crate::types::decl::SignatureItem::SigModtype(_, mtd) => {
                 if let Some(mty) = mtd.mtd_type.as_mut() {
                     rewrite_included_module_type_paths_to_local(
                         ctx,
@@ -2047,7 +2058,6 @@ fn rewrite_included_signature_paths_to_local(
                         visited,
                     );
                 }
-                let _ = id;
             }
             crate::types::decl::SignatureItem::SigClass
             | crate::types::decl::SignatureItem::SigClassType => {}
@@ -5626,33 +5636,36 @@ fn build_spread_constructor(
                     .collect::<Vec<_>>();
                 let typed_lbls: Vec<TypedLabelDeclaration> = normalized_lbls
                     .iter()
-                    .map(|l| TypedLabelDeclaration {
-                        ld_id: l.ld_id,
-                        ld_name: crate::parse_arena::Located {
-                            txt: l.ld_id.name().to_string(),
-                            loc: find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc),
-                        },
-                        ld_runtime_name: l.ld_runtime_name.clone(),
-                        ld_mutable: match l.ld_mutable {
-                            crate::types::asttypes::MutableFlag::Mutable => {
-                                crate::parser::ast::MutableFlag::Mutable
-                            }
-                            crate::types::asttypes::MutableFlag::Immutable => {
-                                crate::parser::ast::MutableFlag::Immutable
-                            }
-                        },
-                        ld_optional: l.ld_optional,
-                        ld_type: TypedCoreType {
-                            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                            ctyp_type: l.ld_type,
-                            ctyp_env: EnvRef(0),
-                            ctyp_loc: find_existing_loc_idx(arena, &l.ld_loc)
-                                .unwrap_or(source_cd_loc),
-                            ctyp_attributes: Attributes::new(),
-                        },
-                        ld_loc: find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc),
-                        ld_attributes: decl_attrs_to_parser_attrs(arena, &l.ld_attributes),
-                        ld_types_attributes: Some(l.ld_attributes.clone().into_boxed_slice()),
+                    .map(|l| {
+                        let label_loc =
+                            find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc);
+                        TypedLabelDeclaration {
+                            ld_id: l.ld_id,
+                            ld_name: crate::parse_arena::Located {
+                                txt: l.ld_id.name().to_string(),
+                                loc: label_loc,
+                            },
+                            ld_runtime_name: l.ld_runtime_name.clone(),
+                            ld_mutable: match l.ld_mutable {
+                                crate::types::asttypes::MutableFlag::Mutable => {
+                                    crate::parser::ast::MutableFlag::Mutable
+                                }
+                                crate::types::asttypes::MutableFlag::Immutable => {
+                                    crate::parser::ast::MutableFlag::Immutable
+                                }
+                            },
+                            ld_optional: l.ld_optional,
+                            ld_type: TypedCoreType {
+                                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                                ctyp_type: l.ld_type,
+                                ctyp_env: EnvRef(0),
+                                ctyp_loc: label_loc,
+                                ctyp_attributes: Attributes::new(),
+                            },
+                            ld_loc: label_loc,
+                            ld_attributes: decl_attrs_to_parser_attrs(arena, &l.ld_attributes),
+                            ld_types_attributes: Some(l.ld_attributes.clone().into_boxed_slice()),
+                        }
                     })
                     .collect();
                 let args_vec = normalized_lbls
@@ -8135,7 +8148,7 @@ fn lookup_module_path_for_module_expr<'a>(
         && target.is_persistent()
         && let Some(pers) = tctx.persistent_env.as_mut()
     {
-        let _ = pers.find_pers_struct(target.name(), tctx.type_ctx);
+        pers.find_pers_struct(target.name(), tctx.type_ctx);
     }
     Ok(path)
 }
@@ -8434,9 +8447,9 @@ pub fn lookup_module_type_by_lid(
                     // env.ml:872-874 for persistent roots and forces
                     // `Lazy.force ps.ps_sig` before include processing later
                     // freshens the extracted signature at typemod.ml:1575-1578.
-                    let _ = pers_env
-                        .as_mut()
-                        .and_then(|pers| pers.force_lazy_signature_rename(mod_name, ctx));
+                    if let Some(pers) = pers_env.as_mut() {
+                        pers.force_lazy_signature_rename(mod_name, ctx);
+                    }
                 }
                 return Some(md.md_type.clone());
             }
