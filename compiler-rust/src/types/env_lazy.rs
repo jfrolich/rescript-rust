@@ -1687,7 +1687,7 @@ fn self_alias_raw_parent_module_item(
                 SignatureItem::SigModule(id, raw_md, _) if id.name() == module_name => Some((
                     *id,
                     raw_md.clone(),
-                    raw_parent_sig.clone(),
+                    (*raw_parent_sig).clone(),
                     raw_parent_path.clone(),
                 )),
                 _ => None,

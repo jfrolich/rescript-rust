@@ -64,10 +64,12 @@ pub const DEFAULT_FUEL: usize = 100_000;
 /// pair during specialization emits a self-reference instead of
 /// expanding again.
 pub struct MonomorphCache {
-    /// Completed specializations: (func_name, type_key) → generated name.
-    completed: HashMap<(String, TypeInfo), String>,
-    /// In-progress specializations (for recursion detection).
-    in_progress: HashSet<(String, TypeInfo)>,
+    /// Completed specializations: func_name → type_key → generated name.
+    /// Keyed by function first so lookups borrow instead of building an
+    /// owned `(String, TypeInfo)` probe.
+    completed: HashMap<String, HashMap<TypeInfo, String>>,
+    /// In-progress specializations (for recursion detection), by function.
+    in_progress: HashMap<String, HashSet<TypeInfo>>,
     /// Generated function bodies to emit as structure items.
     pub generated: Vec<GeneratedFunction>,
 }
@@ -102,7 +104,7 @@ impl MonomorphCache {
     pub fn new() -> Self {
         Self {
             completed: HashMap::new(),
-            in_progress: HashSet::new(),
+            in_progress: HashMap::new(),
             generated: Vec::new(),
         }
     }
@@ -111,21 +113,25 @@ impl MonomorphCache {
     /// Returns the generated function name if so.
     pub fn lookup(&self, func_name: &str, type_key: &TypeInfo) -> Option<&str> {
         self.completed
-            .get(&(func_name.to_string(), type_key.clone()))
-            .map(|s| s.as_str())
+            .get(func_name)?
+            .get(type_key)
+            .map(String::as_str)
     }
 
     /// Check if a specialization is currently in progress (recursion).
     pub fn is_in_progress(&self, func_name: &str, type_key: &TypeInfo) -> bool {
         self.in_progress
-            .contains(&(func_name.to_string(), type_key.clone()))
+            .get(func_name)
+            .is_some_and(|types| types.contains(type_key))
     }
 
     /// Mark a specialization as in-progress. Returns the generated name.
     pub fn begin(&mut self, func_name: &str, type_key: &TypeInfo) -> String {
         let generated_name = make_monomorph_name(func_name, type_key);
         self.in_progress
-            .insert((func_name.to_string(), type_key.clone()));
+            .entry(func_name.to_string())
+            .or_default()
+            .insert(type_key.clone());
         generated_name
     }
 
@@ -137,10 +143,13 @@ impl MonomorphCache {
         generated_name: String,
         func: GeneratedFunction,
     ) {
-        self.in_progress
-            .remove(&(func_name.to_string(), type_key.clone()));
+        if let Some(types) = self.in_progress.get_mut(func_name) {
+            types.remove(type_key);
+        }
         self.completed
-            .insert((func_name.to_string(), type_key.clone()), generated_name);
+            .entry(func_name.to_string())
+            .or_default()
+            .insert(type_key.clone(), generated_name);
         self.generated.push(func);
     }
 }
@@ -289,7 +298,7 @@ pub struct ConstructorInfo {
     pub attributes: Vec<(std::string::String, std::string::String)>,
 }
 
-// ── build_type_info ─────────────────────────────────────────────────────────
+// ── TypeInfo ↔ TypeExpr ─────────────────────────────────────────────────────
 
 /// Convert a TypeInfo back to a TypeExprRef.
 /// Looks up user-defined types by name in the environment.
@@ -825,12 +834,6 @@ pub enum ComptimeValue {
     /// A variant constructor.
     Variant(std::string::String, Option<Box<ComptimeValue>>),
 }
-
-// ── build_type_info ─────────────────────────────────────────────────────────
-
-/// Build a TypeInfo from a compiler type expression.
-///
-/// Resolves aliases, identifies primitives, and inspects user-defined types
 
 // ── Comptime Pattern Matching ───────────────────────────────────────────────
 

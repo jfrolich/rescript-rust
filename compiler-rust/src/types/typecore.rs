@@ -16914,13 +16914,13 @@ fn type_record(
                 TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
             )
         });
-        let dict_labels = if first_is_dict_label {
-            ctx.get_dict_pattern_labels()
+        let dict_label_count = if first_is_dict_label {
+            ctx.dict_pattern_label_count()
         } else {
-            Vec::new()
+            0
         };
-        let num_fields = (!dict_labels.is_empty())
-            .then_some(dict_labels.len())
+        let num_fields = (dict_label_count != 0)
+            .then_some(dict_label_count)
             .or_else(|| all_label_descriptions.as_ref().map(|labels| labels.len()))
             .or_else(|| all_labels.as_ref().map(|labels| labels.len()));
         if num_fields.is_some_and(|num_fields| fields.len() == num_fields) {
