@@ -4046,6 +4046,21 @@ fn has_res_pat_variant_spread_attribute(
         .any(|attr| arena.get_string(attr.0.txt) == PAT_VARIANT_SPREAD_ATTRIBUTE)
 }
 
+/// Reuse the newest `Lident name` in the arena, or push a fresh one.
+fn existing_or_new_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
+    find_existing_lident_idx(arena, name).unwrap_or_else(|| arena.push_typecheck_lident(name))
+}
+
+/// `Lident lbl_name` for a synthesized optional record field, shared across
+/// the compilation through the TypeContext cache.
+fn synthesized_record_lident_idx(ctx: &TypeContext, arena: &ParseArena, name: &str) -> LidentIdx {
+    ctx.get_synthesized_record_lident(name).unwrap_or_else(|| {
+        let lid = existing_or_new_lident_idx(arena, name);
+        ctx.cache_synthesized_record_lident(name.to_string(), lid);
+        lid
+    })
+}
+
 fn find_existing_lident_idx(arena: &ParseArena, name: &str) -> Option<LidentIdx> {
     for idx in (0..arena.longident_count()).rev() {
         let lid_idx = LidentIdx(idx as u32);
@@ -16563,18 +16578,9 @@ fn type_record(
                         crate::types::ctype::instance_label(ctx, false, raw_label_desc);
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     let label_desc = crate::types::LabelDescription {
-                        lbl_name: raw_label_desc.lbl_name.clone(),
-                        lbl_runtime_name: raw_label_desc.lbl_runtime_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
-                        lbl_mut: raw_label_desc.lbl_mut,
-                        lbl_optional: raw_label_desc.lbl_optional,
-                        lbl_pos: raw_label_desc.lbl_pos,
-                        lbl_all: raw_label_desc.lbl_all,
-                        lbl_repres: raw_label_desc.lbl_repres.clone(),
-                        lbl_private: raw_label_desc.lbl_private,
-                        lbl_loc: raw_label_desc.lbl_loc,
-                        lbl_attributes: raw_label_desc.lbl_attributes.clone(),
+                        ..raw_label_desc.clone()
                     };
                     typed_fields.push((
                         placeholder_lid,
@@ -16587,14 +16593,7 @@ fn type_record(
 
                 if raw_label_desc.lbl_optional {
                     let option_ty = raw_label_desc.lbl_arg;
-                    let label_lid_idx = ctx
-                        .get_synthesized_record_lident(&label_name)
-                        .unwrap_or_else(|| {
-                            let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                                .unwrap_or_else(|| tctx.arena.push_typecheck_lident(&label_name));
-                            ctx.cache_synthesized_record_lident(label_name.clone(), lid);
-                            lid
-                        });
+                    let label_lid_idx = synthesized_record_lident_idx(ctx, tctx.arena, &label_name);
                     let label_lid = Located {
                         txt: label_lid_idx,
                         loc,
@@ -16671,18 +16670,9 @@ fn type_record(
                         crate::types::ctype::instance_label(ctx, false, raw_label_desc);
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     crate::types::LabelDescription {
-                        lbl_name: raw_label_desc.lbl_name.clone(),
-                        lbl_runtime_name: raw_label_desc.lbl_runtime_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
-                        lbl_mut: raw_label_desc.lbl_mut,
-                        lbl_optional: raw_label_desc.lbl_optional,
-                        lbl_pos: raw_label_desc.lbl_pos,
-                        lbl_all: raw_label_desc.lbl_all,
-                        lbl_repres: raw_label_desc.lbl_repres.clone(),
-                        lbl_private: raw_label_desc.lbl_private,
-                        lbl_loc: raw_label_desc.lbl_loc,
-                        lbl_attributes: raw_label_desc.lbl_attributes.clone(),
+                        ..raw_label_desc.clone()
                     }
                 } else {
                     crate::types::LabelDescription {
@@ -16742,14 +16732,7 @@ fn type_record(
                     }
                 };
                 // OCaml uses {loc; txt = Lident lbl.lbl_name} for synthesized optional fields
-                let label_lid_idx = ctx
-                    .get_synthesized_record_lident(&label_name)
-                    .unwrap_or_else(|| {
-                        let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                            .unwrap_or_else(|| tctx.arena.push_typecheck_lident(&label_name));
-                        ctx.cache_synthesized_record_lident(label_name.clone(), lid);
-                        lid
-                    });
+                let label_lid_idx = synthesized_record_lident_idx(ctx, tctx.arena, &label_name);
                 let label_lid = Located {
                     txt: label_lid_idx,
                     loc,
@@ -20175,13 +20158,6 @@ fn type_expect_with_module_unpacks(
         arena.push_typecheck_string(s.to_owned())
     }
 
-    fn ensure_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
-        if let Some(idx) = find_existing_lident_idx(arena, name) {
-            return idx;
-        }
-        arena.push_typecheck_lident(name)
-    }
-
     // `wrap_unpacks` (typecore.ml:2097-2108) folds left over the unpacks, so
     // the last one is the outermost `let module`.
     let Some((unpack, rest)) = unpacks.split_last() else {
@@ -20238,7 +20214,7 @@ fn type_expect_with_module_unpacks(
         expected_ty,
     );
 
-    let lid = ensure_lident_idx(tctx.arena, &unpack.name.txt);
+    let lid = existing_or_new_lident_idx(tctx.arena, &unpack.name.txt);
     let located_lid = Located {
         txt: lid,
         loc: unpack.name.loc,
