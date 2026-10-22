@@ -1455,15 +1455,28 @@ fn included_path_is_direct_child(
     }
 }
 
-fn rewrite_included_type_paths_to_local(
+/// Which path-bearing type nodes `rewrite_type_paths_in_place` rewrites,
+/// besides `Tconstr` paths (always rewritten).
+#[derive(Clone, Copy)]
+struct TypePathRewriteSites {
+    /// Rewrite `Tpackage` paths.
+    package_path: bool,
+    /// Rewrite a `Tvariant` row's `row_name` path and visit its arguments
+    /// (before `row_more`), as `Subst.typexp` does (compiler/ml/subst.ml:226-231).
+    row_name: bool,
+}
+
+/// Rewrite type paths in place over the graph rooted at `ty_ref`.
+///
+/// `rewrite` returns `Some(new_path)` to replace a path. Each node is visited
+/// once (tracked in `visited`); a node is rewritten before its children, and
+/// children are visited in descriptor order.
+fn rewrite_type_paths_in_place(
     ctx: &crate::types::context::TypeContext,
     ty_ref: TypeExprRef,
-    include_root_path: Option<&Path>,
-    include_alias_heads: &[String],
-    local_type_ids: &HashMap<String, Ident>,
-    local_module_ids: &HashMap<String, Ident>,
-    local_modtype_ids: &HashMap<String, Ident>,
+    sites: TypePathRewriteSites,
     visited: &mut HashSet<TypeExprRef>,
+    rewrite: &mut impl FnMut(&Path) -> Option<Path>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
 
@@ -1475,229 +1488,125 @@ fn rewrite_included_type_paths_to_local(
     let desc = ctx.get_desc(ty_ref).into_desc();
     match &desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
-            if let Some(rewritten_path) = rewrite_included_path_to_local(
-                path,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-            ) {
+            if let Some(rewritten) = rewrite(path) {
                 ctx.set_desc(
                     ty_ref,
                     TypeDesc::Tconstr {
-                        path: rewritten_path,
+                        path: rewritten,
                         args: args.clone(),
                         abbrev: *abbrev,
                     },
                 );
             }
             for arg in args {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *arg,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
             for arg in args {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    arg.typ,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, arg.typ, sites, visited, rewrite);
             }
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *ret,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *ret, sites, visited, rewrite);
         }
         TypeDesc::Ttuple(types) => {
             for ty in types {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *ty,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
             }
         }
         TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *ty,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
         }
         TypeDesc::Tpoly { body, vars } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *body,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *body, sites, visited, rewrite);
             for var in vars {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *var,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                rewrite_type_paths_in_place(ctx, *var, sites, visited, rewrite);
             }
         }
         TypeDesc::Tobject { fields, .. } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *fields,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *fields, sites, visited, rewrite);
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *typ,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
-            rewrite_included_type_paths_to_local(
-                ctx,
-                *rest,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, *typ, sites, visited, rewrite);
+            rewrite_type_paths_in_place(ctx, *rest, sites, visited, rewrite);
         }
         TypeDesc::Tvariant(row) => {
-            // `Subst.typexp` (compiler/ml/subst.ml:226-231) also rewrites the
-            // row's `row_name` path and arguments.
-            if let Some((name_path, name_args)) = &row.row_name {
-                if let Some(rewritten_path) = rewrite_included_path_to_local(
-                    name_path,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                ) {
+            if sites.row_name
+                && let Some((name_path, name_args)) = &row.row_name
+            {
+                if let Some(rewritten) = rewrite(name_path) {
                     let mut new_row = row.clone();
-                    new_row.row_name = Some((rewritten_path, name_args.clone()));
+                    new_row.row_name = Some((rewritten, name_args.clone()));
                     ctx.set_desc(ty_ref, TypeDesc::Tvariant(new_row));
                 }
                 for arg in name_args {
-                    rewrite_included_type_paths_to_local(
-                        ctx,
-                        *arg,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
-                        visited,
-                    );
+                    rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
                 }
             }
-            rewrite_included_type_paths_to_local(
-                ctx,
-                row.row_more,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+            rewrite_type_paths_in_place(ctx, row.row_more, sites, visited, rewrite);
             for (_, field) in &row.row_fields {
                 match field {
-                    RowField::Rpresent(Some(ty)) => rewrite_included_type_paths_to_local(
-                        ctx,
-                        *ty,
-                        include_root_path,
-                        include_alias_heads,
-                        local_type_ids,
-                        local_module_ids,
-                        local_modtype_ids,
-                        visited,
-                    ),
+                    RowField::Rpresent(Some(ty)) => {
+                        rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
+                    }
                     RowField::Reither { types, .. } => {
                         for ty in types {
-                            rewrite_included_type_paths_to_local(
-                                ctx,
-                                *ty,
-                                include_root_path,
-                                include_alias_heads,
-                                local_type_ids,
-                                local_module_ids,
-                                local_modtype_ids,
-                                visited,
-                            );
+                            rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
                         }
                     }
                     _ => {}
                 }
             }
         }
-        TypeDesc::Tpackage { args, .. } => {
-            for arg in args {
-                rewrite_included_type_paths_to_local(
-                    ctx,
-                    *arg,
-                    include_root_path,
-                    include_alias_heads,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
+        TypeDesc::Tpackage { path, args, lids } => {
+            if sites.package_path
+                && let Some(rewritten) = rewrite(path)
+            {
+                ctx.set_desc(
+                    ty_ref,
+                    TypeDesc::Tpackage {
+                        path: rewritten,
+                        lids: lids.clone(),
+                        args: args.clone(),
+                    },
                 );
+            }
+            for arg in args {
+                rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
+}
+
+fn rewrite_included_type_paths_to_local(
+    ctx: &crate::types::context::TypeContext,
+    ty_ref: TypeExprRef,
+    include_root_path: Option<&Path>,
+    include_alias_heads: &[String],
+    local_type_ids: &HashMap<String, Ident>,
+    local_module_ids: &HashMap<String, Ident>,
+    local_modtype_ids: &HashMap<String, Ident>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    rewrite_type_paths_in_place(
+        ctx,
+        ty_ref,
+        TypePathRewriteSites {
+            package_path: false,
+            row_name: true,
+        },
+        visited,
+        &mut |path| {
+            rewrite_included_path_to_local(
+                path,
+                include_root_path,
+                include_alias_heads,
+                local_type_ids,
+                local_module_ids,
+                local_modtype_ids,
+            )
+        },
+    );
 }
 
 fn rewrite_included_type_decl_paths_to_local(
@@ -2097,87 +2006,19 @@ fn rewrite_module_prefix_in_type(
     ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
 ) {
-    use crate::types::type_expr::{RowField, TypeDesc};
-
-    let ty_ref = ctx.repr(ty_ref);
-    if !visited.insert(ty_ref) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty_ref);
-
-    match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
+    rewrite_type_paths_in_place(
+        ctx,
+        ty_ref,
+        TypePathRewriteSites {
+            package_path: true,
+            row_name: false,
+        },
+        visited,
+        &mut |path| {
             let rewritten = rewrite_module_path_prefix(path, old_param, new_prefix);
-            if rewritten != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
-                    *path = rewritten;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
-                rewrite_module_prefix_in_type(arg.typ, old_param, new_prefix, ctx, visited);
-            }
-            rewrite_module_prefix_in_type(*ret, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Ttuple(types) => {
-            for &ty in types {
-                rewrite_module_prefix_in_type(ty, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_module_prefix_in_type(*ty, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_module_prefix_in_type(*body, old_param, new_prefix, ctx, visited);
-            for &var in vars {
-                rewrite_module_prefix_in_type(var, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            rewrite_module_prefix_in_type(*fields, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_module_prefix_in_type(*typ, old_param, new_prefix, ctx, visited);
-            rewrite_module_prefix_in_type(*rest, old_param, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tvariant(row) => {
-            rewrite_module_prefix_in_type(row.row_more, old_param, new_prefix, ctx, visited);
-            for (_, row_field) in &row.row_fields {
-                match row_field {
-                    RowField::Rpresent(Some(ty)) => {
-                        rewrite_module_prefix_in_type(*ty, old_param, new_prefix, ctx, visited);
-                    }
-                    RowField::Reither { types, .. } => {
-                        for &ty in types {
-                            rewrite_module_prefix_in_type(ty, old_param, new_prefix, ctx, visited);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeDesc::Tpackage { path, args, .. } => {
-            let rewritten = rewrite_module_path_prefix(path, old_param, new_prefix);
-            if rewritten != *path {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
-                    *path = rewritten;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
+            (rewritten != *path).then_some(rewritten)
+        },
+    );
 }
 
 fn copy_and_rewrite_module_prefix_type(
@@ -2198,74 +2039,49 @@ fn copy_and_rewrite_module_prefix_type(
     copied
 }
 
-fn copy_and_rewrite_constructor_args(
+/// Rebuild constructor arguments with every type mapped through `f`, in
+/// argument / label order.
+fn map_constructor_args_types(
     args: &crate::types::decl::ConstructorArguments,
-    old_param: &Ident,
-    arg_path: &Path,
-    ctx: &crate::types::context::TypeContext,
-    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
 ) -> crate::types::decl::ConstructorArguments {
     match args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) => {
             crate::types::decl::ConstructorArguments::CstrTuple(
-                args.iter()
-                    .map(|ty| {
-                        copy_and_rewrite_module_prefix_type(
-                            *ty, old_param, arg_path, ctx, copy_cache,
-                        )
-                    })
-                    .collect(),
+                args.iter().map(|ty| f(*ty)).collect(),
             )
         }
         crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-            crate::types::decl::ConstructorArguments::CstrRecord(
-                labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_prefix_type(
-                            label.ld_type,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            )
+            crate::types::decl::ConstructorArguments::CstrRecord(map_label_types(labels, f))
         }
     }
 }
 
-fn copy_and_rewrite_type_kind(
+fn map_label_types<C: FromIterator<crate::types::decl::LabelDeclaration>>(
+    labels: &[crate::types::decl::LabelDeclaration],
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
+) -> C {
+    labels
+        .iter()
+        .map(|label| {
+            let mut copied = label.clone();
+            copied.ld_type = f(label.ld_type);
+            copied
+        })
+        .collect()
+}
+
+/// Rebuild a type kind with every type mapped through `f`: record labels in
+/// order, or for each constructor its arguments and then its result type.
+fn map_type_kind_types(
     type_kind: &crate::types::decl::TypeKind,
-    old_param: &Ident,
-    arg_path: &Path,
-    ctx: &crate::types::context::TypeContext,
-    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
 ) -> crate::types::decl::TypeKind {
     match type_kind {
         crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
         crate::types::decl::TypeKind::TypeOpen => crate::types::decl::TypeKind::TypeOpen,
         crate::types::decl::TypeKind::TypeRecord(labels, repr) => {
-            crate::types::decl::TypeKind::TypeRecord(
-                labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_prefix_type(
-                            label.ld_type,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-                repr.clone(),
-            )
+            crate::types::decl::TypeKind::TypeRecord(map_label_types(labels, f), repr.clone())
         }
         crate::types::decl::TypeKind::TypeVariant(constructors, layout) => {
             crate::types::decl::TypeKind::TypeVariant(
@@ -2273,18 +2089,8 @@ fn copy_and_rewrite_type_kind(
                     .iter()
                     .map(|constructor| {
                         let mut copied = constructor.clone();
-                        copied.cd_args = copy_and_rewrite_constructor_args(
-                            &constructor.cd_args,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied.cd_res = constructor.cd_res.map(|ty| {
-                            copy_and_rewrite_module_prefix_type(
-                                ty, old_param, arg_path, ctx, copy_cache,
-                            )
-                        });
+                        copied.cd_args = map_constructor_args_types(&constructor.cd_args, f);
+                        copied.cd_res = constructor.cd_res.map(&mut *f);
                         copied
                     })
                     .collect(),
@@ -2294,6 +2100,44 @@ fn copy_and_rewrite_type_kind(
     }
 }
 
+fn map_type_inlined_types(
+    inlined: &crate::types::decl::TypeInlinedType,
+    f: &mut impl FnMut(TypeExprRef) -> TypeExprRef,
+) -> crate::types::decl::TypeInlinedType {
+    match inlined {
+        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
+            crate::types::decl::TypeInlinedType::Record {
+                type_name: type_name.clone(),
+                labels: map_label_types(labels, f),
+            }
+        }
+    }
+}
+
+fn copy_and_rewrite_constructor_args(
+    args: &crate::types::decl::ConstructorArguments,
+    old_param: &Ident,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::ConstructorArguments {
+    map_constructor_args_types(args, &mut |ty| {
+        copy_and_rewrite_module_prefix_type(ty, old_param, arg_path, ctx, copy_cache)
+    })
+}
+
+fn copy_and_rewrite_type_kind(
+    type_kind: &crate::types::decl::TypeKind,
+    old_param: &Ident,
+    arg_path: &Path,
+    ctx: &crate::types::context::TypeContext,
+    copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> crate::types::decl::TypeKind {
+    map_type_kind_types(type_kind, &mut |ty| {
+        copy_and_rewrite_module_prefix_type(ty, old_param, arg_path, ctx, copy_cache)
+    })
+}
+
 fn copy_and_rewrite_type_inlined(
     inlined: &crate::types::decl::TypeInlinedType,
     old_param: &Ident,
@@ -2301,27 +2145,9 @@ fn copy_and_rewrite_type_inlined(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
-    match inlined {
-        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
-            crate::types::decl::TypeInlinedType::Record {
-                type_name: type_name.clone(),
-                labels: labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_prefix_type(
-                            label.ld_type,
-                            old_param,
-                            arg_path,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            }
-        }
-    }
+    map_type_inlined_types(inlined, &mut |ty| {
+        copy_and_rewrite_module_prefix_type(ty, old_param, arg_path, ctx, copy_cache)
+    })
 }
 
 fn substitute_functor_param_in_signature(
@@ -2678,98 +2504,19 @@ fn rewrite_module_aliases_in_type(
     ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
 ) {
-    use crate::types::type_expr::{RowField, TypeDesc};
-
-    let ty_ref = ctx.repr(ty_ref);
-    if !visited.insert(ty_ref) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty_ref).into_desc();
-    match &desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+    rewrite_type_paths_in_place(
+        ctx,
+        ty_ref,
+        TypePathRewriteSites {
+            package_path: true,
+            row_name: false,
+        },
+        visited,
+        &mut |path| {
             let rewritten = rewrite_module_path_prefix_with_aliases(path, old_param, arg_aliases);
-            if rewritten != *path {
-                ctx.set_desc(
-                    ty_ref,
-                    TypeDesc::Tconstr {
-                        path: rewritten,
-                        args: args.clone(),
-                        abbrev: *abbrev,
-                    },
-                );
-            }
-            for arg in args {
-                rewrite_module_aliases_in_type(*arg, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
-                rewrite_module_aliases_in_type(arg.typ, old_param, arg_aliases, ctx, visited);
-            }
-            rewrite_module_aliases_in_type(*ret, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Ttuple(tys) => {
-            for ty in tys {
-                rewrite_module_aliases_in_type(*ty, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => {
-            rewrite_module_aliases_in_type(*ty, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_module_aliases_in_type(*body, old_param, arg_aliases, ctx, visited);
-            for var in vars {
-                rewrite_module_aliases_in_type(*var, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            rewrite_module_aliases_in_type(*fields, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_module_aliases_in_type(*typ, old_param, arg_aliases, ctx, visited);
-            rewrite_module_aliases_in_type(*rest, old_param, arg_aliases, ctx, visited);
-        }
-        TypeDesc::Tvariant(row) => {
-            rewrite_module_aliases_in_type(row.row_more, old_param, arg_aliases, ctx, visited);
-            for (_, row_field) in &row.row_fields {
-                match row_field {
-                    RowField::Rpresent(Some(ty)) => {
-                        rewrite_module_aliases_in_type(*ty, old_param, arg_aliases, ctx, visited);
-                    }
-                    RowField::Reither { types, .. } => {
-                        for ty in types {
-                            rewrite_module_aliases_in_type(
-                                *ty,
-                                old_param,
-                                arg_aliases,
-                                ctx,
-                                visited,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeDesc::Tpackage { path, args, lids } => {
-            let rewritten = rewrite_module_path_prefix_with_aliases(path, old_param, arg_aliases);
-            if rewritten != *path {
-                ctx.set_desc(
-                    ty_ref,
-                    TypeDesc::Tpackage {
-                        path: rewritten,
-                        lids: lids.clone(),
-                        args: args.clone(),
-                    },
-                );
-            }
-            for arg in args {
-                rewrite_module_aliases_in_type(*arg, old_param, arg_aliases, ctx, visited);
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
+            (rewritten != *path).then_some(rewritten)
+        },
+    );
 }
 
 fn copy_and_rewrite_module_aliases_type(
@@ -2795,41 +2542,9 @@ fn copy_and_rewrite_constructor_args_with_aliases(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
-    match args {
-        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-            crate::types::decl::ConstructorArguments::CstrTuple(
-                args.iter()
-                    .map(|ty| {
-                        copy_and_rewrite_module_aliases_type(
-                            *ty,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        )
-                    })
-                    .collect(),
-            )
-        }
-        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-            crate::types::decl::ConstructorArguments::CstrRecord(
-                labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_aliases_type(
-                            label.ld_type,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            )
-        }
-    }
+    map_constructor_args_types(args, &mut |ty| {
+        copy_and_rewrite_module_aliases_type(ty, old_param, arg_aliases, ctx, copy_cache)
+    })
 }
 
 fn copy_and_rewrite_type_kind_with_aliases(
@@ -2839,53 +2554,9 @@ fn copy_and_rewrite_type_kind_with_aliases(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::TypeKind {
-    match kind {
-        crate::types::TypeKind::TypeAbstract => crate::types::TypeKind::TypeAbstract,
-        crate::types::TypeKind::TypeOpen => crate::types::TypeKind::TypeOpen,
-        crate::types::TypeKind::TypeVariant(ctors, layout) => crate::types::TypeKind::TypeVariant(
-            ctors
-                .iter()
-                .map(|ctor| {
-                    let mut copied = ctor.clone();
-                    copied.cd_args = copy_and_rewrite_constructor_args_with_aliases(
-                        &ctor.cd_args,
-                        old_param,
-                        arg_aliases,
-                        ctx,
-                        copy_cache,
-                    );
-                    if let Some(ret) = ctor.cd_res {
-                        copied.cd_res = Some(copy_and_rewrite_module_aliases_type(
-                            ret,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        ));
-                    }
-                    copied
-                })
-                .collect(),
-            *layout,
-        ),
-        crate::types::TypeKind::TypeRecord(labels, repr) => crate::types::TypeKind::TypeRecord(
-            labels
-                .iter()
-                .map(|label| {
-                    let mut copied = label.clone();
-                    copied.ld_type = copy_and_rewrite_module_aliases_type(
-                        label.ld_type,
-                        old_param,
-                        arg_aliases,
-                        ctx,
-                        copy_cache,
-                    );
-                    copied
-                })
-                .collect(),
-            repr.clone(),
-        ),
-    }
+    map_type_kind_types(kind, &mut |ty| {
+        copy_and_rewrite_module_aliases_type(ty, old_param, arg_aliases, ctx, copy_cache)
+    })
 }
 
 fn copy_and_rewrite_type_inlined_with_aliases(
@@ -2895,27 +2566,9 @@ fn copy_and_rewrite_type_inlined_with_aliases(
     ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
-    match inlined {
-        crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
-            crate::types::decl::TypeInlinedType::Record {
-                type_name: type_name.clone(),
-                labels: labels
-                    .iter()
-                    .map(|label| {
-                        let mut copied = label.clone();
-                        copied.ld_type = copy_and_rewrite_module_aliases_type(
-                            label.ld_type,
-                            old_param,
-                            arg_aliases,
-                            ctx,
-                            copy_cache,
-                        );
-                        copied
-                    })
-                    .collect(),
-            }
-        }
-    }
+    map_type_inlined_types(inlined, &mut |ty| {
+        copy_and_rewrite_module_aliases_type(ty, old_param, arg_aliases, ctx, copy_cache)
+    })
 }
 
 fn substitute_functor_param_aliases_in_signature(
