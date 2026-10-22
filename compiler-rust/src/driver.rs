@@ -36,6 +36,9 @@ use crate::parser::ast::{
     StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
+use crate::types::printtyp::{
+    TAG_DIM as DIM, TAG_ERROR as ERROR, TAG_INFO as INFO, TAG_RESET as RESET,
+};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
@@ -95,734 +98,7 @@ pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
 
-pub fn module_name_from_source_filename(path: &str) -> String {
-    let basename = std::path::Path::new(path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path);
-    let name = basename.split('.').next().unwrap_or(basename);
-    let mut chars = name.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
-    }
-}
-
-pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structure) -> i32 {
-    use crate::ident::Ident;
-    use crate::types::decl::{
-        ConstructorArguments as DeclConstructorArguments, ModuleType as DeclModuleType,
-        SignatureItem as DeclSignatureItem, TypeKind as DeclTypeKind,
-    };
-    use crate::types::path::Path as TypePath;
-    use crate::types::typedtree::{
-        Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
-        ExtensionConstructorKind, FunctionParam, IncludeDescription, ModuleBinding, ModuleCoercion,
-        ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint, ModuleTypeDeclaration,
-        ModuleTypeDesc, OpenDeclaration, PatExtra, Pattern, PatternDesc, RowFieldDesc, Structure,
-        StructureItemDesc, TypedConstructorArguments, TypedCoreType, TypedCoreTypeDesc,
-        TypedSignature, TypedSignatureItemDesc, TypedTypeDeclaration, TypedTypeKind,
-        TypedValueDescription, ValueBinding, WithConstraint,
-    };
-
-    fn visit_ident(max_stamp: &mut i32, id: &Ident) {
-        *max_stamp = (*max_stamp).max(id.stamp());
-    }
-
-    fn visit_path(max_stamp: &mut i32, path: &TypePath) {
-        match path {
-            TypePath::Pident(id) => visit_ident(max_stamp, id),
-            TypePath::Pdot(prefix, _, _) => visit_path(max_stamp, prefix),
-            TypePath::Papply(functor, arg) => {
-                visit_path(max_stamp, functor);
-                visit_path(max_stamp, arg);
-            }
-        }
-    }
-
-    fn visit_typed_core_type(max_stamp: &mut i32, core_type: &TypedCoreType) {
-        match &core_type.ctyp_desc {
-            TypedCoreTypeDesc::Ttyp_var(_) => {}
-            TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
-                for arg in args {
-                    visit_typed_core_type(max_stamp, &arg.typ);
-                }
-                visit_typed_core_type(max_stamp, ret);
-            }
-            TypedCoreTypeDesc::Ttyp_tuple(items) => {
-                for item in items {
-                    visit_typed_core_type(max_stamp, item);
-                }
-            }
-            TypedCoreTypeDesc::Ttyp_constr(path, _, args) => {
-                visit_path(max_stamp, path);
-                for arg in args {
-                    visit_typed_core_type(max_stamp, arg);
-                }
-            }
-            TypedCoreTypeDesc::Ttyp_object(fields, _) => {
-                for field in fields {
-                    match &field.of_desc {
-                        crate::types::typedtree::ObjectFieldDesc::OTtag(_, ty)
-                        | crate::types::typedtree::ObjectFieldDesc::OTinherit(ty) => {
-                            visit_typed_core_type(max_stamp, ty);
-                        }
-                    }
-                }
-            }
-            TypedCoreTypeDesc::Ttyp_poly(_, inner) | TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
-                visit_typed_core_type(max_stamp, inner);
-            }
-            TypedCoreTypeDesc::Ttyp_variant(fields, _, _) => {
-                for field in fields {
-                    match &field.rf_desc {
-                        RowFieldDesc::Rtag(_, _, tys) => {
-                            for ty in tys {
-                                visit_typed_core_type(max_stamp, ty);
-                            }
-                        }
-                        RowFieldDesc::Rinherit(ty) => visit_typed_core_type(max_stamp, ty),
-                    }
-                }
-            }
-            TypedCoreTypeDesc::Ttyp_package(pkg) => {
-                visit_path(max_stamp, &pkg.pack_path);
-                for (_, ty) in &pkg.pack_fields {
-                    visit_typed_core_type(max_stamp, ty);
-                }
-            }
-        }
-    }
-
-    fn visit_pattern(max_stamp: &mut i32, pattern: &Pattern) {
-        match &pattern.pat_desc {
-            PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}
-            PatternDesc::Tpat_var(id, _) => visit_ident(max_stamp, id),
-            PatternDesc::Tpat_alias(inner, id, _) => {
-                visit_pattern(max_stamp, inner);
-                visit_ident(max_stamp, id);
-            }
-            PatternDesc::Tpat_tuple(items)
-            | PatternDesc::Tpat_construct(_, _, items)
-            | PatternDesc::Tpat_array(items) => {
-                for item in items {
-                    visit_pattern(max_stamp, item);
-                }
-            }
-            PatternDesc::Tpat_variant(_, inner, _) => {
-                if let Some(inner) = inner {
-                    visit_pattern(max_stamp, inner);
-                }
-            }
-            PatternDesc::Tpat_record(fields, _, _) => {
-                for (_, _, pattern, _) in fields {
-                    visit_pattern(max_stamp, pattern);
-                }
-            }
-            PatternDesc::Tpat_or(left, right, _) => {
-                visit_pattern(max_stamp, left);
-                visit_pattern(max_stamp, right);
-            }
-        }
-
-        for (extra, _, _) in &pattern.pat_extra {
-            match extra {
-                PatExtra::Tpat_constraint(core_type) => {
-                    visit_typed_core_type(max_stamp, core_type);
-                }
-                PatExtra::Tpat_type(path, _) => {
-                    visit_path(max_stamp, path);
-                }
-                PatExtra::Tpat_unpack => {}
-            }
-        }
-    }
-
-    fn visit_case(max_stamp: &mut i32, case: &Case) {
-        visit_pattern(max_stamp, &case.c_lhs);
-        if let Some(guard) = &case.c_guard {
-            visit_expression(max_stamp, guard);
-        }
-        visit_expression(max_stamp, &case.c_rhs);
-    }
-
-    fn visit_function_param(max_stamp: &mut i32, param: &FunctionParam) {
-        visit_ident(max_stamp, &param.fp_param);
-        visit_pattern(max_stamp, &param.fp_pat);
-    }
-
-    fn visit_expression(max_stamp: &mut i32, expr: &Expression) {
-        match &expr.exp_desc {
-            ExpressionDesc::Texp_ident(path, _, _) => visit_path(max_stamp, path),
-            ExpressionDesc::Texp_constant(_)
-            | ExpressionDesc::Texp_break
-            | ExpressionDesc::Texp_continue => {}
-            ExpressionDesc::Texp_let(_, bindings, body) => {
-                for binding in bindings {
-                    visit_value_binding(max_stamp, binding);
-                }
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_function { params, body, .. } => {
-                for param in params {
-                    visit_function_param(max_stamp, param);
-                }
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_apply { funct, args, .. } => {
-                visit_expression(max_stamp, funct);
-                for arg in args {
-                    if let Some(expr) = &arg.expression {
-                        visit_expression(max_stamp, expr);
-                    }
-                }
-            }
-            ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
-                visit_expression(max_stamp, scrutinee);
-                for case in cases {
-                    visit_case(max_stamp, case);
-                }
-                for case in exn_cases {
-                    visit_case(max_stamp, case);
-                }
-            }
-            ExpressionDesc::Texp_try(body, cases) => {
-                visit_expression(max_stamp, body);
-                for case in cases {
-                    visit_case(max_stamp, case);
-                }
-            }
-            ExpressionDesc::Texp_tuple(items)
-            | ExpressionDesc::Texp_construct(_, _, items)
-            | ExpressionDesc::Texp_array(items) => {
-                for item in items {
-                    visit_expression(max_stamp, item);
-                }
-            }
-            ExpressionDesc::Texp_variant(_, arg) => {
-                if let Some(arg) = arg {
-                    visit_expression(max_stamp, arg);
-                }
-            }
-            ExpressionDesc::Texp_record {
-                fields,
-                extended_expression,
-                ..
-            } => {
-                for (_, _, field, _) in fields {
-                    match field {
-                        crate::types::typedtree::RecordLabelDefinition::Kept(_) => {}
-                        crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                            visit_expression(max_stamp, expr);
-                        }
-                        crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
-                            _,
-                            _,
-                        ) => {}
-                    }
-                }
-                if let Some(base) = extended_expression {
-                    visit_expression(max_stamp, base);
-                }
-            }
-            ExpressionDesc::Texp_record_sparse {
-                fields,
-                extended_expression,
-                ..
-            } => {
-                // Intentional Rust performance representation: omitted
-                // optional fields are synthetic, so traversal only visits
-                // explicit overridden expressions and the optional base.
-                for (_, _, field, _) in fields {
-                    if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
-                        field
-                    {
-                        visit_expression(max_stamp, expr);
-                    }
-                }
-                if let Some(base) = extended_expression {
-                    visit_expression(max_stamp, base);
-                }
-            }
-            ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
-                visit_expression(max_stamp, expr);
-            }
-            ExpressionDesc::Texp_setfield(lhs, _, _, rhs)
-            | ExpressionDesc::Texp_sequence(lhs, rhs) => {
-                visit_expression(max_stamp, lhs);
-                visit_expression(max_stamp, rhs);
-            }
-            ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
-                visit_expression(max_stamp, cond);
-                visit_expression(max_stamp, then_);
-                if let Some(else_) = else_ {
-                    visit_expression(max_stamp, else_);
-                }
-            }
-            ExpressionDesc::Texp_while(cond, body) => {
-                visit_expression(max_stamp, cond);
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_for(id, pattern, lo, hi, _, body) => {
-                visit_ident(max_stamp, id);
-                visit_pattern(max_stamp, pattern);
-                visit_expression(max_stamp, lo);
-                visit_expression(max_stamp, hi);
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_for_of(id, _pat, iterable, body)
-            | ExpressionDesc::Texp_for_await_of(id, _pat, iterable, body) => {
-                visit_ident(max_stamp, id);
-                visit_expression(max_stamp, iterable);
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_tagged_template { tag, values, .. } => {
-                visit_expression(max_stamp, tag);
-                for value in values {
-                    visit_expression(max_stamp, value);
-                }
-            }
-            ExpressionDesc::Texp_template { values, .. } => {
-                for value in values {
-                    visit_expression(max_stamp, value);
-                }
-            }
-            ExpressionDesc::Texp_object_get(expr, _) => visit_expression(max_stamp, expr),
-            ExpressionDesc::Texp_object_set(expr, _, value) => {
-                visit_expression(max_stamp, expr);
-                visit_expression(max_stamp, value);
-            }
-            ExpressionDesc::Texp_object_literal(fields) => {
-                for (_, field) in fields {
-                    visit_expression(max_stamp, field);
-                }
-            }
-            ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
-                visit_ident(max_stamp, id);
-                visit_module_expr(max_stamp, module_expr);
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_letexception(ext, body) => {
-                visit_extension_constructor(max_stamp, ext);
-                visit_expression(max_stamp, body);
-            }
-            ExpressionDesc::Texp_pack(module_expr) => visit_module_expr(max_stamp, module_expr),
-            ExpressionDesc::Texp_extension_constructor(_, path) => visit_path(max_stamp, path),
-        }
-
-        for (extra, _, _) in &expr.exp_extra {
-            match extra {
-                ExpExtra::Texp_constraint(core_type)
-                | ExpExtra::Texp_coerce {
-                    target: core_type, ..
-                } => {
-                    visit_typed_core_type(max_stamp, core_type);
-                }
-                ExpExtra::Texp_open(_, path, _, _) => visit_path(max_stamp, path),
-                ExpExtra::Texp_newtype(_) => {}
-            }
-        }
-    }
-
-    fn visit_extension_constructor(max_stamp: &mut i32, ext: &ExtensionConstructor) {
-        visit_ident(max_stamp, &ext.ext_id);
-        match &ext.ext_kind {
-            ExtensionConstructorKind::Text_decl(args, result) => {
-                match args {
-                    ConstructorArgument::Cstr_tuple(types) => {
-                        for ty in types {
-                            visit_typed_core_type(max_stamp, ty);
-                        }
-                    }
-                    ConstructorArgument::Cstr_record(labels) => {
-                        for label in labels {
-                            visit_ident(max_stamp, &label.ld_id);
-                            visit_typed_core_type(max_stamp, &label.ld_type);
-                        }
-                    }
-                }
-                if let Some(result) = result {
-                    visit_typed_core_type(max_stamp, result);
-                }
-            }
-            ExtensionConstructorKind::Text_rebind(path, _) => visit_path(max_stamp, path),
-        }
-    }
-
-    fn visit_typed_type_decl(max_stamp: &mut i32, decl: &TypedTypeDeclaration) {
-        visit_ident(max_stamp, &decl.typ_id);
-        for (param, _) in &decl.typ_params {
-            visit_typed_core_type(max_stamp, param);
-        }
-        for (lhs, rhs, _) in &decl.typ_cstrs {
-            visit_typed_core_type(max_stamp, lhs);
-            visit_typed_core_type(max_stamp, rhs);
-        }
-        if let Some(manifest) = &decl.typ_manifest {
-            visit_typed_core_type(max_stamp, manifest);
-        }
-        match &decl.typ_kind {
-            TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => {}
-            TypedTypeKind::Ttype_variant(constructors) => {
-                for constructor in constructors {
-                    visit_ident(max_stamp, &constructor.cd_id);
-                    match &constructor.cd_args {
-                        TypedConstructorArguments::Cstr_tuple(types) => {
-                            for ty in types {
-                                visit_typed_core_type(max_stamp, ty);
-                            }
-                        }
-                        TypedConstructorArguments::Cstr_record(labels) => {
-                            for label in labels {
-                                visit_ident(max_stamp, &label.ld_id);
-                                visit_typed_core_type(max_stamp, &label.ld_type);
-                            }
-                        }
-                    }
-                    if let Some(result) = &constructor.cd_res {
-                        visit_typed_core_type(max_stamp, result);
-                    }
-                }
-            }
-            TypedTypeKind::Ttype_record(labels) => {
-                for label in labels {
-                    visit_ident(max_stamp, &label.ld_id);
-                    visit_typed_core_type(max_stamp, &label.ld_type);
-                }
-            }
-        }
-    }
-
-    fn visit_open_decl(max_stamp: &mut i32, open_decl: &OpenDeclaration) {
-        visit_path(max_stamp, &open_decl.open_path);
-    }
-
-    fn visit_typed_value_desc(max_stamp: &mut i32, value_desc: &TypedValueDescription) {
-        visit_ident(max_stamp, &value_desc.val_id);
-        visit_typed_core_type(max_stamp, &value_desc.val_desc);
-    }
-
-    fn visit_module_type_constraint(max_stamp: &mut i32, constraint_: &ModuleTypeConstraint) {
-        match constraint_ {
-            ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
-                visit_module_type(max_stamp, module_type);
-            }
-            ModuleTypeConstraint::Tmodtype_implicit => {}
-        }
-    }
-
-    fn visit_module_coercion(max_stamp: &mut i32, coercion: &ModuleCoercion) {
-        match coercion {
-            ModuleCoercion::Tcoerce_none => {}
-            ModuleCoercion::Tcoerce_structure(pos_cc_list, id_pos_list, _) => {
-                for (_, coercion) in pos_cc_list {
-                    visit_module_coercion(max_stamp, coercion);
-                }
-                for (id, _, coercion) in id_pos_list {
-                    visit_ident(max_stamp, id);
-                    visit_module_coercion(max_stamp, coercion);
-                }
-            }
-            ModuleCoercion::Tcoerce_functor(arg, result) => {
-                visit_module_coercion(max_stamp, arg);
-                visit_module_coercion(max_stamp, result);
-            }
-            ModuleCoercion::Tcoerce_primitive(primitive) => {
-                visit_ident(max_stamp, &primitive.pc_id);
-            }
-            ModuleCoercion::Tcoerce_alias(_, path, coercion) => {
-                visit_path(max_stamp, path);
-                visit_module_coercion(max_stamp, coercion);
-            }
-        }
-    }
-
-    fn visit_module_type(max_stamp: &mut i32, module_type: &ModuleType) {
-        match &module_type.mty_desc {
-            ModuleTypeDesc::Tmty_ident(path, _) | ModuleTypeDesc::Tmty_alias(path, _) => {
-                visit_path(max_stamp, path);
-            }
-            ModuleTypeDesc::Tmty_signature(signature) => {
-                visit_typed_signature(max_stamp, signature);
-            }
-            ModuleTypeDesc::Tmty_functor(param, _, param_type, result) => {
-                visit_ident(max_stamp, param);
-                if let Some(param_type) = param_type {
-                    visit_module_type(max_stamp, param_type);
-                }
-                visit_module_type(max_stamp, result);
-            }
-            ModuleTypeDesc::Tmty_with(module_type, constraints) => {
-                visit_module_type(max_stamp, module_type);
-                for (path, _, constraint_) in constraints {
-                    visit_path(max_stamp, path);
-                    match constraint_ {
-                        WithConstraint::Twith_type(type_decl)
-                        | WithConstraint::Twith_typesubst(type_decl) => {
-                            visit_typed_type_decl(max_stamp, type_decl);
-                        }
-                        WithConstraint::Twith_module(path, _)
-                        | WithConstraint::Twith_modsubst(path, _) => {
-                            visit_path(max_stamp, path);
-                        }
-                    }
-                }
-            }
-            ModuleTypeDesc::Tmty_typeof(module_expr) => visit_module_expr(max_stamp, module_expr),
-            ModuleTypeDesc::Tmty_placeholder => {}
-        }
-    }
-
-    fn visit_typed_module_decl(
-        max_stamp: &mut i32,
-        module_decl: &crate::types::typedtree::TypedModuleDeclaration,
-    ) {
-        visit_ident(max_stamp, &module_decl.md_id);
-        visit_module_type(max_stamp, &module_decl.md_type);
-    }
-
-    fn visit_module_binding(max_stamp: &mut i32, binding: &ModuleBinding) {
-        visit_ident(max_stamp, &binding.mb_id);
-        visit_module_expr(max_stamp, &binding.mb_expr);
-    }
-
-    fn visit_include_description(max_stamp: &mut i32, include_desc: &IncludeDescription) {
-        visit_module_type(max_stamp, &include_desc.incl_mod);
-        visit_decl_signature(max_stamp, &include_desc.incl_type);
-    }
-
-    fn visit_module_type_decl(max_stamp: &mut i32, module_type_decl: &ModuleTypeDeclaration) {
-        visit_ident(max_stamp, &module_type_decl.mtd_id);
-        if let Some(module_type) = &module_type_decl.mtd_type {
-            visit_module_type(max_stamp, module_type);
-        }
-    }
-
-    fn visit_typed_signature(max_stamp: &mut i32, signature: &TypedSignature) {
-        for item in &signature.sig_items {
-            match &item.sig_desc {
-                TypedSignatureItemDesc::Tsig_value(value_desc) => {
-                    visit_typed_value_desc(max_stamp, value_desc);
-                }
-                TypedSignatureItemDesc::Tsig_type(_, decls) => {
-                    for decl in decls {
-                        visit_typed_type_decl(max_stamp, decl);
-                    }
-                }
-                TypedSignatureItemDesc::Tsig_typext(type_ext) => {
-                    visit_path(max_stamp, &type_ext.tyext_path);
-                    for (param, _) in &type_ext.tyext_params {
-                        visit_typed_core_type(max_stamp, param);
-                    }
-                    for ext in &type_ext.tyext_constructors {
-                        visit_extension_constructor(max_stamp, ext);
-                    }
-                }
-                TypedSignatureItemDesc::Tsig_exception(ext) => {
-                    visit_extension_constructor(max_stamp, ext);
-                }
-                TypedSignatureItemDesc::Tsig_module(module_decl) => {
-                    visit_typed_module_decl(max_stamp, module_decl);
-                }
-                TypedSignatureItemDesc::Tsig_recmodule(module_decls) => {
-                    for module_decl in module_decls {
-                        visit_typed_module_decl(max_stamp, module_decl);
-                    }
-                }
-                TypedSignatureItemDesc::Tsig_modtype(module_type_decl) => {
-                    visit_module_type_decl(max_stamp, module_type_decl);
-                }
-                TypedSignatureItemDesc::Tsig_open(open_decl) => {
-                    visit_open_decl(max_stamp, open_decl)
-                }
-                TypedSignatureItemDesc::Tsig_include(include_desc) => {
-                    visit_include_description(max_stamp, include_desc);
-                }
-                TypedSignatureItemDesc::Tsig_attribute(_) => {}
-            }
-        }
-    }
-
-    fn visit_module_expr(max_stamp: &mut i32, module_expr: &ModuleExpr) {
-        visit_decl_module_type(max_stamp, &module_expr.mod_type);
-        match &module_expr.mod_desc {
-            ModuleExprDesc::Tmod_ident(path, _) => visit_path(max_stamp, path),
-            ModuleExprDesc::Tmod_structure(structure) => visit_structure(max_stamp, structure),
-            ModuleExprDesc::Tmod_apply(functor, arg, coercion) => {
-                visit_module_expr(max_stamp, functor);
-                visit_module_expr(max_stamp, arg);
-                visit_module_coercion(max_stamp, coercion);
-            }
-            ModuleExprDesc::Tmod_functor(param, _, param_type, body) => {
-                visit_ident(max_stamp, param);
-                if let Some(param_type) = param_type {
-                    visit_module_type(max_stamp, param_type);
-                }
-                visit_module_expr(max_stamp, body);
-            }
-            ModuleExprDesc::Tmod_constraint(module_expr, module_type, constraint_, coercion) => {
-                visit_module_expr(max_stamp, module_expr);
-                visit_decl_module_type(max_stamp, module_type);
-                visit_module_type_constraint(max_stamp, constraint_);
-                visit_module_coercion(max_stamp, coercion);
-            }
-            ModuleExprDesc::Tmod_unpack(expr, module_type) => {
-                visit_expression(max_stamp, expr);
-                visit_decl_module_type(max_stamp, module_type);
-            }
-        }
-    }
-
-    fn visit_value_binding(max_stamp: &mut i32, binding: &ValueBinding) {
-        visit_pattern(max_stamp, &binding.vb_pat);
-        visit_expression(max_stamp, &binding.vb_expr);
-    }
-
-    fn visit_decl_module_type(max_stamp: &mut i32, module_type: &DeclModuleType) {
-        match module_type {
-            DeclModuleType::MtyIdent(path) | DeclModuleType::MtyAlias(_, path) => {
-                visit_path(max_stamp, path);
-            }
-            DeclModuleType::MtySignature(signature) => visit_decl_signature(max_stamp, signature),
-            DeclModuleType::MtyFunctor {
-                param,
-                param_type,
-                result,
-            } => {
-                visit_ident(max_stamp, param);
-                if let Some(param_type) = param_type {
-                    visit_decl_module_type(max_stamp, param_type);
-                }
-                visit_decl_module_type(max_stamp, result);
-            }
-        }
-    }
-
-    fn visit_decl_type_decl(max_stamp: &mut i32, type_decl: &crate::types::decl::TypeDeclaration) {
-        if let Some(path) = &type_decl.type_path {
-            visit_path(max_stamp, path);
-        }
-        match &type_decl.type_kind {
-            DeclTypeKind::TypeAbstract | DeclTypeKind::TypeOpen => {}
-            DeclTypeKind::TypeRecord(labels, _) => {
-                for label in labels {
-                    visit_ident(max_stamp, &label.ld_id);
-                }
-            }
-            DeclTypeKind::TypeVariant(constructors, _) => {
-                for constructor in constructors {
-                    visit_ident(max_stamp, &constructor.cd_id);
-                    if let DeclConstructorArguments::CstrRecord(labels) = &constructor.cd_args {
-                        for label in labels {
-                            visit_ident(max_stamp, &label.ld_id);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn visit_decl_extension_constructor(
-        max_stamp: &mut i32,
-        ext: &crate::types::decl::ExtensionConstructor,
-    ) {
-        visit_path(max_stamp, &ext.ext_type_path);
-        if let DeclConstructorArguments::CstrRecord(labels) = &ext.ext_args {
-            for label in labels {
-                visit_ident(max_stamp, &label.ld_id);
-            }
-        }
-    }
-
-    fn visit_decl_signature(max_stamp: &mut i32, signature: &[DeclSignatureItem]) {
-        for item in signature {
-            match item {
-                DeclSignatureItem::SigValue(id, value_desc) => {
-                    visit_ident(max_stamp, id);
-                    if let Some(path) = &value_desc.val_path {
-                        visit_path(max_stamp, path);
-                    }
-                }
-                DeclSignatureItem::SigType(id, type_decl, _) => {
-                    visit_ident(max_stamp, id);
-                    visit_decl_type_decl(max_stamp, type_decl);
-                }
-                DeclSignatureItem::SigTypext(id, ext, _) => {
-                    visit_ident(max_stamp, id);
-                    visit_decl_extension_constructor(max_stamp, ext);
-                }
-                DeclSignatureItem::SigModule(id, module_decl, _) => {
-                    visit_ident(max_stamp, id);
-                    if let Some(path) = &module_decl.md_path {
-                        visit_path(max_stamp, path);
-                    }
-                    visit_decl_module_type(max_stamp, &module_decl.md_type);
-                }
-                DeclSignatureItem::SigModtype(id, module_type_decl) => {
-                    visit_ident(max_stamp, id);
-                    if let Some(module_type) = &module_type_decl.mtd_type {
-                        visit_decl_module_type(max_stamp, module_type);
-                    }
-                }
-                DeclSignatureItem::SigClass | DeclSignatureItem::SigClassType => {}
-            }
-        }
-    }
-
-    fn visit_structure(max_stamp: &mut i32, structure: &Structure) {
-        for item in &structure.str_items {
-            match &item.str_desc {
-                StructureItemDesc::Tstr_eval(expr, _) => visit_expression(max_stamp, expr),
-                StructureItemDesc::Tstr_value(_, bindings) => {
-                    for binding in bindings {
-                        visit_value_binding(max_stamp, binding);
-                    }
-                }
-                StructureItemDesc::Tstr_primitive(value_desc) => {
-                    visit_typed_value_desc(max_stamp, value_desc);
-                }
-                StructureItemDesc::Tstr_type(_, decls) => {
-                    for decl in decls {
-                        visit_typed_type_decl(max_stamp, decl);
-                    }
-                }
-                StructureItemDesc::Tstr_typext(type_ext) => {
-                    visit_path(max_stamp, &type_ext.tyext_path);
-                    for (param, _) in &type_ext.tyext_params {
-                        visit_typed_core_type(max_stamp, param);
-                    }
-                    for ext in &type_ext.tyext_constructors {
-                        visit_extension_constructor(max_stamp, ext);
-                    }
-                }
-                StructureItemDesc::Tstr_exception(ext) => {
-                    visit_extension_constructor(max_stamp, ext)
-                }
-                StructureItemDesc::Tstr_module(binding) => visit_module_binding(max_stamp, binding),
-                StructureItemDesc::Tstr_recmodule(bindings) => {
-                    for binding in bindings {
-                        visit_module_binding(max_stamp, binding);
-                    }
-                }
-                StructureItemDesc::Tstr_modtype(module_type_decl) => {
-                    visit_module_type_decl(max_stamp, module_type_decl);
-                }
-                StructureItemDesc::Tstr_open(open_decl) => visit_open_decl(max_stamp, open_decl),
-                StructureItemDesc::Tstr_include(include_decl) => {
-                    visit_module_expr(max_stamp, &include_decl.incl_mod);
-                    visit_decl_signature(max_stamp, &include_decl.incl_type);
-                }
-                StructureItemDesc::Tstr_attribute(_) => {}
-            }
-        }
-
-        visit_decl_signature(max_stamp, &structure.str_type);
-    }
-
-    let mut max_stamp = 0;
-    visit_structure(&mut max_stamp, typed_structure);
-    max_stamp
-}
+pub use crate::misc::module_name_from_source_filename;
 
 fn expression_has_string_literal(
     expr: &Expression,
@@ -1478,6 +754,15 @@ impl Default for CompilerOptions {
 }
 
 impl CompilerOptions {
+    /// Whether the builtin spice mapper (`binary_ast::spice_ppx`) rewrites the
+    /// AST. The `bsc` CLI runs every configured `-ppx` executable as OCaml
+    /// does (cmd_ppx_apply.ml:97-110); the in-process build sets `spice_ppx`
+    /// instead of passing a configured spice PPX, so the builtin mapper
+    /// replaces a per-module subprocess.
+    pub fn builtin_spice(&self) -> bool {
+        self.spice_ppx
+    }
+
     /// `Env.get_unit_name ()`: js_implementation.ml:142-145 sets it to
     /// `Ext_filename.module_name outputprefix` (ext_filename.ml:71-79), the
     /// basename up to its last dot, so `hello.foo.res` is unit `Hello` even
@@ -1513,20 +798,37 @@ fn apply_warning_specs_to_config(
     warning_specs: &[String],
     warning_error_specs: &[String],
 ) {
-    for spec in warning_specs {
-        let _ = config.parse(spec);
-    }
-    for spec in warning_error_specs {
-        let _ = config.parse_as_error(spec);
+    apply_warning_ops_to_config(
+        config,
+        warning_specs
+            .iter()
+            .map(|spec| (false, spec.as_str()))
+            .chain(warning_error_specs.iter().map(|spec| (true, spec.as_str()))),
+    );
+}
+
+/// Apply `(as_error, spec)` warning operations in order. Malformed specs are
+/// skipped, leaving the configuration unchanged for them.
+fn apply_warning_ops_to_config<'a>(
+    config: &mut WarningConfig,
+    ops: impl IntoIterator<Item = (bool, &'a str)>,
+) {
+    for (as_error, spec) in ops {
+        let _ = if as_error {
+            config.parse_as_error(spec)
+        } else {
+            config.parse(spec)
+        };
     }
 }
 
-fn apply_file_config_warning_options(
+/// Apply `(as_error, spec)` warning operations to the type checker's state.
+fn apply_warning_ops<'a>(
     tctx: &mut TypeCheckContext<'_>,
-    config: &FileConfigOverrides,
+    ops: impl IntoIterator<Item = (bool, &'a str)>,
 ) {
-    for (as_error, spec) in &config.warning_ops {
-        if *as_error {
+    for (as_error, spec) in ops {
+        if as_error {
             tctx.apply_warning_error_spec(spec);
         } else {
             tctx.apply_warning_spec(spec);
@@ -1534,17 +836,29 @@ fn apply_file_config_warning_options(
     }
 }
 
+fn apply_file_config_warning_options(
+    tctx: &mut TypeCheckContext<'_>,
+    config: &FileConfigOverrides,
+) {
+    apply_warning_ops(tctx, file_config_warning_ops(config));
+}
+
 fn apply_leading_warning_attribute_options(
     tctx: &mut TypeCheckContext<'_>,
     specs: &[ppx::WarningAttributeSpec],
 ) {
-    for spec in specs {
-        if spec.as_error {
-            tctx.apply_warning_error_spec(&spec.spec);
-        } else {
-            tctx.apply_warning_spec(&spec.spec);
-        }
-    }
+    apply_warning_ops(tctx, leading_warning_ops(specs));
+}
+
+fn file_config_warning_ops(config: &FileConfigOverrides) -> impl Iterator<Item = (bool, &str)> {
+    config
+        .warning_ops
+        .iter()
+        .map(|(as_error, spec)| (*as_error, spec.as_str()))
+}
+
+fn leading_warning_ops(specs: &[ppx::WarningAttributeSpec]) -> impl Iterator<Item = (bool, &str)> {
+    specs.iter().map(|spec| (spec.as_error, spec.spec.as_str()))
 }
 
 fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
@@ -1565,13 +879,7 @@ fn warning_config_for_options_and_leading_attrs(
     leading_specs: &[ppx::WarningAttributeSpec],
 ) -> WarningConfig {
     let mut config = warning_config_for_options(options);
-    for spec in leading_specs {
-        if spec.as_error {
-            let _ = config.parse_as_error(&spec.spec);
-        } else {
-            let _ = config.parse(&spec.spec);
-        }
-    }
+    apply_warning_ops_to_config(&mut config, leading_warning_ops(leading_specs));
     config
 }
 
@@ -1580,30 +888,17 @@ fn warning_config_for_options_file_config_and_leading_attrs(
     file_config: &FileConfigOverrides,
     leading_specs: &[ppx::WarningAttributeSpec],
 ) -> WarningConfig {
-    let mut config = warning_config_for_options(options);
     // OCaml compiler/frontend/ppx_entry.ml:28-47 calls
     // Bs_ast_invariant.iter_warnings_on_stru/sigi before builtin PPX
     // rewriting; those leading attributes mutate Warnings.current before
     // @deriving and external warnings are emitted.
-    for spec in leading_specs {
-        if spec.as_error {
-            let _ = config.parse_as_error(&spec.spec);
-        } else {
-            let _ = config.parse(&spec.spec);
-        }
-    }
+    let mut config = warning_config_for_options_and_leading_attrs(options, leading_specs);
     apply_file_config_warning_ops(&mut config, file_config);
     config
 }
 
 fn apply_file_config_warning_ops(config: &mut WarningConfig, file_config: &FileConfigOverrides) {
-    for (as_error, spec) in &file_config.warning_ops {
-        if *as_error {
-            let _ = config.parse_as_error(spec);
-        } else {
-            let _ = config.parse(spec);
-        }
-    }
+    apply_warning_ops_to_config(config, file_config_warning_ops(file_config));
 }
 
 fn shell_quote_path(path: &std::path::Path) -> String {
@@ -1727,23 +1022,6 @@ fn run_external_ppxs(
     result
 }
 
-/// External PPXs the compiler implements itself: `@rescript/ppx-spice` style
-/// rewriters are covered by the builtin spice mapper (`binary_ast::spice_ppx`),
-/// which runs as part of the builtin PPX.
-impl CompilerOptions {
-    /// Whether the builtin spice mapper rewrites the AST. The `bsc` CLI runs
-    /// every configured `-ppx` executable as OCaml does (cmd_ppx_apply.ml:97-110);
-    /// the in-process build sets `spice_ppx` instead of passing a configured
-    /// spice PPX, so the builtin mapper replaces a per-module subprocess.
-    pub fn builtin_spice(&self) -> bool {
-        self.spice_ppx
-    }
-}
-
-fn external_ppxs_to_run(options: &CompilerOptions) -> Vec<String> {
-    options.external_ppxs.clone()
-}
-
 /// `Ast_mapper.ppx_context` (ast_mapper.ml:571-640): the
 /// `[@@@ocaml.ppx.context]` record the rewriters receive.
 fn ppx_context_attribute(
@@ -1837,7 +1115,7 @@ pub fn apply_external_structure_ppxs(
 ) -> Result<Structure> {
     use crate::binary_ast::parsetree0 as pt0;
     arena.set_builtin_spice(options.builtin_spice());
-    let ppxs = external_ppxs_to_run(options);
+    let ppxs = &options.external_ppxs;
     if ppxs.is_empty() {
         // The builtin spice mapper stands in for a configured spice PPX, and
         // OCaml hands that PPX the Parsetree0 form and reads it back
@@ -1861,7 +1139,7 @@ pub fn apply_external_structure_ppxs(
         },
     );
     let output = run_external_ppxs(
-        &ppxs,
+        ppxs,
         filename,
         |path| {
             crate::binary_ast::writer::write_external_ppx_input(
@@ -1900,7 +1178,7 @@ pub fn apply_external_signature_ppxs(
 ) -> Result<Signature> {
     use crate::binary_ast::parsetree0 as pt0;
     arena.set_builtin_spice(options.builtin_spice());
-    let ppxs = external_ppxs_to_run(options);
+    let ppxs = &options.external_ppxs;
     if ppxs.is_empty() {
         // See `apply_external_structure_ppxs` (cmd_ppx_apply.ml:112-125).
         if options.builtin_spice() {
@@ -1922,7 +1200,7 @@ pub fn apply_external_signature_ppxs(
         },
     );
     let output = run_external_ppxs(
-        &ppxs,
+        ppxs,
         filename,
         |path| {
             crate::binary_ast::writer::write_external_ppx_input(
@@ -1998,15 +1276,6 @@ pub fn experimental_let_unwrap_for_structure(
 ) -> bool {
     options.experimental_let_unwrap
         || extract_file_config_from_structure(structure, arena).let_unwrap
-}
-
-fn experimental_let_unwrap_for_signature(
-    signature: &Signature,
-    options: &CompilerOptions,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    options.experimental_let_unwrap
-        || extract_file_config_from_signature(signature, arena).let_unwrap
 }
 
 pub(crate) fn debug_for_structure(
@@ -2184,11 +1453,15 @@ pub fn emit_parser_warnings(
 
 fn write_stderr(output: &str) {
     if !output.is_empty() {
-        let output = crate::source_text::decode_internal_utf8_runs(output);
-        let mut stderr = std::io::stderr();
-        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
-        let _ = std::io::Write::flush(&mut stderr);
+        write_stderr_raw(&crate::source_text::decode_internal_utf8_runs(output));
     }
+}
+
+/// Write `output` to stderr as is. Failures to write diagnostics are ignored.
+fn write_stderr_raw(output: &str) {
+    let mut stderr = std::io::stderr();
+    let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+    let _ = std::io::Write::flush(&mut stderr);
 }
 
 /// Like [`emit_parser_warnings`], appending the reports to `out`.
@@ -2416,10 +1689,10 @@ fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &Pa
     let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
         return false;
     };
-    match (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()) {
-        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false) => true,
-        _ => false,
-    }
+    matches!(
+        (arena.get_string(*ctor_name_idx), !payload.txt.is_empty()),
+        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false)
+    )
 }
 
 fn invalid_enabled_let_unwrap_in_bindings(
@@ -2951,6 +2224,19 @@ fn format_reparse_warnings(type_ctx: &TypeContext) -> String {
     output
 }
 
+/// Run `f` with the typed environment recorded for an error, or an empty one
+/// when none was captured. Error printers only read the environment.
+fn with_typed_env_or_empty<R>(
+    type_ctx: &TypeContext,
+    env: Option<crate::types::typedtree::EnvRef>,
+    f: impl FnOnce(&crate::types::Env) -> R,
+) -> R {
+    match env.and_then(|env| type_ctx.get_typed_env(env)) {
+        Some(env) => f(&env),
+        None => f(&crate::types::Env::empty()),
+    }
+}
+
 fn type_mod_error_to_anyhow_styled(
     err: TypeModError,
     type_ctx: &TypeContext,
@@ -2959,17 +2245,20 @@ fn type_mod_error_to_anyhow_styled(
     filename: &str,
     suppress_info_style: bool,
 ) -> anyhow::Error {
-    match &err {
+    let err = match err {
         TypeModError::CoreError(TypeCoreError::ModuleError(module_error)) => {
-            type_mod_error_to_anyhow(
-                (**module_error).clone(),
+            return type_mod_error_to_anyhow(
+                *module_error,
                 type_ctx,
                 arena,
                 source,
                 filename,
                 suppress_info_style,
-            )
+            );
         }
+        err => err,
+    };
+    match &err {
         TypeModError::CoreError(TypeCoreError::UncurriedArityMismatch {
             loc,
             function_type,
@@ -3055,12 +2344,10 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_or_pattern_type_clash(ppf, type_ctx, &env, id.name(), trace)
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_or_pattern_type_clash(ppf, type_ctx, env, id.name(), trace)
+                })
             });
             UserDiagnostic::new(
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
@@ -3557,7 +2844,7 @@ fn type_mod_error_to_anyhow_styled(
             env,
         }) => {
             let env = env.and_then(|env| type_ctx.get_typed_env(env));
-            let mut report = match env {
+            let report = match env {
                 Some(env) => format_expr_type_clash_report_ocaml(
                     type_ctx, arena, source, filename, *loc, trace, context, &env,
                 ),
@@ -3565,15 +2852,6 @@ fn type_mod_error_to_anyhow_styled(
                     type_ctx, arena, source, filename, *loc, trace, context,
                 ),
             };
-            // Style escapes embedded in the message follow OCaml's
-            // `Color.color_enabled`, which a printed warning switches to the
-            // configured `-color` value (compiler/ext/misc.ml:337-392).
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;31m", "")
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::PatternTypeClash {
@@ -3581,22 +2859,13 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_pattern_type_clash(ppf, type_ctx, &env, trace)
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_pattern_type_clash(ppf, type_ctx, env, trace)
+                })
             });
-            let mut report =
+            let report =
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;31m", "")
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[2m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::RecursiveLocalConstraint { loc, trace }) => {
@@ -3641,23 +2910,13 @@ fn type_mod_error_to_anyhow_styled(
             context,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_not_subtype(ppf, type_ctx, &env, trace, trace2, context.as_ref())
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_not_subtype(ppf, type_ctx, env, trace, trace2, context.as_ref())
+                })
             });
-            let mut report =
+            let report =
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
-            // See `ExprTypeClash`: style escapes follow `Color.color_enabled`.
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;31m", "")
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[2m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::LessGeneral {
@@ -3666,12 +2925,10 @@ fn type_mod_error_to_anyhow_styled(
             trace,
             env,
         }) => {
-            let env = env
-                .and_then(|env| type_ctx.get_typed_env(env))
-                .map(|env| (*env).clone())
-                .unwrap_or_else(crate::types::Env::empty);
-            let message = type_clash::render_error_message(|ppf| {
-                type_clash::print_less_general(ppf, type_ctx, &env, kind, trace)
+            let message = with_typed_env_or_empty(type_ctx, *env, |env| {
+                type_clash::render_error_message(|ppf| {
+                    type_clash::print_less_general(ppf, type_ctx, env, kind, trace)
+                })
             });
             UserDiagnostic::new(
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
@@ -3786,7 +3043,6 @@ fn type_mod_error_to_anyhow_styled(
                     *loc,
                     label,
                     *ty,
-                    suppress_info_style,
                 ),
                 2,
             )
@@ -3892,7 +3148,7 @@ fn type_mod_error_to_anyhow_styled(
             alternatives,
             module_suggestion,
         }) => {
-            let mut report = format_unbound_value_report(
+            let report = format_unbound_value_report(
                 arena,
                 source,
                 filename,
@@ -3902,12 +3158,6 @@ fn type_mod_error_to_anyhow_styled(
                 alternatives,
                 module_suggestion.as_deref(),
             );
-            // See `ExprTypeClash`: style escapes follow `Color.color_enabled`.
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::UnboundModule {
@@ -4821,34 +4071,30 @@ fn type_mod_error_to_anyhow_styled(
 }
 
 fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> anyhow::Error {
-    if let PersistentEnvError::InterfaceRead { message } = error {
-        let mut output = String::new();
-        push_compiler_report_intro(&mut output, "We've found a bug for you!");
-        push_compiler_report_location(&mut output, filename);
-        output.push_str("  ");
-        output.push_str(&message);
-        output.push_str("\n\n");
-        return UserDiagnostic::new(output, 2).into();
-    }
-
     let message = match error {
-        PersistentEnvError::InterfaceRead { .. } => unreachable!(),
+        PersistentEnvError::InterfaceRead { message } => {
+            let mut output = String::new();
+            push_compiler_report_intro(&mut output, "We've found a bug for you!");
+            push_compiler_report_location(&mut output, filename);
+            output.push_str("  ");
+            output.push_str(&message);
+            output.push_str("\n\n");
+            return UserDiagnostic::new(output, 2).into();
+        }
         PersistentEnvError::IllegalRenaming {
             expected, actual, ..
         } => format!(
             "You referred to the module {expected}, but we've found one called {actual} instead.\nIs the name's casing right?"
         ),
+        // OCaml reports the stored persistent-structure filenames directly
+        // through `Location.print_filename` (compiler/ml/env.ml:2110-2119).
         PersistentEnvError::InconsistentImport {
             name,
             source1,
             source2,
-        } => {
-            let source1 = format_persistent_env_path(&source1);
-            let source2 = format_persistent_env_path(&source2);
-            format!(
-                "\x1b[1;33mIt's possible that your build is stale.\x1b[0m\nTry to clean the artifacts and build again?\n\n\x1b[1;33mHere's the original error message\x1b[0m\nThe files {source1}\nand {source2}\nmake inconsistent assumptions over interface {name}"
-            )
-        }
+        } => format!(
+            "\x1b[1;33mIt's possible that your build is stale.\x1b[0m\nTry to clean the artifacts and build again?\n\n\x1b[1;33mHere's the original error message\x1b[0m\nThe files {source1}\nand {source2}\nmake inconsistent assumptions over interface {name}"
+        ),
     };
     UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
 }
@@ -4887,12 +4133,6 @@ fn check_module_path_resolution_errors(
     Ok(())
 }
 
-fn format_persistent_env_path(path: &str) -> String {
-    // OCaml reports the stored persistent-structure filename directly through
-    // `Location.print_filename` in compiler/ml/env.ml:2110-2119.
-    path.to_string()
-}
-
 fn push_compiler_report_intro(output: &mut String, intro: &str) {
     // OCaml compiler/ml/location.ml:88-95 colors the diagnostic intro with
     // the `error`, `warning`, or `info` tag after bsc's color mode has been
@@ -4925,11 +4165,7 @@ fn format_compiler_error_report_for_file(filename: &str, message: &str) -> Strin
     push_compiler_report_intro(&mut output, "We've found a bug for you!");
     push_compiler_report_location(&mut output, filename);
     let message = code_frame::apply_message_styles(message);
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, &message);
     output.push('\n');
     output
 }
@@ -4942,9 +4178,6 @@ fn format_duplicate_type_label_report(
     label: &str,
     record_name: &Option<String>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let message = if let Some(record_name) = record_name {
         format!(
             "The field {INFO}{label}{RESET} is defined several times in the record {INFO}{record_name}{RESET}. Fields can only be added once to a record."
@@ -5161,15 +4394,7 @@ fn push_compiler_error_report_header_from_location(
     filename: &str,
     loc: &Location,
 ) {
-    push_compiler_report_intro(output, "We've found a bug for you!");
-    if !code_frame::has_printable_range(&loc.loc_start, &loc.loc_end) {
-        push_compiler_report_location(output, filename);
-    } else {
-        let location = code_frame::format_location(filename, &loc.loc_start, &loc.loc_end);
-        push_compiler_report_location(output, &location);
-        output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
-        output.push('\n');
-    }
+    push_compiler_error_report_header_from_external_location(output, Some(source), filename, loc);
 }
 
 fn push_compiler_error_report_header(
@@ -5211,11 +4436,7 @@ fn format_compiler_error_report_from_location(
     push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
 
     let message = code_frame::apply_message_styles(message);
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, &message);
     output.push('\n');
     output
 }
@@ -5259,11 +4480,7 @@ fn format_compiler_error_report_from_external_location(
         loc,
     );
 
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, message);
     output.push('\n');
     output
 }
@@ -5280,11 +4497,7 @@ fn format_compiler_error_report(
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     let message = code_frame::apply_message_styles(message);
-    for line in message.lines() {
-        output.push_str("  ");
-        output.push_str(line);
-        output.push('\n');
-    }
+    push_indented_lines(&mut output, &message);
     output.push('\n');
     output
 }
@@ -5304,7 +4517,10 @@ pub fn error_extension_to_anyhow(
             2,
         )
         .into(),
-        _ => UserDiagnostic::new(String::new(), 2).into(),
+        // OCaml's `Location.Already_displayed_error` sentinel: exit with the
+        // error status without printing a report.
+        TypeCoreError::ExtensionAlreadyDisplayed => UserDiagnostic::new(String::new(), 2).into(),
+        other => unreachable!("builtin_extension_error returned {other:?}"),
     }
 }
 
@@ -5550,9 +4766,6 @@ fn format_unbound_type_constructor_report(
     lid: &Longident,
     alternatives: &[String],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let name = format_longident_for_report(arena, lid);
     let spellcheck_name = arena.get_string(lid.last_idx());
     if let Some(hint) = super_spellcheck_hint(spellcheck_name, alternatives) {
@@ -6133,8 +5346,6 @@ fn format_compiler_error_report_with_bare_reset_lines(
     loc: LocIdx,
     message: &str,
 ) -> String {
-    const RESET: &str = "\x1b[0m";
-
     let mut output = String::new();
 
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
@@ -6254,10 +5465,7 @@ fn emit_type_warnings(
         return;
     }
 
-    let mut stderr = std::io::stderr();
-    let output = format_type_warnings(arena, source, filename, warnings);
-    let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
-    let _ = std::io::Write::flush(&mut stderr);
+    write_stderr_raw(&format_type_warnings(arena, source, filename, warnings));
 }
 
 /// [`format_type_warnings`], reading the source only when there is a
@@ -6350,10 +5558,6 @@ fn format_wrong_name_report(
     alternatives: &[String],
     jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some(jsx_component_info) = jsx_component_info {
         let mut message = String::new();
         if name == "children" {
@@ -6534,9 +5738,6 @@ fn format_unbound_value_report(
     alternatives: &[String],
     module_suggestion: Option<&str>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let mut message = String::new();
     if let Some(qualifier) = qualifier {
         message.push_str("The value ");
@@ -6602,9 +5803,6 @@ fn format_unbound_module_report(
     name: &str,
     alternatives: &[String],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     let mut message = if name == "Str" {
         format!(
             "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}RegExp{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
@@ -6685,13 +5883,19 @@ fn format_unbound_constructor_report(
     format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
-fn format_message_with_compiler_indentation(message: &str) -> String {
-    let mut output = String::new();
+/// Append each line of `message` indented by two spaces, as the compiler's
+/// report body prints it.
+fn push_indented_lines(output: &mut String, message: &str) {
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
         output.push('\n');
     }
+}
+
+fn format_message_with_compiler_indentation(message: &str) -> String {
+    let mut output = String::new();
+    push_indented_lines(&mut output, message);
     output
 }
 
@@ -6732,25 +5936,31 @@ fn spellcheck_choices<'a>(name: &str, alternatives: &'a [String]) -> Vec<&'a str
         5 | 6 => 2,
         _ => 3,
     };
+    // Ties are collected in order and reversed once at the end, which yields
+    // OCaml's prepend-on-tie order.
     let mut best: Vec<&str> = Vec::new();
     let mut best_dist = usize::MAX;
+    let mut scratch = Vec::new();
     for candidate in alternatives {
-        let Some(dist) = ocaml_edit_distance(name, candidate, cutoff) else {
+        let Some(dist) = ocaml_edit_distance(name, candidate, cutoff, &mut scratch) else {
             continue;
         };
         if dist < best_dist {
-            best = vec![candidate.as_str()];
+            best.clear();
+            best.push(candidate.as_str());
             best_dist = dist;
         } else if dist == best_dist {
-            best.insert(0, candidate.as_str());
+            best.push(candidate.as_str());
         }
     }
+    best.reverse();
     best
 }
 
 /// OCaml `Misc.edit_distance` (compiler/ext/misc.ml:195-238): Levenshtein
-/// distance with adjacent transpositions, bounded by `cutoff`.
-fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize) -> Option<usize> {
+/// distance with adjacent transpositions, bounded by `cutoff`. `scratch` is a
+/// reusable buffer for the `(la + 1) * (lb + 1)` distance matrix.
+fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize, scratch: &mut Vec<usize>) -> Option<usize> {
     let a = a.as_bytes();
     let b = b.as_bytes();
     let (la, lb) = (a.len(), b.len());
@@ -6758,27 +5968,32 @@ fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize) -> Option<usize> {
     if la.abs_diff(lb) > cutoff {
         return None;
     }
-    let mut m = vec![vec![cutoff + 1; lb + 1]; la + 1];
-    m[0][0] = 0;
-    for (i, row) in m.iter_mut().enumerate().skip(1) {
-        row[0] = i;
+    let width = lb + 1;
+    scratch.clear();
+    scratch.resize((la + 1) * width, cutoff + 1);
+    let m = &mut scratch[..];
+    let at = |i: usize, j: usize| i * width + j;
+    m[0] = 0;
+    for i in 1..=la {
+        m[at(i, 0)] = i;
     }
     for j in 1..=lb {
-        m[0][j] = j;
+        m[at(0, j)] = j;
     }
     for i in 1..=la {
         let lo = 1.max(i.saturating_sub(cutoff + 1));
         let hi = lb.min(i + cutoff + 1);
         for j in lo..=hi {
             let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (1 + m[i - 1][j].min(m[i][j - 1])).min(m[i - 1][j - 1] + cost);
+            let mut best =
+                (1 + m[at(i - 1, j)].min(m[at(i, j - 1)])).min(m[at(i - 1, j - 1)] + cost);
             if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(m[i - 2][j - 2] + cost);
+                best = best.min(m[at(i - 2, j - 2)] + cost);
             }
-            m[i][j] = best;
+            m[at(i, j)] = best;
         }
     }
-    let result = m[la][lb];
+    let result = m[at(la, lb)];
     (result <= cutoff).then_some(result)
 }
 
@@ -6790,9 +6005,6 @@ fn format_label_multiply_defined_report(
     label: &str,
     jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some(jsx_component_info) = jsx_component_info {
         let mut message = String::new();
         message.push_str("The prop ");
@@ -6898,10 +6110,6 @@ fn format_expr_type_clash_report(
     trace: &[(TypeExprRef, TypeExprRef)],
     context: &Option<TypeClashContext>,
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some((actual_arity, expected_arity)) =
         expr_type_clash_uncurried_arity_mismatch(type_ctx, trace)
     {
@@ -7264,24 +6472,13 @@ fn format_expr_type_clash_report(
         Some(TypeClashContext::ComparisonOperator)
             | Some(TypeClashContext::IfCondition)
             | Some(TypeClashContext::StatementFunctionCall)
-    ) {
-        let message = format_type_clash_message_with_empty_blank_lines(&message);
-        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if matches!(
-        context,
-        Some(TypeClashContext::LetUnwrapReturn)
+            | Some(TypeClashContext::LetUnwrapReturn)
             | Some(TypeClashContext::SwitchExpression)
             | Some(TypeClashContext::JsxComponent)
     ) || plain_function_to_component
-    {
-        let message = format_type_clash_message_with_empty_blank_lines(&message);
-        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if type_clash_string_to_polyvariant(type_ctx, trace)
+        || type_clash_string_to_polyvariant(type_ctx, trace)
         || type_clash_string_to_variant(type_ctx, trace)
-    {
-        let message = format_type_clash_message_with_empty_blank_lines(&message);
-        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if type_clash_array_to_tuple(type_ctx, trace)
+        || type_clash_array_to_tuple(type_ctx, trace)
         || type_clash_expected_unit_actual(type_ctx, trace).is_some()
         || type_clash_actual_promise(type_ctx, trace)
     {
@@ -7294,62 +6491,6 @@ fn format_expr_type_clash_report(
     }
 }
 
-fn format_pattern_type_clash_report(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    trace: &[(TypeExprRef, TypeExprRef)],
-) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
-    let Some((actual, expected)) = trace.first().copied() else {
-        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
-    };
-
-    let mut message = String::new();
-    let mut printer = type_clash_printer(type_ctx, trace);
-    message.push_str("This pattern matches values of type ");
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        true,
-        ERROR,
-        actual,
-        &mut message,
-        &mut printer,
-    );
-    message.push('\n');
-    message.push_str("but a pattern was expected which matches values of type ");
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        false,
-        INFO,
-        expected,
-        &mut message,
-        &mut printer,
-    );
-    if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
-        message.push('\n');
-        message.push_str("The type constructor ");
-        message.push_str(&path);
-        message.push_str(" would escape its scope");
-        return format_compiler_error_report(arena, source, filename, loc, &message);
-    }
-    append_pattern_option_type_clash_help(type_ctx, actual, expected, &mut message);
-    let is_polyvariant_explanation =
-        append_polyvariant_type_clash_help(type_ctx, trace, &mut message);
-    if !is_polyvariant_explanation {
-        append_incompatible_type_parts(type_ctx, trace, &mut message);
-    }
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
 fn format_recursive_local_constraint_report(
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -7358,9 +6499,6 @@ fn format_recursive_local_constraint_report(
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
@@ -7389,51 +6527,6 @@ fn format_recursive_local_constraint_report(
         &mut printer,
     );
     append_incompatible_type_parts(type_ctx, trace, &mut message);
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
-fn format_or_pattern_type_clash_report(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    id: &Ident,
-    trace: &[(TypeExprRef, TypeExprRef)],
-) -> String {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-
-    let Some((left, right)) = trace.first().copied() else {
-        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
-    };
-
-    let mut message = String::new();
-    let mut printer = type_clash_printer(type_ctx, trace);
-    message.push_str("The variable ");
-    message.push_str(id.name());
-    message.push_str(" on the left-hand side of this or-pattern has type ");
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        true,
-        ERROR,
-        left,
-        &mut message,
-        &mut printer,
-    );
-    message.push('\n');
-    message.push_str("but on the right-hand side it has type ");
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        false,
-        INFO,
-        right,
-        &mut message,
-        &mut printer,
-    );
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
@@ -7485,9 +6578,6 @@ fn format_label_mismatch_report(
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
     let message = format!(
         "The record field {} belongs to the type {ERROR}{}{RESET}\nbut is mixed here with fields of type {INFO}{}{RESET}",
         format_longident_for_report(arena, lid),
@@ -7509,50 +6599,6 @@ fn format_polymorphic_label_report(
         format_longident_for_report(arena, lid)
     );
     format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
-fn append_pattern_option_type_clash_help(
-    type_ctx: &TypeContext,
-    actual: TypeExprRef,
-    expected: TypeExprRef,
-    message: &mut String,
-) {
-    const INFO: &str = "\x1b[1;33m";
-    const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
-
-    let actual_is_option =
-        type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option());
-    let expected_is_option =
-        type_is_predef_path(type_ctx, expected, &crate::types::predef::path_option());
-
-    if actual_is_option && !expected_is_option {
-        message.push_str("\n\nYou're expecting the value you're pattern matching on to be an ");
-        message.push_str(INFO);
-        message.push_str("option");
-        message.push_str(RESET);
-        message.push_str(", but the value is actually not an option.\n");
-        message.push_str("Change your pattern match to work on the concrete value (remove ");
-        message.push_str(ERROR);
-        message.push_str("Some(_)");
-        message.push_str(RESET);
-        message.push_str(" or ");
-        message.push_str(ERROR);
-        message.push_str("None");
-        message.push_str(RESET);
-        message.push_str(" from the pattern) to make it work.");
-    } else if expected_is_option && !actual_is_option {
-        message.push_str("\n\nThe value you're pattern matching on here is wrapped in an ");
-        message.push_str(INFO);
-        message.push_str("option");
-        message.push_str(RESET);
-        message.push_str(", but you're trying to match on the actual value.\n");
-        message.push_str("Wrap the highlighted pattern in ");
-        message.push_str(INFO);
-        message.push_str("Some()");
-        message.push_str(RESET);
-        message.push_str(" to make it work.");
-    }
 }
 
 // Format's default margin is 78. The Location reporter adds two columns
@@ -7579,8 +6625,6 @@ fn type_clash_visible_width(text: &str) -> usize {
 
 fn wrap_type_clash_headings(message: &str) -> String {
     const MARGIN: usize = 78;
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
     let mut lines = message.splitn(3, '\n');
     let Some(actual) = lines.next() else {
         return message.to_string();
@@ -7642,25 +6686,6 @@ fn type_clash_printer<'a>(
     printer
 }
 
-fn append_type_clash_type(
-    type_ctx: &TypeContext,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    actual_side: bool,
-    color: &str,
-    ty: TypeExprRef,
-    message: &mut String,
-) {
-    append_type_clash_type_with_printer(
-        type_ctx,
-        trace,
-        actual_side,
-        color,
-        ty,
-        message,
-        &mut TypeExprPrinter::new(type_ctx),
-    );
-}
-
 fn append_type_clash_type_with_printer(
     type_ctx: &TypeContext,
     trace: &[(TypeExprRef, TypeExprRef)],
@@ -7670,9 +6695,6 @@ fn append_type_clash_type_with_printer(
     message: &mut String,
     printer: &mut TypeExprPrinter<'_>,
 ) {
-    const DIM: &str = "\x1b[2m";
-    const RESET: &str = "\x1b[0m";
-
     let original_ty = ty;
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
     let ty_text = printer.format(ty);
@@ -7709,8 +6731,6 @@ fn append_type_clash_type_without_alias_expansion(
     ty: TypeExprRef,
     message: &mut String,
 ) {
-    const RESET: &str = "\x1b[0m";
-
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
     message.push_str(color);
     message.push_str(&format_type_expr(type_ctx, ty));
@@ -7870,404 +6890,6 @@ fn expand_promise_compat_alias(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeE
     current
 }
 
-fn format_not_subtype_report(
-    type_ctx: &TypeContext,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    trace: &[(TypeExprRef, TypeExprRef)],
-    context: &Option<crate::types::SubtypeContext>,
-) -> String {
-    let Some((left, right)) = trace.first().copied() else {
-        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
-    };
-
-    let mut message = format!(
-        "Type {} is not a subtype of {} ",
-        format_not_subtype_head_type(type_ctx, left),
-        format_not_subtype_head_type(type_ctx, right)
-    );
-    if let Some(extra) = format_subtype_context(context) {
-        message.push_str("\n\n");
-        message.push_str(&extra);
-        if extra.is_empty() {
-            message.push('\n');
-        }
-        return format_compiler_error_report_for_subtype_context(
-            arena, source, filename, loc, &message,
-        );
-    }
-
-    format_compiler_error_report(arena, source, filename, loc, &message)
-}
-
-fn format_not_subtype_head_type(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
-    let ty_text = format_type_expr(type_ctx, ty);
-    if let Some(expansion) = type_alias_full_expansion(type_ctx, ty)
-        && type_is_polyvariant(type_ctx, expansion)
-        && !type_expansion_same(type_ctx, ty, expansion)
-    {
-        format!("{ty_text} = {}", format_type_expr(type_ctx, expansion))
-    } else {
-        ty_text
-    }
-}
-
-fn format_subtype_context(context: &Option<crate::types::SubtypeContext>) -> Option<String> {
-    use crate::types::SubtypeContext;
-    use crate::types::ctype::{
-        RecordFieldSubtypeViolation, SubtypeTypeKind, VariantConfigurationIssue,
-        VariantConstructorAsPayload, VariantRuntimeRepresentationIssue,
-    };
-
-    const ERROR: &str = "\x1b[1;31m";
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
-    fn variant_as_payload_name(payload: VariantConstructorAsPayload) -> &'static str {
-        match payload {
-            VariantConstructorAsPayload::String => "string",
-            VariantConstructorAsPayload::Int => "int",
-            VariantConstructorAsPayload::Float => "float",
-            VariantConstructorAsPayload::BigInt => "bigint",
-            VariantConstructorAsPayload::Bool => "bool",
-            VariantConstructorAsPayload::Null => "null",
-            VariantConstructorAsPayload::Undefined => "undefined",
-        }
-    }
-
-    fn subtype_type_kind_name(kind: SubtypeTypeKind) -> &'static str {
-        match kind {
-            SubtypeTypeKind::Abstract => "an abstract type",
-            SubtypeTypeKind::Record => "a record",
-            SubtypeTypeKind::Variant => "a variant",
-            SubtypeTypeKind::Open => "an open type",
-        }
-    }
-
-    match context {
-        Some(SubtypeContext::CoercionTargetVariantNotUnboxed {
-            variant_name,
-            primitive,
-        }) => Some(format!(
-            "The variant {INFO}{}{RESET} is not unboxed, so it cannot be coerced to a {INFO}{}{RESET}. \nFix this by adding the {INFO}@unboxed{RESET} attribute to the variant {INFO}{}{RESET}.",
-            variant_name.last(),
-            primitive.last(),
-            variant_name.last()
-        )),
-        Some(SubtypeContext::CoercionTargetVariantDoesNotCoverType {
-            variant_name,
-            primitive,
-        }) => {
-            let primitive_name = primitive.last();
-            let mut chars = primitive_name.chars();
-            let capitalized = match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            };
-            Some(format!(
-                "The variant {INFO}{}{RESET} is unboxed, but has no catch-all case for the primitive {INFO}{primitive_name}{RESET}, and therefore does not cover all values of type {INFO}{primitive_name}{RESET}. \nFix this by adding a catch-all for {INFO}{}{RESET} to {INFO}{primitive_name}{RESET}, like {INFO}{capitalized}({primitive_name}){RESET}.",
-                variant_name.last(),
-                variant_name.last()
-            ))
-        }
-        Some(SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
-            variant_name,
-            issues,
-        }) => {
-            let mut output = String::new();
-            for issue in issues {
-                let mut item = String::new();
-                match issue {
-                    VariantRuntimeRepresentationIssue::CannotCoerceNonUnboxedWithPayload {
-                        constructor_name,
-                        expected_typename,
-                    } => {
-                        item.push_str(&format!(
-                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has a payload, but the variant itself is not unboxed. \nThis means that the constructor {INFO}{constructor_name}{RESET} will be encoded as an object at runtime, which is not compatible with {INFO}{}{RESET}.",
-                            variant_name.last(),
-                            expected_typename.last()
-                        ));
-                    }
-                    VariantRuntimeRepresentationIssue::InlineRecordCannotBeCoerced {
-                        constructor_name,
-                    } => {
-                        item.push_str(&format!(
-                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has an inline record as payload. Currently, inline records cannot be coerced.",
-                            variant_name.last()
-                        ));
-                    }
-                    VariantRuntimeRepresentationIssue::AsPayloadNotEligibleForCoercion {
-                        constructor_name,
-                        expected_typename,
-                        as_payload,
-                    } => {
-                        item.push_str(&format!(
-                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has an {INFO}@as{RESET} payload that has a runtime representation of {INFO}{}{RESET}, which is not compatible with the expected {INFO}{}{RESET}.",
-                            variant_name.last(),
-                            variant_as_payload_name(*as_payload),
-                            expected_typename.last()
-                        ));
-                    }
-                    VariantRuntimeRepresentationIssue::MismatchedUnboxedPayload { .. } => {}
-                    VariantRuntimeRepresentationIssue::MismatchedAsPayload {
-                        constructor_name,
-                        expected_typename,
-                        as_payload,
-                    } => {
-                        item.push_str(&format!(
-                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has ",
-                            variant_name.last()
-                        ));
-                        if let Some(payload) = as_payload {
-                            item.push_str(&format!(
-                                "an {INFO}@as{RESET} payload that gives it the runtime type of {INFO}{}{RESET}.",
-                                variant_as_payload_name(*payload)
-                            ));
-                        } else {
-                            item.push_str(&format!(
-                                "no {INFO}@as{RESET} payload, which makes it a {INFO}string{RESET} at runtime."
-                            ));
-                        }
-                        item.push_str(&format!(
-                            "\nThat runtime representation is not compatible with the expected runtime representation of {INFO}{}{RESET}.",
-                            expected_typename.last()
-                        ));
-                        item.push_str(&format!(
-                            "\n\nFix this by making sure all constructors in variant {INFO}{}{RESET} has a runtime representation of {INFO}{}{RESET}.",
-                            variant_name.last(),
-                            expected_typename.last()
-                        ));
-                    }
-                }
-                if item.is_empty() {
-                    continue;
-                }
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&item);
-            }
-            (!issues.is_empty()).then_some(output)
-        }
-        Some(SubtypeContext::VariantConfigurationsMismatch {
-            left_variant_name,
-            right_variant_name,
-            issue,
-        }) => match issue {
-            VariantConfigurationIssue::UnboxedConfigNotMatching {
-                left_unboxed,
-                right_unboxed,
-            } => {
-                fn unboxed_status(unboxed: bool) -> String {
-                    if unboxed {
-                        format!("{ERROR}not {RESET}unboxed")
-                    } else {
-                        format!("{ERROR}{RESET}unboxed")
-                    }
-                }
-
-                Some(format!(
-                    "The variants have different {INFO}@unboxed{RESET} configurations.\n- Variant {INFO}{}{RESET} is {}.\n- Variant {INFO}{}{RESET} is {}.\n\nFix this by making sure the variants either both have, or don't have, the {INFO}@unboxed{RESET} attribute.",
-                    left_variant_name.last(),
-                    unboxed_status(*left_unboxed),
-                    right_variant_name.last(),
-                    unboxed_status(*right_unboxed),
-                ))
-            }
-            VariantConfigurationIssue::TagNameNotMatching {
-                left_tag,
-                right_tag,
-            } => {
-                fn tag_status(tag: &Option<String>, variant_name: &crate::types::Path) -> String {
-                    match tag {
-                        Some(tag) => format!(
-                            "{INFO}{}{RESET} has tag {INFO}{tag}{RESET}.",
-                            variant_name.last()
-                        ),
-                        None => {
-                            format!("{INFO}{}{RESET} has no explicit tag.", variant_name.last())
-                        }
-                    }
-                }
-
-                Some(format!(
-                    "The variants have different {INFO}@tag{RESET} configurations.\n- {}\n- {}\n\nFix this by making sure the variants either have the exact same {INFO}@tag{RESET} configuration, or no {INFO}@tag{RESET} at all.",
-                    tag_status(left_tag, left_variant_name),
-                    tag_status(right_tag, right_variant_name),
-                ))
-            }
-            VariantConfigurationIssue::IncompatibleConstructorCount { constructor_names } => {
-                let total_constructor_count = constructor_names.len();
-                let names_to_print = constructor_names.iter().take(3).collect::<Vec<_>>();
-                let not_printed_constructor_count =
-                    total_constructor_count.saturating_sub(names_to_print.len());
-                let mut names = names_to_print
-                    .iter()
-                    .map(|name| format!("{INFO}{name}{RESET}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if not_printed_constructor_count > 0 {
-                    names.push_str(&format!(" (+{not_printed_constructor_count} more)"));
-                }
-                Some(format!(
-                    "{INFO}{}{RESET} has {total_constructor_count} constructor{} that {INFO}{}{RESET} does not have: {names}\nTherefore, it is not possible for {INFO}{}{RESET} to represent {INFO}{}{RESET}.",
-                    left_variant_name.last(),
-                    if total_constructor_count == 1 {
-                        ""
-                    } else {
-                        "s"
-                    },
-                    right_variant_name.last(),
-                    right_variant_name.last(),
-                    left_variant_name.last(),
-                ))
-            }
-        },
-        Some(SubtypeContext::DifferentTypeKinds {
-            left_typename,
-            right_typename,
-            left_type_kind,
-            right_type_kind,
-        }) => Some(format!(
-            "The types of {INFO}{}{RESET} and {INFO}{}{RESET} are different:\n- {INFO}{}{RESET} is {}\n- {INFO}{}{RESET} is {}",
-            left_typename.last(),
-            right_typename.last(),
-            left_typename.last(),
-            subtype_type_kind_name(*left_type_kind),
-            right_typename.last(),
-            subtype_type_kind_name(*right_type_kind)
-        )),
-        Some(SubtypeContext::RecordFieldsMismatch {
-            left_record_name,
-            right_record_name,
-            issues,
-        }) => {
-            let mut output = format!(
-                "The record {INFO}{}{RESET} cannot be coerced to the record {INFO}{}{RESET} because:",
-                left_record_name.last(),
-                right_record_name.last()
-            );
-            for issue in issues {
-                output.push_str("\n- ");
-                match issue {
-                    RecordFieldSubtypeViolation::OptionalMismatch {
-                        label,
-                        left_optional,
-                        right_optional,
-                    } => {
-                        output.push_str(&format!("The field {INFO}{label}{RESET} "));
-                        match (*left_optional, *right_optional) {
-                            (true, false) => output.push_str(&format!(
-                                "is optional in record {INFO}{}{RESET}, but is not optional in record {INFO}{}{RESET}",
-                                left_record_name.last(),
-                                right_record_name.last()
-                            )),
-                            (false, true) => output.push_str(&format!(
-                                "is not optional in record {INFO}{}{RESET}, but is optional in record {INFO}{}{RESET}",
-                                left_record_name.last(),
-                                right_record_name.last()
-                            )),
-                            _ => {}
-                        }
-                    }
-                    RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
-                        label,
-                        left_as,
-                        right_as,
-                    } => {
-                        output.push_str(&format!(
-                            "Field {INFO}{label}{RESET} runtime representation"
-                        ));
-                        if let Some(as_name) = left_as {
-                            output.push_str(&format!(
-                                " is configured to be {INFO}\"{as_name}\"{RESET} (via the @as attribute)"
-                            ));
-                        } else {
-                            output.push_str(&format!(" is {INFO}\"{label}\"{RESET}"));
-                        }
-                        output.push_str(&format!(
-                            " in record {INFO}{}{RESET}, but in record {INFO}{}{RESET}",
-                            right_record_name.last(),
-                            left_record_name.last()
-                        ));
-                        if let Some(as_name) = right_as {
-                            output.push_str(&format!(
-                                " it is configured to be {INFO}\"{as_name}\"{RESET} (via the @as attribute)."
-                            ));
-                        } else {
-                            output.push_str(&format!(" it is {INFO}\"{label}\"{RESET}."));
-                        }
-                        output.push_str(" Runtime representations must match.");
-                    }
-                    RecordFieldSubtypeViolation::FieldMissing { label } => {
-                        output.push_str(&format!(
-                            "The field {INFO}{label}{RESET} is missing in record {INFO}{}{RESET}, but present in record {INFO}{}{RESET}",
-                            right_record_name.last(),
-                            left_record_name.last()
-                        ));
-                    }
-                }
-            }
-            Some(output)
-        }
-        _ => None,
-    }
-}
-
-fn format_compiler_error_report_with_empty_blank_lines(
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    message: &str,
-) -> String {
-    let mut output = String::new();
-
-    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
-
-    for line in message.lines() {
-        if !line.is_empty() {
-            output.push_str("  ");
-            output.push_str(line);
-        }
-        output.push('\n');
-    }
-    output.push('\n');
-    output
-}
-
-fn format_compiler_error_report_for_subtype_context(
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    loc: LocIdx,
-    message: &str,
-) -> String {
-    let mut output = String::new();
-
-    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
-
-    let mut blank_lines = 0;
-    for line in message.lines() {
-        if line.is_empty() {
-            if blank_lines == 0 {
-                output.push('\n');
-            } else {
-                output.push_str("  \n");
-            }
-            blank_lines += 1;
-        } else {
-            output.push_str("  ");
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    output.push('\n');
-    output
-}
-
 fn format_array_type_clash_message(message: &str) -> String {
     let mut output = String::new();
     let mut blank_lines = 0;
@@ -8358,9 +6980,6 @@ fn append_extra_type_clash_help(
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
-    const INFO: &str = "\x1b[1;33m";
-    const RESET: &str = "\x1b[0m";
-
     if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
         message.push('\n');
         message.push_str("The type constructor ");
@@ -11190,7 +9809,6 @@ fn format_apply_wrong_label_report(
     loc: LocIdx,
     label: &ParserArgLabel,
     ty: TypeExprRef,
-    suppress_info_style: bool,
 ) -> String {
     let label = match label {
         ParserArgLabel::Nolabel => None,
@@ -11200,12 +9818,7 @@ fn format_apply_wrong_label_report(
     let message = type_clash::render_error_message(|ppf| {
         type_clash::print_apply_wrong_label(ppf, type_ctx, label.as_deref(), ty)
     });
-    let report = format_compiler_error_report_formatted(arena, source, filename, loc, &message);
-    if suppress_info_style {
-        report.replace("\x1b[1;33m", "").replace("\x1b[0m", "")
-    } else {
-        report
-    }
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_field_not_optional_report(
@@ -17010,99 +15623,44 @@ pub fn typecheck_implementation_in_process(
 mod tests {
     use super::build_name_based_coercion;
     use super::extract_file_directives_from_structure;
-    use super::max_lambda_input_stamp;
     use super::normalize_load_path_entry;
-    use crate::ident::{Ident, IdentFlags};
+    use crate::ident::Ident;
     use crate::location::Location;
-    use crate::parse_arena::{LidentIdx, LocIdx, Located};
-    use crate::parser::ast::{Attributes, RecFlag};
     use crate::parser::{Parser, module};
     use crate::types::decl::{
-        AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind,
+        AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem,
     };
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::ModuleCoercion;
-    use crate::types::typedtree::{
-        EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, Structure, StructureItem,
-        StructureItemDesc, ValueBinding,
-    };
-    use crate::types::{TypeExprRef, ValueDescription};
     use std::path::PathBuf;
 
     #[test]
-    fn max_lambda_input_stamp_includes_typed_paths_and_signature_items() {
-        let binding_id = Ident::new("x", 4100, IdentFlags::NONE);
-        let expr_path_id = Ident::new("ExprPath", 4200, IdentFlags::NONE);
-        let sig_module_id = Ident::new("SigModule", 4300, IdentFlags::NONE);
-        let sig_alias_id = Ident::new("SigAlias", 4400, IdentFlags::NONE);
-
-        let binding = ValueBinding {
-            vb_pat: Pattern {
-                pat_desc: PatternDesc::Tpat_var(binding_id, Located::mknoloc("x".to_string())),
-                pat_loc: LocIdx::none(),
-                pat_extra: Default::default(),
-                pat_type: TypeExprRef::null(),
-                pat_env: EnvRef(0),
-                pat_attributes: Attributes::new(),
-            },
-            vb_expr: Expression {
-                exp_desc: ExpressionDesc::Texp_constant(crate::types::typedtree::Constant::Int(1)),
-                exp_loc: LocIdx::none(),
-                exp_extra: Default::default(),
-                exp_type: TypeExprRef::null(),
-                exp_env: EnvRef(0),
-                exp_attributes: Attributes::new(),
-            },
-            vb_attributes: Attributes::new(),
-            vb_loc: LocIdx::none(),
-        };
-
-        let eval_expr = Expression {
-            exp_desc: ExpressionDesc::Texp_ident(
-                TypePath::pident(expr_path_id),
-                Located::mknoloc(LidentIdx(0)),
-                std::sync::Arc::new(ValueDescription {
-                    val_type: TypeExprRef::null(),
-                    val_kind: ValueKind::ValReg,
-                    val_loc: Location::none(),
-                    val_attributes: Vec::new(),
-                    val_path: None,
-                }),
-            ),
-            exp_loc: LocIdx::none(),
-            exp_extra: Default::default(),
-            exp_type: TypeExprRef::null(),
-            exp_env: EnvRef(0),
-            exp_attributes: Attributes::new(),
-        };
-
-        let structure = Structure {
-            str_items: vec![
-                StructureItem {
-                    str_desc: StructureItemDesc::Tstr_value(RecFlag::Nonrecursive, vec![binding]),
-                    str_loc: LocIdx::none(),
-                    str_env: EnvRef(0),
-                },
-                StructureItem {
-                    str_desc: StructureItemDesc::Tstr_eval(eval_expr, Attributes::new()),
-                    str_loc: LocIdx::none(),
-                    str_env: EnvRef(0),
-                },
-            ],
-            str_type: vec![SignatureItem::SigModule(
-                sig_module_id,
-                ModuleDeclaration {
-                    md_type: ModuleType::MtyIdent(TypePath::pident(sig_alias_id)),
-                    md_attributes: Vec::new(),
-                    md_loc: Location::none(),
-                    md_path: None,
-                },
-                RecStatus::TrecNot,
-            )],
-            str_final_env: EnvRef(0),
-        };
-
-        assert_eq!(max_lambda_input_stamp(&structure), 4400);
+    fn spellcheck_choices_prepends_ties_like_ocaml() {
+        let alternatives: Vec<String> = ["abce", "zzzz", "abcf", "abcd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            super::spellcheck_choices("abcx", &alternatives),
+            vec!["abcd", "abcf", "abce"]
+        );
+        assert_eq!(
+            super::spellcheck_choices("abcd", &alternatives),
+            vec!["abcd"]
+        );
+        let mut scratch = Vec::new();
+        assert_eq!(
+            super::ocaml_edit_distance("abc", "bac", 1, &mut scratch),
+            Some(1)
+        );
+        assert_eq!(
+            super::ocaml_edit_distance("abcdef", "abc", 2, &mut scratch),
+            None
+        );
+        assert_eq!(
+            super::ocaml_edit_distance("kitten", "sitting", 3, &mut scratch),
+            Some(3)
+        );
     }
 
     #[test]
