@@ -826,8 +826,7 @@ pub fn compile(
     // so the namespace signature must be available in the PersistentEnv first.
     crate::build::phase_mark("compile-start");
     if build_state.build_mode().is_in_process() {
-        register_namespace_signatures(build_state);
-        register_source_fallback_paths(build_state);
+        prepare_registry_for_runtime_precompile(build_state);
 
         // Pre-compile all @rescript/runtime modules into the registry.
         // In in-process mode, the registry is the sole source of truth —
@@ -837,31 +836,14 @@ pub fn compile(
         // can require modules that the main build graph hasn't reached yet).
         let parent_span = compile_parent_span.clone();
         let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("rewatch-runtime-precompile".to_string())
-                .stack_size(256 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let _parent = parent_span.enter();
-                    pre_compile_runtime_modules(
-                        &build_state.module_registry,
-                        &build_state.build_state.compiler_info.runtime_path,
-                    )
-                })
-                .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
-
-            match handle.join() {
-                Ok(result) => result,
-                Err(panic) => {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-                }
-            }
+            spawn_runtime_precompile(scope, || {
+                let _parent = parent_span.enter();
+                pre_compile_runtime_modules(
+                    &build_state.module_registry,
+                    &build_state.build_state.compiler_info.runtime_path,
+                )
+            })
+            .and_then(join_runtime_precompile)
         });
         pre_compile_result?;
         crate::build::phase_mark("runtime-precompile-end");
@@ -2754,6 +2736,40 @@ pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommand
     register_source_fallback_paths(build_state);
 }
 
+/// Run the runtime pre-compilation `work` on a dedicated large-stack thread
+/// in `scope`; join it with [`join_runtime_precompile`].
+pub(crate) fn spawn_runtime_precompile<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    work: impl FnOnce() -> Result<()> + Send + 'scope,
+) -> Result<std::thread::ScopedJoinHandle<'scope, Result<()>>> {
+    std::thread::Builder::new()
+        .name("rewatch-runtime-precompile".to_string())
+        .stack_size(256 * 1024 * 1024)
+        .spawn_scoped(scope, work)
+        .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))
+}
+
+/// Wait for a [`spawn_runtime_precompile`] thread, turning a panic into an error.
+pub(crate) fn join_runtime_precompile(handle: std::thread::ScopedJoinHandle<'_, Result<()>>) -> Result<()> {
+    handle.join().unwrap_or_else(|panic| {
+        Err(anyhow!(
+            "runtime pre-compilation panicked: {}",
+            panic_message(panic.as_ref(), "unknown")
+        ))
+    })
+}
+
+/// The message of a caught panic payload, or `unknown` when it carries none.
+fn panic_message(panic: &(dyn std::any::Any + Send), unknown: &str) -> String {
+    if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        unknown.to_string()
+    }
+}
+
 /// The namespace of `package` and its `(short_name, internal_name)` module
 /// aliases, as `packages::parse_packages` generates the `.mlmap`.
 pub(crate) fn namespace_aliases(package: &packages::Package) -> Option<(String, Vec<(String, String)>)> {
@@ -3929,13 +3945,7 @@ fn compile_module_in_process_to_js_boundary(
             });
         }
         Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".to_string()
-            };
+            let msg = panic_message(panic.as_ref(), "unknown panic");
             return Err(anyhow!("Compilation panicked for {}: {}", module_name, msg));
         }
     };
@@ -4136,13 +4146,7 @@ fn finish_in_process_js_inner(
             return Err(anyhow!("JS compilation failed for {}: {}", module_name, e));
         }
         Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".to_string()
-            };
+            let msg = panic_message(panic.as_ref(), "unknown panic");
             return Err(anyhow!("JS compilation panicked for {}: {}", module_name, msg));
         }
     };

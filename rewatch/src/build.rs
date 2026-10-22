@@ -528,33 +528,18 @@ pub fn incremental_build_without_lock(
         let registry = std::mem::take(&mut build_state.module_registry);
         let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("rewatch-runtime-precompile".to_string())
-                .stack_size(256 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
-                    phase_mark("runtime-precompile-done");
-                    result
-                });
+            let handle = compile::spawn_runtime_precompile(scope, || {
+                let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
+                phase_mark("runtime-precompile-done");
+                result
+            });
             let result_asts = if incremental {
                 incremental::parse_and_plan(build_state, || pb.inc(1))
             } else {
                 parse::generate_asts(build_state, || pb.inc(1))
             };
             phase_mark("parse-asts-done");
-            let precompile_result = match handle {
-                Ok(handle) => handle.join().unwrap_or_else(|panic| {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-                }),
-                Err(err) => Err(anyhow!("failed to spawn runtime pre-compilation thread: {err}")),
-            };
+            let precompile_result = handle.and_then(compile::join_runtime_precompile);
             (result_asts, precompile_result)
         });
         build_state.module_registry = registry;
