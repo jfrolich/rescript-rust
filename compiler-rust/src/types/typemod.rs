@@ -12941,50 +12941,10 @@ fn normalize_module_alias_path(
     ctx: &crate::types::context::TypeContext,
     path: &Path,
 ) -> Path {
-    fn normalize_inner(
-        env: &Env,
-        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &crate::types::context::TypeContext,
-        path: &Path,
-    ) -> Path {
-        // OCaml compiler/ml/env.ml:903-914 normalizes dotted prefixes before
-        // asking `find_module ~alias:true` whether the complete path is itself
-        // an alias. This matters for namespace-backed aliases such as
-        // `Webapi.Fetch.Request`: `Webapi.Fetch` must normalize to
-        // `Webapi__Fetch` before the child component is selected.
-        let path = match path {
-            Path::Pdot(prefix, name, pos) => {
-                let normalized_prefix = normalize_inner(env, pers_env, ctx, prefix);
-                if normalized_prefix.same(prefix) {
-                    path.clone()
-                } else {
-                    Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
-                }
-            }
-            Path::Papply(functor, arg) => Path::Papply(
-                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, functor)),
-                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, arg)),
-            ),
-            Path::Pident(_) => path.clone(),
-        };
-
-        force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &path);
-        if let Some(alias_target) =
-            crate::types::typecore::alias_target_for_module_path(&path, env, pers_env, ctx)
-            && !alias_target.same(&path)
-        {
-            return normalize_inner(env, pers_env, ctx, &alias_target);
-        }
-
-        let env_normalized = env.normalize_path(&path);
-        if !env_normalized.same(&path) {
-            normalize_inner(env, pers_env, ctx, &env_normalized)
-        } else {
-            path
-        }
+    match normalize_module_alias_path_inner(env, pers_env, ctx, path, path, false) {
+        Ok(path) => path,
+        Err(_) => unreachable!("unchecked module alias normalization cannot fail"),
     }
-
-    normalize_inner(env, pers_env, ctx, path)
 }
 
 fn normalize_module_alias_path_checked(
@@ -12993,55 +12953,100 @@ fn normalize_module_alias_path_checked(
     ctx: &crate::types::context::TypeContext,
     path: &Path,
 ) -> Result<Path, (Path, Path)> {
-    fn normalize_inner(
-        env: &Env,
-        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &crate::types::context::TypeContext,
-        original: &Path,
-        path: &Path,
-    ) -> Result<Path, (Path, Path)> {
-        let path = match path {
-            Path::Pdot(prefix, name, pos) => {
-                let normalized_prefix = normalize_inner(env, pers_env, ctx, original, prefix)?;
-                if normalized_prefix.same(prefix) {
-                    path.clone()
-                } else {
-                    Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
-                }
-            }
-            Path::Papply(functor, arg) => Path::Papply(
-                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, original, functor)?),
-                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, original, arg)?),
-            ),
-            Path::Pident(id) if id.is_persistent() && !env.has_module_ident(id) => {
-                if let Some(pers) = pers_env.as_mut()
-                    && pers.find_pers_struct(id.name(), ctx).is_none()
-                    && pers.last_error().is_none()
-                {
-                    return Err((original.clone(), path.clone()));
-                }
+    normalize_module_alias_path_inner(env, pers_env, ctx, path, path, true)
+}
+
+/// Shared recursion for [`normalize_module_alias_path`] and
+/// [`normalize_module_alias_path_checked`]. When `check_missing` is set, a
+/// persistent root that cannot be found reports `Err((original, root))`;
+/// otherwise that probe is skipped entirely.
+fn normalize_module_alias_path_inner(
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+    original: &Path,
+    path: &Path,
+    check_missing: bool,
+) -> Result<Path, (Path, Path)> {
+    // OCaml compiler/ml/env.ml:903-914 normalizes dotted prefixes before
+    // asking `find_module ~alias:true` whether the complete path is itself
+    // an alias. This matters for namespace-backed aliases such as
+    // `Webapi.Fetch.Request`: `Webapi.Fetch` must normalize to
+    // `Webapi__Fetch` before the child component is selected.
+    let path = match path {
+        Path::Pdot(prefix, name, pos) => {
+            let normalized_prefix = normalize_module_alias_path_inner(
+                env,
+                pers_env,
+                ctx,
+                original,
+                prefix,
+                check_missing,
+            )?;
+            if normalized_prefix.same(prefix) {
                 path.clone()
+            } else {
+                Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
             }
-            _ => path.clone(),
-        };
-
-        force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &path);
-        if let Some(alias_target) =
-            crate::types::typecore::alias_target_for_module_path(&path, env, pers_env, ctx)
-            && !alias_target.same(&path)
-        {
-            return normalize_inner(env, pers_env, ctx, original, &alias_target);
         }
-
-        let env_normalized = env.normalize_path(&path);
-        if !env_normalized.same(&path) {
-            normalize_inner(env, pers_env, ctx, original, &env_normalized)
-        } else {
-            Ok(path)
+        Path::Papply(functor, arg) => Path::Papply(
+            std::sync::Arc::new(normalize_module_alias_path_inner(
+                env,
+                pers_env,
+                ctx,
+                original,
+                functor,
+                check_missing,
+            )?),
+            std::sync::Arc::new(normalize_module_alias_path_inner(
+                env,
+                pers_env,
+                ctx,
+                original,
+                arg,
+                check_missing,
+            )?),
+        ),
+        Path::Pident(id) if check_missing && id.is_persistent() && !env.has_module_ident(id) => {
+            if let Some(pers) = pers_env.as_mut()
+                && pers.find_pers_struct(id.name(), ctx).is_none()
+                && pers.last_error().is_none()
+            {
+                return Err((original.clone(), path.clone()));
+            }
+            path.clone()
         }
+        Path::Pident(_) => path.clone(),
+    };
+
+    force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &path);
+    if let Some(alias_target) =
+        crate::types::typecore::alias_target_for_module_path(&path, env, pers_env, ctx)
+        && !alias_target.same(&path)
+    {
+        return normalize_module_alias_path_inner(
+            env,
+            pers_env,
+            ctx,
+            original,
+            &alias_target,
+            check_missing,
+        );
     }
 
-    normalize_inner(env, pers_env, ctx, path, path)
+    let env_normalized = env.normalize_path(&path);
+    if !env_normalized.same(&path) {
+        normalize_module_alias_path_inner(
+            env,
+            pers_env,
+            ctx,
+            original,
+            &env_normalized,
+            check_missing,
+        )
+    } else {
+        Ok(path)
+    }
 }
 
 fn force_persistent_sigs_for_normalize_path(
@@ -21670,11 +21675,6 @@ fn type_structure_item<'a>(
     }
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Type check value bindings in a structure.
 // ============================================================================
 // Signature Type Declaration Translation
 // ============================================================================
