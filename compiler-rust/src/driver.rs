@@ -2832,7 +2832,7 @@ fn type_mod_error_to_anyhow_styled(
             env,
         }) => {
             let env = env.and_then(|env| type_ctx.get_typed_env(env));
-            let mut report = match env {
+            let report = match env {
                 Some(env) => format_expr_type_clash_report_ocaml(
                     type_ctx, arena, source, filename, *loc, trace, context, &env,
                 ),
@@ -2840,15 +2840,6 @@ fn type_mod_error_to_anyhow_styled(
                     type_ctx, arena, source, filename, *loc, trace, context,
                 ),
             };
-            // Style escapes embedded in the message follow OCaml's
-            // `Color.color_enabled`, which a printed warning switches to the
-            // configured `-color` value (compiler/ext/misc.ml:337-392).
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;31m", "")
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::PatternTypeClash {
@@ -2863,15 +2854,8 @@ fn type_mod_error_to_anyhow_styled(
             let message = type_clash::render_error_message(|ppf| {
                 type_clash::print_pattern_type_clash(ppf, type_ctx, &env, trace)
             });
-            let mut report =
+            let report =
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;31m", "")
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[2m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::RecursiveLocalConstraint { loc, trace }) => {
@@ -2923,16 +2907,8 @@ fn type_mod_error_to_anyhow_styled(
             let message = type_clash::render_error_message(|ppf| {
                 type_clash::print_not_subtype(ppf, type_ctx, &env, trace, trace2, context.as_ref())
             });
-            let mut report =
+            let report =
                 format_compiler_error_report_formatted(arena, source, filename, *loc, &message);
-            // See `ExprTypeClash`: style escapes follow `Color.color_enabled`.
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;31m", "")
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[2m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::LessGeneral {
@@ -3061,7 +3037,6 @@ fn type_mod_error_to_anyhow_styled(
                     *loc,
                     label,
                     *ty,
-                    suppress_info_style,
                 ),
                 2,
             )
@@ -3167,7 +3142,7 @@ fn type_mod_error_to_anyhow_styled(
             alternatives,
             module_suggestion,
         }) => {
-            let mut report = format_unbound_value_report(
+            let report = format_unbound_value_report(
                 arena,
                 source,
                 filename,
@@ -3177,12 +3152,6 @@ fn type_mod_error_to_anyhow_styled(
                 alternatives,
                 module_suggestion.as_deref(),
             );
-            // See `ExprTypeClash`: style escapes follow `Color.color_enabled`.
-            if suppress_info_style {
-                report = report
-                    .replace("\x1b[1;33m", "")
-                    .replace("\x1b[0m", "");
-            }
             UserDiagnostic::new(report, 2).into()
         }
         TypeModError::CoreError(TypeCoreError::UnboundModule {
@@ -9903,7 +9872,6 @@ fn format_apply_wrong_label_report(
     loc: LocIdx,
     label: &ParserArgLabel,
     ty: TypeExprRef,
-    suppress_info_style: bool,
 ) -> String {
     let label = match label {
         ParserArgLabel::Nolabel => None,
@@ -9913,12 +9881,7 @@ fn format_apply_wrong_label_report(
     let message = type_clash::render_error_message(|ppf| {
         type_clash::print_apply_wrong_label(ppf, type_ctx, label.as_deref(), ty)
     });
-    let report = format_compiler_error_report_formatted(arena, source, filename, loc, &message);
-    if suppress_info_style {
-        report.replace("\x1b[1;33m", "").replace("\x1b[0m", "")
-    } else {
-        report
-    }
+    format_compiler_error_report_formatted(arena, source, filename, loc, &message)
 }
 
 fn format_field_not_optional_report(
