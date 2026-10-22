@@ -596,9 +596,9 @@ impl fmt::Display for Warning {
 #[derive(Debug, Clone)]
 pub struct WarningConfig {
     /// Which warnings are active (indexed by warning number).
-    active: Vec<bool>,
+    active: [bool; MAX_WARNING_NUMBER],
     /// Which warnings are errors (indexed by warning number).
-    errors: Vec<bool>,
+    errors: [bool; MAX_WARNING_NUMBER],
     /// Whether warnings are disabled globally.
     disabled: bool,
 }
@@ -615,8 +615,8 @@ impl WarningConfig {
     /// Create a new warning configuration with defaults.
     pub fn new() -> Self {
         let mut config = Self {
-            active: vec![true; MAX_WARNING_NUMBER],
-            errors: vec![false; MAX_WARNING_NUMBER],
+            active: [true; MAX_WARNING_NUMBER],
+            errors: [false; MAX_WARNING_NUMBER],
             disabled: false,
         };
         // Match OCaml compiler/ext/bsc_warnings.ml:46-48. ReScript starts
@@ -666,8 +666,8 @@ impl WarningConfig {
     }
 
     fn parse_options(&mut self, errflag: bool, spec: &str) -> Result<(), String> {
-        let mut error = self.errors.clone();
-        let mut active = self.active.clone();
+        let mut error = self.errors;
+        let mut active = self.active;
         parse_opt(&mut error, &mut active, errflag, spec.as_bytes())?;
         self.errors = error;
         self.active = active;
@@ -720,14 +720,14 @@ fn parse_opt(
     while i < s.len() {
         let action = match s[i] {
             c @ b'A'..=b'Z' => {
-                for n in letter_warnings(c.to_ascii_lowercase() as char) {
+                for &n in letter_warnings(c.to_ascii_lowercase() as char) {
                     apply(Action::Set, n);
                 }
                 i += 1;
                 continue;
             }
             c @ b'a'..=b'z' => {
-                for n in letter_warnings(c as char) {
+                for &n in letter_warnings(c as char) {
                     apply(Action::Clear, n);
                 }
                 i += 1;
@@ -763,7 +763,7 @@ fn parse_opt(
                 i = next;
             }
             c @ (b'A'..=b'Z' | b'a'..=b'z') => {
-                for n in letter_warnings(c.to_ascii_lowercase() as char) {
+                for &n in letter_warnings(c.to_ascii_lowercase() as char) {
                     apply(action, n);
                 }
                 i += 1;
@@ -774,26 +774,37 @@ fn parse_opt(
     Ok(())
 }
 
+/// Warning numbers 1..=LAST_WARNING_NUMBER, for the letter `a`.
+const ALL_WARNINGS: [usize; LAST_WARNING_NUMBER] = {
+    let mut all = [0; LAST_WARNING_NUMBER];
+    let mut i = 0;
+    while i < LAST_WARNING_NUMBER {
+        all[i] = i + 1;
+        i += 1;
+    }
+    all
+};
+
 /// Get warning numbers for a letter abbreviation.
-fn letter_warnings(letter: char) -> Vec<usize> {
+fn letter_warnings(letter: char) -> &'static [usize] {
     match letter {
-        'a' => (1..=LAST_WARNING_NUMBER).collect(),
-        'c' => vec![1, 2],
-        'd' => vec![3],
-        'e' => vec![4],
-        'f' => vec![5],
-        'k' => vec![32, 33, 34, 35, 36, 37, 38, 39],
-        'l' => vec![6],
-        'm' => vec![7],
-        'p' => vec![8],
-        'r' => vec![9],
-        's' => vec![10],
-        'u' => vec![11, 12],
-        'v' => vec![13],
-        'x' => vec![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30],
-        'y' => vec![26],
-        'z' => vec![27],
-        _ => vec![],
+        'a' => &ALL_WARNINGS,
+        'c' => &[1, 2],
+        'd' => &[3],
+        'e' => &[4],
+        'f' => &[5],
+        'k' => &[32, 33, 34, 35, 36, 37, 38, 39],
+        'l' => &[6],
+        'm' => &[7],
+        'p' => &[8],
+        'r' => &[9],
+        's' => &[10],
+        'u' => &[11, 12],
+        'v' => &[13],
+        'x' => &[14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30],
+        'y' => &[26],
+        'z' => &[27],
+        _ => &[],
     }
 }
 
