@@ -5936,25 +5936,31 @@ fn spellcheck_choices<'a>(name: &str, alternatives: &'a [String]) -> Vec<&'a str
         5 | 6 => 2,
         _ => 3,
     };
+    // Ties are collected in order and reversed once at the end, which yields
+    // OCaml's prepend-on-tie order.
     let mut best: Vec<&str> = Vec::new();
     let mut best_dist = usize::MAX;
+    let mut scratch = Vec::new();
     for candidate in alternatives {
-        let Some(dist) = ocaml_edit_distance(name, candidate, cutoff) else {
+        let Some(dist) = ocaml_edit_distance(name, candidate, cutoff, &mut scratch) else {
             continue;
         };
         if dist < best_dist {
-            best = vec![candidate.as_str()];
+            best.clear();
+            best.push(candidate.as_str());
             best_dist = dist;
         } else if dist == best_dist {
-            best.insert(0, candidate.as_str());
+            best.push(candidate.as_str());
         }
     }
+    best.reverse();
     best
 }
 
 /// OCaml `Misc.edit_distance` (compiler/ext/misc.ml:195-238): Levenshtein
-/// distance with adjacent transpositions, bounded by `cutoff`.
-fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize) -> Option<usize> {
+/// distance with adjacent transpositions, bounded by `cutoff`. `scratch` is a
+/// reusable buffer for the `(la + 1) * (lb + 1)` distance matrix.
+fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize, scratch: &mut Vec<usize>) -> Option<usize> {
     let a = a.as_bytes();
     let b = b.as_bytes();
     let (la, lb) = (a.len(), b.len());
@@ -5962,27 +5968,32 @@ fn ocaml_edit_distance(a: &str, b: &str, cutoff: usize) -> Option<usize> {
     if la.abs_diff(lb) > cutoff {
         return None;
     }
-    let mut m = vec![vec![cutoff + 1; lb + 1]; la + 1];
-    m[0][0] = 0;
-    for (i, row) in m.iter_mut().enumerate().skip(1) {
-        row[0] = i;
+    let width = lb + 1;
+    scratch.clear();
+    scratch.resize((la + 1) * width, cutoff + 1);
+    let m = &mut scratch[..];
+    let at = |i: usize, j: usize| i * width + j;
+    m[0] = 0;
+    for i in 1..=la {
+        m[at(i, 0)] = i;
     }
     for j in 1..=lb {
-        m[0][j] = j;
+        m[at(0, j)] = j;
     }
     for i in 1..=la {
         let lo = 1.max(i.saturating_sub(cutoff + 1));
         let hi = lb.min(i + cutoff + 1);
         for j in lo..=hi {
             let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (1 + m[i - 1][j].min(m[i][j - 1])).min(m[i - 1][j - 1] + cost);
+            let mut best =
+                (1 + m[at(i - 1, j)].min(m[at(i, j - 1)])).min(m[at(i - 1, j - 1)] + cost);
             if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(m[i - 2][j - 2] + cost);
+                best = best.min(m[at(i - 2, j - 2)] + cost);
             }
-            m[i][j] = best;
+            m[at(i, j)] = best;
         }
     }
-    let result = m[la][lb];
+    let result = m[at(la, lb)];
     (result <= cutoff).then_some(result)
 }
 
@@ -15650,6 +15661,35 @@ mod tests {
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::ModuleCoercion;
     use std::path::PathBuf;
+
+    #[test]
+    fn spellcheck_choices_prepends_ties_like_ocaml() {
+        let alternatives: Vec<String> = ["abce", "zzzz", "abcf", "abcd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            super::spellcheck_choices("abcx", &alternatives),
+            vec!["abcd", "abcf", "abce"]
+        );
+        assert_eq!(
+            super::spellcheck_choices("abcd", &alternatives),
+            vec!["abcd"]
+        );
+        let mut scratch = Vec::new();
+        assert_eq!(
+            super::ocaml_edit_distance("abc", "bac", 1, &mut scratch),
+            Some(1)
+        );
+        assert_eq!(
+            super::ocaml_edit_distance("abcdef", "abc", 2, &mut scratch),
+            None
+        );
+        assert_eq!(
+            super::ocaml_edit_distance("kitten", "sitting", 3, &mut scratch),
+            Some(3)
+        );
+    }
 
     #[test]
     fn normalize_load_path_entry_expands_relative_paths_against_cwd() {
