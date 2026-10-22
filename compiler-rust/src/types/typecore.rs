@@ -1271,9 +1271,6 @@ pub struct TypeCheckContext<'a> {
     /// Nesting depth of comptime function specializations; a fallback guard
     /// behind the monomorphization cache against runaway recursion.
     comptime_depth: usize,
-    /// Comptime let bindings whose body is a type builder — to be evaluated
-    /// at end of type_structure and emitted as type declarations.
-    pub pending_type_builders: Vec<(String, crate::parse_arena::ExprIdx)>,
 }
 
 /// A diagnostic from type checking.
@@ -1404,7 +1401,6 @@ impl<'a> TypeCheckContext<'a> {
             comptime_bindings: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),
             comptime_depth: 0,
-            pending_type_builders: Vec::new(),
         }
     }
 
