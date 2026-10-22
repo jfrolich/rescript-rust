@@ -15,15 +15,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Guard that ensures telemetry is properly flushed and shut down.
 /// Drop this at the end of main to flush all spans.
 pub struct TelemetryGuard {
+    /// Present exactly when OTLP export was initialized (affects logger setup in main).
     provider: Option<SdkTracerProvider>,
-    /// Whether OTEL tracing was initialized (affects logger setup in main).
-    otel_enabled: bool,
 }
 
 impl TelemetryGuard {
     /// Returns whether OTLP span export was successfully initialized.
     pub fn otel_enabled(&self) -> bool {
-        self.otel_enabled
+        self.provider.is_some()
     }
 }
 
@@ -121,17 +120,13 @@ fn init_with_otlp() -> TelemetryGuard {
 
     TelemetryGuard {
         provider: Some(provider),
-        otel_enabled: true,
     }
 }
 
 /// Initialize with no-op tracing (no export).
 fn init_noop() -> TelemetryGuard {
     // Don't set up any subscriber - let main.rs handle logging normally
-    TelemetryGuard {
-        provider: None,
-        otel_enabled: false,
-    }
+    TelemetryGuard { provider: None }
 }
 
 #[cfg(test)]

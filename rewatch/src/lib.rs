@@ -6,7 +6,6 @@ pub mod format;
 pub mod helpers;
 pub mod lock;
 pub mod project_context;
-pub mod queue;
 pub mod telemetry;
 pub mod tooling_server;
 pub mod watcher;
