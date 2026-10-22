@@ -46,9 +46,28 @@ pub fn compare(s1: &T, s2: &T) -> Ordering {
 }
 
 pub fn uncapitalize(s: &T) -> T {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+    // OCaml String.uncapitalize_ascii (module_name.ml:28): only an ASCII
+    // first byte is lowercased.
+    let mut s = s.clone();
+    if let Some(first) = s.get_mut(0..1) {
+        first.make_ascii_lowercase();
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uncapitalize_lowercases_only_an_ascii_first_char() {
+        assert_eq!(uncapitalize(&"Foo.cmt".to_string()), "foo.cmt");
+        assert_eq!(uncapitalize(&"foo".to_string()), "foo");
+        assert_eq!(uncapitalize(&String::new()), "");
+        assert_eq!(uncapitalize(&"\u{c9}cole".to_string()), "\u{c9}cole");
+        assert_eq!(
+            uncapitalize(&"\u{c3}\u{89}cole".to_string()),
+            "\u{c3}\u{89}cole"
+        );
     }
 }
