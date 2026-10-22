@@ -23094,22 +23094,14 @@ impl Env {
                     ctx,
                     |components| {
                         components.lookup_module(submod_name).map(|(pos, _, _md)| {
-                            if path_non_apply_root_is_persistent_or_global(&parent_path) {
-                                // OCaml compiler/ml/env.ml:1008-1013
-                                // `lookup_module_descr_aux` and env.ml:1064-1073
-                                // `lookup_module` construct the selected child
-                                // access path as `Pdot(parent, name, pos)`.
-                                // The module declaration's `md_path` is the
-                                // alias target; using it here leaks the backing
-                                // unit into typedtree paths.
-                                Path::pdot_pos(
-                                    parent_path.clone(),
-                                    submod_name.to_string(),
-                                    pos as i32,
-                                )
-                            } else {
-                                Path::pdot_pos(parent_path.clone(), submod_name, pos as i32)
-                            }
+                            // OCaml compiler/ml/env.ml:1008-1013
+                            // `lookup_module_descr_aux` and env.ml:1064-1073
+                            // `lookup_module` construct the selected child
+                            // access path as `Pdot(parent, name, pos)`. The
+                            // module declaration's `md_path` is the alias
+                            // target; using it here leaks the backing unit
+                            // into typedtree paths.
+                            Path::pdot_pos(parent_path.clone(), submod_name, pos as i32)
                         })
                     },
                 )
@@ -23945,9 +23937,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env(
                     return Some(current);
                 }
                 crate::types::TypeKind::TypeAbstract => {
-                    let manifest = decl.type_manifest;
-                    manifest?;
-                    let manifest = manifest.unwrap();
+                    let manifest = decl.type_manifest?;
                     let manifest_repr = ctx.repr(manifest);
                     let manifest_desc = ctx.get_desc(manifest_repr);
                     let next_path = match &*manifest_desc {
@@ -24362,15 +24352,14 @@ fn type_contains_unresolved_local_path(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
-    visited: &mut Vec<TypeExprRef>,
+    visited: &mut TypeExprRefSet,
 ) -> bool {
     use crate::types::type_expr::RowField;
 
     let repr = ctx.repr(ty);
-    if visited.contains(&repr) {
+    if !visited.insert(repr) {
         return false;
     }
-    visited.push(repr);
 
     let desc = ctx.borrow_desc(repr);
     match &*desc {
@@ -24477,13 +24466,7 @@ fn qualify_label_description_paths(
         let TypeDesc::Tconstr { path, .. } = &*desc else {
             return QualifiedRecordLabelCacheKeyResult::Other;
         };
-        if path_non_apply_root_is_persistent(path) {
-            QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
-        } else if path_non_apply_root_ident(path)
-            .is_some_and(|id| !id.is_persistent() && id.stamp() != 0)
-        {
-            QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
-        } else if path_non_apply_root_ident(path).is_some() {
+        if path_non_apply_root_ident(path).is_some() {
             QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
         } else {
             QualifiedRecordLabelCacheKeyResult::Other
@@ -24500,15 +24483,14 @@ fn qualify_label_description_paths(
         ty: TypeExprRef,
         old_root_path: &Path,
         new_root_path: &Path,
-        visited: &mut Vec<TypeExprRef>,
+        visited: &mut TypeExprRefSet,
     ) {
         use crate::types::type_expr::RowField;
 
         let repr = ctx.repr(ty);
-        if visited.contains(&repr) {
+        if !visited.insert(repr) {
             return;
         }
-        visited.push(repr);
 
         let desc = ctx.get_desc(repr).into_desc();
         match desc {
@@ -24720,12 +24702,10 @@ fn qualify_label_description_paths(
         path.clone()
     };
     let mut module_access_paths = Vec::new();
-    let mut has_unresolved_local_path = false;
-
     match &res_path {
         Path::Pdot(_, _, _) => {
-            let mut probe_visited = Vec::new();
-            has_unresolved_local_path = type_contains_unresolved_local_path(
+            let mut probe_visited = TypeExprRefSet::new();
+            let has_unresolved_local_path = type_contains_unresolved_local_path(
                 ctx,
                 env,
                 pers_env,
@@ -24788,7 +24768,7 @@ fn qualify_label_description_paths(
             if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx)
             {
                 if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
-                    let mut visited = Vec::new();
+                    let mut visited = TypeExprRefSet::new();
                     rewrite_direct_root_type_family_in_place(
                         ctx,
                         label.lbl_arg,
@@ -28197,19 +28177,11 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     cache_mode: ComponentLookupApi,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
-    let local_module_path = match module_path {
-        Path::Pident(_id) => {
-            // OCaml compiler/ml/env.ml:781-788 path-based `Pident` lookup is
-            // exact (`IdTbl.find_same`). Source `Longident.Lident` name lookup
-            // is handled before paths reach this helper
-            // (compiler/ml/env.ml:1000-1007), so keep persistent type paths from
-            // imported signatures independent from local/opened same-name modules.
-            None
-        }
-        _ => None,
-    };
-    let module_path = local_module_path.as_ref().unwrap_or(module_path);
-
+    // OCaml compiler/ml/env.ml:781-788 path-based `Pident` lookup is exact
+    // (`IdTbl.find_same`). Source `Longident.Lident` name lookup is handled
+    // before paths reach this helper (compiler/ml/env.ml:1000-1007), so
+    // persistent type paths from imported signatures stay independent from
+    // local/opened same-name modules: `module_path` is used as given.
     let mut f = Some(f);
     let module_key = module_components_cache_key(module_path, env);
     if let Some(result) = env
