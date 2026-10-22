@@ -12180,10 +12180,6 @@ fn type_match_cases_batch_non_gadt<'a>(
         let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
         let mut pattern_forces: Vec<GlobalizeForce> = Vec::new();
         for case in cases {
-            let case_loc = tctx
-                .arena
-                .to_location(tctx.arena.get_pat(case.pc_lhs).ppat_loc);
-            let _case_line = case_loc.loc_start.line;
             // Match OCaml type_cases: instance the GENERIC scrutinee type inside
             // begin_def. This creates fresh copies at the elevated level (L+1).
             // After end_def + generalize, pattern types become GENERIC, preventing
@@ -16792,7 +16788,6 @@ fn type_record(
         let base_loc = typed_base_expr.exp_loc;
         if let Some(labels) = all_labels_for_unify {
             for (idx, env_label) in labels.iter().enumerate() {
-                let _label_name = env_label.lbl_name.clone();
                 // Instance 1: connect to base expression. OCaml `unify_kept`
                 // (typecore.ml:2886-2898) raises from each unification.
                 // (typecore.ml: `unify_exp_types ~context:None exp.exp_loc env ty_exp ty_res1`).
@@ -17193,23 +17188,7 @@ fn inline_record_decl_from_variant_type(
         return None;
     };
 
-    let num_consts = constrs
-        .iter()
-        .filter(|c| {
-            matches!(
-                c.cd_args,
-                crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-            )
-        })
-        .count() as i32;
-    let _num_nonconsts = constrs.len() as i32 - num_consts;
-
     for (position, cd) in constrs.iter().enumerate() {
-        let is_constant = matches!(
-            cd.cd_args,
-            crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-        );
-
         if cd.cd_id.name() == cstr_name {
             let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args else {
                 return None;
@@ -17250,8 +17229,6 @@ fn inline_record_decl_from_variant_type(
                 type_path: None,
             });
         }
-
-        let _ = is_constant;
     }
 
     None
@@ -30628,72 +30605,10 @@ fn lookup_type_decl_for_path_with_cache_mode(
             && let Some(parent_decl) =
                 lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode)
         {
-            if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
+            if let Some(decl) =
+                inline_record_decl_from_variant_type(ctx, &parent_decl, type_name.as_str())
             {
-                let num_consts = constrs
-                    .iter()
-                    .filter(|c| {
-                        matches!(
-                            c.cd_args,
-                            crate::types::ConstructorArguments::CstrTuple(ref args)
-                                if args.is_empty()
-                        )
-                    })
-                    .count() as i32;
-                let _num_nonconsts = constrs.len() as i32 - num_consts;
-                let mut block_idx = 0i32;
-                for (position, cd) in constrs.iter().enumerate() {
-                    let is_constant = matches!(
-                        cd.cd_args,
-                        crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-                    );
-
-                    if cd.cd_id.name() == type_name.as_str() {
-                        if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
-                        {
-                            let inline_params =
-                                inline_record_type_params(ctx, &parent_decl.type_params, labels);
-                            return Some(Arc::new(crate::types::TypeDeclaration {
-                                type_params: inline_params.clone(),
-                                type_arity: inline_params.len() as i32,
-                                type_kind: crate::types::TypeKind::TypeRecord(
-                                    crate::types::decl::SharedVec::from(labels.clone()),
-                                    if parent_decl.type_representation
-                                        == crate::types::TypeRepresentation::Unboxed
-                                    {
-                                        // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
-                                        crate::types::RecordRepresentation::RecordUnboxed(true)
-                                    } else {
-                                        crate::types::RecordRepresentation::RecordInlined {
-                                            name: type_name.to_string(),
-                                            representation: crate::types::ConstructorReference {
-                                                variant: layout,
-                                                position,
-                                            },
-                                        }
-                                    },
-                                ),
-                                type_private: parent_decl.type_private,
-                                type_manifest: None,
-                                type_variance: inline_params
-                                    .iter()
-                                    .map(|_| crate::types::variance::Variance::full())
-                                    .collect(),
-                                type_newtype_level: None,
-                                type_loc: cd.cd_loc,
-                                type_attributes: vec![],
-                                type_immediate: false,
-                                type_representation: crate::types::TypeRepresentation::Boxed,
-                                type_inlined_types: vec![],
-                                type_path: None,
-                            }));
-                        }
-                    }
-
-                    if !is_constant {
-                        block_idx += 1;
-                    }
-                }
+                return Some(Arc::new(decl));
             }
         }
 
