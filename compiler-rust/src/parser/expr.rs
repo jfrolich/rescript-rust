@@ -94,7 +94,7 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
             Constant::Float(value, *suffix)
         }
         Token::String(s) => {
-            let source = s.to_string();
+            let source = s.clone();
             let (start_pos, end_pos) = (p.start_pos, p.end_pos);
             parse_string_constant(p, start_pos, end_pos, &source)
         }
@@ -313,7 +313,7 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
 /// OCaml `parse_value_or_constructor` (compiler/syntax/src/res_core.ml:4212-4267).
 pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
-    let mut acc: Vec<String> = Vec::new();
+    let mut acc: Vec<Cow<'_, str>> = Vec::new();
     loop {
         match p.token.clone() {
             Token::Uident(ident) => {
@@ -322,11 +322,11 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
                 match p.token {
                     Token::Dot => {
                         p.next();
-                        acc.push(ident.to_string());
+                        acc.push(ident);
                     }
                     Token::Lparen if p.prev_end_pos.line == p.start_pos.line => {
                         let args = parse_constructor_args(p);
-                        acc.push(ident.to_string());
+                        acc.push(ident);
                         let lid_idx = super::core::build_longident_idx(p, &acc);
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         let ident_loc = p.mk_loc_idx(start_pos_idx, end_pos_lident);
@@ -341,7 +341,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
                     }
                     _ => {
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        acc.push(ident.to_string());
+                        acc.push(ident);
                         let lid_idx = super::core::build_longident_idx(p, &acc);
                         return Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
@@ -357,7 +357,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
             Token::Lident(ident) => {
                 p.next();
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                acc.push(ident.to_string());
+                acc.push(ident);
                 let lid_idx = super::core::build_longident_idx(p, &acc);
                 return ast_helper::make_ident_idx(lid_idx, loc);
             }
@@ -372,7 +372,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let context = p.breadcrumbs().to_vec();
                 p.err(DiagnosticCategory::Unexpected { token, context });
-                acc.push("_".to_string());
+                acc.push(Cow::Borrowed("_"));
                 let lid_idx = super::core::build_longident_idx(p, &acc);
                 return ast_helper::make_ident_idx(lid_idx, loc);
             }
@@ -552,7 +552,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
     }
 
     // Parse leading attributes first (e.g., @attr expr)
-    let attrs = parse_attributes(p);
+    let mut attrs = parse_attributes(p);
 
     // Handle unary operators
     // Track whether attrs were passed to arrow expression (so we don't attach them twice)
@@ -576,24 +576,15 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         }
         Token::Lident(s) if s == "async" => {
             // async arrow function
-            // Capture the async keyword position for Pexp_newtype locations
-            let async_pos_idx = p.start_pos_idx();
             // OCaml res_core.ml:2366-2374 runs `is_es6_arrow_expression` with
             // `async` still the current token.
             let is_arrow =
                 super::core::is_es6_arrow_expression(p, context == ExprContext::TernaryTrueBranch);
             p.next();
             if is_arrow {
-                // Pass attrs to arrow expression - they're consumed
-                // OCaml: Pexp_fun location starts AFTER async (not including it)
-                // But Pexp_newtype location DOES include async
+                // The arrow consumes attrs; its location starts after `async`.
                 (
-                    parse_es6_arrow_expression_async(
-                        p,
-                        Some(async_pos_idx), // for Pexp_newtype
-                        attrs.clone(),
-                        context,
-                    ),
+                    parse_es6_arrow_expression_async(p, std::mem::take(&mut attrs), context),
                     true,
                 )
             } else {
@@ -635,9 +626,9 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
                     context == ExprContext::TernaryTrueBranch,
                 );
             if is_arrow {
-                // Pass attrs to arrow expression - they're consumed
+                // The arrow consumes attrs.
                 (
-                    parse_es6_arrow_expression(p, false, None, attrs.clone(), context),
+                    parse_es6_arrow_expression(p, false, None, std::mem::take(&mut attrs), context),
                     true,
                 )
             } else {
@@ -651,12 +642,9 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         expr
     } else {
         // Combine existing attributes with parsed attributes
-        let mut combined_attrs = expr.pexp_attributes.clone();
-        combined_attrs.extend(attrs);
-        Expression {
-            pexp_attributes: combined_attrs,
-            ..expr
-        }
+        let mut expr = expr;
+        expr.pexp_attributes.extend(attrs);
+        expr
     }
 }
 
@@ -709,18 +697,14 @@ pub fn parse_await_expression(p: &mut Parser<'_>) -> Expression {
     }
 }
 
-/// Parse an ES6 arrow function expression for async functions.
-/// The `async_pos` is used for Pexp_newtype locations (which include 'async').
+/// Parse an ES6 arrow function expression for async functions, called after
+/// `async` was consumed (the Pexp_fun location starts after `async`).
 fn parse_es6_arrow_expression_async(
     p: &mut Parser<'_>,
-    async_pos_idx: Option<PosIdx>,
     arrow_attrs: Attributes,
     context: ExprContext,
 ) -> Expression {
-    // For async functions:
-    // - Pexp_fun location starts AFTER async (the default p.start_pos)
-    // - Pexp_newtype location includes async (async_pos)
-    parse_es6_arrow_expression_internal(p, true, None, async_pos_idx, arrow_attrs, context, None)
+    parse_es6_arrow_expression_internal(p, true, None, arrow_attrs, context, None)
 }
 
 /// Parse an ES6 arrow function expression.
@@ -735,7 +719,6 @@ pub fn parse_es6_arrow_expression(
         p,
         is_async,
         arrow_start_pos_idx,
-        None,
         arrow_attrs,
         context,
         None,
@@ -747,7 +730,6 @@ fn parse_es6_arrow_expression_internal(
     p: &mut Parser<'_>,
     is_async: bool,
     arrow_start_pos_idx: Option<PosIdx>,
-    _newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
     arrow_attrs: Attributes,
     context: ExprContext,
     term_parameters: Option<Vec<super::core::FundefParameter>>,
@@ -858,7 +840,7 @@ fn parse_es6_arrow_expression_internal(
                     is_async,
                 }))),
                 pexp_loc: pexp_fun_loc,
-                pexp_attributes: arrow_attrs.clone(),
+                pexp_attributes: arrow_attrs,
             },
             pexp_fun_loc,
         )
@@ -907,7 +889,7 @@ fn parse_es6_arrow_expression_internal(
                     is_async,
                 }))),
                 pexp_loc: wrapper_loc,
-                pexp_attributes: arrow_attrs.clone(),
+                pexp_attributes: arrow_attrs,
             },
             wrapper_loc,
         )
@@ -1115,7 +1097,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
     }
 
     // Parse attributes
-    let attrs = parse_attributes(p);
+    let mut attrs = parse_attributes(p);
 
     // Check for type parameter
     if p.token == Token::Typ {
@@ -3286,14 +3268,9 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
             expr
         }
         Token::Lident(ref s) if s == "async" && super::core::is_es6_arrow_expression(p, false) => {
-            let async_pos_idx = p.start_pos_idx();
             p.expect(Token::Lident("async".into()));
-            let expr = parse_es6_arrow_expression_async(
-                p,
-                Some(async_pos_idx),
-                Attributes::new(),
-                ExprContext::Ordinary,
-            );
+            let expr =
+                parse_es6_arrow_expression_async(p, Attributes::new(), ExprContext::Ordinary);
             let expr = parse_expr_block_first(p, Some(expr));
             p.expect(Token::Rbrace);
             with_braces(p, start_pos_idx, expr)
@@ -3426,7 +3403,6 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                         p,
                         false,
                         None,
-                        None,
                         Attributes::new(),
                         ExprContext::Ordinary,
                         Some(vec![super::core::FundefParameter::Term(term_param)]),
@@ -3494,7 +3470,7 @@ fn remove_module_name_from_punned_field_value(p: &mut Parser<'_>, exp: Expressio
 
 /// OCaml `parse_record_expr_row` (compiler/syntax/src/res_core.ml:3440-3508).
 fn parse_record_expr_row(p: &mut Parser<'_>) -> Option<ExpressionRecordField> {
-    let attrs = parse_attributes(p);
+    let mut attrs = parse_attributes(p);
     if p.token == Token::DotDotDot {
         p.err(DiagnosticCategory::Message(
             super::core::error_messages::RECORD_EXPR_SPREAD.to_string(),
@@ -5093,35 +5069,24 @@ fn read_jsx_tag_name(p: &mut Parser<'_>) -> Result<(JsxTagName, LocIdx), String>
     }
 }
 
-/// `Ast_helper.Jsx.longident_of_jsx_tag_name`, flattened to its segments.
-fn jsx_tag_name_segments(tag_name: &JsxTagName, p: &Parser<'_>) -> Vec<String> {
-    fn lid_segments(lid: &super::longident::Longident, arena: &ParseArena, out: &mut Vec<String>) {
-        match lid {
-            super::longident::Longident::Lident(idx) => {
-                out.push(arena.get_string(*idx).to_string())
-            }
-            super::longident::Longident::Ldot(prefix, idx) => {
-                lid_segments(prefix, arena, out);
-                out.push(arena.get_string(*idx).to_string());
-            }
-            super::longident::Longident::Lapply(a, b) => {
-                lid_segments(a, arena, out);
-                lid_segments(b, arena, out);
-            }
-        }
-    }
-    let mut out = Vec::new();
+/// `Ast_helper.Jsx.longident_of_jsx_tag_name`, flattened to its segments
+/// (`Longident.flatten`). Tag paths are built from `Lident`/`Ldot` only.
+fn jsx_tag_name_segments<'p>(tag_name: &'p JsxTagName, p: &'p Parser<'_>) -> Vec<&'p str> {
+    let arena = p.arena();
+    let path_segments = |lid_idx| {
+        arena
+            .get_longident(lid_idx)
+            .flatten_idx()
+            .into_iter()
+            .map(|idx| arena.get_string(idx))
+    };
     match tag_name {
-        JsxTagName::Lower(name) | JsxTagName::Invalid(name) => out.push(name.clone()),
-        JsxTagName::Upper(lid_idx) => {
-            lid_segments(p.arena().get_longident(*lid_idx), p.arena(), &mut out)
-        }
-        JsxTagName::QualifiedLower { path, name } => {
-            lid_segments(p.arena().get_longident(*path), p.arena(), &mut out);
-            out.push(name.clone());
-        }
+        JsxTagName::Lower(name) | JsxTagName::Invalid(name) => vec![name.as_str()],
+        JsxTagName::Upper(lid_idx) => path_segments(*lid_idx).collect(),
+        JsxTagName::QualifiedLower { path, name } => path_segments(*path)
+            .chain(std::iter::once(name.as_str()))
+            .collect(),
     }
-    out
 }
 
 /// `Ast_helper.Jsx.string_of_jsx_tag_name`.
@@ -5193,7 +5158,6 @@ fn parse_jsx_opening_or_self_closing_element(
                 .into_iter()
                 .map(|e| p.arena_mut().push_expr(e))
                 .collect();
-            let opening_name = jsx_tag_name_to_string_for_error(&name, p);
             let token0 = p.token.clone().into_owned();
             let closing_tag = match token0 {
                 Token::Lident(_) | Token::Uident(_) => {
@@ -5209,6 +5173,7 @@ fn parse_jsx_opening_or_self_closing_element(
                         )
                     } else {
                         let end = p.prev_end_pos;
+                        let opening_name = jsx_tag_name_to_string_for_error(&name, p);
                         if super::grammar::is_structure_item_start(&token0) {
                             p.err_at(
                                 start_pos,
@@ -5239,6 +5204,7 @@ fn parse_jsx_opening_or_self_closing_element(
                 }
                 token => {
                     let end = p.prev_end_pos;
+                    let opening_name = jsx_tag_name_to_string_for_error(&name, p);
                     if super::grammar::is_structure_item_start(&token) {
                         p.err_at(
                             start_pos,
@@ -5298,7 +5264,10 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         Token::GreaterThan => parse_jsx_fragment(p, start_pos_idx),
         _ => {
             let (tag_name, loc) = parse_jsx_name(p);
-            let segments = jsx_tag_name_segments(&tag_name, p);
+            let segments: Vec<String> = jsx_tag_name_segments(&tag_name, p)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
             let lid = super::core::build_longident(p.arena_mut(), &segments);
             let lid_idx = p.push_longident(lid);
             Expression {
