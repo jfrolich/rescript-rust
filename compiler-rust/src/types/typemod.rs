@@ -5392,13 +5392,13 @@ fn check_duplicate_constructor_declarations(
     loc: LocIdx,
     constructors: &[crate::parser::ast::ConstructorDeclaration],
 ) -> TypeModResult<()> {
-    let mut seen = HashSet::default();
+    let mut seen: HashSet<&str> = HashSet::default();
     for constructor in constructors {
         let name = arena.get_string(constructor.pcd_name.txt);
         if name == "..." {
             continue;
         }
-        if !seen.insert(name.to_string()) {
+        if !seen.insert(name) {
             return Err(TypeModError::DuplicateConstructor {
                 loc,
                 name: name.to_string(),
@@ -5452,10 +5452,10 @@ fn check_duplicate_typed_label_declarations(
     labels: &[TypedLabelDeclaration],
     record_name: Option<&str>,
 ) -> TypeModResult<()> {
-    let mut seen = HashSet::default();
+    let mut seen: HashSet<&str> = HashSet::default();
     for label in labels {
         let name = label.ld_id.name();
-        if !seen.insert(name.to_string()) {
+        if !seen.insert(name) {
             return Err(TypeModError::DuplicateLabel {
                 loc,
                 label: name.to_string(),
@@ -5480,16 +5480,18 @@ fn check_name(
     loc: LocIdx,
     name: &str,
 ) -> TypeModResult<()> {
-    if let Some(repeated_loc) = table.get(name).copied() {
-        return Err(TypeModError::RepeatedName {
+    match table.entry(name.to_string()) {
+        std::collections::hash_map::Entry::Occupied(entry) => Err(TypeModError::RepeatedName {
             loc,
             kind,
-            name: name.to_string(),
-            repeated_loc,
-        });
+            name: entry.key().clone(),
+            repeated_loc: *entry.get(),
+        }),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(loc);
+            Ok(())
+        }
     }
-    table.insert(name.to_string(), loc);
-    Ok(())
 }
 
 /// OCaml `check_sig_item` (compiler/ml/typemod.ml:637-642): names bound by an
@@ -6254,92 +6256,59 @@ fn check_variant_declaration_well_formed(
     Ok(())
 }
 
-fn path_is_t_of_persistent_module(path: &Path, module_name: &str) -> bool {
-    matches!(
-        path,
-        Path::Pdot(parent, type_name, _)
-            if type_name == "t"
-                && matches!(parent.as_ref(), Path::Pident(id) if id.name() == module_name)
-    )
-}
-
-fn path_is_t_of_stdlib_child(path: &Path, child_name: &str) -> bool {
-    matches!(
-        path,
-        Path::Pdot(parent, type_name, _)
-            if type_name == "t"
-                && matches!(
-                    parent.as_ref(),
-                    Path::Pdot(root, module_name, _)
-                        if module_name == child_name
-                            && matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib")
-                )
-    )
-}
-
 fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
-    if matches!(path, Path::Pident(id) if id.name() == "array" || id.name() == "promise") {
-        if matches!(path, Path::Pident(id) if id.name() == "array") {
-            return Some("Array");
-        }
-        return Some("Promise");
-    }
     // OCaml compiler/ml/ast_untagged_variants.ml:243-266 recognizes the
     // flattened `Stdlib_File.t` and `Stdlib_Blob.t` paths after expansion.
     // Rust can still hold the selected `Stdlib.File.t` / `Stdlib.Blob.t`
     // component paths before expansion, so recognize both representations.
-    if path_is_t_of_persistent_module(path, "Stdlib_ArrayBuffer")
-        || path_is_t_of_stdlib_child(path, "ArrayBuffer")
-    {
-        Some("ArrayBuffer")
-    } else if path_is_t_of_stdlib_child(path, "BigInt64Array") {
-        Some("BigInt64Array")
-    } else if path_is_t_of_stdlib_child(path, "BigUint64Array") {
-        Some("BigUint64Array")
-    } else if path_is_t_of_stdlib_child(path, "DataView") {
-        Some("DataView")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_Date") {
-        Some("Date")
-    } else if path_is_t_of_stdlib_child(path, "Float32Array") {
-        Some("Float32Array")
-    } else if path_is_t_of_stdlib_child(path, "Float64Array") {
-        Some("Float64Array")
-    } else if path_is_t_of_stdlib_child(path, "Int16Array") {
-        Some("Int16Array")
-    } else if path_is_t_of_stdlib_child(path, "Int32Array") {
-        Some("Int32Array")
-    } else if path_is_t_of_stdlib_child(path, "Int8Array") {
-        Some("Int8Array")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_RegExp") {
-        Some("RegExp")
-    } else if path_is_t_of_stdlib_child(path, "Uint16Array") {
-        Some("Uint16Array")
-    } else if path_is_t_of_stdlib_child(path, "Uint32Array") {
-        Some("Uint32Array")
-    } else if path_is_t_of_stdlib_child(path, "Uint8Array") {
-        Some("Uint8Array")
-    } else if path_is_t_of_stdlib_child(path, "Uint8ClampedArray") {
-        Some("Uint8ClampedArray")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_File")
-        || path_is_t_of_stdlib_child(path, "File")
-    {
-        Some("File")
-    } else if path_is_t_of_persistent_module(path, "Stdlib_Blob")
-        || path_is_t_of_stdlib_child(path, "Blob")
-    {
-        Some("Blob")
-    } else if path_is_t_of_stdlib_child(path, "Set") {
-        Some("Set")
-    } else if path_is_t_of_stdlib_child(path, "Map") {
-        Some("Map")
-    } else if path_is_t_of_stdlib_child(path, "WeakSet") {
-        Some("WeakSet")
-    } else if path_is_t_of_stdlib_child(path, "WeakMap") {
-        Some("WeakMap")
-    } else if path_is_t_of_stdlib_child(path, "Promise") {
-        Some("Promise")
-    } else {
-        None
+    let parent = match path {
+        Path::Pident(id) => {
+            return match id.name() {
+                "array" => Some("Array"),
+                "promise" => Some("Promise"),
+                _ => None,
+            };
+        }
+        Path::Pdot(parent, type_name, _) if type_name == "t" => parent.as_ref(),
+        _ => return None,
+    };
+    match parent {
+        // `Stdlib_X.t`
+        Path::Pident(id) => match id.name() {
+            "Stdlib_ArrayBuffer" => Some("ArrayBuffer"),
+            "Stdlib_Date" => Some("Date"),
+            "Stdlib_RegExp" => Some("RegExp"),
+            "Stdlib_File" => Some("File"),
+            "Stdlib_Blob" => Some("Blob"),
+            _ => None,
+        },
+        // `Stdlib.X.t`
+        Path::Pdot(root, module_name, _) if matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib") => {
+            match module_name.as_str() {
+                "ArrayBuffer" => Some("ArrayBuffer"),
+                "BigInt64Array" => Some("BigInt64Array"),
+                "BigUint64Array" => Some("BigUint64Array"),
+                "DataView" => Some("DataView"),
+                "Float32Array" => Some("Float32Array"),
+                "Float64Array" => Some("Float64Array"),
+                "Int16Array" => Some("Int16Array"),
+                "Int32Array" => Some("Int32Array"),
+                "Int8Array" => Some("Int8Array"),
+                "Uint16Array" => Some("Uint16Array"),
+                "Uint32Array" => Some("Uint32Array"),
+                "Uint8Array" => Some("Uint8Array"),
+                "Uint8ClampedArray" => Some("Uint8ClampedArray"),
+                "File" => Some("File"),
+                "Blob" => Some("Blob"),
+                "Set" => Some("Set"),
+                "Map" => Some("Map"),
+                "WeakSet" => Some("WeakSet"),
+                "WeakMap" => Some("WeakMap"),
+                "Promise" => Some("Promise"),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -7384,6 +7353,9 @@ fn compute_type_variance_fixpoint(
         .map(|decl| vec![TypesVariance::null(); decl.type_params.len()])
         .collect();
 
+    // OCaml iterates until the variances stop changing; this port caps the
+    // fixpoint at 32 rounds. Union only grows the rows, so the cap is only
+    // reached for very large recursive groups.
     for _ in 0..32 {
         let mut iter_env = env.clone();
         for ((type_id, template), variance) in
