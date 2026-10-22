@@ -408,55 +408,28 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     }
 }
 
-pub(crate) fn find_type_decl_pub<'a>(
+pub(crate) fn find_type_decl<'a>(
     ctx: &'a TypeContext,
     env: &'a Env,
     path: &Path,
 ) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
-    find_type_decl(ctx, env, path)
-}
-
-fn find_type_decl<'a>(
-    ctx: &'a TypeContext,
-    env: &'a Env,
-    path: &Path,
-) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
-    match path {
-        Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
-            crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
-                .or_else(|| {
-                    ctx.find_type_decl_by_stamp(id.stamp())
-                        .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
-                })
-                .or_else(|| {
-                    ctx.find_resolved_pdot_type_by_name(path)
-                        .map(crate::types::decl::TypeDeclarationRef::Shared)
-                })
-                .or_else(|| {
-                    ctx.find_type_decl_by_path(&path.name())
-                        .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
-                })
-                .or_else(|| {
-                    env.lookup_type(path)
-                        .ok()
-                        .map(crate::types::decl::TypeDeclarationRef::Borrowed)
-                })
-        }
-        _ => crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
-            .or_else(|| {
-                ctx.find_resolved_pdot_type_by_name(path)
-                    .map(crate::types::decl::TypeDeclarationRef::Shared)
-            })
-            .or_else(|| {
-                ctx.find_type_decl_by_path(&path.name())
-                    .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
-            })
-            .or_else(|| {
-                env.lookup_type(path)
-                    .ok()
-                    .map(crate::types::decl::TypeDeclarationRef::Borrowed)
-            }),
-    }
+    use crate::types::decl::TypeDeclarationRef;
+    crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
+        .or_else(|| match path {
+            Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => ctx
+                .find_type_decl_by_stamp(id.stamp())
+                .map(|decl| TypeDeclarationRef::owned(decl.clone())),
+            _ => None,
+        })
+        .or_else(|| {
+            ctx.find_resolved_pdot_type_by_name(path)
+                .map(TypeDeclarationRef::Shared)
+        })
+        .or_else(|| {
+            ctx.find_type_decl_by_path(&path.name())
+                .map(|decl| TypeDeclarationRef::owned(decl.clone()))
+        })
+        .or_else(|| env.lookup_type(path).ok().map(TypeDeclarationRef::Borrowed))
 }
 
 fn is_not_undefined_attr(attr: &Attribute) -> bool {
@@ -481,8 +454,7 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
             if matches!(path, Path::Pident(id) if id.name() == "dict") && args.len() == 1 {
                 true
             } else {
-                let name = path.name();
-                name == JS_DICT_T || name == JS_DICT_T_LEGACY
+                path.name_eq(JS_DICT_T) || path.name_eq(JS_DICT_T_LEGACY)
             }
         }
         _ => false,

@@ -2488,7 +2488,7 @@ impl<'a> RawLambdaConverter<'a> {
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) =
-                    crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, env, path)
+                    crate::raw_lambda::typeopt::find_type_decl(self.type_ctx, env, path)
                 {
                     return decl.type_immediate;
                 }

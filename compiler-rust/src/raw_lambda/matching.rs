@@ -9626,7 +9626,7 @@ mod tests {
 
     use super::*;
     use crate::context::IdGenerator;
-    use crate::raw_lambda::typeopt::find_type_decl_pub;
+    use crate::raw_lambda::typeopt::find_type_decl;
     use crate::types::decl::TypeKind;
     use crate::types::env::initial_env;
     use crate::types::predef;
@@ -9648,7 +9648,7 @@ mod tests {
         let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(pat.pat_type)) else {
             panic!("expected result constructor");
         };
-        let decl = find_type_decl_pub(&ctx, pat_env.as_ref(), path).expect("result declaration");
+        let decl = find_type_decl(&ctx, pat_env.as_ref(), path).expect("result declaration");
         let TypeKind::TypeVariant(_, layout_ref) = decl.type_kind else {
             panic!("expected result variant layout");
         };
