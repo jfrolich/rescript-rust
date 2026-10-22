@@ -18520,8 +18520,7 @@ fn type_structure_item<'a>(
             let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
             let type_entry_capacity = decls.len() + fixed_row_type_ids.len();
             let mut type_entry_ids: Vec<Ident> = Vec::with_capacity(type_entry_capacity);
-            let mut type_entry_parser_indices: Vec<Option<usize>> =
-                Vec::with_capacity(type_entry_capacity);
+            let mut type_entry_parser_indices: Vec<usize> = Vec::with_capacity(type_entry_capacity);
             let mut type_entry_is_synthetic_row: Vec<bool> =
                 Vec::with_capacity(type_entry_capacity);
             let needs_placeholder = matches!(rec_flag, crate::parser::ast::RecFlag::Recursive);
@@ -18653,7 +18652,7 @@ fn type_structure_item<'a>(
                     ctx.register_type_decl_by_stamp(row_id.id.stamp(), row_internal_decl.clone());
                 }
                 type_entry_ids.push(row_id.id);
-                type_entry_parser_indices.push(Some(row_id.decl_idx));
+                type_entry_parser_indices.push(row_id.decl_idx);
                 type_entry_is_synthetic_row.push(true);
                 internal_decls_for_generalize.push(row_internal_decl);
                 typed_tree_decls.push(typed_row_decl);
@@ -19791,7 +19790,7 @@ fn type_structure_item<'a>(
                 typed_tree_decl_origins.push(decl.ptype_origin);
                 if has_fixed_rows {
                     type_entry_ids.push(type_id);
-                    type_entry_parser_indices.push(Some(decl_idx));
+                    type_entry_parser_indices.push(decl_idx);
                     type_entry_is_synthetic_row.push(false);
                 }
                 tctx.type_variables = saved_type_variables;
@@ -19947,9 +19946,6 @@ fn type_structure_item<'a>(
                 let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
                     .iter()
                     .map(|parser_idx| {
-                        let Some(parser_idx) = parser_idx else {
-                            return Vec::new();
-                        };
                         decls[*parser_idx]
                             .ptype_params
                             .iter()
@@ -19969,13 +19965,12 @@ fn type_structure_item<'a>(
                             continue;
                         };
                         if !type_entry_is_synthetic_row[idx]
-                            && let Some(parser_idx) = type_entry_parser_indices[idx]
                             && let Some(typed_decl) = typed_tree_decls.get(idx)
                         {
                             check_type_decl_variance_requirements(
                                 ctx,
                                 &new_env,
-                                &decls[parser_idx],
+                                &decls[type_entry_parser_indices[idx]],
                                 typed_decl,
                                 variance_row,
                             )?;
@@ -19996,9 +19991,7 @@ fn type_structure_item<'a>(
                         }
 
                         let type_name = if type_entry_is_synthetic_row[idx] {
-                            let parser_idx = type_entry_parser_indices[idx].expect(
-                                "synthetic row entries keep their source declaration index",
-                            );
+                            let parser_idx = type_entry_parser_indices[idx];
                             fixed_row_type_id_for_decl(&fixed_row_type_ids, parser_idx)
                                 .map(|row_id| row_id.name.clone())
                                 .unwrap_or_else(|| {
@@ -20007,8 +20000,7 @@ fn type_structure_item<'a>(
                                     )
                                 })
                         } else {
-                            let parser_idx = type_entry_parser_indices[idx]
-                                .expect("type entries keep their source declaration index");
+                            let parser_idx = type_entry_parser_indices[idx];
                             arena
                                 .get_string(decls[parser_idx].ptype_name.txt)
                                 .to_string()
@@ -20024,8 +20016,7 @@ fn type_structure_item<'a>(
                     if type_entry_is_synthetic_row[entry_idx] {
                         continue;
                     }
-                    let idx = type_entry_parser_indices[entry_idx]
-                        .expect("type entries keep their source declaration index");
+                    let idx = type_entry_parser_indices[entry_idx];
                     check_type_declaration_coherence(
                         ctx,
                         &new_env,
@@ -21767,7 +21758,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     let mut temp_env = env.clone();
     let type_entry_capacity = decls.len() + fixed_row_type_ids.len();
     let mut type_entry_ids: Vec<Ident> = Vec::with_capacity(type_entry_capacity);
-    let mut type_entry_parser_indices: Vec<Option<usize>> = Vec::with_capacity(type_entry_capacity);
+    let mut type_entry_parser_indices: Vec<usize> = Vec::with_capacity(type_entry_capacity);
     let mut type_entry_is_synthetic_row: Vec<bool> = Vec::with_capacity(type_entry_capacity);
     for decl in decls {
         check_nonrecursive_gadt_enter_type(rec_flag, decl)?;
@@ -21837,7 +21828,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             )?;
             let row_internal_decl = typed_row_decl.typ_type.clone();
             type_entry_ids.push(row_id.id);
-            type_entry_parser_indices.push(Some(row_id.decl_idx));
+            type_entry_parser_indices.push(row_id.decl_idx);
             type_entry_is_synthetic_row.push(true);
             internal_decls_for_generalize.push(row_internal_decl);
             typed_tree_decls.push(typed_row_decl);
@@ -22451,7 +22442,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             typed_tree_decl_origins.push(decl.ptype_origin);
             if has_fixed_rows {
                 type_entry_ids.push(type_id);
-                type_entry_parser_indices.push(Some(decl_idx));
+                type_entry_parser_indices.push(decl_idx);
                 type_entry_is_synthetic_row.push(false);
             }
             tctx.drain_open_slot_uses();
@@ -22604,9 +22595,6 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
             .iter()
             .map(|parser_idx| {
-                let Some(parser_idx) = parser_idx else {
-                    return Vec::new();
-                };
                 decls[*parser_idx]
                     .ptype_params
                     .iter()
@@ -22623,13 +22611,12 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         if resolved_variances.len() == type_entry_ids.len() {
             for (idx, variance_row) in resolved_variances.iter().enumerate() {
                 if !type_entry_is_synthetic_row[idx]
-                    && let Some(parser_idx) = type_entry_parser_indices[idx]
                     && let Some(typed_decl) = typed_tree_decls.get(idx)
                 {
                     check_type_decl_variance_requirements(
                         ctx,
                         &variance_env,
-                        &decls[parser_idx],
+                        &decls[type_entry_parser_indices[idx]],
                         typed_decl,
                         variance_row,
                     )?;
@@ -22647,8 +22634,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             if type_entry_is_synthetic_row[entry_idx] {
                 continue;
             }
-            let idx = type_entry_parser_indices[entry_idx]
-                .expect("type entries keep their source declaration index");
+            let idx = type_entry_parser_indices[entry_idx];
             check_type_declaration_coherence(
                 ctx,
                 &variance_env,
