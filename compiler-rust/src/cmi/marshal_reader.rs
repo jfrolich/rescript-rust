@@ -150,8 +150,8 @@ impl OcamlValue {
         match self {
             OcamlValue::Int(n) => format!("Int({})", n),
             OcamlValue::String(s) => {
-                if s.len() > 50 {
-                    format!("String(\"{}...\")", &s[..50])
+                if let Some((cut, _)) = s.char_indices().nth(50) {
+                    format!("String(\"{}...\")", &s[..cut])
                 } else {
                     format!("String(\"{}\")", s)
                 }
@@ -162,19 +162,6 @@ impl OcamlValue {
             OcamlValue::Float(f) => format!("Float({})", f),
         }
     }
-}
-
-/// Marshal format header.
-#[derive(Debug)]
-pub struct MarshalHeader {
-    /// Length of data section in bytes
-    pub data_len: u32,
-    /// Number of objects in the serialized data
-    pub obj_count: u32,
-    /// Size of heap data in 32-bit words
-    pub size_32: u32,
-    /// Size of heap data in 64-bit words
-    pub size_64: u32,
 }
 
 /// Errors from reading Marshal format.
@@ -244,14 +231,16 @@ impl MarshalReader {
             return Err(MarshalError::BadMagic(magic));
         }
 
-        let _header = MarshalHeader {
-            data_len: read_u32_be(reader)?,
-            obj_count: read_u32_be(reader)?,
-            size_32: read_u32_be(reader)?,
-            size_64: read_u32_be(reader)?,
-        };
+        // Header: data_len, obj_count, size_32, size_64.
+        let data_len = read_u32_be(reader)?;
+        let obj_count = read_u32_be(reader)?;
+        let _size_32 = read_u32_be(reader)?;
+        let _size_64 = read_u32_be(reader)?;
 
         self.obj_table.clear();
+        // Every object takes at least one byte of payload, so `data_len`
+        // bounds a corrupt `obj_count`.
+        self.obj_table.reserve(obj_count.min(data_len) as usize);
         self.read_value(reader)
     }
 
@@ -517,6 +506,16 @@ fn read_i64_be<R: Read>(reader: &mut R) -> Result<i64, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_debug_truncates_on_char_boundary() {
+        // Latin-1 bytes decode to two-byte UTF-8 chars.
+        let value = OcamlValue::String("é".repeat(60));
+        assert_eq!(
+            value.short_debug(),
+            format!("String(\"{}...\")", "é".repeat(50))
+        );
+    }
 
     #[test]
     fn test_read_small_int() {
