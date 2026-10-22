@@ -3913,6 +3913,21 @@ fn has_res_pat_variant_spread_attribute(
         .any(|attr| arena.get_string(attr.0.txt) == PAT_VARIANT_SPREAD_ATTRIBUTE)
 }
 
+/// Reuse the newest `Lident name` in the arena, or push a fresh one.
+fn existing_or_new_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
+    find_existing_lident_idx(arena, name).unwrap_or_else(|| arena.push_typecheck_lident(name))
+}
+
+/// `Lident lbl_name` for a synthesized optional record field, shared across
+/// the compilation through the TypeContext cache.
+fn synthesized_record_lident_idx(ctx: &TypeContext, arena: &ParseArena, name: &str) -> LidentIdx {
+    ctx.get_synthesized_record_lident(name).unwrap_or_else(|| {
+        let lid = existing_or_new_lident_idx(arena, name);
+        ctx.cache_synthesized_record_lident(name.to_string(), lid);
+        lid
+    })
+}
+
 fn find_existing_lident_idx(arena: &ParseArena, name: &str) -> Option<LidentIdx> {
     for idx in (0..arena.longident_count()).rev() {
         let lid_idx = LidentIdx(idx as u32);
@@ -8746,16 +8761,9 @@ fn type_expect_with_recarg_unscoped<'a>(
             )
         }
 
-        ED::Pexp_jsx_element(jsx_element) => {
+        ED::Pexp_jsx_element(_) => {
             // JSX element - typically transformed before type checking
-            type_jsx_element(
-                tctx,
-                env,
-                loc,
-                jsx_element,
-                expected_ty,
-                &expr.pexp_attributes,
-            )
+            Err(TypeCoreError::JsxNotEnabled { loc })
         }
 
         ED::Pexp_inline_for(inner) => {
@@ -11226,10 +11234,15 @@ fn report_unused_match_cases(
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) && !check_ambiguous {
         return;
     }
-    let parmatch_cases: Vec<ParmatchCase> = cases
+    if let [case] = cases
+        && unused_check_is_trivial(&case.c_lhs, case.c_guard.is_some())
+    {
+        return;
+    }
+    let check_cases: Vec<UnusedCheckCase<'_>> = cases
         .iter()
-        .map(|case| ParmatchCase {
-            lhs: case.c_lhs.clone(),
+        .map(|case| UnusedCheckCase {
+            lhs: &case.c_lhs,
             guarded: case.c_guard.is_some(),
             guard_idents: case.c_guard.as_ref().map(|guard| {
                 let mut ids = Vec::new();
@@ -11241,7 +11254,7 @@ fn report_unused_match_cases(
     register_unused_match_check(
         tctx,
         env,
-        parmatch_cases,
+        check_cases,
         delayed,
         level,
         ty_arg_check,
@@ -11259,84 +11272,136 @@ fn report_unused_match_pattern(
     level: i32,
     ty_arg_check: TypeExprRef,
 ) {
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch) || unused_check_is_trivial(lhs, false)
+    {
         return;
     }
-    let case = ParmatchCase {
-        lhs: lhs.clone(),
+    let case = UnusedCheckCase {
+        lhs,
         guarded: false,
         guard_idents: None,
     };
     register_unused_match_check(tctx, env, vec![case], delayed, level, ty_arg_check, false);
 }
 
+/// `check_unused` of one unguarded case without or-patterns: with no
+/// earlier rows `every_satisfiables` answers `Used`, the refinement is
+/// skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
+/// guarded or-patterns, so nothing can be reported.
+fn unused_check_is_trivial(lhs: &Pattern, guarded: bool) -> bool {
+    !guarded && !pattern_contains_or(lhs)
+}
+
+/// A borrowed match case for the unused/ambiguous Parmatch checks.
+struct UnusedCheckCase<'a> {
+    lhs: &'a Pattern,
+    guarded: bool,
+    /// `all_rhs_idents` of the guard.
+    guard_idents: Option<std::collections::BTreeSet<Ident>>,
+}
+
 fn register_unused_match_check(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    parmatch_cases: Vec<ParmatchCase>,
+    cases: Vec<UnusedCheckCase<'_>>,
     delayed: bool,
     level: i32,
     ty_arg_check: TypeExprRef,
     check_ambiguous: bool,
 ) {
-    // `check_unused` of one unguarded case without or-patterns: with no
-    // earlier rows `every_satisfiables` answers `Used`, the refinement is
-    // skipped (`pref = []`) and `check_ambiguous_bindings` only looks at
-    // guarded or-patterns, so nothing can be reported.
-    if let [case] = parmatch_cases.as_slice()
-        && !case.guarded
-        && !pattern_contains_or(&case.lhs)
-    {
-        return;
-    }
-    let check = DelayedUnusedCheck {
-        env: env.clone(),
-        level,
-        ty_arg_check,
-        cases: parmatch_cases,
-        warning_config: tctx.warning_config.clone(),
-        check_ambiguous,
-        seq: 0,
-    };
+    let warning_config = tctx.warning_config.clone();
     if delayed {
         let seq = tctx.next_delayed_check_seq();
-        tctx.delayed_unused_checks
-            .push(DelayedUnusedCheck { seq, ..check });
+        tctx.delayed_unused_checks.push(DelayedUnusedCheck {
+            env: env.clone(),
+            level,
+            ty_arg_check,
+            cases: cases
+                .into_iter()
+                .map(|case| ParmatchCase {
+                    lhs: case.lhs.clone(),
+                    guarded: case.guarded,
+                    guard_idents: case.guard_idents,
+                })
+                .collect(),
+            warning_config,
+            check_ambiguous,
+            seq,
+        });
     } else {
-        run_delayed_unused_check(tctx, check);
+        run_unused_check(
+            tctx,
+            env,
+            level,
+            ty_arg_check,
+            cases,
+            warning_config,
+            check_ambiguous,
+        );
     }
 }
 
 fn run_delayed_unused_check(tctx: &mut TypeCheckContext<'_>, check: DelayedUnusedCheck) {
-    tctx.drain_open_slot_uses();
-    let saved = std::mem::replace(&mut tctx.warning_config, check.warning_config);
-    let expected_ty = crate::types::instance(tctx.type_ctx, check.ty_arg_check);
-    let refs: Vec<_> = check
+    let cases = check
         .cases
         .iter()
-        .map(|case| crate::types::parmatch::CaseRef {
+        .map(|case| UnusedCheckCase {
             lhs: &case.lhs,
+            guarded: case.guarded,
+            guard_idents: if check.check_ambiguous {
+                case.guard_idents.clone()
+            } else {
+                None
+            },
+        })
+        .collect();
+    run_unused_check(
+        tctx,
+        &check.env,
+        check.level,
+        check.ty_arg_check,
+        cases,
+        check.warning_config,
+        check.check_ambiguous,
+    );
+}
+
+fn run_unused_check(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    level: i32,
+    ty_arg_check: TypeExprRef,
+    cases: Vec<UnusedCheckCase<'_>>,
+    warning_config: WarningConfig,
+    check_ambiguous: bool,
+) {
+    tctx.drain_open_slot_uses();
+    let saved = std::mem::replace(&mut tctx.warning_config, warning_config);
+    let expected_ty = crate::types::instance(tctx.type_ctx, ty_arg_check);
+    let refs: Vec<_> = cases
+        .iter()
+        .map(|case| crate::types::parmatch::CaseRef {
+            lhs: case.lhs,
             guarded: case.guarded,
         })
         .collect();
-    parmatch_check_unused(tctx, &check.env, check.level, expected_ty, &refs);
-    if check.check_ambiguous {
+    parmatch_check_unused(tctx, env, level, expected_ty, &refs);
+    if check_ambiguous {
         // Parmatch.check_ambiguous_bindings (typecore.ml:4486).
         let oracle = TypecoreParmatchOracle {
             tctx: &mut *tctx,
-            env: &check.env,
+            env,
             expected_ty,
-            level: check.level,
+            level,
             partial_explode: 0,
             none_type: None,
         };
         let mut pm = crate::types::parmatch::Parmatch::new(oracle);
-        let cases: Vec<_> = check
-            .cases
-            .iter()
+        let cases: Vec<_> = cases
+            .into_iter()
             .map(|case| crate::types::parmatch::AmbiguousCase {
-                lhs: &case.lhs,
-                guard_idents: case.guard_idents.clone(),
+                lhs: case.lhs,
+                guard_idents: case.guard_idents,
             })
             .collect();
         pm.check_ambiguous_bindings(&cases);
@@ -11797,10 +11862,6 @@ fn type_match_cases_batch_non_gadt<'a>(
         let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
         let mut pattern_forces: Vec<GlobalizeForce> = Vec::new();
         for case in cases {
-            let case_loc = tctx
-                .arena
-                .to_location(tctx.arena.get_pat(case.pc_lhs).ppat_loc);
-            let _case_line = case_loc.loc_start.line;
             // Match OCaml type_cases: instance the GENERIC scrutinee type inside
             // begin_def. This creates fresh copies at the elevated level (L+1).
             // After end_def + generalize, pattern types become GENERIC, preventing
@@ -12098,19 +12159,15 @@ fn type_match(
     } else {
         expected_ty
     };
-    let mut duplicated_case_env = None;
+    let duplicated_case_env;
     let val_case_env = if has_generalized_value_patterns {
-        duplicated_case_env = Some(duplicate_ident_types_for_gadt_cases(
-            tctx,
-            env,
-            &val_caselist,
-        ));
-        duplicated_case_env.as_ref().unwrap_or(env)
+        duplicated_case_env = duplicate_ident_types_for_gadt_cases(tctx, env, &val_caselist);
+        &duplicated_case_env
     } else {
         env
     };
 
-    let mut gadt_match_env = None;
+    let gadt_match_env;
     let mut gadt_scope_open = false;
     let mut gadt_lev = ctx.current_level();
     let val_case_env = if has_generalized_value_patterns {
@@ -12127,8 +12184,8 @@ fn type_match(
         ctx.init_def(gadt_lev + 1000);
         let mut scoped_env = val_case_env.clone();
         scoped_env.add_gadt_instance_level();
-        gadt_match_env = Some(scoped_env);
-        gadt_match_env.as_ref().unwrap()
+        gadt_match_env = scoped_env;
+        &gadt_match_env
     } else {
         val_case_env
     };
@@ -12196,8 +12253,8 @@ fn type_match(
     }
 
     // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
-    // INSIDE begin_def scope (line 3993), already handled by lines 5711-5720 in
-    // type_match_cases_batch_non_gadt. Do NOT directly unify pattern types with
+    // INSIDE begin_def scope (line 3993), already handled by the per-case
+    // `instance` in type_match_cases_batch_non_gadt. Do NOT directly unify pattern types with
     // typed_scrutinee.exp_type — that creates false node sharing between scrutinee
     // and pattern types (OCaml keeps them separate via fresh instances).
 
@@ -12458,13 +12515,6 @@ fn finalize_variant_in_pattern(
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
     }
 }
-
-/// Close variant rows in let binding patterns, matching OCaml's
-/// `Parmatch.pressure_variants env [pat]` call in type_let (typecore.ml:4120).
-/// For let bindings, variant patterns have no wildcard alternative at the same
-/// position, so all non-fixed variant rows on Tpat_variant nodes are closed.
-/// This matches OCaml's close_variant: sets unmatched Reither fields to Rabsent
-/// and marks the row as closed.
 
 fn pattern_contains_generalized_constructor(
     tctx: &mut TypeCheckContext<'_>,
@@ -12886,27 +12936,6 @@ fn duplicate_ident_types_for_gadt_cases(
     copied_env
 }
 
-fn shallow_copy_pattern_binding_type(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    copy_nullary: bool,
-) -> TypeExprRef {
-    let repr = ctx.repr(ty);
-    let desc = ctx.get_desc(repr);
-    let (path, args) = match &*desc {
-        TypeDesc::Tconstr { path, args, .. } if copy_nullary || !args.is_empty() => {
-            (path.clone(), args.clone())
-        }
-        _ => return ty,
-    };
-    let level = ctx.get_level(repr);
-    drop(desc);
-
-    let copied = ctx.new_constr(path, args.to_vec());
-    ctx.set_level(copied, level);
-    copied
-}
-
 fn is_simple_variable_pattern(arena: &ParseArena, pat: &ParsedPattern) -> bool {
     match &*pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any
@@ -12956,7 +12985,7 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
 
 fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let mut worklist = vec![ctx.repr(ty)];
-    let mut visited = HashSet::new();
+    let mut visited = TypeExprRefSet::new();
     while let Some(current) = worklist.pop() {
         let current = ctx.repr(current);
         if !visited.insert(current) {
@@ -12965,7 +12994,6 @@ fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
         if ctx.get_level(current) < crate::types::LOWEST_LEVEL {
             continue;
         }
-        let mut children = Vec::new();
         let desc = ctx.get_desc(current);
         if let TypeDesc::Tvariant(row) = &*desc {
             let row = crate::types::btype::row_repr(ctx, row);
@@ -12981,10 +13009,7 @@ fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
             }
         }
         drop(desc);
-        crate::types::iter_type_expr(ctx, current, |child| {
-            children.push(child);
-        });
-        worklist.extend(children);
+        crate::types::iter_type_expr(ctx, current, |child| worklist.push(child));
     }
     false
 }
@@ -14520,34 +14545,6 @@ fn type_construct(
     ))
 }
 
-fn is_active_recursive_value_ident(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    lid: &Located<LidentIdx>,
-) -> bool {
-    if tctx.active_recursive_value_ids.is_empty() {
-        return false;
-    }
-
-    let longident = tctx.arena.get_longident(lid.txt);
-    let Ok((path, _)) = env.lookup_value_by_lid(
-        longident,
-        tctx.arena,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-    ) else {
-        return false;
-    };
-
-    match path {
-        Path::Pident(id) => tctx
-            .active_recursive_value_ids
-            .iter()
-            .any(|active| active == &id),
-        _ => false,
-    }
-}
-
 /// Type check polymorphic variant.
 fn type_variant(
     tctx: &mut TypeCheckContext<'_>,
@@ -14737,16 +14734,6 @@ impl RecordLabelDescriptionsInfo {
             field_names.len() == self.labels.len()
         }
     }
-}
-
-fn find_record_label_description_by_name(
-    labels: Option<&[crate::types::LabelDescription]>,
-    label_name: &str,
-) -> Option<crate::types::LabelDescription> {
-    labels?
-        .iter()
-        .find(|label| label.lbl_name == label_name)
-        .cloned()
 }
 
 fn qualified_record_label_from_info(
@@ -15431,7 +15418,7 @@ fn type_record(
         // with nothing in scope is unbound.
         if record_opath_ty.is_none()
             && matches!(resolved_lid, Longident::Lident(_))
-            && env.find_all_labels(field_name).is_empty()
+            && env.find_label(field_name).is_err()
         {
             let resolved_lid = resolved_lid.clone();
             return Err(TypeCoreError::UnboundRecordField {
@@ -16185,18 +16172,9 @@ fn type_record(
                         crate::types::ctype::instance_label(ctx, false, raw_label_desc);
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     let label_desc = crate::types::LabelDescription {
-                        lbl_name: raw_label_desc.lbl_name.clone(),
-                        lbl_runtime_name: raw_label_desc.lbl_runtime_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
-                        lbl_mut: raw_label_desc.lbl_mut,
-                        lbl_optional: raw_label_desc.lbl_optional,
-                        lbl_pos: raw_label_desc.lbl_pos,
-                        lbl_all: raw_label_desc.lbl_all,
-                        lbl_repres: raw_label_desc.lbl_repres.clone(),
-                        lbl_private: raw_label_desc.lbl_private,
-                        lbl_loc: raw_label_desc.lbl_loc,
-                        lbl_attributes: raw_label_desc.lbl_attributes.clone(),
+                        ..raw_label_desc.clone()
                     };
                     typed_fields.push((
                         placeholder_lid,
@@ -16209,14 +16187,7 @@ fn type_record(
 
                 if raw_label_desc.lbl_optional {
                     let option_ty = raw_label_desc.lbl_arg;
-                    let label_lid_idx = ctx
-                        .get_synthesized_record_lident(&label_name)
-                        .unwrap_or_else(|| {
-                            let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                                .unwrap_or_else(|| tctx.arena.push_typecheck_lident(&label_name));
-                            ctx.cache_synthesized_record_lident(label_name.clone(), lid);
-                            lid
-                        });
+                    let label_lid_idx = synthesized_record_lident_idx(ctx, tctx.arena, &label_name);
                     let label_lid = Located {
                         txt: label_lid_idx,
                         loc,
@@ -16293,18 +16264,9 @@ fn type_record(
                         crate::types::ctype::instance_label(ctx, false, raw_label_desc);
                     let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
                     crate::types::LabelDescription {
-                        lbl_name: raw_label_desc.lbl_name.clone(),
-                        lbl_runtime_name: raw_label_desc.lbl_runtime_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: ty_arg,
-                        lbl_mut: raw_label_desc.lbl_mut,
-                        lbl_optional: raw_label_desc.lbl_optional,
-                        lbl_pos: raw_label_desc.lbl_pos,
-                        lbl_all: raw_label_desc.lbl_all,
-                        lbl_repres: raw_label_desc.lbl_repres.clone(),
-                        lbl_private: raw_label_desc.lbl_private,
-                        lbl_loc: raw_label_desc.lbl_loc,
-                        lbl_attributes: raw_label_desc.lbl_attributes.clone(),
+                        ..raw_label_desc.clone()
                     }
                 } else {
                     crate::types::LabelDescription {
@@ -16364,14 +16326,7 @@ fn type_record(
                     }
                 };
                 // OCaml uses {loc; txt = Lident lbl.lbl_name} for synthesized optional fields
-                let label_lid_idx = ctx
-                    .get_synthesized_record_lident(&label_name)
-                    .unwrap_or_else(|| {
-                        let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                            .unwrap_or_else(|| tctx.arena.push_typecheck_lident(&label_name));
-                        ctx.cache_synthesized_record_lident(label_name.clone(), lid);
-                        lid
-                    });
+                let label_lid_idx = synthesized_record_lident_idx(ctx, tctx.arena, &label_name);
                 let label_lid = Located {
                     txt: label_lid_idx,
                     loc,
@@ -16468,7 +16423,6 @@ fn type_record(
         let base_loc = typed_base_expr.exp_loc;
         if let Some(labels) = all_labels_for_unify {
             for (idx, env_label) in labels.iter().enumerate() {
-                let _label_name = env_label.lbl_name.clone();
                 // Instance 1: connect to base expression. OCaml `unify_kept`
                 // (typecore.ml:2886-2898) raises from each unification.
                 // (typecore.ml: `unify_exp_types ~context:None exp.exp_loc env ty_exp ty_res1`).
@@ -16869,23 +16823,7 @@ fn inline_record_decl_from_variant_type(
         return None;
     };
 
-    let num_consts = constrs
-        .iter()
-        .filter(|c| {
-            matches!(
-                c.cd_args,
-                crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-            )
-        })
-        .count() as i32;
-    let _num_nonconsts = constrs.len() as i32 - num_consts;
-
     for (position, cd) in constrs.iter().enumerate() {
-        let is_constant = matches!(
-            cd.cd_args,
-            crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-        );
-
         if cd.cd_id.name() == cstr_name {
             let crate::types::ConstructorArguments::CstrRecord(ref labels) = cd.cd_args else {
                 return None;
@@ -16926,8 +16864,6 @@ fn inline_record_decl_from_variant_type(
                 type_path: None,
             });
         }
-
-        let _ = is_constant;
     }
 
     None
@@ -18572,12 +18508,12 @@ fn resolve_alias_root_from_module_type(
         DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
         DeclMty::MtyIdent(path) => match path {
             Path::Pident(id) => {
-                let name = id.name().to_string();
-                if !visited.insert(name.clone()) {
+                let name = id.name();
+                if !visited.insert(name.to_string()) {
                     return None;
                 }
 
-                if let Ok(mtd) = env.find_modtype(&name) {
+                if let Ok(mtd) = env.find_modtype(name) {
                     if let Some(inner_mty) = &mtd.mtd_type {
                         if let Some(alias_root) =
                             resolve_alias_root_from_module_type(env, inner_mty, visited)
@@ -18587,7 +18523,7 @@ fn resolve_alias_root_from_module_type(
                     }
                 }
 
-                if let Ok(md) = env.find_module(&name) {
+                if let Ok(md) = env.find_module(name) {
                     if let Some(alias_root) =
                         resolve_alias_root_from_module_type(env, &md.md_type, visited)
                     {
@@ -18612,7 +18548,6 @@ fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
 fn replace_letmodule_local_paths(
     ctx: &TypeContext,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
     module_id: &Ident,
     seen: &mut HashSet<TypeExprRef>,
@@ -18636,7 +18571,7 @@ fn replace_letmodule_local_paths(
             let expanded = ctx.repr(expanded);
             if expanded != ty {
                 crate::types::link_type(ctx, ty, expanded);
-                replace_letmodule_local_paths(ctx, env, pers_env, expanded, module_id, seen);
+                replace_letmodule_local_paths(ctx, env, expanded, module_id, seen);
                 return;
             }
         }
@@ -18649,7 +18584,7 @@ fn replace_letmodule_local_paths(
             if rewritten_path != local_path {
                 let rewritten_ty = ctx.new_constr(rewritten_path, local_args.to_vec());
                 crate::types::link_type(ctx, ty, rewritten_ty);
-                replace_letmodule_local_paths(ctx, env, pers_env, rewritten_ty, module_id, seen);
+                replace_letmodule_local_paths(ctx, env, rewritten_ty, module_id, seen);
                 return;
             }
         }
@@ -18660,41 +18595,23 @@ fn replace_letmodule_local_paths(
     }
 
     crate::types::iter_type_expr(ctx, ty, |child| {
-        replace_letmodule_local_paths(ctx, env, pers_env, child, module_id, seen);
+        replace_letmodule_local_paths(ctx, env, child, module_id, seen);
     });
 }
 
 fn apply_letmodule_local_path_cleanup(
     ctx: &TypeContext,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     body_env: &Env,
     module_id: &Ident,
     rewritten_ty: TypeExprRef,
     expected_ty: TypeExprRef,
 ) {
     let mut seen: HashSet<TypeExprRef> = HashSet::new();
-    replace_letmodule_local_paths(ctx, body_env, pers_env, rewritten_ty, module_id, &mut seen);
-    replace_letmodule_local_paths(ctx, body_env, pers_env, expected_ty, module_id, &mut seen);
+    replace_letmodule_local_paths(ctx, body_env, rewritten_ty, module_id, &mut seen);
+    replace_letmodule_local_paths(ctx, body_env, expected_ty, module_id, &mut seen);
     for (_id, value_desc) in env.iter_values() {
-        replace_letmodule_local_paths(
-            ctx,
-            body_env,
-            pers_env,
-            value_desc.val_type,
-            module_id,
-            &mut seen,
-        );
-    }
-}
-
-fn expression_result_loc(expr: &Expression) -> LocIdx {
-    match &expr.exp_desc {
-        ExpressionDesc::Texp_let(_, _, body)
-        | ExpressionDesc::Texp_letmodule(_, _, _, body)
-        | ExpressionDesc::Texp_letexception(_, body)
-        | ExpressionDesc::Texp_sequence(_, body) => expression_result_loc(body),
-        _ => expr.exp_loc,
+        replace_letmodule_local_paths(ctx, body_env, value_desc.val_type, module_id, &mut seen);
     }
 }
 
@@ -18888,29 +18805,53 @@ fn narrowed_module_lookup_error(
     module_structure_lookup_error(tctx, env, loc, lid, &module_path)
 }
 
-fn unbound_module_alternatives(
-    tctx: &mut TypeCheckContext<'_>,
+/// Spelling-hint candidates for an unbound name: the local env table for
+/// `Lident`, or the matching items of the prefix module's signature in
+/// `Tbl.fold` order for `Ldot`.
+fn unbound_name_alternatives(
+    arena: &ParseArena,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &TypeContext,
     lid: &Longident,
+    local_names: impl FnOnce(&Env) -> Vec<String>,
+    mut item_names: impl FnMut(&crate::types::decl::SignatureItem, &mut Vec<String>),
 ) -> Vec<String> {
     match lid {
-        Longident::Lident(_) => env.fold_module_names(),
+        Longident::Lident(_) => local_names(env),
         Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+            env.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
                 .map(|(_, sig)| {
-                    sig.iter()
-                        .filter_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                                Some(id.name().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect()
+                    let mut names = Vec::new();
+                    for item in sig.iter() {
+                        item_names(item, &mut names);
+                    }
+                    names
                 })
                 .unwrap_or_default(),
         ),
         Longident::Lapply(_, _) => Vec::new(),
     }
+}
+
+fn unbound_module_alternatives(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Vec<String> {
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_module_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 /// The name list a `Tbl.fold` over a structure's components builds by consing
@@ -18927,24 +18868,19 @@ fn unbound_type_constructor_alternatives(
     env: &Env,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_type_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-                .map(|(_, sig)| {
-                    sig.iter()
-                        .filter_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigType(id, _, _) => {
-                                Some(id.name().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_type_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigType(id, _, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 fn unbound_constructor_alternatives(
@@ -18952,50 +18888,30 @@ fn unbound_constructor_alternatives(
     env: &Env,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_constructor_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-                .map(|(_, sig)| {
-                    sig.iter()
-                        .flat_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigType(_, decl, _) => {
-                                match &decl.type_kind {
-                                    crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
-                                        constructors
-                                            .iter()
-                                            .map(|cstr| cstr.cd_id.name().to_string())
-                                            .collect::<Vec<_>>()
-                                    }
-                                    _ => Vec::new(),
-                                }
-                            }
-                            crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
-                                vec![id.name().to_string()]
-                            }
-                            _ => Vec::new(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
-}
-
-fn label_names_from_signature(sig: &crate::types::decl::Signature) -> Vec<String> {
-    sig.iter()
-        .flat_map(|item| match item {
-            crate::types::decl::SignatureItem::SigType(_, decl, _) => match &decl.type_kind {
-                crate::types::decl::TypeKind::TypeRecord(labels, _) => labels
-                    .iter()
-                    .map(|label| label.ld_id.name().to_string())
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        })
-        .collect()
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_constructor_names,
+        |item, names| match item {
+            crate::types::decl::SignatureItem::SigType(_, decl, _) => {
+                if let crate::types::decl::TypeKind::TypeVariant(constructors, _) = &decl.type_kind
+                {
+                    names.extend(
+                        constructors
+                            .iter()
+                            .map(|cstr| cstr.cd_id.name().to_string()),
+                    );
+                }
+            }
+            crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
+                names.push(id.name().to_string());
+            }
+            _ => {}
+        },
+    )
 }
 
 fn unbound_label_alternatives(
@@ -19005,15 +18921,21 @@ fn unbound_label_alternatives(
     ctx: &TypeContext,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_label_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
-                .map(|(_, sig)| label_names_from_signature(&sig))
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
+    unbound_name_alternatives(
+        arena,
+        env,
+        pers_env,
+        ctx,
+        lid,
+        Env::fold_label_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigType(_, decl, _) = item
+                && let crate::types::decl::TypeKind::TypeRecord(labels, _) = &decl.type_kind
+            {
+                names.extend(labels.iter().map(|label| label.ld_id.name().to_string()));
+            }
+        },
+    )
 }
 
 fn module_structure_lookup_error(
@@ -19049,24 +18971,19 @@ fn unbound_value_alternatives(
     env: &Env,
     lid: &Longident,
 ) -> Vec<String> {
-    match lid {
-        Longident::Lident(_) => env.fold_value_names(),
-        Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
-                .map(|(_, sig)| {
-                    sig.iter()
-                        .filter_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigValue(id, _) => {
-                                Some(id.name().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        Longident::Lapply(_, _) => Vec::new(),
-    }
+    unbound_name_alternatives(
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        lid,
+        Env::fold_value_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigValue(id, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 fn check_inlined_record_escape(
@@ -19138,83 +19055,6 @@ fn type_letmodule(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    fn path_root_is_module(path: &Path, module_id: &Ident) -> bool {
-        match path {
-            Path::Pident(id) => id.same(module_id),
-            Path::Pdot(prefix, _, _) => path_root_is_module(prefix, module_id),
-            Path::Papply(_, _) => false,
-        }
-    }
-
-    fn replace_module_root_path(path: &Path, module_id: &Ident, alias_root: &Path) -> Path {
-        match path {
-            Path::Pident(id) => {
-                if id.same(module_id) {
-                    alias_root.clone()
-                } else {
-                    path.clone()
-                }
-            }
-            Path::Pdot(prefix, name, _) => {
-                let rewritten_prefix = replace_module_root_path(prefix, module_id, alias_root);
-                if rewritten_prefix == **prefix {
-                    path.clone()
-                } else {
-                    Path::pdot(rewritten_prefix, *name)
-                }
-            }
-            Path::Papply(_, _) => path.clone(),
-        }
-    }
-
-    fn resolve_alias_root_from_module_type(
-        env: &Env,
-        mty: &crate::types::decl::ModuleType,
-        visited: &mut HashSet<String>,
-    ) -> Option<Path> {
-        use crate::types::decl::ModuleType as DeclMty;
-
-        match mty {
-            DeclMty::MtyAlias(_, alias_path) => Some(alias_path.clone()),
-            DeclMty::MtyIdent(path) => match path {
-                Path::Pident(id) => {
-                    let name = id.name().to_string();
-                    if !visited.insert(name.clone()) {
-                        return None;
-                    }
-
-                    if let Ok(mtd) = env.find_modtype(&name) {
-                        if let Some(inner_mty) = &mtd.mtd_type {
-                            if let Some(alias_root) =
-                                resolve_alias_root_from_module_type(env, inner_mty, visited)
-                            {
-                                return Some(alias_root);
-                            }
-                        }
-                    }
-
-                    if let Ok(md) = env.find_module(&name) {
-                        if let Some(alias_root) =
-                            resolve_alias_root_from_module_type(env, &md.md_type, visited)
-                        {
-                            return Some(alias_root);
-                        }
-                    }
-
-                    None
-                }
-                _ => Some(path.clone()),
-            },
-            _ => None,
-        }
-    }
-
-    fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
-        let md = env.find_module(module_id.name()).ok()?;
-        let mut visited = HashSet::new();
-        resolve_alias_root_from_module_type(env, &md.md_type, &mut visited)
-    }
-
     fn register_module_type_type_decls_by_stamp(
         ctx: &TypeContext,
         mty: &crate::types::decl::ModuleType,
@@ -19253,59 +19093,6 @@ fn type_letmodule(
             }
             DeclMty::MtyAlias(_, _) | DeclMty::MtyIdent(_) => {}
         }
-    }
-
-    fn replace_letmodule_local_paths(
-        ctx: &TypeContext,
-        env: &Env,
-        ty: TypeExprRef,
-        module_id: &Ident,
-        seen: &mut HashSet<TypeExprRef>,
-    ) {
-        let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
-            return;
-        }
-
-        let local_constr = match &*ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, args, .. } if path_root_is_module(path, module_id) => {
-                Some((path.clone(), args.clone()))
-            }
-            _ => None,
-        };
-
-        if let Some((local_path, local_args)) = local_constr {
-            // Match OCaml `Ctype.nondep_type`: for local module-rooted paths,
-            // first try one-step abbreviation expansion.
-            if let Some(expanded) = crate::types::ctype::expand_head_once(ctx, env, ty) {
-                let expanded = ctx.repr(expanded);
-                if expanded != ty {
-                    crate::types::link_type(ctx, ty, expanded);
-                    replace_letmodule_local_paths(ctx, env, expanded, module_id, seen);
-                    return;
-                }
-            }
-
-            // If expansion is unavailable, try replacing the local root module
-            // with its underlying alias root path (`MS.t` -> `Belt_MapString.t`).
-            if let Some(alias_root) = resolve_letmodule_alias_root(env, module_id) {
-                let rewritten_path = replace_module_root_path(&local_path, module_id, &alias_root);
-                if rewritten_path != local_path {
-                    let rewritten_ty = ctx.new_constr(rewritten_path, local_args.to_vec());
-                    crate::types::link_type(ctx, ty, rewritten_ty);
-                    replace_letmodule_local_paths(ctx, env, rewritten_ty, module_id, seen);
-                    return;
-                }
-            }
-
-            // OCaml keeps truly local abstract types visible here so the
-            // scoping check can report that the type constructor would escape.
-            return;
-        }
-
-        crate::types::iter_type_expr(ctx, ty, |child| {
-            replace_letmodule_local_paths(ctx, env, child, module_id, seen);
-        });
     }
 
     let arena = tctx.arena;
@@ -19422,8 +19209,7 @@ fn type_letmodule(
         apply_letmodule_local_path_cleanup(
             ctx,
             env,
-            &mut tctx.persistent_env,
-            &body_env,
+                        &body_env,
             &mod_id,
             rewritten_ty,
             expected_ty,
@@ -19885,19 +19671,6 @@ fn type_pack(
     ))
 }
 
-/// Type check JSX element.
-fn type_jsx_element(
-    tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
-    loc: LocIdx,
-    _jsx_element: &crate::parser::ast::JsxElement,
-    expected_ty: TypeExprRef,
-    attributes: &[crate::parser::ast::Attribute],
-) -> TypeCoreResult<Expression> {
-    let _ = (tctx, expected_ty, attributes);
-    Err(TypeCoreError::JsxNotEnabled { loc })
-}
-
 /// The module type of `Pmod_unpack` on a module pattern variable, as typed
 /// by the `let module` that `wrap_unpacks` builds (typemod.ml:1357-1370).
 fn module_type_from_package_binding(
@@ -19941,33 +19714,6 @@ fn module_type_from_package_binding(
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)))
 }
 
-fn typed_module_type_for_unpack(
-    arena: &ParseArena,
-    loc: LocIdx,
-    module_type: &crate::types::decl::ModuleType,
-) -> crate::types::typedtree::ModuleType {
-    use crate::types::decl::ModuleType as DeclMty;
-    use crate::types::typedtree::ModuleTypeDesc;
-
-    match module_type {
-        DeclMty::MtyIdent(path) => crate::types::typedtree::ModuleType {
-            mty_desc: ModuleTypeDesc::Tmty_ident(path.clone(), arena.placeholder_located(loc)),
-            mty_type: module_type.clone(),
-            mty_env: EnvRef(0),
-            mty_loc: loc,
-            mty_attributes: Attributes::new(),
-        },
-        DeclMty::MtyAlias(_, path) => crate::types::typedtree::ModuleType {
-            mty_desc: ModuleTypeDesc::Tmty_alias(path.clone(), arena.placeholder_located(loc)),
-            mty_type: module_type.clone(),
-            mty_env: EnvRef(0),
-            mty_loc: loc,
-            mty_attributes: Attributes::new(),
-        },
-        _ => crate::types::typedtree::ModuleType::placeholder(),
-    }
-}
-
 fn type_expect_with_module_unpacks(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -19981,13 +19727,6 @@ fn type_expect_with_module_unpacks(
             return idx;
         }
         arena.push_typecheck_string(s.to_owned())
-    }
-
-    fn ensure_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
-        if let Some(idx) = find_existing_lident_idx(arena, name) {
-            return idx;
-        }
-        arena.push_typecheck_lident(name)
     }
 
     // `wrap_unpacks` (typecore.ml:2097-2108) folds left over the unpacks, so
@@ -20039,14 +19778,13 @@ fn type_expect_with_module_unpacks(
     apply_letmodule_local_path_cleanup(
         tctx.type_ctx,
         env,
-        &mut tctx.persistent_env,
         &body_env,
         &letmod_id,
         typed_body.exp_type,
         expected_ty,
     );
 
-    let lid = ensure_lident_idx(tctx.arena, &unpack.name.txt);
+    let lid = existing_or_new_lident_idx(tctx.arena, &unpack.name.txt);
     let located_lid = Located {
         txt: lid,
         loc: unpack.name.loc,
@@ -20122,31 +19860,6 @@ fn type_expect_with_module_unpacks(
     ))
 }
 
-fn extract_recursive_binding_name(
-    pat: &crate::parser::ast::Pattern,
-    arena: &ParseArena,
-) -> Option<crate::parser::ast::StringLoc> {
-    match &*pat.ppat_desc {
-        crate::parser::ast::PatternDesc::Ppat_var(name) => Some(*name),
-        crate::parser::ast::PatternDesc::Ppat_constraint(inner) => {
-            let (inner_pat, _) = &**inner;
-            extract_recursive_binding_name(arena.get_pat(*inner_pat), arena)
-        }
-        crate::parser::ast::PatternDesc::Ppat_alias(inner, alias_name) => {
-            let inner_pat = arena.get_pat(*inner);
-            if matches!(
-                &*inner_pat.ppat_desc,
-                crate::parser::ast::PatternDesc::Ppat_any
-            ) {
-                Some(*alias_name)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
 fn has_internal_expansive_attribute(
     arena: &ParseArena,
     attrs: &[crate::parser::ast::Attribute],
@@ -20195,24 +19908,8 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             fields,
             extended_expression,
             ..
-        } => {
-            fields
-                .iter()
-                .all(|(_, label, definition, _)| match definition {
-                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                        label.lbl_mut == crate::types::MutableFlag::Immutable
-                            && is_nonexpansive_expression(tctx, expr)
-                    }
-                    crate::types::typedtree::RecordLabelDefinition::Kept(_)
-                    | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
-                        true
-                    }
-                })
-                && extended_expression
-                    .as_deref()
-                    .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
         }
-        ExpressionDesc::Texp_record_sparse {
+        | ExpressionDesc::Texp_record_sparse {
             fields,
             extended_expression,
             ..
@@ -20595,19 +20292,29 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
     }
 }
 
+/// Bound identifiers of a typed pattern in OCaml `pat_bound_idents` order.
+///
+/// OCaml compiler/ml/typedtree.ml:444-457 `bound_idents` conses each
+/// identifier onto a shared accumulator and returns it directly from
+/// `pat_bound_idents`, so the observable warning order is the cons order
+/// (reverse traversal order). typecore.ml:4652-4670 iterates that list when
+/// registering unused-binding checks.
+fn typed_pattern_bound_idents(pat: &Pattern) -> Vec<(&Ident, &str, LocIdx)> {
+    let mut out = Vec::new();
+    collect_typed_pattern_idents(pat, &mut out);
+    out.reverse();
+    out
+}
+
+/// Collects bound identifiers in traversal order.
 fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, &'a str, LocIdx)>) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
-            // OCaml compiler/ml/typedtree.ml:444-457 `bound_idents`
-            // conses each identifier onto a shared accumulator and returns it
-            // directly from `pat_bound_idents`, so the observable warning order
-            // is the cons order, not traversal append order. typecore.ml:4652-4670
-            // iterates that list when registering unused-binding checks.
-            out.insert(0, (id, id.name(), name.loc));
+            out.push((id, id.name(), name.loc));
         }
         PatternDesc::Tpat_alias(inner, id, name) => {
             collect_typed_pattern_idents(inner, out);
-            out.insert(0, (id, id.name(), name.loc));
+            out.push((id, id.name(), name.loc));
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
             for item in items {
@@ -20624,14 +20331,11 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
         }
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
-                out.insert(
-                    0,
-                    (
-                        &rest.rest_ident,
-                        rest.rest_name.txt.as_str(),
-                        rest.rest_name.loc,
-                    ),
-                );
+                out.push((
+                    &rest.rest_ident,
+                    rest.rest_name.txt.as_str(),
+                    rest.rest_name.loc,
+                ));
             }
             for (_, _, field_pat, _) in fields {
                 collect_typed_pattern_idents(field_pat, out);
@@ -20945,53 +20649,54 @@ fn rec_use_discard(use_: RecUse) -> RecUse {
 
 fn rec_env_join(mut left: RecEnv, right: RecEnv) -> RecEnv {
     for (id, use_) in right {
-        left.entry(id)
-            .and_modify(|existing| {
-                *existing = rec_use_join(std::mem::take(existing), use_.clone());
-            })
-            .or_insert(use_);
+        match left.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                let existing = existing.get_mut();
+                *existing = rec_use_join(std::mem::take(existing), use_);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(use_);
+            }
+        }
     }
     left
 }
 
 fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
-    let mut vars = Vec::new();
-    let mut push_var = |id: &Ident, _name: &str, _loc: LocIdx| {
-        vars.push(*id);
-    };
-    fn collect<F: FnMut(&Ident, &str, LocIdx)>(pat: &Pattern, f: &mut F) {
+    fn collect(pat: &Pattern, vars: &mut Vec<Ident>) {
         match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, name) => f(id, id.name(), name.loc),
-            PatternDesc::Tpat_alias(inner, id, name) => {
-                collect(inner, f);
-                f(id, id.name(), name.loc);
+            PatternDesc::Tpat_var(id, _) => vars.push(*id),
+            PatternDesc::Tpat_alias(inner, id, _) => {
+                collect(inner, vars);
+                vars.push(*id);
             }
             PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
                 for item in items {
-                    collect(item, f);
+                    collect(item, vars);
                 }
             }
             PatternDesc::Tpat_construct(_, _, args) => {
                 for arg in args {
-                    collect(arg, f);
+                    collect(arg, vars);
                 }
             }
-            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, f),
+            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, vars),
             PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, field_pat, _) in fields {
-                    collect(field_pat, f);
+                    collect(field_pat, vars);
                 }
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                collect(left, f);
-                collect(right, f);
+                collect(left, vars);
+                collect(right, vars);
             }
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_constant(_)
             | PatternDesc::Tpat_variant(_, None, _) => {}
         }
     }
-    collect(pat, &mut push_var);
+    let mut vars = Vec::new();
+    collect(pat, &mut vars);
     vars
 }
 
@@ -21089,10 +20794,16 @@ fn rec_case(
     } else {
         rec_use_discard(scrutinee)
     };
-    let mut case_env = env.clone();
-    for id in rec_pattern_variables(&case.c_lhs) {
-        case_env.insert(id, scrutinee.clone());
-    }
+    let vars = rec_pattern_variables(&case.c_lhs);
+    let case_env = if vars.is_empty() {
+        std::borrow::Cow::Borrowed(env)
+    } else {
+        let mut case_env = env.clone();
+        for id in vars {
+            case_env.insert(id, scrutinee.clone());
+        }
+        std::borrow::Cow::Owned(case_env)
+    };
     rec_use_join(
         scrutinee,
         rec_use_join(
@@ -21812,9 +21523,7 @@ fn type_let_bindings(
                         let mut usage = tctx.type_ctx.usage();
                         (usage.new_cell(), usage.new_let_slot())
                     };
-                    let mut bound = Vec::new();
-                    collect_typed_pattern_idents(typed_pat, &mut bound);
-                    for (id, name, _) in bound {
+                    for (id, name, _) in typed_pattern_bound_idents(typed_pat) {
                         let Some(pv) = pvars.iter().find(|pv| pv.id.same(id)) else {
                             continue;
                         };
@@ -22096,21 +21805,17 @@ pub(crate) fn copy_type_expr_mapping_paths(
     cache: &mut TypeExprRefMap<TypeExprRef>,
     map_path: &dyn Fn(&Path) -> Path,
 ) -> TypeExprRef {
-    copy_lookup_type_expr_with_paths(ctx, ty, cache, &|p: &Path| map_path(p), &|p: &Path| {
-        map_path(p)
-    })
+    copy_lookup_type_expr_with_paths(ctx, ty, cache, &|p: &Path| map_path(p))
 }
 
-fn copy_lookup_type_expr_with_paths<TP, MP>(
+fn copy_lookup_type_expr_with_paths<TP>(
     ctx: &TypeContext,
     ty: TypeExprRef,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> TypeExprRef
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     use crate::types::type_expr::{MutabilityRef, RowDesc, RowField};
 
@@ -22270,34 +21975,24 @@ where
                     .iter()
                     .map(|arg| {
                         let mut arg = arg.clone();
-                        arg.typ = copy_lookup_type_expr_with_paths(
-                            ctx,
-                            arg.typ,
-                            cache,
-                            type_path,
-                            module_path,
-                        );
+                        arg.typ = copy_lookup_type_expr_with_paths(ctx, arg.typ, cache, type_path);
                         arg
                     })
                     .collect();
-                let ret = copy_lookup_type_expr_with_paths(ctx, ret, cache, type_path, module_path);
+                let ret = copy_lookup_type_expr_with_paths(ctx, ret, cache, type_path);
                 TypeDesc::Tarrow { args, ret }
             }
             CopyTypeExprPlan::Ttuple(types) => {
                 let copied_items = types
                     .iter()
-                    .map(|t| {
-                        copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path)
-                    })
+                    .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
                     .collect();
                 TypeDesc::Ttuple(copied_items)
             }
             CopyTypeExprPlan::Tconstr { path, args } => {
                 let copied_args = args
                     .iter()
-                    .map(|t| {
-                        copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path)
-                    })
+                    .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
                     .collect();
                 TypeDesc::Tconstr {
                     path,
@@ -22306,13 +22001,7 @@ where
                 }
             }
             CopyTypeExprPlan::Tobject { fields } => TypeDesc::Tobject {
-                fields: copy_lookup_type_expr_with_paths(
-                    ctx,
-                    fields,
-                    cache,
-                    type_path,
-                    module_path,
-                ),
+                fields: copy_lookup_type_expr_with_paths(ctx, fields, cache, type_path),
             },
             CopyTypeExprPlan::Tfield {
                 name,
@@ -22326,10 +22015,8 @@ where
                     let cache = &*cache;
                     ctx.copy_field_mutability(mutability, rest, false, &|t| cache.get(t).copied())
                 };
-                let copied_typ =
-                    copy_lookup_type_expr_with_paths(ctx, typ, cache, type_path, module_path);
-                let copied_rest =
-                    copy_lookup_type_expr_with_paths(ctx, rest, cache, type_path, module_path);
+                let copied_typ = copy_lookup_type_expr_with_paths(ctx, typ, cache, type_path);
+                let copied_rest = copy_lookup_type_expr_with_paths(ctx, rest, cache, type_path);
                 TypeDesc::Tfield {
                     name,
                     mutability,
@@ -22339,15 +22026,13 @@ where
             }
             CopyTypeExprPlan::Tnil => TypeDesc::Tnil,
             CopyTypeExprPlan::Tlink(target) => {
-                let copied =
-                    copy_lookup_type_expr_with_paths(ctx, target, cache, type_path, module_path);
+                let copied = copy_lookup_type_expr_with_paths(ctx, target, cache, type_path);
                 ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
                 cache.insert(ty, copied);
                 return copied;
             }
             CopyTypeExprPlan::Tsubst(target) => {
-                let copied_target =
-                    copy_lookup_type_expr_with_paths(ctx, target, cache, type_path, module_path);
+                let copied_target = copy_lookup_type_expr_with_paths(ctx, target, cache, type_path);
                 TypeDesc::Tsubst(copied_target)
             }
             CopyTypeExprPlan::Tvariant {
@@ -22362,15 +22047,9 @@ where
                         .into_iter()
                         .map(|(label, field)| {
                             let copied_field = match field {
-                                CopyRowFieldPlan::Rpresent(Some(ty)) => {
-                                    RowField::Rpresent(Some(copy_lookup_type_expr_with_paths(
-                                        ctx,
-                                        ty,
-                                        cache,
-                                        type_path,
-                                        module_path,
-                                    )))
-                                }
+                                CopyRowFieldPlan::Rpresent(Some(ty)) => RowField::Rpresent(Some(
+                                    copy_lookup_type_expr_with_paths(ctx, ty, cache, type_path),
+                                )),
                                 CopyRowFieldPlan::Rpresent(None) => RowField::Rpresent(None),
                                 CopyRowFieldPlan::Reither {
                                     constant,
@@ -22383,11 +22062,7 @@ where
                                         .iter()
                                         .map(|t| {
                                             copy_lookup_type_expr_with_paths(
-                                                ctx,
-                                                *t,
-                                                cache,
-                                                type_path,
-                                                module_path,
+                                                ctx, *t, cache, type_path,
                                             )
                                         })
                                         .collect(),
@@ -22399,13 +22074,7 @@ where
                             (label, copied_field)
                         })
                         .collect(),
-                    row_more: copy_lookup_type_expr_with_paths(
-                        ctx,
-                        row_more,
-                        cache,
-                        type_path,
-                        module_path,
-                    ),
+                    row_more: copy_lookup_type_expr_with_paths(ctx, row_more, cache, type_path),
                     row_closed,
                     row_fixed,
                     // `Subst.typexp` maps the row name's path like a
@@ -22415,13 +22084,7 @@ where
                             type_path(path),
                             args.iter()
                                 .map(|t| {
-                                    copy_lookup_type_expr_with_paths(
-                                        ctx,
-                                        *t,
-                                        cache,
-                                        type_path,
-                                        module_path,
-                                    )
+                                    copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path)
                                 })
                                 .collect(),
                         )
@@ -22431,13 +22094,10 @@ where
             }
             CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
             CopyTypeExprPlan::Tpoly { body, vars } => {
-                let copied_body =
-                    copy_lookup_type_expr_with_paths(ctx, body, cache, type_path, module_path);
+                let copied_body = copy_lookup_type_expr_with_paths(ctx, body, cache, type_path);
                 let copied_vars = vars
                     .iter()
-                    .map(|t| {
-                        copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path)
-                    })
+                    .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
                     .collect();
                 TypeDesc::Tpoly {
                     body: copied_body,
@@ -22447,9 +22107,7 @@ where
             CopyTypeExprPlan::Tpackage { path, lids, args } => {
                 let copied_args = args
                     .iter()
-                    .map(|t| {
-                        copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path)
-                    })
+                    .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
                     .collect();
                 TypeDesc::Tpackage {
                     path,
@@ -22473,34 +22131,24 @@ fn copy_lookup_type_expr(
     ty: TypeExprRef,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> TypeExprRef {
-    copy_lookup_type_expr_with_paths(
-        ctx,
-        ty,
-        cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    copy_lookup_type_expr_with_paths(ctx, ty, cache, &clone_copy_lookup_path)
 }
 
-fn copy_lookup_constructor_args_with_paths<TP, MP>(
+fn copy_lookup_constructor_args_with_paths<TP>(
     args: &crate::types::decl::ConstructorArguments,
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> crate::types::decl::ConstructorArguments
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     match args {
         crate::types::decl::ConstructorArguments::CstrTuple(items) => {
             crate::types::decl::ConstructorArguments::CstrTuple(
                 items
                     .iter()
-                    .map(|t| {
-                        copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path)
-                    })
+                    .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
                     .collect(),
             )
         }
@@ -22518,7 +22166,6 @@ where
                             label.ld_type,
                             cache,
                             type_path,
-                            module_path,
                         ),
                         ld_loc: label.ld_loc,
                         ld_attributes: label.ld_attributes.clone(),
@@ -22534,25 +22181,17 @@ fn copy_lookup_constructor_args(
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
-    copy_lookup_constructor_args_with_paths(
-        args,
-        ctx,
-        cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    copy_lookup_constructor_args_with_paths(args, ctx, cache, &clone_copy_lookup_path)
 }
 
-fn copy_lookup_type_kind_with_paths<TP, MP>(
+fn copy_lookup_type_kind_with_paths<TP>(
     kind: &crate::types::decl::TypeKind,
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> crate::types::decl::TypeKind
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     match kind {
         crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
@@ -22571,7 +22210,6 @@ where
                             label.ld_type,
                             cache,
                             type_path,
-                            module_path,
                         ),
                         ld_loc: label.ld_loc,
                         ld_attributes: label.ld_attributes.clone(),
@@ -22592,11 +22230,10 @@ where
                             ctx,
                             cache,
                             type_path,
-                            module_path,
                         ),
-                        cd_res: constructor.cd_res.map(|t| {
-                            copy_lookup_type_expr_with_paths(ctx, t, cache, type_path, module_path)
-                        }),
+                        cd_res: constructor
+                            .cd_res
+                            .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
                         cd_loc: constructor.cd_loc,
                         cd_attributes: constructor.cd_attributes.clone(),
                     })
@@ -22612,25 +22249,17 @@ fn copy_lookup_type_kind(
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::TypeKind {
-    copy_lookup_type_kind_with_paths(
-        kind,
-        ctx,
-        cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    copy_lookup_type_kind_with_paths(kind, ctx, cache, &clone_copy_lookup_path)
 }
 
-fn copy_lookup_type_inlined_with_paths<TP, MP>(
+fn copy_lookup_type_inlined_with_paths<TP>(
     inlined: &crate::types::decl::TypeInlinedType,
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> crate::types::decl::TypeInlinedType
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     match inlined {
         crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
@@ -22648,7 +22277,6 @@ where
                             label.ld_type,
                             cache,
                             type_path,
-                            module_path,
                         ),
                         ld_loc: label.ld_loc,
                         ld_attributes: label.ld_attributes.clone(),
@@ -22664,44 +22292,30 @@ fn copy_lookup_type_inlined(
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
-    copy_lookup_type_inlined_with_paths(
-        inlined,
-        ctx,
-        cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    copy_lookup_type_inlined_with_paths(inlined, ctx, cache, &clone_copy_lookup_path)
 }
 
-fn copy_lookup_type_decl_with_paths<TP, MP>(
+fn copy_lookup_type_decl_with_paths<TP>(
     decl: &crate::types::decl::TypeDeclaration,
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> crate::types::decl::TypeDeclaration
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     crate::types::decl::TypeDeclaration {
         type_params: decl
             .type_params
             .iter()
-            .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path))
+            .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
             .collect(),
         type_arity: decl.type_arity,
-        type_kind: copy_lookup_type_kind_with_paths(
-            &decl.type_kind,
-            ctx,
-            cache,
-            type_path,
-            module_path,
-        ),
+        type_kind: copy_lookup_type_kind_with_paths(&decl.type_kind, ctx, cache, type_path),
         type_private: decl.type_private,
         type_manifest: decl
             .type_manifest
-            .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path, module_path)),
+            .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
         type_variance: decl.type_variance.clone(),
         type_newtype_level: decl.type_newtype_level,
         type_loc: decl.type_loc,
@@ -22711,9 +22325,7 @@ where
         type_inlined_types: decl
             .type_inlined_types
             .iter()
-            .map(|inlined| {
-                copy_lookup_type_inlined_with_paths(inlined, ctx, cache, type_path, module_path)
-            })
+            .map(|inlined| copy_lookup_type_inlined_with_paths(inlined, ctx, cache, type_path))
             .collect(),
         type_path: decl.type_path.as_ref().map(type_path),
     }
@@ -22724,13 +22336,7 @@ fn copy_lookup_type_decl(
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::TypeDeclaration {
-    copy_lookup_type_decl_with_paths(
-        decl,
-        ctx,
-        cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    copy_lookup_type_decl_with_paths(decl, ctx, cache, &clone_copy_lookup_path)
 }
 
 pub(crate) fn copy_lookup_type_decl_for_subst(
@@ -22741,25 +22347,17 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     ctx.with_copy_session(|| copy_lookup_type_decl(decl, ctx, &mut cache))
 }
 
-fn copy_lookup_value_description_with_paths<TP, MP>(
+fn copy_lookup_value_description_with_paths<TP>(
     desc: &crate::types::decl::ValueDescription,
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> crate::types::decl::ValueDescription
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     crate::types::decl::ValueDescription {
-        val_type: copy_lookup_type_expr_with_paths(
-            ctx,
-            desc.val_type,
-            cache,
-            type_path,
-            module_path,
-        ),
+        val_type: copy_lookup_type_expr_with_paths(ctx, desc.val_type, cache, type_path),
         val_kind: desc.val_kind.clone(),
         val_loc: desc.val_loc,
         val_attributes: desc.val_attributes.clone(),
@@ -22773,44 +22371,30 @@ pub(crate) fn copy_lookup_value_description_for_subst(
 ) -> crate::types::decl::ValueDescription {
     let mut cache = TypeExprRefMap::new();
     ctx.with_copy_session(|| {
-        copy_lookup_value_description_with_paths(
-            desc,
-            ctx,
-            &mut cache,
-            &clone_copy_lookup_path,
-            &clone_copy_lookup_path,
-        )
+        copy_lookup_value_description_with_paths(desc, ctx, &mut cache, &clone_copy_lookup_path)
     })
 }
 
-fn copy_lookup_extension_constructor_with_paths<TP, MP>(
+fn copy_lookup_extension_constructor_with_paths<TP>(
     ext: &crate::types::decl::ExtensionConstructor,
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
     type_path: &TP,
-    module_path: &MP,
 ) -> crate::types::decl::ExtensionConstructor
 where
     TP: Fn(&Path) -> Path,
-    MP: Fn(&Path) -> Path,
 {
     crate::types::decl::ExtensionConstructor {
         ext_type_path: type_path(&ext.ext_type_path),
         ext_type_params: ext
             .ext_type_params
             .iter()
-            .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path, module_path))
+            .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
             .collect(),
-        ext_args: copy_lookup_constructor_args_with_paths(
-            &ext.ext_args,
-            ctx,
-            cache,
-            type_path,
-            module_path,
-        ),
+        ext_args: copy_lookup_constructor_args_with_paths(&ext.ext_args, ctx, cache, type_path),
         ext_ret_type: ext
             .ext_ret_type
-            .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path, module_path)),
+            .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
         ext_private: ext.ext_private,
         ext_loc: ext.ext_loc,
         ext_attributes: ext.ext_attributes.clone(),
@@ -22823,13 +22407,7 @@ fn copy_lookup_extension_constructor(
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::ExtensionConstructor {
-    copy_lookup_extension_constructor_with_paths(
-        ext,
-        ctx,
-        cache,
-        &clone_copy_lookup_path,
-        &clone_copy_lookup_path,
-    )
+    copy_lookup_extension_constructor_with_paths(ext, ctx, cache, &clone_copy_lookup_path)
 }
 
 fn copy_lookup_module_type_with_paths<TP, MP>(
@@ -22940,24 +22518,14 @@ where
                 crate::types::decl::SignatureItem::SigValue(id, desc) => {
                     crate::types::decl::SignatureItem::SigValue(
                         new_id.unwrap_or(*id),
-                        copy_lookup_value_description_with_paths(
-                            desc,
-                            ctx,
-                            cache,
-                            type_path,
-                            module_path,
-                        ),
+                        copy_lookup_value_description_with_paths(desc, ctx, cache, type_path),
                     )
                 }
                 crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
                     crate::types::decl::SignatureItem::SigType(
                         new_id.unwrap_or(*id),
                         std::sync::Arc::new(copy_lookup_type_decl_with_paths(
-                            decl,
-                            ctx,
-                            cache,
-                            type_path,
-                            module_path,
+                            decl, ctx, cache, type_path,
                         )),
                         *rec_status,
                     )
@@ -22965,13 +22533,7 @@ where
                 crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
                     crate::types::decl::SignatureItem::SigTypext(
                         new_id.unwrap_or(*id),
-                        copy_lookup_extension_constructor_with_paths(
-                            ext,
-                            ctx,
-                            cache,
-                            type_path,
-                            module_path,
-                        ),
+                        copy_lookup_extension_constructor_with_paths(ext, ctx, cache, type_path),
                         *ext_status,
                     )
                 }
@@ -30493,72 +30055,10 @@ fn lookup_type_decl_for_path_with_cache_mode(
             && let Some(parent_decl) =
                 lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode)
         {
-            if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
+            if let Some(decl) =
+                inline_record_decl_from_variant_type(ctx, &parent_decl, type_name.as_str())
             {
-                let num_consts = constrs
-                    .iter()
-                    .filter(|c| {
-                        matches!(
-                            c.cd_args,
-                            crate::types::ConstructorArguments::CstrTuple(ref args)
-                                if args.is_empty()
-                        )
-                    })
-                    .count() as i32;
-                let _num_nonconsts = constrs.len() as i32 - num_consts;
-                let mut block_idx = 0i32;
-                for (position, cd) in constrs.iter().enumerate() {
-                    let is_constant = matches!(
-                        cd.cd_args,
-                        crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-                    );
-
-                    if cd.cd_id.name() == type_name.as_str() {
-                        if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
-                        {
-                            let inline_params =
-                                inline_record_type_params(ctx, &parent_decl.type_params, labels);
-                            return Some(Arc::new(crate::types::TypeDeclaration {
-                                type_params: inline_params.clone(),
-                                type_arity: inline_params.len() as i32,
-                                type_kind: crate::types::TypeKind::TypeRecord(
-                                    crate::types::decl::SharedVec::from(labels.clone()),
-                                    if parent_decl.type_representation
-                                        == crate::types::TypeRepresentation::Unboxed
-                                    {
-                                        // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
-                                        crate::types::RecordRepresentation::RecordUnboxed(true)
-                                    } else {
-                                        crate::types::RecordRepresentation::RecordInlined {
-                                            name: type_name.to_string(),
-                                            representation: crate::types::ConstructorReference {
-                                                variant: layout,
-                                                position,
-                                            },
-                                        }
-                                    },
-                                ),
-                                type_private: parent_decl.type_private,
-                                type_manifest: None,
-                                type_variance: inline_params
-                                    .iter()
-                                    .map(|_| crate::types::variance::Variance::full())
-                                    .collect(),
-                                type_newtype_level: None,
-                                type_loc: cd.cd_loc,
-                                type_attributes: vec![],
-                                type_immediate: false,
-                                type_representation: crate::types::TypeRepresentation::Boxed,
-                                type_inlined_types: vec![],
-                                type_path: None,
-                            }));
-                        }
-                    }
-
-                    if !is_constant {
-                        block_idx += 1;
-                    }
-                }
+                return Some(Arc::new(decl));
             }
         }
 
