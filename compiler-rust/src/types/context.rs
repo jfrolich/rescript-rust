@@ -1628,6 +1628,15 @@ impl TypeContext {
         .ok()
     }
 
+    /// Like `find_type_decl`, but returns the shared declaration handle.
+    pub(crate) fn find_type_decl_arc(
+        &self,
+        name: &str,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(TypeDeclMap::Name);
+        self.type_decl_store.borrow().get(name).cloned()
+    }
+
     /// Look up a type declaration by stamp from the global store.
     pub(crate) fn find_type_decl_arc_by_stamp(
         &self,
@@ -2399,6 +2408,15 @@ impl TypeContext {
     }
 
     /// Look up a type declaration by full qualified path string.
+    /// Like `find_type_decl_by_path`, but returns the shared declaration handle.
+    pub(crate) fn find_type_decl_arc_by_path(
+        &self,
+        path: &str,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.replay_type_decl_log(TypeDeclMap::Path);
+        self.type_decl_by_path.borrow().get(path).cloned()
+    }
+
     pub fn find_type_decl_by_path(
         &self,
         path: &str,

@@ -29529,9 +29529,6 @@ fn lookup_type_decl_for_path_with_cache_mode(
         .flatten()
     }
 
-    // Only use env.lookup_type directly for simple identifiers. For qualified
-    // paths, env.lookup_type currently resolves by leaf name and can return an
-    // unrelated declaration with the same type name.
     if let Path::Pident(id) = type_path {
         // OCaml compiler/ml/env.ml:800-813 resolves Pident type paths with
         // `IdTbl.find_same`. Keep this exact here too, so a same-name local
@@ -29539,18 +29536,6 @@ fn lookup_type_decl_for_path_with_cache_mode(
         // expanded by ctype.ml:1367-1372.
         if let Some(decl) = env.find_type_arc_by_ident(id) {
             return Some(decl.clone());
-        }
-    }
-
-    // Try stamp-based lookup only for regular type identifiers. Constructor-like
-    // paths such as local exception inline-record paths (`C`) share the `Path`
-    // representation but are not type bindings, and imported CMI type stamps can
-    // collide with local constructor stamps.
-    if let Path::Pident(id) = type_path {
-        if id.stamp() != 0 {
-            if let Some(decl) = env.find_type_arc_by_ident(id) {
-                return Some(decl.clone());
-            }
         }
 
         // Try stamp-based lookup only for regular type identifiers.
@@ -29567,12 +29552,11 @@ fn lookup_type_decl_for_path_with_cache_mode(
                 return Some(decl);
             }
         }
-    }
 
-    // Only use env.lookup_type directly for simple identifiers after exact/stamp
-    // lookup. For qualified paths, env.lookup_type currently resolves by leaf
-    // name and can return an unrelated declaration with the same type name.
-    if let Path::Pident(id) = type_path {
+        // Only use env.lookup_type directly for simple identifiers after
+        // exact/stamp lookup. For qualified paths, env.lookup_type currently
+        // resolves by leaf name and can return an unrelated declaration with
+        // the same type name.
         if let Some(decl) = env.lookup_type_arc_by_ident(id) {
             return Some(decl.clone());
         }
@@ -29754,8 +29738,8 @@ fn lookup_type_decl_for_path_with_cache_mode(
                 match &md.md_type {
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
-                        if let Some(decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
-                            return Some(Arc::new(decl.clone()));
+                        if let Some(decl) = ctx.find_type_decl_arc_by_path(&resolved_path.name()) {
+                            return Some(decl);
                         }
                         if let Some(decl) =
                             crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
@@ -29808,8 +29792,8 @@ fn lookup_type_decl_for_path_with_cache_mode(
         // exposing Sig_type entries; preferring substituted signatures first avoids
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
         if cache_key.is_some() {
-            if let Some(decl) = ctx.find_type_decl_by_path(&type_path.name()) {
-                return Some(Arc::new(decl.clone()));
+            if let Some(decl) = ctx.find_type_decl_arc_by_path(&type_path.name()) {
+                return Some(decl);
             }
         }
 
@@ -29827,8 +29811,8 @@ fn lookup_type_decl_for_path_with_cache_mode(
     // For qualified paths (Pdot), a head-name fallback is unsound and can
     // resolve to an unrelated type that happens to share the same leaf name.
     if let Path::Pident(id) = type_path {
-        if let Some(decl) = ctx.find_type_decl(id.name()) {
-            return Some(Arc::new(decl.clone()));
+        if let Some(decl) = ctx.find_type_decl_arc(id.name()) {
+            return Some(decl);
         }
     }
 
