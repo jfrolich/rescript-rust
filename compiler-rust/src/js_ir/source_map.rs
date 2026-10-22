@@ -33,12 +33,15 @@ struct Mapping {
 /// Builder installed on one JS printer while one concrete output is rendered.
 pub struct SourceMapBuilder {
     generated_file: String,
+    /// Absolute directory of the generated file.
     generated_dir: PathBuf,
     source_root: String,
     sources_content: bool,
     default_source: PathBuf,
     source_file_names: Arc<HashMap<StrIdx, String>>,
     sources: HashMap<PathBuf, usize>,
+    /// `sources` index already resolved for a location's file-name index.
+    sources_by_file_name: HashMap<StrIdx, usize>,
     source_list: Vec<Source>,
     mappings: Vec<Mapping>,
     last_generated: Option<(usize, usize)>,
@@ -57,15 +60,13 @@ impl SourceMapBuilder {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned(),
-            generated_dir: generated_file
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
+            generated_dir: absolute_path(generated_file.parent().unwrap_or_else(|| Path::new("."))),
             source_root,
             sources_content,
             default_source: default_source.to_path_buf(),
             source_file_names: Arc::new(HashMap::new()),
             sources: HashMap::new(),
+            sources_by_file_name: HashMap::new(),
             source_list: Vec::new(),
             mappings: Vec::new(),
             last_generated: None,
@@ -81,6 +82,15 @@ impl SourceMapBuilder {
     }
 
     fn add_source(&mut self, source_file_name: StrIdx) -> (usize, Option<&str>) {
+        if let Some(&index) = self.sources_by_file_name.get(&source_file_name) {
+            return (index, self.source_list[index].content.as_deref());
+        }
+        let index = self.resolve_source(source_file_name);
+        self.sources_by_file_name.insert(source_file_name, index);
+        (index, self.source_list[index].content.as_deref())
+    }
+
+    fn resolve_source(&mut self, source_file_name: StrIdx) -> usize {
         let source_file = self
             .source_file_names
             .get(&source_file_name)
@@ -90,17 +100,17 @@ impl SourceMapBuilder {
             .unwrap_or(&self.default_source);
         let filename = absolute_path(source_file);
         if let Some(&index) = self.sources.get(&filename) {
-            return (index, self.source_list[index].content.as_deref());
+            return index;
         }
         let content = std::fs::read_to_string(&filename).ok();
         let source = Source {
-            relative_path: relative_path(&absolute_path(&self.generated_dir), &filename),
+            relative_path: relative_path(&self.generated_dir, &filename),
             content,
         };
         let index = self.source_list.len();
         self.source_list.push(source);
         self.sources.insert(filename, index);
-        (index, self.source_list[index].content.as_deref())
+        index
     }
 
     pub fn add_mapping(&mut self, generated_line: usize, generated_column: usize, loc: &Location) {
@@ -131,54 +141,52 @@ impl SourceMapBuilder {
     }
 
     pub fn json(&self) -> String {
-        let sources = self
-            .source_list
-            .iter()
-            .map(|source| serde_json::Value::String(source.relative_path.clone()))
-            .collect();
-        let mut fields = vec![
-            ("version".to_string(), serde_json::Value::from(3)),
-            (
-                "file".to_string(),
-                serde_json::Value::String(self.generated_file.clone()),
-            ),
-            ("sources".to_string(), serde_json::Value::Array(sources)),
-            ("names".to_string(), serde_json::Value::Array(Vec::new())),
-            (
-                "mappings".to_string(),
-                serde_json::Value::String(encode_mappings(&self.mappings)),
-            ),
-        ];
-        if !self.source_root.is_empty() {
-            fields.push((
-                "sourceRoot".to_string(),
-                serde_json::Value::String(self.source_root.clone()),
-            ));
+        fn push_json_str(result: &mut String, value: &str) {
+            result.push_str(&serde_json::to_string(value).expect("JSON string"));
         }
-        if self.sources_content {
-            fields.push((
-                "sourcesContent".to_string(),
-                serde_json::Value::Array(
-                    self.source_list
-                        .iter()
-                        .map(|source| {
-                            source
-                                .content
-                                .clone()
-                                .map_or(serde_json::Value::Null, serde_json::Value::String)
-                        })
-                        .collect(),
-                ),
-            ));
+        fn push_key(result: &mut String, key: &str) {
+            if result.len() > 1 {
+                result.push(',');
+            }
+            push_json_str(result, key);
+            result.push(':');
         }
+
         let mut result = String::from("{");
-        for (index, (key, value)) in fields.into_iter().enumerate() {
+        push_key(&mut result, "version");
+        result.push('3');
+        push_key(&mut result, "file");
+        push_json_str(&mut result, &self.generated_file);
+        push_key(&mut result, "sources");
+        result.push('[');
+        for (index, source) in self.source_list.iter().enumerate() {
             if index != 0 {
                 result.push(',');
             }
-            result.push_str(&serde_json::to_string(&key).expect("JSON key"));
-            result.push(':');
-            result.push_str(&serde_json::to_string(&value).expect("JSON value"));
+            push_json_str(&mut result, &source.relative_path);
+        }
+        result.push(']');
+        push_key(&mut result, "names");
+        result.push_str("[]");
+        push_key(&mut result, "mappings");
+        push_json_str(&mut result, &encode_mappings(&self.mappings));
+        if !self.source_root.is_empty() {
+            push_key(&mut result, "sourceRoot");
+            push_json_str(&mut result, &self.source_root);
+        }
+        if self.sources_content {
+            push_key(&mut result, "sourcesContent");
+            result.push('[');
+            for (index, source) in self.source_list.iter().enumerate() {
+                if index != 0 {
+                    result.push(',');
+                }
+                match &source.content {
+                    Some(content) => push_json_str(&mut result, content),
+                    None => result.push_str("null"),
+                }
+            }
+            result.push(']');
         }
         result.push('}');
         result
@@ -198,7 +206,9 @@ fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() || has_windows_drive(path) {
         path.to_path_buf()
     } else {
-        std::env::current_dir().unwrap_or_default().join(path)
+        crate::process_cwd::current_dir()
+            .unwrap_or_default()
+            .join(path)
     }
 }
 
@@ -370,6 +380,30 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_keeps_the_fixed_key_order() {
+        let builder = SourceMapBuilder::new(
+            Path::new("/out/x.js"),
+            Path::new("/src/x.res"),
+            "root\"".to_string(),
+            true,
+        );
+        assert_eq!(
+            builder.json(),
+            r#"{"version":3,"file":"x.js","sources":[],"names":[],"mappings":"","sourceRoot":"root\"","sourcesContent":[]}"#
+        );
+        let builder = SourceMapBuilder::new(
+            Path::new("/out/x.js"),
+            Path::new("/src/x.res"),
+            String::new(),
+            false,
+        );
+        assert_eq!(
+            builder.json(),
+            r#"{"version":3,"file":"x.js","sources":[],"names":[],"mappings":""}"#
+        );
+    }
 
     #[test]
     fn encodes_base64_with_padding() {
