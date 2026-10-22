@@ -7782,14 +7782,13 @@ fn type_expect_with_recarg_unscoped<'a>(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             ) {
-                Ok(result) => result,
-                Err(TypeCoreError::UndefinedMethod { .. }) => {
+                Some(result) => result,
+                None => {
                     if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
                         return Err(err);
                     }
                     return Err(unbound_value_error(tctx, env, lid.loc, longident));
                 }
-                Err(err) => return Err(err),
             };
             // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
             let used_name = tctx.arena.get_string(longident.last_idx());
@@ -22893,26 +22892,21 @@ impl Env {
         ctx.new_constr(crate::types::predef::path_option(), vec![elem_ty])
     }
 
-    /// Look up a value by longident.
+    /// Look up a value by longident. `None` means the value is unbound; the
+    /// caller builds the user-facing error.
     pub fn lookup_value_by_lid(
         &self,
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &crate::types::context::TypeContext,
-    ) -> TypeCoreResult<(Path, Arc<ValueDescription>)> {
+    ) -> Option<(Path, Arc<ValueDescription>)> {
         match lid {
             Longident::Lident(idx) => {
                 let name = arena.get_string(*idx);
-                match self.find_value_arc_with_path(name) {
-                    Ok((access_path, desc)) => Ok((access_path, desc.clone())),
-                    Err(_) => Err(TypeCoreError::UndefinedMethod {
-                        loc: None,
-                        ty: TypeExprRef(0),
-                        method: name.to_string(),
-                        alternatives: None,
-                    }),
-                }
+                self.find_value_arc_with_path(name)
+                    .ok()
+                    .map(|(access_path, desc)| (access_path, desc.clone()))
             }
             Longident::Ldot(prefix, idx) => {
                 let value_name = arena.get_string(*idx);
@@ -22949,13 +22943,13 @@ impl Env {
                             })
                     },
                 ) {
-                    return Ok(result);
+                    return Some(result);
                 }
                 if let Some(module_path) =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)
                 {
                     if let Some(cached) = ctx.find_resolved_module_value(&module_path, value_name) {
-                        return Ok(cached);
+                        return Some(cached);
                     }
                     if let Some(Some((mod_path, pos, vd))) =
                         with_resolved_module_components_for_path(
@@ -22982,15 +22976,10 @@ impl Env {
                             result.0.clone(),
                             result.1.clone(),
                         );
-                        return Ok(result);
+                        return Some(result);
                     }
 
-                    return Err(TypeCoreError::UndefinedMethod {
-                        loc: None,
-                        ty: TypeExprRef(0),
-                        method: Self::longident_to_string(lid, arena),
-                        alternatives: None,
-                    });
+                    return None;
                 }
 
                 // OCaml compiler/ml/env.ml:1091-1100 only resolves qualified
@@ -22998,25 +22987,10 @@ impl Env {
                 // `lookup_module_descr`, then reading the selected component
                 // table. It does not fall back to an unqualified value with the
                 // same leaf name when the prefix is unavailable.
-                Err(TypeCoreError::UndefinedMethod {
-                    loc: None,
-                    ty: TypeExprRef(0),
-                    method: Self::longident_to_string(lid, arena),
-                    alternatives: None,
-                })
+                None
             }
-            Longident::Lapply(_, _) => Err(TypeCoreError::UndefinedMethod {
-                loc: None,
-                ty: TypeExprRef(0),
-                method: "(functor application)".to_string(),
-                alternatives: None,
-            }),
+            Longident::Lapply(_, _) => None,
         }
-    }
-
-    /// Convert a longident to a human-readable string for error messages.
-    fn longident_to_string(lid: &Longident, arena: &crate::parse_arena::ParseArena) -> String {
-        arena.longident_to_string(lid)
     }
 
     /// Resolve a module longident to its signature and path.
