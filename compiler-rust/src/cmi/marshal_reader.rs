@@ -126,6 +126,31 @@ impl OcamlValue {
         result
     }
 
+    /// Iterate over a list value, or `None` when it is not a well-formed
+    /// list.
+    pub fn try_list(&self) -> Option<Vec<&OcamlValue>> {
+        let mut result = Vec::new();
+        let mut current = self;
+        loop {
+            match current {
+                OcamlValue::Int(0) => return Some(result),
+                OcamlValue::Block(0, fields) if fields.len() == 2 => {
+                    result.push(&fields[0]);
+                    current = &fields[1];
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Get as string, or `None` when it is not a string.
+    pub fn as_string_opt(&self) -> Option<&str> {
+        match self {
+            OcamlValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Get block field at index.
     pub fn field(&self, idx: usize) -> &OcamlValue {
         match self {
