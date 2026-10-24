@@ -6381,50 +6381,18 @@ fn get_variant_constructors_from_env(
     result_type: TypeExprRef,
 ) -> Vec<ConstructorDescription> {
     use crate::types::ctype;
-    use crate::types::decl::{ConstructorArguments, ConstructorDeclaration, TypeKind};
+    use crate::types::decl::TypeKind;
     use crate::types::type_expr::TypeDesc;
 
-    fn cstr_arity(args: &ConstructorArguments) -> i32 {
-        match args {
-            ConstructorArguments::CstrTuple(v) => v.len() as i32,
-            ConstructorArguments::CstrRecord(v) => v.len() as i32,
-        }
-    }
-
+    // `fst (Env.find_type_descrs path env)` (compiler/ml/parmatch.ml:484-495):
+    // the descriptors built by `Datarepr.constructors_of_type`, where an
+    // inline record is one argument with its declaration in `cstr_inlined`.
     fn build_descriptions(
+        ctx: &TypeContext,
+        path: &crate::types::Path,
         decl: &crate::types::TypeDeclaration,
-        cds: &[ConstructorDeclaration],
-        result_type: TypeExprRef,
     ) -> Vec<ConstructorDescription> {
-        let layout = decl.variant_layout_ref().expect("variant layout");
-        cds.iter()
-            .enumerate()
-            .map(|(position, cd)| {
-                let arity = cstr_arity(&cd.cd_args);
-                let args_vec = match &cd.cd_args {
-                    ConstructorArguments::CstrTuple(v) => v.clone(),
-                    ConstructorArguments::CstrRecord(v) => v.iter().map(|ld| ld.ld_type).collect(),
-                };
-                ConstructorDescription {
-                    cstr_name: cd.cd_id.name().to_string(),
-                    cstr_res: result_type,
-                    cstr_existentials: Vec::new(),
-                    cstr_args: args_vec,
-                    cstr_arity: arity,
-                    cstr_kind: crate::types::ConstructorKind::Ordinary(
-                        crate::types::ConstructorReference {
-                            variant: layout,
-                            position,
-                        },
-                    ),
-                    cstr_generalized: false,
-                    cstr_private: crate::types::asttypes::PrivateFlag::Public,
-                    cstr_loc: Location::none(),
-                    cstr_attributes: Vec::new(),
-                    cstr_inlined: None,
-                }
-            })
-            .collect()
+        crate::types::env_lazy::constructors_of_type_path(path, decl, ctx)
     }
 
     let mut ty = ctx_ref.repr(result_type);
@@ -6454,8 +6422,8 @@ fn get_variant_constructors_from_env(
 
         if let Some(decl) = env_decl {
             match &decl.type_kind {
-                TypeKind::TypeVariant(cds, _) => {
-                    return build_descriptions(decl, cds, result_type);
+                TypeKind::TypeVariant(_, _) => {
+                    return build_descriptions(ctx_ref, &path, decl);
                 }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
@@ -6470,8 +6438,8 @@ fn get_variant_constructors_from_env(
             }
         } else if let Some(decl) = fallback_decl {
             match &decl.type_kind {
-                TypeKind::TypeVariant(cds, _) => {
-                    return build_descriptions(&decl, cds, result_type);
+                TypeKind::TypeVariant(_, _) => {
+                    return build_descriptions(ctx_ref, &path, &decl);
                 }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
