@@ -20212,6 +20212,9 @@ fn type_structure_item<'a>(
                                     as i32;
                                 let num_nonconsts = constructors.len() as i32 - num_consts;
 
+                                let mut inline_record_descs: Option<
+                                    Vec<crate::types::ConstructorDescription>,
+                                > = None;
                                 for (position, cd) in constructors.iter().enumerate() {
                                     let is_constant = matches!(
                                         cd.cd_args,
@@ -20220,16 +20223,31 @@ fn type_structure_item<'a>(
                                         ) if args.is_empty()
                                     ) && cd.cd_res.is_none();
 
-                                    let (cstr_args, cstr_arity) = match &cd.cd_args {
+                                    // `Datarepr.constructor_args` (datarepr.ml:64-92): an
+                                    // inline record is one argument, the record type at
+                                    // `Pdot (type_path, cstr_name)`, with its declaration
+                                    // in `cstr_inlined`.
+                                    let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
                                         crate::types::decl::ConstructorArguments::CstrTuple(
                                             args,
-                                        ) => (args.clone(), args.len() as i32),
-                                        crate::types::decl::ConstructorArguments::CstrRecord(
-                                            labels,
-                                        ) => {
-                                            let args: Vec<crate::types::TypeExprRef> =
-                                                labels.iter().map(|l| l.ld_type).collect();
-                                            (args.clone(), args.len() as i32)
+                                        ) => (args.clone(), args.len() as i32, None),
+                                        crate::types::decl::ConstructorArguments::CstrRecord(_) => {
+                                            let inlined = inline_record_descs
+                                                .get_or_insert_with(|| {
+                                                    crate::types::env_lazy::constructors_of_type_path(
+                                                        &crate::types::path::Path::Pident(*id),
+                                                        decl,
+                                                        tctx.type_ctx,
+                                                    )
+                                                })
+                                                .iter()
+                                                .find(|desc| desc.cstr_name == cd.cd_id.name())
+                                                .expect("a descriptor per constructor");
+                                            (
+                                                inlined.cstr_args.clone(),
+                                                inlined.cstr_arity,
+                                                inlined.cstr_inlined.clone(),
+                                            )
                                         }
                                     };
                                     for arg in &cstr_args {
@@ -20274,7 +20292,7 @@ fn type_structure_item<'a>(
                                             crate::types::decl::constructor_description_attrs_for_variant(
                                                 constructors, cd,
                                             ),
-                                        cstr_inlined: None,
+                                        cstr_inlined,
                                     };
                                     new_env.add_constructor(cd.cd_id, cstr_desc);
                                 }
