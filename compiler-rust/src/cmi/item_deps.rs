@@ -74,6 +74,10 @@ pub struct UnitRead {
 /// for the declarations of a unit's own signature). Functor applications
 /// read the functor and the argument as whole modules.
 pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut Vec<UnitRead>) {
+    // Without `own_unit` only paths with a persistent root read anything.
+    if own_unit.is_none() && !has_persistent_head(path) {
+        return;
+    }
     if let Path::Papply(f, x) = path {
         read_of_path(f, Kind::Module, own_unit, out);
         read_of_path(x, Kind::Module, own_unit, out);
@@ -101,6 +105,14 @@ pub fn read_of_path(path: &Path, kind: Kind, own_unit: Option<&str>, out: &mut V
             segs: full,
             kind,
         });
+    }
+}
+
+fn has_persistent_head(path: &Path) -> bool {
+    match path {
+        Path::Pident(id) => id.is_persistent(),
+        Path::Pdot(parent, _, _) => has_persistent_head(parent),
+        Path::Papply(f, x) => has_persistent_head(f) || has_persistent_head(x),
     }
 }
 

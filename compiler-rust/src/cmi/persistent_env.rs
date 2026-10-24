@@ -445,7 +445,7 @@ pub struct ModuleRegistry {
     /// of the JS metadata whose inlinable bodies the references follow
     /// (`usize::MAX` for references without them).
     item_refs_cache:
-        Arc<Mutex<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
+        Arc<RwLock<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -7621,13 +7621,13 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
             ps.fingerprint,
             lambdas,
         );
-        if let Some(refs) = registry.item_refs_cache.lock().unwrap().get(&key) {
+        if let Some(refs) = registry.item_refs_cache.read().unwrap().get(&key) {
             return Some(refs.clone());
         }
         let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
         registry
             .item_refs_cache
-            .lock()
+            .write()
             .unwrap()
             .insert(key, refs.clone());
         Some(refs)
