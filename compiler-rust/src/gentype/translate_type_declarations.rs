@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateTypeDeclarations.ml:1-373.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{
@@ -8,7 +7,7 @@ use crate::gentype::gen_type_common::{
 };
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
-use crate::parser::ast::{Attribute, Attributes};
+use crate::parser::ast::Attributes;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::MutableFlag;
 use crate::types::decl::{
@@ -120,9 +119,7 @@ fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag
         Some(crate::types::VariantLiteralTag::Bool(value)) => LabelJs::BoolLabel(*value),
         Some(crate::types::VariantLiteralTag::Null) => LabelJs::NullLabel,
         Some(crate::types::VariantLiteralTag::Undefined) => LabelJs::UndefinedLabel,
-        None => {
-            LabelJs::StringLabel(label.to_string())
-        }
+        None => LabelJs::StringLabel(label.to_string()),
     };
     VariantCase { label_js }
 }
@@ -297,7 +294,7 @@ fn traslate_declaration_kind_with_attribute_info(
         |translation: crate::gentype::translate_type_expr_from_types::Translation| {
             let export_from_type_declaration = create_export_type_from_type_declaration(
                 annotation,
-                loc.clone(),
+                loc,
                 name_as.clone(),
                 opaque,
                 translation.type_,
@@ -743,10 +740,6 @@ fn translate_label_declarations(
         dependencies,
         type_,
     }
-}
-
-fn attributes_from_vec(attributes: &[Attribute]) -> Attributes {
-    Attributes::from_vec(attributes.to_vec())
 }
 
 fn longident_is_lident(arena: &ParseArena, longident: &Longident, expected: &str) -> bool {

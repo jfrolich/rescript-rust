@@ -92,7 +92,7 @@ fn ident_hash(id: &Ident) -> u32 {
 }
 
 /// Reproduces `Hash_ident` bucket traversal, including retained resize capacity.
-fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Vec<usize> {
+pub(crate) fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Vec<usize> {
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); (*capacity).max(32).next_power_of_two()];
     for (entry, id) in params.iter().enumerate() {
         let bucket = (ident_hash(id) as usize) & (buckets.len() - 1);
@@ -227,8 +227,8 @@ fn rebind(
     id: &Ident,
 ) -> Ident {
     let fresh = id.rename(id_gen);
-    let var = store.append(NodeSnapshot::Var(fresh.clone()));
-    map.insert(id.clone(), var);
+    let var = store.append(NodeSnapshot::Var(fresh));
+    map.insert(*id, var);
     diagnostics.record(store, map);
     fresh
 }
@@ -274,7 +274,10 @@ fn rewrite_bounded(
                 .map(|id| rebind(store, map, diagnostics, id_gen, id))
                 .collect();
             let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
-            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr, loc))
+            append_rebuilt(
+                store,
+                NodeSnapshot::Function(arity, params, body, attr, loc),
+            )
         }
         NodeSnapshot::StaticCatch(body, exit, params, handler) => {
             let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
@@ -365,19 +368,19 @@ fn propagate(
                         .is_some_and(|stat| stat.top_and_used_zero_or_one())
             });
         if direct {
-            map.insert(param.clone(), arg);
+            map.insert(*param, arg);
             diagnostics.record(store, &map);
             continue;
         }
         let fresh = param.rename(id_gen);
-        let fresh_var = store.append(NodeSnapshot::Var(fresh.clone()));
+        let fresh_var = store.append(NodeSnapshot::Var(fresh));
         bindings.push((fresh, arg));
-        map.insert(param.clone(), fresh_var);
+        map.insert(*param, fresh_var);
         diagnostics.record(store, &map);
     }
     let mut result = rewrite_bounded(store, &mut map, diagnostics, body, id_gen);
     for (id, arg) in bindings.into_iter().rev() {
-        register_kind(store, meta, id.clone(), arg);
+        register_kind(store, meta, id, arg);
         result = append_refine_let(store, LetKind::Strict, id, arg, result);
     }
     result
@@ -459,7 +462,7 @@ mod tests {
         let params = ids(1, 3);
         let body = crate::lambda::Lambda::prim(
             Primitive::Pidentity,
-            vec![crate::lambda::Lambda::var(params[0].clone())],
+            vec![crate::lambda::Lambda::var(params[0])],
             Location::none(),
         );
         let mut store = IndexedLambda::from_lambda(body);
@@ -489,8 +492,8 @@ mod tests {
         let body = crate::lambda::Lambda::prim(
             Primitive::Paddint,
             vec![
-                crate::lambda::Lambda::var(params[0].clone()),
-                crate::lambda::Lambda::var(params[0].clone()),
+                crate::lambda::Lambda::var(params[0]),
+                crate::lambda::Lambda::var(params[0]),
             ],
             Location::none(),
         );

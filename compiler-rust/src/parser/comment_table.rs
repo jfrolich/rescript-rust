@@ -5,10 +5,9 @@
 //!
 //! This is a 1:1 port of OCaml's `res_comments_table.ml`.
 
+use crate::fast_hash::AHashMap as HashMap;
 use crate::location::Location;
-use crate::parse_arena::{
-    CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
-};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, ParseArena, PatIdx};
 use crate::parser::ast::Payload::{PPat, PSig, PStr, PTyp};
 use crate::parser::ast::{
     ArgLabel, Attribute, Case, ConstructorArguments, ConstructorDeclaration, CoreType,
@@ -23,7 +22,6 @@ use crate::parser::ast::{
 use crate::parser::comment::Comment;
 use crate::parser::longident::Longident;
 use crate::parser::parsetree_viewer;
-use std::collections::HashMap;
 
 /// Position-based key for comment lookup.
 /// Uses (start_cnum, end_cnum) to uniquely identify a location span.
@@ -94,13 +92,9 @@ impl CommentTable {
         }
     }
 
-    /// Create a copy of the comment table.
+    /// Create a copy of the comment table (OCaml `CommentTable.copy`).
     pub fn copy(&self) -> Self {
-        Self {
-            leading: self.leading.clone(),
-            inside: self.inside.clone(),
-            trailing: self.trailing.clone(),
-        }
+        self.clone()
     }
 
     /// Remove and return leading comments for a location.
@@ -365,7 +359,7 @@ pub fn partition_adjacent_trailing_through_question(
                 && first.prev_tok_end_pos().cnum > arena.loc_end(loc).cnum =>
         {
             let mut extended = arena.to_location(loc);
-            extended.loc_end = first.prev_tok_end_pos().clone();
+            extended.loc_end = *first.prev_tok_end_pos();
             let extended = arena.from_location(&extended);
             let (after_question, rest) = partition_adjacent_trailing(extended, rest, arena);
             after_loc.extend(after_question);
@@ -482,7 +476,7 @@ impl<'a> Node<'a> {
                     Some(braces_loc) => arena.loc_end(braces_loc),
                     None => arena.loc_end(pc_rhs.pexp_loc),
                 };
-                arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+                arena.from_location(&Location::from_positions(*start, *end))
             }
             Node::CoreType(ct) => ct.ptyp_loc,
             Node::CoreTypeIdx(idx) => arena.get_core_type(*idx).ptyp_loc,
@@ -502,7 +496,7 @@ impl<'a> Node<'a> {
                 let e = arena.get_expr(*expr_idx);
                 let start = arena.loc_start(li.loc);
                 let end = arena.loc_end(e.pexp_loc);
-                arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+                arena.from_location(&Location::from_positions(*start, *end))
             }
             Node::ExtensionConstructor(ec) => ec.pext_loc,
             Node::LabelDeclaration(ld) => ld.pld_loc,
@@ -514,7 +508,7 @@ impl<'a> Node<'a> {
                     let typ = arena.get_core_type(*typ_idx);
                     let start = arena.loc_start(lbl.loc);
                     let end = arena.loc_end(typ.ptyp_loc);
-                    arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+                    arena.from_location(&Location::from_positions(*start, *end))
                 }
                 ObjectField::Oinherit(typ_idx) => arena.get_core_type(*typ_idx).ptyp_loc,
             },
@@ -522,7 +516,7 @@ impl<'a> Node<'a> {
                 let te = arena.get_core_type(*typ_idx);
                 let start = arena.loc_start(li.loc);
                 let end = arena.loc_end(te.ptyp_loc);
-                arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+                arena.from_location(&Location::from_positions(*start, *end))
             }
             Node::Pattern(p) => p.ppat_loc,
             Node::PatternIdx(idx) => arena.get_pat(*idx).ppat_loc,
@@ -536,7 +530,7 @@ impl<'a> Node<'a> {
                 } else {
                     let start = arena.loc_start(li.loc);
                     let end = arena.loc_end(p.ppat_loc);
-                    arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+                    arena.from_location(&Location::from_positions(*start, *end))
                 }
             }
             Node::RowField(rf) => match rf {
@@ -560,7 +554,7 @@ fn get_jsx_prop_loc(prop: &JsxProp, arena: &mut ParseArena) -> LocIdx {
             let val = arena.get_expr(*value);
             let start = arena.loc_start(name.loc);
             let end = arena.loc_end(val.pexp_loc);
-            arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+            arena.from_location(&Location::from_positions(*start, *end))
         }
         JsxProp::Spreading { loc, .. } => *loc,
     }
@@ -615,7 +609,9 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
                 let pair = match args.txt.as_slice() {
                     [pat, rest] => Some((*pat, *rest)),
                     [arg] => match &*arena.get_pat(*arg).ppat_desc {
-                        PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => Some((tuple[0], tuple[1])),
+                        PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => {
+                            Some((tuple[0], tuple[1]))
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -628,7 +624,9 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
                 acc.push(current.clone());
                 break;
             }
-            PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "[]") && args.txt.is_empty() => {
+            PatternDesc::Ppat_construct(name, args)
+                if arena.is_lident(name.txt, "[]") && args.txt.is_empty() =>
+            {
                 break;
             }
             _ => {
@@ -653,7 +651,9 @@ fn collect_list_exprs(arena: &ParseArena, expr: &Expression) -> Vec<Expression> 
                 let pair = match args.txt.as_slice() {
                     [expr, rest] => Some((*expr, *rest)),
                     [arg] => match &*arena.get_expr(*arg).pexp_desc {
-                        ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => Some((tuple[0], tuple[1])),
+                        ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => {
+                            Some((tuple[0], tuple[1]))
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -698,7 +698,7 @@ pub fn walk_structure(
         return;
     }
 
-    let nodes: Vec<Node<'_>> = structure.iter().map(|si| Node::StructureItem(si)).collect();
+    let nodes: Vec<Node<'_>> = structure.iter().map(Node::StructureItem).collect();
     walk_list(&nodes, t, comments, arena);
 }
 
@@ -717,7 +717,7 @@ pub fn walk_signature(
         return;
     }
 
-    let nodes: Vec<Node<'_>> = signature.iter().map(|si| Node::SignatureItem(si)).collect();
+    let nodes: Vec<Node<'_>> = signature.iter().map(Node::SignatureItem).collect();
     walk_list(&nodes, t, comments, arena);
 }
 
@@ -793,7 +793,7 @@ fn walk_node(
 ) {
     match node {
         Node::Case(c) => walk_case(c, t, comments, arena),
-        Node::CoreType(ct) => walk_core_type(&ct, t, comments, arena),
+        Node::CoreType(ct) => walk_core_type(ct, t, comments, arena),
         Node::CoreTypeIdx(idx) => {
             // Safety: arena is append-only, core type won't be invalidated
             let ct = arena.get_core_type(*idx).clone();
@@ -804,7 +804,7 @@ fn walk_node(
             let e = arena.get_expr(*expr).clone();
             walk_expr_argument(&e, loc, t, comments, arena);
         }
-        Node::Expression(e) => walk_expression(&e, t, comments, arena),
+        Node::Expression(e) => walk_expression(e, t, comments, arena),
         Node::ExpressionIdx(idx) => {
             // Safety: arena is append-only, expression won't be invalidated
             let e = arena.get_expr(*idx).clone();
@@ -819,14 +819,14 @@ fn walk_node(
         Node::LabelDeclaration(ld) => walk_label_declaration(ld, t, comments, arena),
         Node::ModuleBinding(mb) => walk_module_binding(mb, t, comments, arena),
         Node::ModuleDeclaration(md) => walk_module_declaration(md, t, comments, arena),
-        Node::ModuleExpr(me) => walk_module_expr(&me, t, comments, arena),
+        Node::ModuleExpr(me) => walk_module_expr(me, t, comments, arena),
         Node::ObjectField(f) => walk_object_field(f, t, comments, arena),
         Node::PackageConstraint(li, typ_idx) => {
             // Safety: arena is append-only, core type won't be invalidated
             let te = arena.get_core_type(*typ_idx).clone();
             walk_package_constraint(li, &te, t, comments, arena);
         }
-        Node::Pattern(p) => walk_pattern(&p, t, comments, arena),
+        Node::Pattern(p) => walk_pattern(p, t, comments, arena),
         Node::PatternIdx(idx) => {
             // Safety: arena is append-only, pattern won't be invalidated
             let p = arena.get_pat(*idx).clone();
@@ -876,7 +876,7 @@ fn walk_structure_item(
         }
         StructureItemDesc::Pstr_module(mb) => walk_module_binding(mb, t, comments, arena),
         StructureItemDesc::Pstr_recmodule(mbs) => {
-            let nodes: Vec<Node<'_>> = mbs.iter().map(|mb| Node::ModuleBinding(mb)).collect();
+            let nodes: Vec<Node<'_>> = mbs.iter().map(Node::ModuleBinding).collect();
             walk_list(&nodes, t, comments, arena);
         }
         StructureItemDesc::Pstr_modtype(mtd) => {
@@ -913,7 +913,7 @@ fn walk_signature_item(
         SignatureItemDesc::Psig_exception(ec) => walk_extension_constructor(ec, t, comments, arena),
         SignatureItemDesc::Psig_module(md) => walk_module_declaration(md, t, comments, arena),
         SignatureItemDesc::Psig_recmodule(mds) => {
-            let nodes: Vec<Node<'_>> = mds.iter().map(|md| Node::ModuleDeclaration(md)).collect();
+            let nodes: Vec<Node<'_>> = mds.iter().map(Node::ModuleDeclaration).collect();
             walk_list(&nodes, t, comments, arena);
         }
         SignatureItemDesc::Psig_modtype(mtd) => {
@@ -985,7 +985,7 @@ fn walk_type_extension(
     let nodes: Vec<Node<'_>> = te
         .ptyext_constructors
         .iter()
-        .map(|ec| Node::ExtensionConstructor(ec))
+        .map(Node::ExtensionConstructor)
         .collect();
     walk_list(&nodes, t, rest, arena);
 }
@@ -1071,7 +1071,7 @@ fn walk_module_binding(
     // Safety: arena is append-only, module expression won't be invalidated
     let pmb_expr = arena.get_mod_expr(mb.pmb_expr).clone();
     if is_constraint {
-        let combined: Vec<Comment> = leading.into_iter().chain(inside.into_iter()).collect();
+        let combined: Vec<Comment> = leading.into_iter().chain(inside).collect();
         walk_module_expr(&pmb_expr, t, combined, arena);
     } else {
         t.attach_leading(pmb_expr_loc, leading, arena);
@@ -1119,7 +1119,7 @@ fn walk_value_bindings(
     comments: Vec<Comment>,
     arena: &mut ParseArena,
 ) {
-    let nodes: Vec<Node<'_>> = vbs.iter().map(|vb| Node::ValueBinding(vb)).collect();
+    let nodes: Vec<Node<'_>> = vbs.iter().map(Node::ValueBinding).collect();
     walk_list(&nodes, t, comments, arena);
 }
 
@@ -1129,7 +1129,7 @@ fn walk_type_declarations(
     comments: Vec<Comment>,
     arena: &mut ParseArena,
 ) {
-    let nodes: Vec<Node<'_>> = tds.iter().map(|td| Node::TypeDeclaration(td)).collect();
+    let nodes: Vec<Node<'_>> = tds.iter().map(Node::TypeDeclaration).collect();
     walk_list(&nodes, t, comments, arena);
 }
 
@@ -1166,8 +1166,8 @@ fn rewrite_value_binding_locs(
                 if vars.is_empty() {
                     // Pattern loc ends at the inner type's location
                     let new_pat_loc = arena.from_location(&Location {
-                        loc_start: arena.loc_start(pat_loc).clone(),
-                        loc_end: arena.loc_end(inner_typ_loc).clone(),
+                        loc_start: *arena.loc_start(pat_loc),
+                        loc_end: *arena.loc_end(inner_typ_loc),
                         loc_ghost: false,
                     });
                     let inner_expr_loc = arena.get_expr(*expr_idx).pexp_loc;
@@ -1191,8 +1191,8 @@ fn rewrite_value_binding_locs(
                 if !vars.is_empty() {
                     // Pattern loc ends at the inner type's location
                     let new_pat_loc = arena.from_location(&Location {
-                        loc_start: arena.loc_start(pvb_pat.ppat_loc).clone(),
-                        loc_end: arena.loc_end(inner_typ_loc).clone(),
+                        loc_start: *arena.loc_start(pvb_pat.ppat_loc),
+                        loc_end: *arena.loc_end(inner_typ_loc),
                         loc_ghost: false,
                     });
                     (new_pat_loc, vb.pvb_expr, pvb_expr_loc)
@@ -1230,8 +1230,8 @@ fn rewrite_value_binding_locs(
                     };
                     if let Some(expr_idx) = constraint_expr_idx {
                         let new_pat_loc = arena.from_location(&Location {
-                            loc_start: arena.loc_start(pvb_pat.ppat_loc).clone(),
-                            loc_end: arena.loc_end(inner_typ_loc).clone(),
+                            loc_start: *arena.loc_start(pvb_pat.ppat_loc),
+                            loc_end: *arena.loc_end(inner_typ_loc),
                             loc_ghost: false,
                         });
                         let expr_loc = arena.get_expr(expr_idx).pexp_loc;
@@ -1292,8 +1292,11 @@ fn walk_value_binding(
         let (before_expr, inside_expr, after_expr) =
             partition_by_loc(surrounding_expr, expr.pexp_loc, arena);
         if is_block_expr(arena, &expr) {
-            let combined: Vec<Comment> =
-                before_expr.into_iter().chain(inside_expr).chain(after_expr).collect();
+            let combined: Vec<Comment> = before_expr
+                .into_iter()
+                .chain(inside_expr)
+                .chain(after_expr)
+                .collect();
             walk_expression(&expr, t, combined, arena);
         } else {
             t.attach_leading(expr.pexp_loc, before_expr, arena);
@@ -1325,8 +1328,8 @@ fn walk_value_binding(
     if is_block_expr(arena, &expr) {
         let combined: Vec<Comment> = before_expr
             .into_iter()
-            .chain(inside_expr.into_iter())
-            .chain(after_expr.into_iter())
+            .chain(inside_expr)
+            .chain(after_expr)
             .collect();
         walk_expression(&expr, t, combined, arena);
     } else {
@@ -1390,8 +1393,7 @@ fn walk_type_declaration(
                 t.attach_inside(td.ptype_loc, rest, arena);
                 Vec::new()
             } else {
-                let nodes: Vec<Node<'_>> =
-                    lds.iter().map(|ld| Node::LabelDeclaration(ld)).collect();
+                let nodes: Vec<Node<'_>> = lds.iter().map(Node::LabelDeclaration).collect();
                 walk_list(&nodes, t, rest, arena);
                 Vec::new()
             }
@@ -1432,7 +1434,7 @@ fn walk_constructor_declarations(
     visit_list_but_continue_with_remaining_comments(
         cds,
         |cd, _arena| cd.pcd_loc,
-        |cd, t, comments, arena| walk_constructor_declaration(cd, t, comments, arena),
+        walk_constructor_declaration,
         t,
         comments,
         false,
@@ -1497,7 +1499,7 @@ fn walk_constructor_arguments(
         ConstructorArguments::Pcstr_record(lds) => visit_list_but_continue_with_remaining_comments(
             lds,
             |ld, _arena| ld.pld_loc,
-            |ld, t, comments, arena| walk_label_declaration(ld, t, comments, arena),
+            walk_label_declaration,
             t,
             comments,
             false,
@@ -1594,7 +1596,7 @@ fn walk_expression(
                             vb.pvb_loc
                         }
                     },
-                    |vb, t, comments, arena| walk_value_binding(vb, t, comments, arena),
+                    walk_value_binding,
                     t,
                     comments,
                     true,
@@ -1623,8 +1625,8 @@ fn walk_expression(
                     partition_by_on_same_line(lhs.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
+                    .chain(inside)
+                    .chain(after_expr)
                     .collect();
                 walk_expression(&lhs, t, combined, arena);
                 comments
@@ -1652,8 +1654,8 @@ fn walk_expression(
             let body = arena.get_expr(*body_idx).clone();
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
-                arena.loc_start(expr.pexp_loc).clone(),
-                arena.loc_end(lid.loc).clone(),
+                *arena.loc_start(expr.pexp_loc),
+                *arena.loc_end(lid.loc),
             ));
             t.attach_leading(combined_loc, leading, arena);
 
@@ -1679,11 +1681,19 @@ fn walk_expression(
                 .map(|(name, e)| {
                     let name_idx = arena.intern(&name.txt);
                     let lid = arena.push_longident(Longident::Lident(name_idx));
-                    (Loc { txt: lid, loc: name.loc }, *e)
+                    (
+                        Loc {
+                            txt: lid,
+                            loc: name.loc,
+                        },
+                        *e,
+                    )
                 })
                 .collect();
-            let nodes: Vec<Node<'_>> =
-                rows.iter().map(|(lid, e)| Node::ExprRecordRow(lid, *e)).collect();
+            let nodes: Vec<Node<'_>> = rows
+                .iter()
+                .map(|(lid, e)| Node::ExprRecordRow(lid, *e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_extension(ext) => walk_extension(ext, t, comments, arena),
@@ -1693,8 +1703,8 @@ fn walk_expression(
             let body = arena.get_expr(*body_idx).clone();
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
-                arena.loc_start(expr.pexp_loc).clone(),
-                arena.loc_end(ext.pext_loc).clone(),
+                *arena.loc_start(expr.pexp_loc),
+                *arena.loc_end(ext.pext_loc),
             ));
             t.attach_leading(combined_loc, leading, arena);
 
@@ -1722,8 +1732,8 @@ fn walk_expression(
             let module_loc = module.pmod_loc;
             let (leading, comments) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             let combined_loc = arena.from_location(&Location::from_positions(
-                arena.loc_start(expr.pexp_loc).clone(),
-                arena.loc_end(module_loc).clone(),
+                *arena.loc_start(expr.pexp_loc),
+                *arena.loc_end(module_loc),
             ));
             t.attach_leading(combined_loc, leading, arena);
 
@@ -1814,7 +1824,7 @@ fn walk_expression(
         }
         ExpressionDesc::Pexp_construct(name, _) if arena.is_lident(name.txt, "::") => {
             let list_exprs = collect_list_exprs(arena, expr);
-            let nodes: Vec<Node<'_>> = list_exprs.iter().map(|e| Node::Expression(e)).collect();
+            let nodes: Vec<Node<'_>> = list_exprs.iter().map(Node::Expression).collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_construct(name, args) => {
@@ -1824,14 +1834,21 @@ fn walk_expression(
             if args.txt.is_empty() {
                 t.attach_trailing(name.loc, trailing, arena);
             } else {
-                let (after_longident, rest) = partition_adjacent_trailing(name.loc, trailing, arena);
+                let (after_longident, rest) =
+                    partition_adjacent_trailing(name.loc, trailing, arena);
                 t.attach_trailing(name.loc, after_longident, arena);
-                let nodes: Vec<Node<'_>> = args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+                let nodes: Vec<Node<'_>> =
+                    args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
                 walk_list(&nodes, t, rest, arena);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let nodes: Vec<Node<'_>> = inner.1.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+            let nodes: Vec<Node<'_>> = inner
+                .1
+                .txt
+                .iter()
+                .map(|e| Node::ExpressionIdx(*e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
@@ -1876,8 +1893,8 @@ fn walk_expression(
                     partition_adjacent_trailing(inner.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
+                    .chain(inside)
+                    .chain(after_expr)
                     .collect();
                 walk_expression(&inner, t, combined, arena);
                 rest
@@ -1905,8 +1922,8 @@ fn walk_expression(
                 let (after_expr, rest) = partition_adjacent_trailing(obj.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
+                    .chain(inside)
+                    .chain(after_expr)
                     .collect();
                 walk_expression(&obj, t, combined, arena);
                 rest
@@ -1954,8 +1971,8 @@ fn walk_expression(
                     partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
+                    .chain(inside)
+                    .chain(after_expr)
                     .collect();
                 walk_expression(&cond, t, combined, arena);
                 comments
@@ -1976,8 +1993,8 @@ fn walk_expression(
                     partition_adjacent_trailing(then_branch.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
+                    .chain(inside)
+                    .chain(after_expr)
                     .collect();
                 walk_expression(&then_branch, t, combined, arena);
                 trailing
@@ -2015,8 +2032,8 @@ fn walk_expression(
                     partition_adjacent_trailing(cond.pexp_loc, trailing, arena);
                 let combined: Vec<Comment> = leading
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
+                    .chain(inside)
+                    .chain(after_expr)
                     .collect();
                 walk_expression(&cond, t, combined, arena);
                 rest
@@ -2121,11 +2138,8 @@ fn walk_expression(
             let after = if is_block_expr(arena, &match_expr) {
                 let (after_expr, rest) =
                     partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
-                let combined: Vec<Comment> = before
-                    .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_expr.into_iter())
-                    .collect();
+                let combined: Vec<Comment> =
+                    before.into_iter().chain(inside).chain(after_expr).collect();
                 walk_expression(&match_expr, t, combined, arena);
                 rest
             } else {
@@ -2137,7 +2151,7 @@ fn walk_expression(
             let (after_expr, rest) = partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
             t.attach_trailing(match_expr.pexp_loc, after_expr, arena);
 
-            let nodes: Vec<Node<'_>> = cases.iter().map(|c| Node::Case(c)).collect();
+            let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
             walk_list(&nodes, t, rest, arena);
         }
         ExpressionDesc::Pexp_apply(inner) => {
@@ -2394,7 +2408,7 @@ fn walk_expression(
                             pat,
                             ..
                         } => OwnedFunParam::Parameter {
-                            label: label.clone(),
+                            label: *label,
                             default_expr: default_expr.cloned(),
                             pat: pat.clone(),
                         },
@@ -2415,7 +2429,7 @@ fn walk_expression(
                                 label: ArgLabel::Nolabel,
                                 default_expr: None,
                                 pat: Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_var(name.clone())),
+                                    ppat_desc: Box::new(PatternDesc::Ppat_var(name)),
                                     ppat_loc: name.loc,
                                     ppat_attributes: crate::parser::ast::Attributes::new(),
                                 },
@@ -2457,13 +2471,13 @@ fn walk_expression(
                             ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl)
                                 if arena.to_location(lbl.loc) != Location::none() =>
                             {
-                                arena.loc_start(lbl.loc).clone()
+                                *arena.loc_start(lbl.loc)
                             }
-                            _ => arena.loc_start(pat.ppat_loc).clone(),
+                            _ => *arena.loc_start(pat.ppat_loc),
                         };
                         let end_pos = match default_expr {
-                            Some(expr) => arena.loc_end(expr.pexp_loc).clone(),
-                            None => arena.loc_end(pat.ppat_loc).clone(),
+                            Some(expr) => *arena.loc_end(expr.pexp_loc),
+                            None => *arena.loc_end(pat.ppat_loc),
                         };
                         arena.from_location(&Location::from_positions(start_pos, end_pos))
                     }
@@ -2509,19 +2523,19 @@ fn walk_expression(
                         let (leading, inside2, trailing2) =
                             partition_by_loc(inside, pat.ppat_loc, arena);
                         t.attach_leading(pat.ppat_loc, leading, arena);
-                        walk_pattern(&pat, t, inside2, arena);
+                        walk_pattern(pat, t, inside2, arena);
 
                         match default_expr {
                             Some(expr) => {
                                 let (after_pat, rest) =
                                     partition_adjacent_trailing(pat.ppat_loc, trailing2, arena);
                                 t.attach_trailing(pat.ppat_loc, after_pat, arena);
-                                if is_block_expr(arena, &expr) {
-                                    walk_expression(&expr, t, rest, arena);
+                                if is_block_expr(arena, expr) {
+                                    walk_expression(expr, t, rest, arena);
                                 } else {
                                     let (l, i, tr) = partition_by_loc(rest, expr.pexp_loc, arena);
                                     t.attach_leading(expr.pexp_loc, l, arena);
-                                    walk_expression(&expr, t, i, arena);
+                                    walk_expression(expr, t, i, arena);
                                     t.attach_trailing(expr.pexp_loc, tr, arena);
                                 }
                             }
@@ -2614,8 +2628,11 @@ fn walk_expression(
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_template(template) => {
-            let exprs: Vec<Expression> =
-                template.values.iter().map(|idx| arena.get_expr(*idx).clone()).collect();
+            let exprs: Vec<Expression> = template
+                .values
+                .iter()
+                .map(|idx| arena.get_expr(*idx).clone())
+                .collect();
             let nodes: Vec<Node<'_>> = exprs.iter().map(Node::Expression).collect();
             walk_list(&nodes, t, comments, arena);
         }
@@ -2731,8 +2748,8 @@ fn walk_jsx_element(
             let opening_loc = {
                 let full_loc = arena.to_location(pexp_loc);
                 arena.from_location(&Location::from_positions(
-                    full_loc.loc_start.clone(),
-                    arena.get_position(fragment.opening).clone(),
+                    full_loc.loc_start,
+                    *arena.get_position(fragment.opening),
                 ))
             };
 
@@ -2763,7 +2780,7 @@ fn walk_jsx_element(
                         0
                     },
                 };
-                arena.from_location(&Location::from_positions(start_pos, end_pos.clone()))
+                arena.from_location(&Location::from_positions(start_pos, *end_pos))
             };
 
             let name_loc = unary.tag_name.loc;
@@ -2793,19 +2810,15 @@ fn walk_jsx_element(
                 // Walk through props
                 let (comments_for_props, _rest) =
                     partition_leading_trailing(rest, closing_token_loc, arena);
-                let prop_nodes: Vec<Node<'_>> =
-                    unary.props.iter().map(|p| Node::JsxProp(p)).collect();
+                let prop_nodes: Vec<Node<'_>> = unary.props.iter().map(Node::JsxProp).collect();
                 walk_list(&prop_nodes, t, comments_for_props, arena);
             }
         }
         JsxElement::Container(container) => {
             // Create location for the opening > token
             let opening_greater_than_loc = {
-                let opening_end = arena.get_position(container.opening_end).clone();
-                arena.from_location(&Location::from_positions(
-                    opening_end.clone(),
-                    opening_end.clone(),
-                ))
+                let opening_end = *arena.get_position(container.opening_end);
+                arena.from_location(&Location::from_positions(opening_end, opening_end))
             };
 
             let name_loc = container.tag_name_start.loc;
@@ -2836,8 +2849,7 @@ fn walk_jsx_element(
                 // Walk props
                 let (comments_for_props, rest) =
                     partition_leading_trailing(rest, opening_greater_than_loc, arena);
-                let prop_nodes: Vec<Node<'_>> =
-                    container.props.iter().map(|p| Node::JsxProp(p)).collect();
+                let prop_nodes: Vec<Node<'_>> = container.props.iter().map(Node::JsxProp).collect();
                 walk_list(&prop_nodes, t, comments_for_props, arena);
                 rest
             };
@@ -2853,8 +2865,8 @@ fn walk_jsx_element(
                 Some(closing_tag) => {
                     let closing_tag_loc = {
                         arena.from_location(&Location::from_positions(
-                            arena.get_position(closing_tag.start).clone(),
-                            arena.get_position(closing_tag.end).clone(),
+                            *arena.get_position(closing_tag.start),
+                            *arena.get_position(closing_tag.end),
                         ))
                     };
                     partition_leading_trailing(rest, closing_tag_loc, arena)
@@ -2865,8 +2877,8 @@ fn walk_jsx_element(
                 // Attach all comments to the closing tag if there are no children
                 if let Some(closing_tag) = &container.closing_tag {
                     let closing_tag_loc = arena.from_location(&Location::from_positions(
-                        arena.get_position(closing_tag.start).clone(),
-                        arena.get_position(closing_tag.end).clone(),
+                        *arena.get_position(closing_tag.start),
+                        *arena.get_position(closing_tag.end),
                     ));
 
                     let opening_end_line = arena.to_location(opening_greater_than_loc).loc_end.line;
@@ -2950,18 +2962,14 @@ fn walk_apply_expr(
 ) {
     let (before, inside, after) = partition_by_loc(comments, call_expr.pexp_loc, arena);
 
-    let after = if is_block_expr(arena, &call_expr) {
+    let after = if is_block_expr(arena, call_expr) {
         let (after_expr, rest) = partition_adjacent_trailing(call_expr.pexp_loc, after, arena);
-        let combined: Vec<Comment> = before
-            .into_iter()
-            .chain(inside.into_iter())
-            .chain(after_expr.into_iter())
-            .collect();
-        walk_expression(&call_expr, t, combined, arena);
+        let combined: Vec<Comment> = before.into_iter().chain(inside).chain(after_expr).collect();
+        walk_expression(call_expr, t, combined, arena);
         rest
     } else {
         t.attach_leading(call_expr.pexp_loc, before, arena);
-        walk_expression(&call_expr, t, inside, arena);
+        walk_expression(call_expr, t, inside, arena);
         after
     };
 
@@ -2976,7 +2984,7 @@ fn walk_apply_expr(
                 ArgLabel::Labelled(lbl_loc) | ArgLabel::Optional(lbl_loc) => {
                     let start = arena.loc_start(lbl_loc.loc);
                     let end = arena.loc_end(expr.pexp_loc);
-                    arena.from_location(&Location::from_positions(start.clone(), end.clone()))
+                    arena.from_location(&Location::from_positions(*start, *end))
                 }
                 ArgLabel::Nolabel => expr.pexp_loc,
             };
@@ -3006,7 +3014,7 @@ fn walk_expr_argument(
 
     let (before, inside, after) = partition_by_loc(rest, expr.pexp_loc, arena);
     t.attach_leading(expr.pexp_loc, before, arena);
-    walk_expression(&expr, t, inside, arena);
+    walk_expression(expr, t, inside, arena);
     t.attach_trailing(expr.pexp_loc, after, arena);
 }
 
@@ -3025,7 +3033,7 @@ fn walk_expr_record_row(
 
     let (before, inside, after) = partition_by_loc(rest, expr.pexp_loc, arena);
     t.attach_leading(expr.pexp_loc, before, arena);
-    walk_expression(&expr, t, inside, arena);
+    walk_expression(expr, t, inside, arena);
     t.attach_trailing(expr.pexp_loc, after, arena);
 }
 
@@ -3034,7 +3042,7 @@ fn walk_case(case: &Case, t: &mut CommentTable, comments: Vec<Comment>, arena: &
     let (before, inside, after) = partition_by_loc(comments, pc_lhs_loc, arena);
     // cases don't have a location on their own, leading comments should go
     // after the bar on the pattern - match OCaml's List.concat [before; inside]
-    let pattern_comments: Vec<Comment> = before.into_iter().chain(inside.into_iter()).collect();
+    let pattern_comments: Vec<Comment> = before.into_iter().chain(inside).collect();
     // Safety: arena is append-only, pattern won't be invalidated
     let pc_lhs = arena.get_pat(case.pc_lhs).clone();
     walk_pattern(&pc_lhs, t, pattern_comments, arena);
@@ -3053,8 +3061,8 @@ fn walk_case(case: &Case, t: &mut CommentTable, comments: Vec<Comment>, arena: &
                 // For block expressions, pass all comments into walk_expression
                 let all_comments: Vec<Comment> = before
                     .into_iter()
-                    .chain(inside.into_iter())
-                    .chain(after_guard.into_iter())
+                    .chain(inside)
+                    .chain(after_guard)
                     .collect();
                 walk_expression(&guard, t, all_comments, arena);
             } else {
@@ -3130,7 +3138,7 @@ fn walk_pattern(
         }
         PatternDesc::Ppat_construct(name, _) if arena.is_lident(name.txt, "::") => {
             let list_pats = collect_list_patterns(arena, pattern);
-            let nodes: Vec<Node<'_>> = list_pats.iter().map(|p| Node::Pattern(p)).collect();
+            let nodes: Vec<Node<'_>> = list_pats.iter().map(Node::Pattern).collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_construct(name, args) => {
@@ -3144,7 +3152,8 @@ fn walk_pattern(
                         partition_adjacent_trailing(name.loc, trailing, arena);
                     t.attach_trailing(name.loc, after_longident, arena);
                     let arg_pat = arena.get_pat(*arg_pat_idx).clone();
-                    let (leading, inside, trailing) = partition_by_loc(rest, arg_pat.ppat_loc, arena);
+                    let (leading, inside, trailing) =
+                        partition_by_loc(rest, arg_pat.ppat_loc, arena);
                     t.attach_leading(arg_pat.ppat_loc, leading, arena);
                     walk_pattern(&arg_pat, t, inside, arena);
                     t.attach_trailing(arg_pat.ppat_loc, trailing, arena);
@@ -3183,7 +3192,7 @@ fn walk_pattern(
                 .into_iter()
                 .cloned()
                 .collect();
-            let nodes: Vec<Node<'_>> = or_chain.iter().map(|p| Node::Pattern(p)).collect();
+            let nodes: Vec<Node<'_>> = or_chain.iter().map(Node::Pattern).collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_constraint(inner) => {
@@ -3241,7 +3250,7 @@ fn walk_pattern_record_row(
 
     let (before, inside, after) = partition_by_loc(rest, pat.ppat_loc, arena);
     t.attach_leading(pat.ppat_loc, before, arena);
-    walk_pattern(&pat, t, inside, arena);
+    walk_pattern(pat, t, inside, arena);
     t.attach_trailing(pat.ppat_loc, after, arena);
 }
 
@@ -3271,7 +3280,8 @@ fn walk_pattern_record_rest(
                 partition_by_loc(comments, typ.ptyp_loc, arena);
             t.attach_leading(typ.ptyp_loc, before_typ, arena);
             walk_core_type(&typ, t, inside_typ, arena);
-            let (after_typ, remaining) = partition_adjacent_trailing(typ.ptyp_loc, after_typ, arena);
+            let (after_typ, remaining) =
+                partition_adjacent_trailing(typ.ptyp_loc, after_typ, arena);
             t.attach_trailing(typ.ptyp_loc, after_typ, arena);
             attach_rest_name(rest, t, remaining, arena);
         }
@@ -3330,7 +3340,7 @@ fn walk_core_type(
                 let parameters: Vec<OwnedTypeParameter> = parameters
                     .into_iter()
                     .map(|param| OwnedTypeParameter {
-                        lbl: param.lbl.clone(),
+                        lbl: *param.lbl,
                         typ: param.typ.clone(),
                     })
                     .collect();
@@ -3353,7 +3363,7 @@ fn walk_core_type(
         }
         CoreTypeDesc::Ptyp_object(inner) => {
             let (ref fields, _) = **inner;
-            let nodes: Vec<Node<'_>> = fields.iter().map(|f| Node::ObjectField(f)).collect();
+            let nodes: Vec<Node<'_>> = fields.iter().map(Node::ObjectField).collect();
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_poly(inner) => {
@@ -3387,7 +3397,7 @@ fn walk_core_type(
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
             let (ref fields, _, _) = **inner;
-            let nodes: Vec<Node<'_>> = fields.iter().map(|f| Node::RowField(f)).collect();
+            let nodes: Vec<Node<'_>> = fields.iter().map(Node::RowField).collect();
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_package(pkg_inner) => {
@@ -3528,7 +3538,7 @@ fn walk_package_constraint(
 
     let (before, inside, after) = partition_by_loc(rest, typ.ptyp_loc, arena);
     t.attach_leading(typ.ptyp_loc, before, arena);
-    walk_core_type(&typ, t, inside, arena);
+    walk_core_type(typ, t, inside, arena);
     t.attach_trailing(typ.ptyp_loc, after, arena);
 }
 
@@ -3563,7 +3573,7 @@ fn walk_module_expr(
                 let parameters: Vec<OwnedModExprFunctorParam> = parameters
                     .into_iter()
                     .map(|param| OwnedModExprFunctorParam {
-                        lbl: param.lbl.clone(),
+                        lbl: *param.lbl,
                         mod_type: param.mod_type.cloned(),
                     })
                     .collect();
@@ -3640,7 +3650,7 @@ fn walk_module_expr(
             let mut mod_exprs: Vec<ModuleExpr> = vec![call_expr];
             mod_exprs.extend(args);
             // Walk all module expressions as a list
-            let nodes: Vec<Node<'_>> = mod_exprs.iter().map(|me| Node::ModuleExpr(me)).collect();
+            let nodes: Vec<Node<'_>> = mod_exprs.iter().map(Node::ModuleExpr).collect();
             walk_list(&nodes, t, comments, arena);
         }
         ModuleExprDesc::Pmod_constraint(module_expr_idx, mod_type_idx) => {
@@ -3715,7 +3725,7 @@ fn walk_mod_expr_parameter(
 
             let (before, inside, after) = partition_by_loc(rest, mod_type.pmty_loc, arena);
             t.attach_leading(mod_type.pmty_loc, before, arena);
-            walk_mod_type(&mod_type, t, inside, arena);
+            walk_mod_type(mod_type, t, inside, arena);
             t.attach_trailing(mod_type.pmty_loc, after, arena);
         }
     }
@@ -3955,7 +3965,7 @@ fn functor_type_params(
             ModuleTypeDesc::Pmty_functor(inner) => {
                 let (ref lbl, ref arg_type, ref return_type) = **inner;
                 acc.push(OwnedModTypeFunctorParam {
-                    lbl: lbl.clone(),
+                    lbl: *lbl,
                     mod_type: arg_type
                         .as_ref()
                         .map(|idx| arena.get_mod_type(*idx).clone()),
@@ -3989,7 +3999,7 @@ fn walk_mod_type_parameter(
             t.attach_trailing(param.lbl.loc, after_lbl, arena);
             let (before, inside, after) = partition_by_loc(rest, mod_type.pmty_loc, arena);
             t.attach_leading(mod_type.pmty_loc, before, arena);
-            walk_mod_type(&mod_type, t, inside, arena);
+            walk_mod_type(mod_type, t, inside, arena);
             t.attach_trailing(mod_type.pmty_loc, after, arena);
         }
     }

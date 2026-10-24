@@ -54,7 +54,7 @@ fn eliminate_tuple(
         && let NodeView::Prim(Primitive::Pfield(index, _), [base], _) = store.view(value)
         && matches!(store.view(*base), NodeView::Var(id) if id.same(tuple))
     {
-        mapping.insert(*index, projected.clone());
+        mapping.insert(*index, *projected);
         return eliminate_tuple(store, tuple, body, mapping);
     }
     (!hit_variable(store, tuple, node)).then_some(node)
@@ -81,7 +81,7 @@ fn flatten(
                     return flatten(store, groups, body, id_gen);
                 }
                 let fresh = id.rename(id_gen);
-                let fresh_var = store.append(NodeSnapshot::Var(fresh.clone()));
+                let fresh_var = store.append(NodeSnapshot::Var(fresh));
                 let wrapped = append_rebuilt(
                     store,
                     NodeSnapshot::Prim(primitive, vec![fresh_var], Location::none()),
@@ -112,9 +112,7 @@ fn flatten(
                     };
                     for (index, arg) in args.into_iter().enumerate() {
                         match mapping.get(&(index as i32)) {
-                            Some(projected) => {
-                                groups.push(Group::Single(kind, projected.clone(), arg))
-                            }
+                            Some(projected) => groups.push(Group::Single(kind, *projected, arg)),
                             None => groups.push(Group::Nop(arg)),
                         }
                     }
@@ -155,7 +153,7 @@ fn aux(store: &mut IndexedLambda, node: NodeId, id_gen: &IdGenerator) -> NodeId 
             lambda_of_groups(store, groups, result)
         }
         NodeSnapshot::LetRec(bindings, body) => {
-            let collections: Vec<_> = bindings.iter().map(|(id, _)| id.clone()).collect();
+            let collections: Vec<_> = bindings.iter().map(|(id, _)| *id).collect();
             let bindings: Vec<_> = bindings
                 .into_iter()
                 .map(|(id, value)| (id, aux(store, value, id_gen)))
@@ -237,7 +235,7 @@ mod tests {
         let projected = id("field", 2);
         let input = Lambda::let_(
             LetKind::Strict,
-            tuple.clone(),
+            tuple,
             Lambda::prim(
                 Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                 vec![int(10), int(20)],
@@ -245,7 +243,7 @@ mod tests {
             ),
             Lambda::let_(
                 LetKind::Alias,
-                projected.clone(),
+                projected,
                 Lambda::prim(
                     Primitive::Pfield(1, FieldDbgInfo::Tuple),
                     vec![Lambda::var(tuple)],
@@ -262,7 +260,7 @@ mod tests {
         let value = id("value", 1);
         let input = Lambda::let_(
             LetKind::Strict,
-            value.clone(),
+            value,
             Lambda::prim(
                 Primitive::PnullToOpt,
                 vec![Lambda::prim(
@@ -283,11 +281,7 @@ mod tests {
         let b = id("b", 2);
         let c = id("c", 3);
         let input = Lambda::letrec(
-            vec![
-                (a.clone(), int(1)),
-                (b.clone(), Lambda::var(a.clone())),
-                (c.clone(), int(3)),
-            ],
+            vec![(a, int(1)), (b, Lambda::var(a)), (c, int(3))],
             Lambda::var(b),
         );
         let generator = IdGenerator::with_start_stamp(10);

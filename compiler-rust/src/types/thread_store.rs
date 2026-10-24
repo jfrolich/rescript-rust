@@ -19,15 +19,14 @@ use super::context::TypeArena;
 use super::decl::{Signature, TypeDeclaration};
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr,
-    TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -121,7 +120,6 @@ impl std::ops::Deref for SigTypeBatch {
     }
 }
 
-/// Shared dependency state for one worker thread.
 /// Store-built label descriptions of one record type, their summary, and the
 /// replay record of building them.
 pub(crate) type SharedRecordLabels = (
@@ -130,6 +128,7 @@ pub(crate) type SharedRecordLabels = (
     Arc<crate::types::context::StorePiece>,
 );
 
+/// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
     types: TypeArena,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
@@ -168,7 +167,6 @@ pub(crate) struct ThreadTypeStore {
             ),
         >,
     >,
-    /// Synthetic longident component names used by store `Tpackage` nodes.
     /// Label descriptions of large regular records of dependency types,
     /// built as store builds (see `typecore::build_record_label_descriptions_info`).
     record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
@@ -285,7 +283,9 @@ impl ThreadTypeStore {
             return found.clone();
         }
         let built = Arc::new(crate::types::env_lazy::SignatureIndex::build(sig));
-        self.signature_indexes.borrow_mut().insert(key, built.clone());
+        self.signature_indexes
+            .borrow_mut()
+            .insert(key, built.clone());
         built
     }
 
@@ -339,10 +339,6 @@ impl ThreadTypeStore {
         self.initial_env.borrow_mut().get_or_insert((env, piece));
     }
 
-    pub(crate) fn pers_struct_count(&self) -> usize {
-        self.pers.borrow().len()
-    }
-
     /// Intern a longident component name for a store node. Names live in
     /// the process-wide pool, so every compilation resolves them without
     /// copying the table into each exported signature.
@@ -387,7 +383,11 @@ impl ThreadTypeStore {
     }
 
     /// Apply `f` to a store memo cell without copying it.
-    pub(crate) fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
+    pub(crate) fn with_abbrev<R>(
+        &self,
+        memo: AbbrevMemoRef,
+        f: impl FnOnce(&AbbrevMemo) -> R,
+    ) -> R {
         match self.abbrevs.borrow().get(memo.store_index()) {
             Some(value) => f(value),
             None => f(&AbbrevMemo::Mnil),

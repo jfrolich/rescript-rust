@@ -20,13 +20,14 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
+    FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField, TypeArg, TypeDesc,
+    TypeExprRef,
 };
 use crate::types::variance::Variance;
 
 use super::marshal_reader::OcamlValue;
 
-use std::collections::{HashMap, HashSet};
+use crate::fast_hash::AHashMap;
 
 /// Context for reading signatures, holding the type arena and a table for
 /// resolving shared type_expr references.
@@ -34,13 +35,13 @@ pub struct SigReadContext<'a> {
     /// The type context for allocating type expressions.
     pub ctx: &'a TypeContext,
     /// Map from OCaml type_expr id to TypeExprRef, for shared type references.
-    type_expr_cache: HashMap<i64, TypeExprRef>,
+    type_expr_cache: AHashMap<i64, TypeExprRef>,
     /// OCaml layout refs are shared mutable blocks. Preserve that physical
     /// sharing by mapping their marshal block identity to one TypeContext slot.
-    variant_layout_cache: HashMap<usize, crate::types::VariantLayoutRef>,
+    variant_layout_cache: AHashMap<usize, crate::types::VariantLayoutRef>,
     /// Object field mutability cells are shared `ref` blocks; keep their
     /// sharing by marshal block identity.
-    mutability_cache: HashMap<usize, MutabilityRef>,
+    mutability_cache: AHashMap<usize, MutabilityRef>,
 }
 
 impl<'a> SigReadContext<'a> {
@@ -48,9 +49,9 @@ impl<'a> SigReadContext<'a> {
     pub fn new(ctx: &'a TypeContext) -> Self {
         SigReadContext {
             ctx,
-            type_expr_cache: HashMap::new(),
-            variant_layout_cache: HashMap::new(),
-            mutability_cache: HashMap::new(),
+            type_expr_cache: AHashMap::new(),
+            variant_layout_cache: AHashMap::new(),
+            mutability_cache: AHashMap::new(),
         }
     }
 
@@ -77,27 +78,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     let id = read_ident(&fields[0]);
-                    let debug_this_value = crate::debug_flags::debug_sig_value().is_some_and(|raw| {
-                        raw.split(',')
-                            .map(|part| part.trim())
-                            .filter(|part| !part.is_empty())
-                            .any(|target| target == id.name())
-                    });
-                    if debug_this_value {
-                        eprintln!(
-                            "[sig-read] raw value={} before read_type_expr ids={}",
-                            id.name(),
-                            debug_raw_type_expr_ids(&fields[1].field(0))
-                        );
-                    }
                     let desc = self.read_value_description(&fields[1]);
-                    if debug_this_value {
-                        eprintln!(
-                            "[sig-read] loaded value={} refs={}",
-                            id.name(),
-                            debug_loaded_type_refs(self.ctx, desc.val_type)
-                        );
-                    }
                     SignatureItem::SigValue(id, desc)
                 }
                 1 => {
@@ -396,7 +377,9 @@ impl<'a> SigReadContext<'a> {
         let (_, fields) = value.as_block();
         crate::types::VariantTag {
             name: fields[0].as_string().to_string(),
-            literal: fields[1].as_option().map(|v| self.read_variant_literal_tag(v)),
+            literal: fields[1]
+                .as_option()
+                .map(|v| self.read_variant_literal_tag(v)),
         }
     }
 
@@ -440,7 +423,9 @@ impl<'a> SigReadContext<'a> {
     fn read_label_declaration(&mut self, value: &OcamlValue) -> LabelDeclaration {
         let fields = &value.as_block().1;
         let ld_id = read_ident(&fields[0]);
-        let ld_runtime_name = fields[1].as_option().map(|name| name.as_string().to_string());
+        let ld_runtime_name = fields[1]
+            .as_option()
+            .map(|name| name.as_string().to_string());
         let ld_mutable = read_mutable_flag(&fields[2]);
         let ld_optional = fields[3].as_bool();
         let ld_type = self.read_type_expr(&fields[4]);
@@ -470,7 +455,9 @@ impl<'a> SigReadContext<'a> {
     fn read_constructor_declaration(&mut self, value: &OcamlValue) -> ConstructorDeclaration {
         let fields = &value.as_block().1;
         let cd_id = read_ident(&fields[0]);
-        let cd_runtime_tag = fields[1].as_option().map(|tag| self.read_variant_literal_tag(tag));
+        let cd_runtime_tag = fields[1]
+            .as_option()
+            .map(|tag| self.read_variant_literal_tag(tag));
         let cd_args = self.read_constructor_arguments(&fields[2]);
         let cd_res = fields[3].as_option().map(|te| self.read_type_expr(te));
         let cd_loc = read_location(self.ctx, &fields[4]);
@@ -750,7 +737,11 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     let abbrev = self.ctx.alloc_abbrev_nil();
 
-                    TypeDesc::Tconstr { path, args: args.into(), abbrev }
+                    TypeDesc::Tconstr {
+                        path,
+                        args: args.into(),
+                        abbrev,
+                    }
                 }
                 4 => {
                     // Tobject of type_expr
@@ -799,7 +790,10 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpoly { body, vars: vars.into() }
+                    TypeDesc::Tpoly {
+                        body,
+                        vars: vars.into(),
+                    }
                 }
                 11 => {
                     // Tpackage(Path.t, Longident.t list, type_expr list)
@@ -814,7 +808,11 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpackage { path, lids: Box::new(lids), args: args.into() }
+                    TypeDesc::Tpackage {
+                        path,
+                        lids: Box::new(lids),
+                        args: args.into(),
+                    }
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar
@@ -945,194 +943,6 @@ impl<'a> SigReadContext<'a> {
     }
 }
 
-fn debug_raw_type_expr_ids(value: &OcamlValue) -> String {
-    fn walk(value: &OcamlValue, out: &mut Vec<String>, seen: &mut HashSet<i64>) {
-        let (_, fields) = value.as_block();
-        let id = fields[2].as_int();
-        if !seen.insert(id) {
-            out.push(format!("id#{id}:<seen>"));
-            return;
-        }
-
-        let head = match &fields[0] {
-            OcamlValue::Int(0) => "Tnil".to_string(),
-            OcamlValue::Block(tag, desc_fields) => match tag {
-                0 => "Tvar".to_string(),
-                1 => "Tarrow".to_string(),
-                2 => "Ttuple".to_string(),
-                3 => {
-                    let path = read_path(&desc_fields[0]);
-                    format!("Tconstr({})", path.name())
-                }
-                4 => "Tobject".to_string(),
-                5 => "Tfield".to_string(),
-                6 => "Tlink".to_string(),
-                7 => "Tsubst".to_string(),
-                8 => "Tvariant".to_string(),
-                9 => "Tunivar".to_string(),
-                10 => "Tpoly".to_string(),
-                11 => "Tpackage".to_string(),
-                other => format!("tag{other}"),
-            },
-            other => format!("{other:?}"),
-        };
-        let level = fields[1].as_int();
-        out.push(format!("id#{id}@{level}:{head}"));
-
-        match &fields[0] {
-            OcamlValue::Block(tag, desc_fields) => match tag {
-                1 => {
-                    walk(&desc_fields[0].field(1), out, seen);
-                    walk(&desc_fields[1], out, seen);
-                }
-                2 => {
-                    for item in desc_fields[0].as_list() {
-                        walk(item, out, seen);
-                    }
-                }
-                3 => {
-                    for item in desc_fields[1].as_list() {
-                        walk(item, out, seen);
-                    }
-                }
-                4 => walk(&desc_fields[0], out, seen),
-                5 => {
-                    walk(&desc_fields[2], out, seen);
-                    walk(&desc_fields[3], out, seen);
-                }
-                6 | 7 => walk(&desc_fields[0], out, seen),
-                8 => {
-                    let row_fields = desc_fields[0].field(0);
-                    for pair in row_fields.as_list() {
-                        let (_, pf) = pair.as_block();
-                        match &pf[1] {
-                            OcamlValue::Block(0, rf) => {
-                                if let Some(inner) = rf[0].as_option() {
-                                    walk(inner, out, seen);
-                                }
-                            }
-                            OcamlValue::Block(1, rf) => {
-                                for item in rf[1].as_list() {
-                                    walk(item, out, seen);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    walk(&desc_fields[0].field(1), out, seen);
-                }
-                10 => {
-                    walk(&desc_fields[0], out, seen);
-                    for item in desc_fields[1].as_list() {
-                        walk(item, out, seen);
-                    }
-                }
-                11 => {
-                    for item in desc_fields[2].as_list() {
-                        walk(item, out, seen);
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    walk(value, &mut out, &mut seen);
-    out.join(", ")
-}
-
-fn debug_loaded_type_refs(ctx: &TypeContext, ty: TypeExprRef) -> String {
-    fn walk(
-        ctx: &TypeContext,
-        ty: TypeExprRef,
-        out: &mut Vec<String>,
-        seen: &mut HashSet<TypeExprRef>,
-    ) {
-        let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
-            out.push(format!("ref#{}:<seen>", ty.0));
-            return;
-        }
-        let desc = ctx.get_desc(ty);
-        let head = match &*desc {
-            TypeDesc::Tconstr { path, .. } => format!("Tconstr({})", path.name()),
-            TypeDesc::Tarrow { .. } => "Tarrow".to_string(),
-            TypeDesc::Ttuple(_) => "Ttuple".to_string(),
-            TypeDesc::Tvar(_) => "Tvar".to_string(),
-            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-            TypeDesc::Tobject { .. } => "Tobject".to_string(),
-            TypeDesc::Tfield { .. } => "Tfield".to_string(),
-            TypeDesc::Tlink(_) => "Tlink".to_string(),
-            TypeDesc::Tsubst(_) => "Tsubst".to_string(),
-            TypeDesc::Tvariant(_) => "Tvariant".to_string(),
-            TypeDesc::Tpoly { .. } => "Tpoly".to_string(),
-            TypeDesc::Tpackage { .. } => "Tpackage".to_string(),
-            TypeDesc::Tnil => "Tnil".to_string(),
-        };
-        out.push(format!("ref#{}@{}:{head}", ty.0, ctx.get_level(ty)));
-        drop(desc);
-
-        match &*ctx.get_desc(ty) {
-            TypeDesc::Tarrow { args, ret } => {
-                for arg in args {
-                    walk(ctx, arg.typ, out, seen);
-                }
-                walk(ctx, *ret, out, seen);
-            }
-            TypeDesc::Ttuple(items) => {
-                for item in items {
-                    walk(ctx, *item, out, seen);
-                }
-            }
-            TypeDesc::Tconstr { args, .. } => {
-                for item in args {
-                    walk(ctx, *item, out, seen);
-                }
-            }
-            TypeDesc::Tobject { fields, .. } => walk(ctx, *fields, out, seen),
-            TypeDesc::Tfield { typ, rest, .. } => {
-                walk(ctx, *typ, out, seen);
-                walk(ctx, *rest, out, seen);
-            }
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => walk(ctx, *target, out, seen),
-            TypeDesc::Tvariant(row) => {
-                walk(ctx, row.row_more, out, seen);
-                for (_, field) in &row.row_fields {
-                    match field {
-                        RowField::Rpresent(Some(inner)) => walk(ctx, *inner, out, seen),
-                        RowField::Reither { types, .. } => {
-                            for inner in types {
-                                walk(ctx, *inner, out, seen);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                walk(ctx, *body, out, seen);
-                for inner in vars {
-                    walk(ctx, *inner, out, seen);
-                }
-            }
-            TypeDesc::Tpackage { args, .. } => {
-                for inner in args {
-                    walk(ctx, *inner, out, seen);
-                }
-            }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-        }
-    }
-
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    walk(ctx, ty, &mut out, &mut seen);
-    out.join(", ")
-}
-
 // ============================================================================
 // Pure functions (no context needed)
 // ============================================================================
@@ -1143,39 +953,6 @@ fn debug_loaded_type_refs(ctx: &TypeContext, ty: TypeExprRef) -> String {
 /// 0: stamp: int
 /// 1: name: string
 /// 2: flags: int (mutable)
-/// Known predef type names that should be normalized to persistent idents.
-/// OCaml creates these with small stamps (1-999) via Ident.create, but
-/// Rust's initial_env uses persistent idents (stamp=0). Normalizing here
-/// ensures CMI types unify with initial_env types.
-fn is_predef_type_name(name: &str) -> bool {
-    matches!(
-        name,
-        "int"
-            | "char"
-            | "float"
-            | "bool"
-            | "unit"
-            | "exn"
-            | "array"
-            | "list"
-            | "option"
-            | "nativeint"
-            | "int32"
-            | "int64"
-            | "lazy_t"
-            | "bytes"
-            | "string"
-            | "ref"
-            | "result"
-            | "dict"
-            | "promise"
-            | "unknown"
-            | "bigint"
-            | "symbol"
-            | "regexp"
-    )
-}
-
 fn read_ident(value: &OcamlValue) -> Ident {
     let fields = &value.as_block().1;
     let stamp = fields[0].as_int() as i32;
@@ -1485,7 +1262,9 @@ fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
             return None;
         }
         match v {
-            OcamlValue::Block(2, fields) if fields.len() == 1 && string_literal_semantic(&fields[0]).is_some() => {
+            OcamlValue::Block(2, fields)
+                if fields.len() == 1 && string_literal_semantic(&fields[0]).is_some() =>
+            {
                 string_literal_semantic(&fields[0])
             }
             OcamlValue::Block(_, fields) => fields
@@ -1587,6 +1366,48 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
     }
 }
 
+/// Decode a marshalled `Variant_runtime.block_type`.
+pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::VariantBlockType {
+    use crate::types::{VariantBlockType as B, VariantInstance as I};
+    match value {
+        OcamlValue::Int(0) => B::Int,
+        OcamlValue::Int(1) => B::String,
+        OcamlValue::Int(2) => B::Float,
+        OcamlValue::Int(3) => B::Bigint,
+        OcamlValue::Int(4) => B::Boolean,
+        OcamlValue::Int(5) => B::Function,
+        OcamlValue::Int(6) => B::Object,
+        OcamlValue::Int(7) => B::Unknown,
+        OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
+            0 => I::Array,
+            1 => I::ArrayBuffer,
+            2 => I::BigInt64Array,
+            3 => I::BigUint64Array,
+            4 => I::Blob,
+            5 => I::DataView,
+            6 => I::Date,
+            7 => I::File,
+            8 => I::Float32Array,
+            9 => I::Float64Array,
+            10 => I::Int16Array,
+            11 => I::Int32Array,
+            12 => I::Int8Array,
+            13 => I::Promise,
+            14 => I::RegExp,
+            15 => I::Uint16Array,
+            16 => I::Uint32Array,
+            17 => I::Uint8Array,
+            18 => I::Uint8ClampedArray,
+            19 => I::Set,
+            20 => I::Map,
+            21 => I::WeakSet,
+            22 => I::WeakMap,
+            n => panic!("invalid variant instance {n}"),
+        }),
+        _ => panic!("invalid variant block type"),
+    }
+}
+
 /// Read field_kind.
 
 #[cfg(test)]
@@ -1657,47 +1478,5 @@ mod tests {
             read_attribute_payload(&cmi_string_pstr("fulfilled")),
             AttributePayload::Str("fulfilled".to_string())
         );
-    }
-}
-
-/// Decode a marshalled `Variant_runtime.block_type`.
-pub(crate) fn decode_variant_block_type(value: &OcamlValue) -> crate::types::VariantBlockType {
-    use crate::types::{VariantBlockType as B, VariantInstance as I};
-    match value {
-        OcamlValue::Int(0) => B::Int,
-        OcamlValue::Int(1) => B::String,
-        OcamlValue::Int(2) => B::Float,
-        OcamlValue::Int(3) => B::Bigint,
-        OcamlValue::Int(4) => B::Boolean,
-        OcamlValue::Int(5) => B::Function,
-        OcamlValue::Int(6) => B::Object,
-        OcamlValue::Int(7) => B::Unknown,
-        OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
-            0 => I::Array,
-            1 => I::ArrayBuffer,
-            2 => I::BigInt64Array,
-            3 => I::BigUint64Array,
-            4 => I::Blob,
-            5 => I::DataView,
-            6 => I::Date,
-            7 => I::File,
-            8 => I::Float32Array,
-            9 => I::Float64Array,
-            10 => I::Int16Array,
-            11 => I::Int32Array,
-            12 => I::Int8Array,
-            13 => I::Promise,
-            14 => I::RegExp,
-            15 => I::Uint16Array,
-            16 => I::Uint32Array,
-            17 => I::Uint8Array,
-            18 => I::Uint8ClampedArray,
-            19 => I::Set,
-            20 => I::Map,
-            21 => I::WeakSet,
-            22 => I::WeakMap,
-            n => panic!("invalid variant instance {n}"),
-        }),
-        _ => panic!("invalid variant block type"),
     }
 }

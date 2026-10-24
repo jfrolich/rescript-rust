@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name, jsx_version_for_structure,
-    load_pervasives, normalize_signature,
+    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name,
+    jsx_version_for_structure, load_pervasives, normalize_signature,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
@@ -444,7 +444,8 @@ pub struct ModuleRegistry {
     /// Keyed by unit, signature identity and fingerprint, and the identity
     /// of the JS metadata whose inlinable bodies the references follow
     /// (`usize::MAX` for references without them).
-    item_refs_cache: Arc<Mutex<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
+    item_refs_cache:
+        Arc<RwLock<HashMap<(String, usize, u64, usize), Arc<super::item_deps::UnitRefs>>>>,
 }
 
 impl ModuleRegistry {
@@ -471,10 +472,6 @@ impl ModuleRegistry {
         snapshot
     }
 
-    pub fn alias_rewrite_len(&self) -> usize {
-        self.alias_rewrites.len() + self.local_alias_rewrites.len()
-    }
-
     pub fn has_cached_module(&self, name: &str) -> bool {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
@@ -491,7 +488,10 @@ impl ModuleRegistry {
         Some(self.item_digests(name)?[super::item_deps::WHOLE])
     }
 
-    fn registered(&self, name: &str) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
+    fn registered(
+        &self,
+        name: &str,
+    ) -> (Option<Arc<PortablePersStruct>>, Option<InMemoryModuleInfo>) {
         let pers = self
             .local_cached_modules
             .get(name)
@@ -513,7 +513,10 @@ impl ModuleRegistry {
         if pers.is_none() && info.is_none() {
             return None;
         }
-        Some(super::item_deps::item_digests(pers.as_deref(), info.as_ref()))
+        Some(super::item_deps::item_digests(
+            pers.as_deref(),
+            info.as_ref(),
+        ))
     }
 
     /// Resolve the reads of a compile against the registered modules' signatures
@@ -526,7 +529,13 @@ impl ModuleRegistry {
         &self,
         reads: Vec<super::item_deps::UnitRead>,
     ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
-        super::item_deps::resolve_reads(reads, &RegistryUnitSource { registry: self, lambdas: false })
+        super::item_deps::resolve_reads(
+            reads,
+            &RegistryUnitSource {
+                registry: self,
+                lambdas: false,
+            },
+        )
     }
 
     /// What the inlinable bodies of the values and modules in `resolved`
@@ -537,7 +546,10 @@ impl ModuleRegistry {
         resolved: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
         use super::item_deps::{Kind, UnitRead, item_key};
-        let source = RegistryUnitSource { registry: self, lambdas: true };
+        let source = RegistryUnitSource {
+            registry: self,
+            lambdas: true,
+        };
         let value_prefix = item_key(Kind::Value, "");
         let module_prefix = item_key(Kind::Module, "");
         let mut seeds = Vec::new();
@@ -553,8 +565,9 @@ impl ModuleRegistry {
                 names.extend(info.cmj_export_lambdas.keys().map(String::as_str));
             } else {
                 for key in keys {
-                    if let Some(name) =
-                        key.strip_prefix(&value_prefix).or_else(|| key.strip_prefix(&module_prefix))
+                    if let Some(name) = key
+                        .strip_prefix(&value_prefix)
+                        .or_else(|| key.strip_prefix(&module_prefix))
                     {
                         names.push(name);
                     }
@@ -578,24 +591,36 @@ impl ModuleRegistry {
 
     /// The module's published interface encoded for storage (see
     /// [`super::stored_module`]), `None` when it is not registered.
-    pub fn encode_stored_module(&self, name: &str, alias_rewrites: &[(String, Path)]) -> Option<Vec<u8>> {
+    pub fn encode_stored_module(
+        &self,
+        name: &str,
+        alias_rewrites: &[(String, Path)],
+    ) -> Option<Vec<u8>> {
         let (pers, info) = self.registered(name);
         let info = info?;
         let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
-        Some(super::stored_module::encode(&super::stored_module::StoredModuleRef {
-            pers_struct: pers.as_deref(),
-            info: &info,
-            alias_rewrites,
-            gentype_declarations: &gentype_declarations,
-        }))
+        Some(super::stored_module::encode(
+            &super::stored_module::StoredModuleRef {
+                pers_struct: pers.as_deref(),
+                info: &info,
+                alias_rewrites,
+                gentype_declarations: &gentype_declarations,
+            },
+        ))
     }
 
     /// Register a stored module's interface, as compiling it would.
-    pub fn register_stored_module(&mut self, name: &str, module: super::stored_module::StoredModule) {
+    pub fn register_stored_module(
+        &mut self,
+        name: &str,
+        module: super::stored_module::StoredModule,
+    ) {
         let alias_rewrites = module.alias_rewrite_map();
         crate::gentype::main::restore_type_declarations(name, module.gentype_declarations);
         match module.pers_struct {
-            Some(pers) => self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites),
+            Some(pers) => {
+                self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites)
+            }
             None => {
                 self.insert_module_info(name.to_string(), module.info);
                 self.extend_alias_rewrites(alias_rewrites);
@@ -609,7 +634,9 @@ impl ModuleRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0 && self.disk_modules.len() == 0
+        self.local_cached_modules.is_empty()
+            && self.cached_modules.len() == 0
+            && self.disk_modules.len() == 0
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
@@ -644,7 +671,8 @@ impl ModuleRegistry {
         ps_crcs: Vec<(String, Option<[u8; 16]>)>,
     ) {
         if let Some(root) = package_root {
-            self.module_package_roots.insert(namespace_name.to_string(), root);
+            self.module_package_roots
+                .insert(namespace_name.to_string(), root);
         }
         let mut sig_items: Signature = Vec::with_capacity(module_aliases.len());
         for (short_name, internal_name) in module_aliases {
@@ -673,7 +701,7 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
-        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(
+        let fingerprint = portable_types::compute_type_graph_fingerprint(
             &portable_types::HashGraph {
                 entries: &[],
                 layouts: &[],
@@ -878,6 +906,9 @@ pub struct PersistentEnv {
     /// `imported_units` with their recorded CRCs (env.ml:612-646): the
     /// units this compilation found and the units their CRC lists name.
     imported_units: Arc<Mutex<ImportedUnits>>,
+    /// Decoded `.cmj` files by path, so the per-kind disk queries
+    /// (`module_cmj_*`) read and unmarshal each file once per compilation.
+    cmj_values: Arc<Mutex<HashMap<PathBuf, Option<OcamlValue>>>>,
     view: Arc<ResolutionView>,
 }
 
@@ -968,6 +999,7 @@ impl PersistentEnv {
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             imported_units: Arc::default(),
+            cmj_values: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::new(),
                 compiling_module: None,
@@ -1004,6 +1036,7 @@ impl PersistentEnv {
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
             imported_units: Arc::default(),
+            cmj_values: Arc::default(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                     registry.alias_rewrites.clone(),
@@ -1113,7 +1146,8 @@ impl PersistentEnv {
         if self.outside_load_path(name) {
             return None;
         }
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
+        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name)
+        {
             if self.view.hidden_modules.contains(key) {
                 return None;
             }
@@ -1136,11 +1170,7 @@ impl PersistentEnv {
             if self.view.hidden_modules.contains(key) {
                 return None;
             }
-            return self
-                .view
-                .in_memory_module_overrides
-                .get(key)
-                .map(|info| f(info));
+            return self.view.in_memory_module_overrides.get(key).map(&mut f);
         }
         self.in_memory_modules
             .get_case_with(name, |key, info| {
@@ -1183,16 +1213,13 @@ impl PersistentEnv {
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
-    /// PersStruct and any new alias rewrites that weren't in the original
-    /// registry. Used to update the shared ModuleRegistry after compilation.
-    /// Extract the diff produced by this compilation: the newly-registered
     /// PersStruct (serialized to portable form) and any new alias rewrites.
     /// Must be called while the TypeContext is still alive so the type graph
-    /// can be serialized.
+    /// can be serialized. Used to update the shared ModuleRegistry after
+    /// compilation.
     pub fn extract_module_update(
         &self,
         module_name: &str,
-        _original_alias_count: usize,
         ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
@@ -1235,7 +1262,11 @@ impl PersistentEnv {
     }
 
     /// Set the load path from lists shared with other compilations.
-    pub fn set_load_path_shared(&mut self, paths: Arc<Vec<PathBuf>>, display_paths: Arc<Vec<PathBuf>>) {
+    pub fn set_load_path_shared(
+        &mut self,
+        paths: Arc<Vec<PathBuf>>,
+        display_paths: Arc<Vec<PathBuf>>,
+    ) {
         debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = paths;
         self.load_path_display = display_paths;
@@ -1254,7 +1285,6 @@ impl PersistentEnv {
         self.outside_load_path_memo = OutsideLoadPathMemo::default();
     }
 
-    /// Whether `name` is a registered unit of a package outside the load path.
     /// Whether this compilation can see the persistent unit `name`: it is
     /// neither hidden nor in a package outside its load path (OCaml finds a
     /// unit only through the compilation's load path, env.ml:669-678).
@@ -1375,11 +1405,7 @@ impl PersistentEnv {
     /// `Env.find_pers_struct` (env.ml:711-731): a found unit is an import
     /// (`add_import`), and so is every unit its CRC list names, with that
     /// CRC (`check_consistency`, env.ml:627-638).
-    pub fn find_pers_struct<'a>(
-        &mut self,
-        name: &str,
-        ctx: &'a TypeContext,
-    ) -> Option<Arc<PersStruct>> {
+    pub fn find_pers_struct(&mut self, name: &str, ctx: &TypeContext) -> Option<Arc<PersStruct>> {
         if ctx.in_store_build() {
             // Preparing a module is an effect on this compilation; later users
             // of the shared data replay it (`StoreEffect::PreparePers`).
@@ -1405,7 +1431,14 @@ impl PersistentEnv {
 
     /// The units whose interface this compilation read, sorted.
     pub fn loaded_units(&self) -> Vec<String> {
-        let mut units: Vec<String> = self.imported_units.lock().unwrap().recorded.iter().cloned().collect();
+        let mut units: Vec<String> = self
+            .imported_units
+            .lock()
+            .unwrap()
+            .recorded
+            .iter()
+            .cloned()
+            .collect();
         units.sort();
         units
     }
@@ -1440,10 +1473,10 @@ impl PersistentEnv {
             .collect()
     }
 
-    fn find_pers_struct_unrecorded<'a>(
+    fn find_pers_struct_unrecorded(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<Arc<PersStruct>> {
         let debug_pers = crate::debug_flags::debug_pers_struct();
         if debug_pers {
@@ -1609,7 +1642,7 @@ impl PersistentEnv {
         }
     }
 
-    fn finalize_loaded_signature<'a>(
+    fn finalize_loaded_signature(
         &mut self,
         name: &str,
         ps_name: String,
@@ -1617,7 +1650,7 @@ impl PersistentEnv {
         ps_filename: String,
         ps_deprecated: Option<String>,
         ps_crcs: Vec<(String, Option<[u8; 16]>)>,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> PersStruct {
         let module_path = Path::Pident(Ident::create_persistent(name));
 
@@ -1754,7 +1787,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        let metadata = read_cmj_module_metadata(&path)?;
+        let metadata = decode_cmj_module_metadata(&self.cmj_value(&path)?)?;
         let package_path = path.parent()?.parent()?.parent()?.to_path_buf();
         Some(CmjModuleImportInfo {
             package_path,
@@ -1777,6 +1810,19 @@ impl PersistentEnv {
         self.find_in_path_uncap(filename).is_some()
     }
 
+    /// The decoded `.cmj` at `path`, read from disk on first use.
+    fn cmj_value(&self, path: &FsPath) -> Option<OcamlValue> {
+        if let Some(value) = self.cmj_values.lock().unwrap().get(path) {
+            return value.clone();
+        }
+        let value = read_marshaled_cmj(path);
+        self.cmj_values
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), value.clone());
+        value
+    }
+
     /// Resolve a module name to its companion `.cmj` path when present.
     pub fn resolve_module_cmj_path(&self, name: &str) -> Option<PathBuf> {
         let cmj_filename = format!("{name}.cmj");
@@ -1797,7 +1843,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_pure(&path)
+        decode_cmj_pure(&self.cmj_value(&path)?)
     }
 
     /// Read closed constant exports recorded in a module's `.cmj` metadata.
@@ -1823,7 +1869,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_constants(&path).map(Arc::new)
+        decode_cmj_export_constants(&self.cmj_value(&path)?).map(Arc::new)
     }
 
     /// Read arity metadata recorded in a module's companion `.cmj`.
@@ -1847,7 +1893,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_arities(&path).map(Arc::new)
+        decode_cmj_export_arities(&self.cmj_value(&path)?).map(Arc::new)
     }
 
     /// Resolve a nested source path to its flat hoisted JS export.
@@ -1864,7 +1910,7 @@ impl PersistentEnv {
             return None;
         }
         let cmj_path = self.resolve_module_cmj_path(name)?;
-        read_cmj_hoisted_exports(&cmj_path)?
+        decode_cmj_hoisted_exports(&self.cmj_value(&cmj_path)?)?
             .into_iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.export_name)
@@ -1876,7 +1922,8 @@ impl PersistentEnv {
     /// `js_cmj_format.ml:112-121`, where non-constant
     /// `persistent_closed_lambda` values are preserved for backend inlining.
     pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<Arc<HashMap<String, Lambda>>> {
-        if let Some(lambdas) = self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
+        if let Some(lambdas) =
+            self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
         {
             return Some(lambdas);
         }
@@ -1887,7 +1934,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_lambdas(&path).map(Arc::new)
+        decode_cmj_export_lambdas(&self.cmj_value(&path)?).map(Arc::new)
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
@@ -1908,10 +1955,10 @@ impl PersistentEnv {
     /// many transitive deps being loaded on demand.
     const MAX_SOURCE_FALLBACK_DEPTH: usize = 15;
 
-    fn typecheck_source_signature<'a>(
+    fn typecheck_source_signature(
         &self,
         source_path: &FsPath,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<(Signature, PersistentEnv, Option<String>)> {
         if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
             return None;
@@ -1952,6 +1999,7 @@ impl PersistentEnv {
             crc_units: self.crc_units.clone(),
             // A unit compiled from source has its own imports.
             imported_units: Arc::default(),
+            cmj_values: self.cmj_values.clone(),
             view: Arc::new(ResolutionView {
                 alias_prefix_rewrites: self.view.alias_prefix_rewrites.clone(),
                 compiling_module: self.view.compiling_module.clone(),
@@ -2001,7 +2049,9 @@ impl PersistentEnv {
             );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
-                mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(decl_signature)),
+                mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(
+                    decl_signature,
+                )),
                 mty_env: crate::types::typedtree::EnvRef(0),
                 mty_loc: crate::parse_arena::LocIdx(0),
                 mty_attributes: crate::parser::ast::Attributes::new(),
@@ -2070,10 +2120,10 @@ impl PersistentEnv {
         Some((typed_structure.str_type.clone(), fallback_pers, deprecated))
     }
 
-    fn load_module_from_source_fallback<'a>(
+    fn load_module_from_source_fallback(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<PersStruct> {
         let ast_filename = format!("{}.ast", name);
         let ast_path = self.find_in_path_uncap(&ast_filename)?;
@@ -2091,8 +2141,7 @@ impl PersistentEnv {
         };
         let preferred_path = interface_path.as_deref().unwrap_or(source_path.as_path());
 
-        let debug_source_fallback =
-            crate::debug_flags::debug_persistent_source_fallback();
+        let debug_source_fallback = crate::debug_flags::debug_persistent_source_fallback();
         if debug_source_fallback {
             eprintln!(
                 "[persistent-source] module={} ast={} source={}",
@@ -2102,8 +2151,10 @@ impl PersistentEnv {
             );
         }
 
-        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(preferred_path, ctx)?;
-        self.view_mut().alias_prefix_rewrites
+        let (signature, fallback_pers, deprecated) =
+            self.typecheck_source_signature(preferred_path, ctx)?;
+        self.view_mut()
+            .alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
@@ -2121,8 +2172,9 @@ impl PersistentEnv {
 
         // OCaml reads this unit's `.cmi`; report the CRCs saved beside the
         // source it was typed from.
-        let crcs = cmi_format::read_cmi_crcs(&preferred_path.with_extension("cmi").to_string_lossy())
-            .unwrap_or_default();
+        let crcs =
+            cmi_format::read_cmi_crcs(&preferred_path.with_extension("cmi").to_string_lossy())
+                .unwrap_or_default();
         Some(self.finalize_loaded_signature(
             name,
             name.to_string(),
@@ -2136,7 +2188,7 @@ impl PersistentEnv {
 
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
-    fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<PersStruct> {
+    fn load_module(&mut self, name: &str, ctx: &TypeContext) -> Option<PersStruct> {
         // In in-process mode, never fall through to .cmi loading. The registry
         // is authoritative for normal project modules. Runtime/bootstrap code
         // may register source fallback paths, which are also source-only.
@@ -2186,7 +2238,8 @@ impl PersistentEnv {
                 .map(|(unit, crc)| {
                     (
                         unit.clone(),
-                        crc.as_deref().and_then(|crc| <[u8; 16]>::try_from(crc).ok()),
+                        crc.as_deref()
+                            .and_then(|crc| <[u8; 16]>::try_from(crc).ok()),
                     )
                 })
                 .collect();
@@ -2208,17 +2261,18 @@ impl PersistentEnv {
     ///
     /// Unlike `load_module_from_source_fallback` (which reads `.ast` files),
     /// this reads the source `.res`/`.resi` file path from `source_fallback_paths`.
-    fn load_module_from_source_path_fallback<'a>(
+    fn load_module_from_source_path_fallback(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<PersStruct> {
         let source_path = self.source_fallback_path_entry(name)?.1;
 
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
         // registering the paths.
-        let (signature, fallback_pers, deprecated) = self.typecheck_source_signature(&source_path, ctx)?;
+        let (signature, fallback_pers, deprecated) =
+            self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
         self.view_mut()
@@ -2258,11 +2312,7 @@ impl PersistentEnv {
     /// Pident paths that match the implementation's local paths.
     /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
     /// lazily in components_of_module_maker, not on ps_sig.
-    pub fn read_raw_sig_shared<'a>(
-        &mut self,
-        name: &str,
-        ctx: &'a TypeContext,
-    ) -> Option<Arc<Signature>> {
+    pub fn read_raw_sig_shared(&mut self, name: &str, ctx: &TypeContext) -> Option<Arc<Signature>> {
         if self.in_process_mode {
             if let Some(cached) = self.cache_lookup(name) {
                 return cached.map(|loaded| loaded.ps_sig.clone());
@@ -2292,12 +2342,8 @@ impl PersistentEnv {
         Some(Arc::new(sig_ctx.read_signature(&cmi.cmi_sign)))
     }
 
-    /// Read a module's signature from CMI without applying path substitution.
-    /// Used for interface constraint propagation (moregen) where we need raw
-    /// Pident paths that match the implementation's local paths.
-    /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
-    /// lazily in components_of_module_maker, not on ps_sig.
-    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
+    /// Owned copy of [`Self::read_raw_sig_shared`].
+    pub fn read_raw_sig(&mut self, name: &str, ctx: &TypeContext) -> Option<Signature> {
         self.read_raw_sig_shared(name, ctx)
             .map(|sig| (*sig).clone())
     }
@@ -2310,18 +2356,20 @@ impl PersistentEnv {
     }
 
     fn find_in_path_uncap_entry(&self, filename: &str) -> Option<(String, String)> {
+        let uncap = filename
+            .chars()
+            .next()
+            .filter(char::is_ascii_uppercase)
+            .map(|first_char| format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]));
         for (index, dir) in self.load_path.iter().enumerate() {
             let display_dir = self.load_path_display.get(index).unwrap_or(dir);
-            if let Some(first_char) = filename.chars().next() {
-                if first_char.is_ascii_uppercase() {
-                    let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
-                    let uncap_path = dir.join(&uncap);
-                    if uncap_path.exists() {
-                        return Some((
-                            uncap_path.to_string_lossy().into_owned(),
-                            display_dir.join(uncap).to_string_lossy().into_owned(),
-                        ));
-                    }
+            if let Some(uncap) = &uncap {
+                let uncap_path = dir.join(uncap);
+                if uncap_path.exists() {
+                    return Some((
+                        uncap_path.to_string_lossy().into_owned(),
+                        display_dir.join(uncap).to_string_lossy().into_owned(),
+                    ));
                 }
             }
 
@@ -2336,18 +2384,16 @@ impl PersistentEnv {
         None
     }
 
-    /// Open a module's signature into the environment.
-    /// This adds all the module's exported bindings to the environment.
     /// Get the renamed signature for a module, cached.
     /// Matches OCaml's `ps_sig = lazy (Subst.signature Subst.identity sign)`.
     /// In OCaml, accessing a module's components cascades into forcing ps_sig
     /// for all dependent modules (via components_of_module_maker → scrape_alias
     /// → find_module). We match this by triggering ALL registered module renames
     /// when any module is first accessed.
-    pub fn get_renamed_sig_shared<'a>(
+    pub fn get_renamed_sig_shared(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<Arc<Signature>> {
         // Check TypeContext cache first (populated by trigger_module_sig_rename)
         if let Some(renamed) = ctx.renamed_module_sig(name) {
@@ -2364,7 +2410,7 @@ impl PersistentEnv {
         })
     }
 
-    pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
+    pub fn get_renamed_sig(&mut self, name: &str, ctx: &TypeContext) -> Option<Signature> {
         self.get_renamed_sig_shared(name, ctx)
             .map(|sig| sig.as_ref().clone())
     }
@@ -2373,10 +2419,10 @@ impl PersistentEnv {
     /// persistent module without requiring the caller to use the renamed
     /// signature. OCaml allocates fresh identifiers the first time `ps_sig` is
     /// forced; in-process type lookups still often need the raw signature shape.
-    pub(crate) fn force_lazy_signature_rename<'a>(
+    pub(crate) fn force_lazy_signature_rename(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<()> {
         if ctx.renamed_module_sigs.borrow().contains_key(name)
             || self.renamed_sig_cache.contains_key(name)
@@ -2398,7 +2444,7 @@ impl PersistentEnv {
         Some(())
     }
 
-    pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext) -> bool {
+    pub fn open_module(&mut self, name: &str, env: &mut Env, ctx: &TypeContext) -> bool {
         // Don't rename at open time — OCaml's ps_sig is only forced later
         // when find_module is called from normalize_path during type expansion.
         let ps = match self.find_pers_struct(name, ctx) {
@@ -2479,10 +2525,10 @@ impl PersistentEnv {
 
     /// Get a module's declaration using the raw (un-renamed) sig.
     /// Used during initial env setup where OCaml doesn't force ps_sig.
-    pub fn get_module_declaration<'a>(
+    pub fn get_module_declaration(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) -> Option<ModuleDeclaration> {
         let ps = self.find_pers_struct(name, ctx)?;
         Some(ModuleDeclaration {
@@ -2510,14 +2556,14 @@ impl PersistentEnv {
     ///
     /// `source_filename` is the source file path (e.g. `/path/to/Foo.res`),
     /// used as `ps_filename` for downstream lookups.
-    pub fn register_in_memory_signature<'a>(
+    pub fn register_in_memory_signature(
         &mut self,
         name: &str,
         signature: Signature,
         source_filename: &str,
         deprecated: Option<String>,
         crcs: Vec<(String, Option<[u8; 16]>)>,
-        ctx: &'a TypeContext,
+        ctx: &TypeContext,
     ) {
         let ps = self.finalize_loaded_signature(
             name,
@@ -2640,10 +2686,10 @@ impl PersistentEnv {
 /// Install the type declarations of a loaded signature in this unit's
 /// registries. `shared` says the signature is owned by the worker store, so
 /// the `Arc` handles can be shared across compilations instead of cloned.
-fn register_sig_types_recursive<'a>(
+fn register_sig_types_recursive(
     sig: &Signature,
     module_path: &Path,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     shared: bool,
 ) {
     if shared {
@@ -2773,30 +2819,19 @@ fn read_marshaled_cmj(path: &FsPath) -> Option<OcamlValue> {
     reader.read_from_bytes(marshaled).ok()
 }
 
-pub fn read_cmj_module_metadata(path: &FsPath) -> Option<CmjModuleMetadata> {
-    let value = read_marshaled_cmj(path)?;
+fn decode_cmj_module_metadata(value: &OcamlValue) -> Option<CmjModuleMetadata> {
     Some(CmjModuleMetadata {
-        is_pure: decode_cmj_pure(&value)?,
-        export_constants: decode_cmj_export_constants(&value)?,
-        hoisted_exports: decode_cmj_hoisted_exports(&value)?,
-        package_spec: decode_cmj_package_spec(&value)?,
-        file_case: decode_cmj_file_case(&value)?,
+        is_pure: decode_cmj_pure(value)?,
+        export_constants: decode_cmj_export_constants(value)?,
+        hoisted_exports: decode_cmj_hoisted_exports(value)?,
+        package_spec: decode_cmj_package_spec(value)?,
+        file_case: decode_cmj_file_case(value)?,
     })
-}
-
-fn read_cmj_pure(path: &FsPath) -> Option<bool> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_pure(&value)
 }
 
 fn decode_cmj_pure(value: &OcamlValue) -> Option<bool> {
     let (_, fields) = value.as_block_opt()?;
     fields.get(2).map(|field| field.as_bool())
-}
-
-fn read_cmj_hoisted_exports(path: &FsPath) -> Option<Vec<crate::lambda::HoistedExport>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_hoisted_exports(&value)
 }
 
 fn decode_cmj_hoisted_exports(value: &OcamlValue) -> Option<Vec<crate::lambda::HoistedExport>> {
@@ -2812,21 +2847,6 @@ fn decode_cmj_hoisted_exports(value: &OcamlValue) -> Option<Vec<crate::lambda::H
             })
         })
         .collect()
-}
-
-fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportConstant>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_export_constants(&value)
-}
-
-fn read_cmj_export_arities(path: &FsPath) -> Option<HashMap<String, CmjExportArity>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_export_arities(&value)
-}
-
-fn read_cmj_export_lambdas(path: &FsPath) -> Option<HashMap<String, Lambda>> {
-    let value = read_marshaled_cmj(path)?;
-    decode_cmj_export_lambdas(&value)
 }
 
 fn decode_cmj_export_constants(value: &OcamlValue) -> Option<HashMap<String, CmjExportConstant>> {
@@ -3046,9 +3066,9 @@ fn decode_cmj_lambda(value: &OcamlValue) -> Option<Lambda> {
             let apply = decode_cmj_apply(&fields[0])?;
             Some(Lambda::Lapply(Box::new(apply)))
         }
-        OcamlValue::Block(4, fields) if fields.len() == 1 => {
-            Some(Lambda::Lfunction(Box::new(decode_cmj_lfunction(&fields[0])?)))
-        }
+        OcamlValue::Block(4, fields) if fields.len() == 1 => Some(Lambda::Lfunction(Box::new(
+            decode_cmj_lfunction(&fields[0])?,
+        ))),
         OcamlValue::Block(7, fields) if fields.len() == 1 => {
             let prim = decode_cmj_prim_info(&fields[0])?;
             Some(Lambda::Lprim(Box::new(prim)))
@@ -3261,9 +3281,7 @@ fn decode_cmj_variant_literal_tag(value: &OcamlValue) -> Option<crate::types::Va
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             Some(T::String(fields[0].as_string().to_string()))
         }
-        OcamlValue::Block(1, fields) if fields.len() == 1 => {
-            Some(T::Int(fields[0].as_int()))
-        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => Some(T::Int(fields[0].as_int())),
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(T::Float(fields[0].as_string().to_string()))
         }
@@ -3300,7 +3318,9 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
     /// record `Untagged of {tag; block_type}`.
     fn block(value: &OcamlValue) -> Option<crate::types::VariantBlock> {
         match value.as_block_opt()? {
-            (0, fields) => Some(crate::types::VariantBlock::Tagged(tagged_block(fields.first()?)?)),
+            (0, fields) => Some(crate::types::VariantBlock::Tagged(tagged_block(
+                fields.first()?,
+            )?)),
             (1, fields) => Some(crate::types::VariantBlock::Untagged {
                 tag: decode_cmj_variant_tag(fields.first()?)?,
                 block_type: crate::cmi::sig_reader::decode_variant_block_type(fields.get(1)?),
@@ -3518,13 +3538,12 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Block(13, fields) if fields.len() == 1 => {
             Some(Primitive::Pstringcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(18, fields) if fields.len() == 1 => {
-            Some(Primitive::PtaggedTemplate(decode_cmj_string_list(&fields[0])?))
-        }
-        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(decode_cmj_list(
-            &fields[0],
-            decode_cmj_template_segment,
-        )?)),
+        OcamlValue::Block(18, fields) if fields.len() == 1 => Some(Primitive::PtaggedTemplate(
+            decode_cmj_string_list(&fields[0])?,
+        )),
+        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(
+            decode_cmj_list(&fields[0], decode_cmj_template_segment)?,
+        )),
         OcamlValue::Block(16, fields) if fields.len() == 1 => {
             Some(Primitive::Pjscomp(decode_cmj_comparison(&fields[0])?))
         }
@@ -3560,16 +3579,22 @@ fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
 }
 
 /// `String_literal.payload`: `Valid {source; semantic}` or `Invalid_source`.
-fn decode_cmj_template_segment(value: &OcamlValue) -> Option<crate::string_literal::TemplateSegment> {
+fn decode_cmj_template_segment(
+    value: &OcamlValue,
+) -> Option<crate::string_literal::TemplateSegment> {
     use std::borrow::Cow;
     match value {
-        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(crate::string_literal::StringLiteral::Valid {
-            source: Cow::Owned(fields[0].as_string().to_string()),
-            semantic: Cow::Owned(fields[1].as_string().to_string()),
-        }),
-        OcamlValue::Block(1, fields) if fields.len() == 1 => Some(
-            crate::string_literal::StringLiteral::InvalidSource(Cow::Owned(fields[0].as_string().to_string())),
-        ),
+        OcamlValue::Block(0, fields) if fields.len() == 2 => {
+            Some(crate::string_literal::StringLiteral::Valid {
+                source: Cow::Owned(fields[0].as_string().to_string()),
+                semantic: Cow::Owned(fields[1].as_string().to_string()),
+            })
+        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(crate::string_literal::StringLiteral::InvalidSource(
+                Cow::Owned(fields[0].as_string().to_string()),
+            ))
+        }
         _ => None,
     }
 }
@@ -3743,7 +3768,7 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
 }
 
 fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
-    let new_path = Path::pident(new_id.clone());
+    let new_path = Path::pident(*new_id);
     if old_id.stamp() != 0 {
         maps.type_stamp_map.insert(old_id.stamp(), new_path);
     } else {
@@ -3753,7 +3778,7 @@ fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) 
 }
 
 fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
-    let new_path = Path::pident(new_id.clone());
+    let new_path = Path::pident(*new_id);
     if old_id.stamp() != 0 {
         insert_module_stamp_subst(&mut maps.module_stamp_map, old_id, new_path);
     } else {
@@ -3856,20 +3881,25 @@ fn freshen_module_type_bound_idents_rec(
             }
         }
         ModuleType::MtySignature(sig) => {
-            freshen_signature_bound_idents_rec(crate::types::decl::signature_mut(sig), maps, ctx, visited);
+            freshen_signature_bound_idents_rec(
+                crate::types::decl::signature_mut(sig),
+                maps,
+                ctx,
+                visited,
+            );
         }
         ModuleType::MtyFunctor {
             param,
             param_type,
             result,
         } => {
-            let old_param = param.clone();
+            let old_param = *param;
             // OCaml compiler/ml/subst.ml:352-355 renames the functor
             // parameter, then observes `Mty_functor` argument evaluation by
             // freshening the result before the argument module type. This
             // stamp order is observable in strict typedtree identifiers.
             let new_param = ctx.rename_ident(&old_param);
-            *param = new_param.clone();
+            *param = new_param;
             let mut param_maps = SubstMaps::default();
             insert_module_subst_path(&mut param_maps, &old_param, &new_param);
             let result_maps = merge_subst_maps(maps, &param_maps);
@@ -3899,19 +3929,19 @@ fn freshen_signature_bound_idents_rec(
                 *id = ctx.rename_ident(id);
             }
             SignatureItem::SigType(id, _, _) => {
-                let old_id = id.clone();
+                let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModtype(id, _) => {
-                let old_id = id.clone();
+                let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModule(id, _, _) => {
-                let old_id = id.clone();
+                let old_id = *id;
                 let new_id = ctx.rename_ident(&old_id);
                 insert_module_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
@@ -3998,14 +4028,18 @@ pub(crate) fn signature_freshen_stamp_count(sig_items: &[SignatureItem]) -> i32 
                 param_type, result, ..
             } => {
                 1 + module_type_count(result)
-                    + param_type.as_ref().map_or(0, |param| module_type_count(param))
+                    + param_type
+                        .as_ref()
+                        .map_or(0, |param| module_type_count(param))
             }
         }
     }
     sig_items
         .iter()
         .map(|item| match item {
-            SignatureItem::SigValue(..) | SignatureItem::SigTypext(..) | SignatureItem::SigType(..) => 1,
+            SignatureItem::SigValue(..)
+            | SignatureItem::SigTypext(..)
+            | SignatureItem::SigType(..) => 1,
             SignatureItem::SigModtype(_, mtd) => {
                 1 + mtd.mtd_type.as_ref().map_or(0, module_type_count)
             }
@@ -4234,7 +4268,10 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
             );
         }
         ModuleType::MtySignature(sig) => {
-            substitute_sig_decl_paths_in_place_with_maps(crate::types::decl::signature_mut(sig), maps);
+            substitute_sig_decl_paths_in_place_with_maps(
+                crate::types::decl::signature_mut(sig),
+                maps,
+            );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -4716,10 +4753,10 @@ pub fn substitute_type_paths_in_sig(
             SignatureItem::SigValue(_id, desc) => {
                 substitute_type_expr_path(
                     desc.val_type,
-                    &type_stamp_map,
+                    type_stamp_map,
                     &type_name_map,
-                    &module_stamp_map,
-                    &module_name_map,
+                    module_stamp_map,
+                    module_name_map,
                     protected_module_head,
                     ctx,
                     &mut visited,
@@ -4730,10 +4767,10 @@ pub fn substitute_type_paths_in_sig(
                 for &param in &decl.type_params {
                     substitute_type_expr_path(
                         param,
-                        &type_stamp_map,
+                        type_stamp_map,
                         &type_name_map,
-                        &module_stamp_map,
-                        &module_name_map,
+                        module_stamp_map,
+                        module_name_map,
                         protected_module_head,
                         ctx,
                         &mut visited,
@@ -4752,18 +4789,18 @@ pub fn substitute_type_paths_in_sig(
                         id,
                         manifest,
                         module_path,
-                        &type_stamp_map,
+                        type_stamp_map,
                         &type_name_map,
-                        &module_stamp_map,
-                        &module_name_map,
+                        module_stamp_map,
+                        module_name_map,
                         protected_module_head,
                     ) {
                         substitute_type_expr_path(
                             manifest,
-                            &type_stamp_map,
+                            type_stamp_map,
                             &type_name_map,
-                            &module_stamp_map,
-                            &module_name_map,
+                            module_stamp_map,
+                            module_name_map,
                             protected_module_head,
                             ctx,
                             &mut visited,
@@ -4779,10 +4816,10 @@ pub fn substitute_type_paths_in_sig(
                                     for &arg in args {
                                         substitute_type_expr_path(
                                             arg,
-                                            &type_stamp_map,
+                                            type_stamp_map,
                                             &type_name_map,
-                                            &module_stamp_map,
-                                            &module_name_map,
+                                            module_stamp_map,
+                                            module_name_map,
                                             protected_module_head,
                                             ctx,
                                             &mut visited,
@@ -4793,10 +4830,10 @@ pub fn substitute_type_paths_in_sig(
                                     for lbl in labels {
                                         substitute_type_expr_path(
                                             lbl.ld_type,
-                                            &type_stamp_map,
+                                            type_stamp_map,
                                             &type_name_map,
-                                            &module_stamp_map,
-                                            &module_name_map,
+                                            module_stamp_map,
+                                            module_name_map,
                                             protected_module_head,
                                             ctx,
                                             &mut visited,
@@ -4807,10 +4844,10 @@ pub fn substitute_type_paths_in_sig(
                             if let Some(res) = cd.cd_res {
                                 substitute_type_expr_path(
                                     res,
-                                    &type_stamp_map,
+                                    type_stamp_map,
                                     &type_name_map,
-                                    &module_stamp_map,
-                                    &module_name_map,
+                                    module_stamp_map,
+                                    module_name_map,
                                     protected_module_head,
                                     ctx,
                                     &mut visited,
@@ -4822,10 +4859,10 @@ pub fn substitute_type_paths_in_sig(
                         for lbl in labels {
                             substitute_type_expr_path(
                                 lbl.ld_type,
-                                &type_stamp_map,
+                                type_stamp_map,
                                 &type_name_map,
-                                &module_stamp_map,
-                                &module_name_map,
+                                module_stamp_map,
+                                module_name_map,
                                 protected_module_head,
                                 ctx,
                                 &mut visited,
@@ -4839,10 +4876,10 @@ pub fn substitute_type_paths_in_sig(
                 for &param in &ext.ext_type_params {
                     substitute_type_expr_path(
                         param,
-                        &type_stamp_map,
+                        type_stamp_map,
                         &type_name_map,
-                        &module_stamp_map,
-                        &module_name_map,
+                        module_stamp_map,
+                        module_name_map,
                         protected_module_head,
                         ctx,
                         &mut visited,
@@ -4853,10 +4890,10 @@ pub fn substitute_type_paths_in_sig(
                         for &arg in args {
                             substitute_type_expr_path(
                                 arg,
-                                &type_stamp_map,
+                                type_stamp_map,
                                 &type_name_map,
-                                &module_stamp_map,
-                                &module_name_map,
+                                module_stamp_map,
+                                module_name_map,
                                 protected_module_head,
                                 ctx,
                                 &mut visited,
@@ -4867,10 +4904,10 @@ pub fn substitute_type_paths_in_sig(
                         for lbl in labels {
                             substitute_type_expr_path(
                                 lbl.ld_type,
-                                &type_stamp_map,
+                                type_stamp_map,
                                 &type_name_map,
-                                &module_stamp_map,
-                                &module_name_map,
+                                module_stamp_map,
+                                module_name_map,
                                 protected_module_head,
                                 ctx,
                                 &mut visited,
@@ -4881,10 +4918,10 @@ pub fn substitute_type_paths_in_sig(
                 if let Some(ret) = ext.ext_ret_type {
                     substitute_type_expr_path(
                         ret,
-                        &type_stamp_map,
+                        type_stamp_map,
                         &type_name_map,
-                        &module_stamp_map,
-                        &module_name_map,
+                        module_stamp_map,
+                        module_name_map,
                         protected_module_head,
                         ctx,
                         &mut visited,
@@ -4955,29 +4992,6 @@ pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
 }
 
 /// Recursively walk a type expression and substitute Tconstr paths.
-/// Public wrapper for substitute_type_expr_path.
-pub(crate) fn substitute_type_expr_path_pub(
-    ty_ref: TypeExprRef,
-    type_stamp_map: &HashMap<i32, Path>,
-    type_name_map: &HashMap<String, Path>,
-    module_stamp_map: &ModuleStampSubstMap,
-    module_name_map: &HashMap<String, Path>,
-    protected_module_head: Option<&(i32, String)>,
-    ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
-) {
-    substitute_type_expr_path(
-        ty_ref,
-        type_stamp_map,
-        type_name_map,
-        module_stamp_map,
-        module_name_map,
-        protected_module_head,
-        ctx,
-        visited,
-    );
-}
-
 fn substitute_type_expr_path(
     initial_ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
@@ -5147,8 +5161,12 @@ pub fn reroot_value_description(
     }
     let mut cache = crate::types::type_expr::TypeExprRefMap::new();
     let map_path = |p: &Path| reroot_path(p, prefixes);
-    desc.val_type =
-        crate::types::typecore::copy_type_expr_mapping_paths(ctx, desc.val_type, &mut cache, &map_path);
+    desc.val_type = crate::types::typecore::copy_type_expr_mapping_paths(
+        ctx,
+        desc.val_type,
+        &mut cache,
+        &map_path,
+    );
 }
 
 /// Alias sources of a component path, including those inherited from its
@@ -5170,7 +5188,8 @@ fn component_alias_sources(module_path: &Path, ctx: &TypeContext) -> Vec<Path> {
 
 /// Rewrite `path` through the first matching `(old, new)` prefix pair.
 pub fn reroot_path(path: &Path, prefixes: &[(Path, Path)]) -> Path {
-    rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes)).unwrap_or_else(|| path.clone())
+    rewrite_path_by_path_prefixes(path, &PathPrefixes::new(prefixes))
+        .unwrap_or_else(|| path.clone())
 }
 
 /// Whether any type constructor or package path reachable from `ty` starts
@@ -5332,7 +5351,7 @@ pub fn substitute_type_paths_in_value_with_maps(
             // contain the flattened persistent backing path for that same
             // component type, so rewrite only the current component's direct
             // type binders at the Env substitution boundary.
-            rewrite_type_expr_by_path_prefix_pub(desc.val_type, &old_path, &new_path, ctx);
+            rewrite_type_expr_by_path_prefix(desc.val_type, &old_path, &new_path, ctx);
         }
     }
 }
@@ -5400,7 +5419,7 @@ fn substitute_type_path(
                 module_name_map,
                 protected_module_head,
             );
-            Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
         }
         Path::Papply(left, right) => Path::Papply(
             std::sync::Arc::new(substitute_module_path(
@@ -5451,7 +5470,7 @@ fn substitute_module_path(
                 module_name_map,
                 protected_module_head,
             );
-            Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
         }
         Path::Papply(left, right) => Path::Papply(
             std::sync::Arc::new(substitute_module_path(
@@ -5591,15 +5610,14 @@ fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option
                 if id.name() == old_name {
                     return Some(Path::Pdot(
                         std::sync::Arc::new(new_prefix.clone()),
-                        name.clone(),
+                        *name,
                         *pos,
                     ));
                 }
             }
             // Recursively check deeper paths
             let rewritten_inner = rewrite_path_prefix(inner, old_name, new_prefix);
-            rewritten_inner
-                .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), name.clone(), *pos))
+            rewritten_inner.map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), *name, *pos))
         }
         _ => None,
     }
@@ -5617,7 +5635,11 @@ fn rewrite_module_type_prefix_paths(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_module_prefix_paths_in_sig(crate::types::decl::signature_mut(sig), old_name, new_prefix);
+            rewrite_module_prefix_paths_in_sig(
+                crate::types::decl::signature_mut(sig),
+                old_name,
+                new_prefix,
+            );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -5994,12 +6016,12 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
             if inner.same(old_prefix) {
                 return Some(Path::Pdot(
                     std::sync::Arc::new(new_prefix.clone()),
-                    name.clone(),
+                    *name,
                     *pos,
                 ));
             }
             rewrite_path_by_path_prefix(inner, old_prefix, new_prefix)
-                .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), name.clone(), *pos))
+                .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), *name, *pos))
         }
         _ => None,
     }
@@ -6069,7 +6091,11 @@ fn rewrite_module_type_by_path_prefix(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_sig_paths_by_path_prefix(crate::types::decl::signature_mut(sig), old_prefix, new_prefix);
+            rewrite_sig_paths_by_path_prefix(
+                crate::types::decl::signature_mut(sig),
+                old_prefix,
+                new_prefix,
+            );
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -6180,7 +6206,7 @@ pub fn rewrite_sig_paths_by_path_prefix_shallow(
 /// that have `old_prefix` as a path prefix, replacing it with `new_prefix`.
 /// Used for module alias resolution: `module J = Js.Json` rewrites
 /// `Js.Json.Kind.t` → `J.Kind.t` in all types.
-fn rewrite_type_expr_by_path_prefix(
+fn rewrite_type_expr_by_path_prefix_in(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
     new_prefix: &Path,
@@ -6202,38 +6228,38 @@ fn rewrite_type_expr_by_path_prefix(
                 ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
-                rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tarrow { args, ret } => {
             for arg in args {
-                rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(arg.typ, old_prefix, new_prefix, ctx, visited);
             }
-            rewrite_type_expr_by_path_prefix(*ret, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*ret, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
             for &t in types {
-                rewrite_type_expr_by_path_prefix(t, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(t, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tlink(t) => {
-            rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*t, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tsubst(t) => {
-            rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*t, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tpoly { body, vars } => {
-            rewrite_type_expr_by_path_prefix(*body, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*body, old_prefix, new_prefix, ctx, visited);
             for &v in vars {
-                rewrite_type_expr_by_path_prefix(v, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(v, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tobject { fields, .. } => {
-            rewrite_type_expr_by_path_prefix(*fields, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*fields, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_type_expr_by_path_prefix(*typ, old_prefix, new_prefix, ctx, visited);
-            rewrite_type_expr_by_path_prefix(*rest, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*typ, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(*rest, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
             if let Some((path, _)) = &row.row_name
@@ -6249,18 +6275,20 @@ fn rewrite_type_expr_by_path_prefix(
             }
             if let Some((_, args)) = &row.row_name {
                 for &arg in args {
-                    rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                    rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
                 }
             }
-            rewrite_type_expr_by_path_prefix(row.row_more, old_prefix, new_prefix, ctx, visited);
+            rewrite_type_expr_by_path_prefix_in(row.row_more, old_prefix, new_prefix, ctx, visited);
             for field in &row.row_fields {
                 match &field.1 {
                     crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                        rewrite_type_expr_by_path_prefix(*t, old_prefix, new_prefix, ctx, visited);
+                        rewrite_type_expr_by_path_prefix_in(
+                            *t, old_prefix, new_prefix, ctx, visited,
+                        );
                     }
                     crate::types::type_expr::RowField::Reither { types, .. } => {
                         for &t in types {
-                            rewrite_type_expr_by_path_prefix(
+                            rewrite_type_expr_by_path_prefix_in(
                                 t, old_prefix, new_prefix, ctx, visited,
                             );
                         }
@@ -6278,21 +6306,22 @@ fn rewrite_type_expr_by_path_prefix(
                 ctx.set_desc(ty_ref, new_desc);
             }
             for &arg in args {
-                rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
     }
 }
 
-pub fn rewrite_type_expr_by_path_prefix_pub(
+/// [`rewrite_type_expr_by_path_prefix_in`] with a fresh visited set.
+pub fn rewrite_type_expr_by_path_prefix(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
     new_prefix: &Path,
     ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
-    rewrite_type_expr_by_path_prefix(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
+    rewrite_type_expr_by_path_prefix_in(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
 }
 
 fn rewrite_type_expr_by_path_prefixes(
@@ -6408,7 +6437,7 @@ pub fn rewrite_sig_by_path_prefix(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                rewrite_type_expr_by_path_prefix(
+                rewrite_type_expr_by_path_prefix_in(
                     desc.val_type,
                     old_prefix,
                     new_prefix,
@@ -6418,7 +6447,7 @@ pub fn rewrite_sig_by_path_prefix(
             }
             SignatureItem::SigType(_id, decl, _) => {
                 for &param in &decl.type_params {
-                    rewrite_type_expr_by_path_prefix(
+                    rewrite_type_expr_by_path_prefix_in(
                         param,
                         old_prefix,
                         new_prefix,
@@ -6427,7 +6456,7 @@ pub fn rewrite_sig_by_path_prefix(
                     );
                 }
                 if let Some(manifest) = decl.type_manifest {
-                    rewrite_type_expr_by_path_prefix(
+                    rewrite_type_expr_by_path_prefix_in(
                         manifest,
                         old_prefix,
                         new_prefix,
@@ -6441,7 +6470,7 @@ pub fn rewrite_sig_by_path_prefix(
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
-                                        rewrite_type_expr_by_path_prefix(
+                                        rewrite_type_expr_by_path_prefix_in(
                                             arg,
                                             old_prefix,
                                             new_prefix,
@@ -6452,7 +6481,7 @@ pub fn rewrite_sig_by_path_prefix(
                                 }
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     for lbl in labels {
-                                        rewrite_type_expr_by_path_prefix(
+                                        rewrite_type_expr_by_path_prefix_in(
                                             lbl.ld_type,
                                             old_prefix,
                                             new_prefix,
@@ -6463,7 +6492,7 @@ pub fn rewrite_sig_by_path_prefix(
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                rewrite_type_expr_by_path_prefix(
+                                rewrite_type_expr_by_path_prefix_in(
                                     res,
                                     old_prefix,
                                     new_prefix,
@@ -6475,7 +6504,7 @@ pub fn rewrite_sig_by_path_prefix(
                     }
                     TypeKind::TypeRecord(labels, _) => {
                         for lbl in labels {
-                            rewrite_type_expr_by_path_prefix(
+                            rewrite_type_expr_by_path_prefix_in(
                                 lbl.ld_type,
                                 old_prefix,
                                 new_prefix,
@@ -6516,7 +6545,6 @@ fn rewrite_sig_by_path_prefix_index(
     prefixes: &PathPrefixes<'_>,
     ctx: &TypeContext,
 ) {
-
     let mut visited = HashSet::new();
 
     for item in sig_items {
@@ -6589,20 +6617,15 @@ fn rewrite_sig_by_path_prefix_index(
     }
 }
 
-/// Public wrapper for substitute_submodule_paths.
-pub fn substitute_submodule_paths_pub(
-    sig_items: &[SignatureItem],
-    module_path: &Path,
-    ctx: &TypeContext,
-) {
-    substitute_submodule_paths(sig_items, module_path, ctx);
-}
-
 /// Recursively substitute type paths in sub-module signatures.
 /// For a module like Belt with sub-modules Array, Map, etc.,
 /// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"
 /// instead of Pident "t".
-fn substitute_submodule_paths(sig_items: &[SignatureItem], module_path: &Path, ctx: &TypeContext) {
+pub fn substitute_submodule_paths(
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
     // Match OCaml `prefix_idents`/`Subst` behavior: when descending into a
     // submodule, keep parent substitutions visible so child signatures can
     // reference parent-defined types through qualified paths.
@@ -6818,92 +6841,6 @@ fn add_signature_to_env_with_options_inner(
         substitute_type_paths_in_sig(sig_items, module_path, ctx);
     }
 
-    fn collect_target_constr_nodes(
-        ctx: &TypeContext,
-        initial_ty: TypeExprRef,
-        out: &mut Vec<(TypeExprRef, String)>,
-        seen: &mut HashSet<TypeExprRef>,
-    ) {
-        // Use an explicit work stack to avoid stack overflow on large type
-        // graphs (e.g., objects with hundreds of fields create deep Tfield chains).
-        let mut work_stack = vec![initial_ty];
-
-        while let Some(raw_ty) = work_stack.pop() {
-            let ty = ctx.repr(raw_ty);
-            if !seen.insert(ty) {
-                continue;
-            }
-            let desc = ctx.get_desc(ty);
-            match &*desc {
-                TypeDesc::Tconstr { path, args, .. } => {
-                    let path_name = path.name();
-                    if path_name == "React.element"
-                        || path_name == "Jsx.element"
-                        || path.last() == "element"
-                        || path.last() == "someElement"
-                    {
-                        out.push((ty, path_name));
-                    }
-                    for arg in args {
-                        work_stack.push(*arg);
-                    }
-                }
-                TypeDesc::Tarrow { args, ret } => {
-                    work_stack.extend(args.iter().map(|arg| arg.typ));
-                    work_stack.push(*ret);
-                }
-                TypeDesc::Ttuple(items) => {
-                    for item in items {
-                        work_stack.push(*item);
-                    }
-                }
-                TypeDesc::Tobject { fields } => {
-                    work_stack.push(*fields);
-                }
-                TypeDesc::Tfield { typ, rest, .. } => {
-                    work_stack.push(*typ);
-                    work_stack.push(*rest);
-                }
-                TypeDesc::Tpoly { body, vars } => {
-                    work_stack.push(*body);
-                    for var in vars {
-                        work_stack.push(*var);
-                    }
-                }
-                TypeDesc::Tvariant(row) => {
-                    if let Some((_, args)) = &row.row_name {
-                        for arg in args {
-                            work_stack.push(*arg);
-                        }
-                    }
-                    work_stack.push(row.row_more);
-                    for (_label, field) in &row.row_fields {
-                        match field {
-                            crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
-                                work_stack.push(*ty);
-                            }
-                            crate::types::type_expr::RowField::Reither { types, .. } => {
-                                for ty in types {
-                                    work_stack.push(*ty);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                TypeDesc::Tpackage { args, .. } => {
-                    for arg in args {
-                        work_stack.push(*arg);
-                    }
-                }
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                    work_stack.push(*target);
-                }
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-            }
-        }
-    }
-
     fn inline_record_type_params(
         ctx: &TypeContext,
         parent_type_params: &[TypeExprRef],
@@ -6977,35 +6914,10 @@ fn add_signature_to_env_with_options_inner(
                 if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
                     pos += 1;
                 }
-                if crate::debug_flags::debug_open_sig_values()
-                    && (id.name() == "someElement"
-                        || id.name() == "element"
-                        || id.name() == "stringToJson"
-                        || id.name() == "stringFromJson"
-                        || module_path.last() == "ReactDOM")
-                {
-                    let mut seen = HashSet::new();
-                    let mut nodes = Vec::new();
-                    collect_target_constr_nodes(ctx, desc.val_type, &mut nodes, &mut seen);
-                    let refs = nodes
-                        .iter()
-                        .map(|(ty, path_name)| {
-                            let repr = ctx.repr(*ty);
-                            format!("{}#{}@{}", path_name, repr.0, ctx.get_level(repr))
-                        })
-                        .collect::<Vec<_>>();
-                    eprintln!(
-                        "[open-sig-value] module={} id={} val_type={} refs={}",
-                        module_path.name(),
-                        id.name(),
-                        ctx.repr(desc.val_type).0,
-                        refs.join(",")
-                    );
-                }
                 if as_opened {
-                    opened_values.push((id.clone(), desc, value_pos));
+                    opened_values.push((*id, desc, value_pos));
                 } else {
-                    env.add_value(id.clone(), desc);
+                    env.add_value(*id, desc);
                 }
             }
             SignatureItem::SigType(id, decl, _rec_status) => {
@@ -7014,9 +6926,9 @@ fn add_signature_to_env_with_options_inner(
                 decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                 let decl = Arc::new(decl);
                 if as_opened {
-                    opened_types.push((id.clone(), decl.clone()));
+                    opened_types.push((*id, decl.clone()));
                 } else {
-                    env.add_type(id.clone(), decl.clone());
+                    env.add_type(*id, decl.clone());
                 }
 
                 // Also register in global type store for alias expansion
@@ -7128,7 +7040,7 @@ fn add_signature_to_env_with_options_inner(
                                 cstr_generalized: cd.cd_res.is_some(),
                                 cstr_private: decl.type_private,
                                 // datarepr.ml:111-172 `cstr_loc = cd_loc`.
-                                cstr_loc: cd.cd_loc.clone(),
+                                cstr_loc: cd.cd_loc,
                                 cstr_attributes:
                                     crate::types::decl::constructor_description_attrs_for_variant(
                                         constrs, cd,
@@ -7161,22 +7073,22 @@ fn add_signature_to_env_with_options_inner(
                                             lbl_all: crate::types::decl::LabelArrayRef(0),
                                             lbl_repres: repres.clone(),
                                             lbl_private: decl.type_private,
-                                            lbl_loc: ld.ld_loc.clone(),
+                                            lbl_loc: ld.ld_loc,
                                             lbl_attributes: ld.ld_attributes.clone(),
                                         };
                                         if as_opened {
-                                            opened_labels.push((ld.ld_id.clone(), label_desc));
+                                            opened_labels.push((ld.ld_id, label_desc));
                                         } else {
-                                            env.add_label(ld.ld_id.clone(), label_desc);
+                                            env.add_label(ld.ld_id, label_desc);
                                         }
                                     }
                                 }
                             }
 
                             if as_opened {
-                                opened_constructors.push((cd.cd_id.clone(), cstr_desc));
+                                opened_constructors.push((cd.cd_id, cstr_desc));
                             } else {
-                                env.add_constructor(cd.cd_id.clone(), cstr_desc);
+                                env.add_constructor(cd.cd_id, cstr_desc);
                             }
                         }
                     }
@@ -7200,13 +7112,13 @@ fn add_signature_to_env_with_options_inner(
                                 lbl_all: crate::types::decl::LabelArrayRef(0), // placeholder
                                 lbl_repres: repr.clone(),
                                 lbl_private: decl.type_private,
-                                lbl_loc: ld.ld_loc.clone(),
+                                lbl_loc: ld.ld_loc,
                                 lbl_attributes: ld.ld_attributes.clone(),
                             };
                             if as_opened {
-                                opened_labels.push((ld.ld_id.clone(), label_desc));
+                                opened_labels.push((ld.ld_id, label_desc));
                             } else {
-                                env.add_label(ld.ld_id.clone(), label_desc);
+                                env.add_label(ld.ld_id, label_desc);
                             }
                         }
                     }
@@ -7306,8 +7218,8 @@ fn add_signature_to_env_with_options_inner(
                             access_path.clone(),
                             md.clone(),
                         ));
-                        opened_module_components.push((id.clone(), stored, module_pos));
-                        opened_modules.push((id.clone(), md.clone(), module_pos));
+                        opened_module_components.push((*id, stored, module_pos));
+                        opened_modules.push((*id, md.clone(), module_pos));
                     } else if let Some((_, stored)) = precomputed_components
                         .and_then(|components| components.lookup_child_components(id.name(), ctx))
                     {
@@ -7316,13 +7228,13 @@ fn add_signature_to_env_with_options_inner(
                         // `comp_modules`. Reuse that child component thunk so
                         // opened-module source lookup follows env.ml:1000-1013
                         // without forcing the parent module declaration.
-                        opened_module_components.push((id.clone(), stored, module_pos));
-                        opened_modules.push((id.clone(), md.clone(), module_pos));
+                        opened_module_components.push((*id, stored, module_pos));
+                        opened_modules.push((*id, md.clone(), module_pos));
                     } else {
-                        opened_modules.push((id.clone(), md.clone(), module_pos));
+                        opened_modules.push((*id, md.clone(), module_pos));
                     }
                 } else {
-                    env.add_module(id.clone(), md.clone());
+                    env.add_module(*id, md.clone());
                 }
                 // Recursively register types from sub-module signatures by stamp,
                 // so that types referenced in function return types can be expanded
@@ -7342,9 +7254,9 @@ fn add_signature_to_env_with_options_inner(
                     })
                     .unwrap_or_else(|| mtd.clone());
                 if as_opened {
-                    opened_modtypes.push((id.clone(), mtd));
+                    opened_modtypes.push((*id, mtd));
                 } else {
-                    env.add_modtype(id.clone(), mtd);
+                    env.add_modtype(*id, mtd);
                 }
             }
             SignatureItem::SigTypext(id, ext, _status) => {
@@ -7386,9 +7298,9 @@ fn add_signature_to_env_with_options_inner(
                     cstr_inlined: None,
                 };
                 if as_opened {
-                    opened_constructors.push((id.clone(), cstr_desc));
+                    opened_constructors.push((*id, cstr_desc));
                 } else {
-                    env.add_constructor(id.clone(), cstr_desc);
+                    env.add_constructor(*id, cstr_desc);
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {
@@ -7703,12 +7615,21 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
         } else {
             usize::MAX
         };
-        let key = (unit.to_string(), Arc::as_ptr(&ps) as usize, ps.fingerprint, lambdas);
-        if let Some(refs) = registry.item_refs_cache.lock().unwrap().get(&key) {
+        let key = (
+            unit.to_string(),
+            Arc::as_ptr(&ps) as usize,
+            ps.fingerprint,
+            lambdas,
+        );
+        if let Some(refs) = registry.item_refs_cache.read().unwrap().get(&key) {
             return Some(refs.clone());
         }
         let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
-        registry.item_refs_cache.lock().unwrap().insert(key, refs.clone());
+        registry
+            .item_refs_cache
+            .write()
+            .unwrap()
+            .insert(key, refs.clone());
         Some(refs)
     }
 }

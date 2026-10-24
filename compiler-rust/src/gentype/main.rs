@@ -1,6 +1,5 @@
 // Port of compiler/gentype/GenTypeMain.ml:1-175.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -25,20 +24,6 @@ struct InProcessTypeDeclarationsTables {
 }
 
 type InProcessTypeDeclarationsCache = Mutex<InProcessTypeDeclarationsTables>;
-
-pub enum BinaryAnnots {
-    Implementation(Structure),
-    Interface(TypedSignature),
-    Packed,
-    PartialImplementation,
-    PartialInterface,
-}
-
-pub struct InputCmt<'a> {
-    pub cmt_annots: BinaryAnnots,
-    pub arena: ParseArena,
-    pub ctx: &'a TypeContext,
-}
 
 pub enum TypedArtifactAnnots<'a> {
     Implementation(&'a Structure),
@@ -114,7 +99,7 @@ fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     let path = PathBuf::from(cmt_file);
     let path = if path.is_relative() {
         crate::process_cwd::current_dir()
-            .unwrap_or_else(|_| PathBuf::new())
+            .unwrap_or_else(|_| Path::new(""))
             .join(path)
     } else {
         path
@@ -146,13 +131,14 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
+fn lookup_in_process_type_declarations(
+    cmt_file: &str,
+) -> Option<std::sync::Arc<InProcessTypeDeclarations>> {
     let key = normalize_cmt_cache_key(cmt_file);
-    let shared = in_process_type_declarations_cache()
+    in_process_type_declarations_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.by_cmt.get(&key).cloned())?;
-    Some(shared.as_ref().clone())
+        .and_then(|cache| cache.by_cmt.get(&key).cloned())
 }
 
 fn register_in_process_type_declarations(
@@ -162,13 +148,16 @@ fn register_in_process_type_declarations(
 ) {
     let key = normalize_cmt_cache_key(cmt_file);
     let type_declarations = std::sync::Arc::new(type_declarations);
-    let replaced = in_process_type_declarations_cache().lock().ok().and_then(|mut cache| {
-        let keys = cache.by_module.entry(module_name.to_string()).or_default();
-        if !keys.contains(&key) {
-            keys.push(key.clone());
-        }
-        cache.by_cmt.insert(key, type_declarations)
-    });
+    let replaced = in_process_type_declarations_cache()
+        .lock()
+        .ok()
+        .and_then(|mut cache| {
+            let keys = cache.by_module.entry(module_name.to_string()).or_default();
+            if !keys.contains(&key) {
+                keys.push(key.clone());
+            }
+            cache.by_cmt.insert(key, type_declarations)
+        });
     drop(replaced);
 }
 
@@ -224,40 +213,6 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
         // In-process builds write no .cmt; ask the registry before the disk.
         has_in_process_type_declarations(path) || path.exists()
     })
-}
-
-pub fn cmt_check_annotations(
-    check_annotation: &impl Fn(&ParseArena, LocIdx, &Attributes) -> bool,
-    input_cmt: &InputCmt<'_>,
-) -> bool {
-    // Mirrors compiler/gentype/GenTypeMain.ml:3-10.
-    match &input_cmt.cmt_annots {
-        BinaryAnnots::Implementation(structure) => {
-            crate::gentype::annotation::structure_check_annotation(
-                &input_cmt.arena,
-                &|loc, attributes| check_annotation(&input_cmt.arena, loc, attributes),
-                structure,
-            )
-        }
-        BinaryAnnots::Interface(signature) => {
-            crate::gentype::annotation::signature_check_annotation(
-                &input_cmt.arena,
-                &|loc, attributes| check_annotation(&input_cmt.arena, loc, attributes),
-                signature,
-            )
-        }
-        BinaryAnnots::Packed
-        | BinaryAnnots::PartialImplementation
-        | BinaryAnnots::PartialInterface => false,
-    }
-}
-
-pub fn cmt_has_type_errors(input_cmt: &InputCmt<'_>) -> bool {
-    // Mirrors compiler/gentype/GenTypeMain.ml:11-14.
-    matches!(
-        &input_cmt.cmt_annots,
-        BinaryAnnots::PartialImplementation | BinaryAnnots::PartialInterface
-    )
 }
 
 pub fn typed_artifact_check_annotations(
@@ -354,7 +309,7 @@ pub fn translate_typed_artifact(
     };
     crate::gentype::translation::add_type_declarations_from_module_equations(
         &type_env,
-        crate::gentype::translation::combine(&translations),
+        crate::gentype::translation::combine(translations),
     )
 }
 
@@ -388,59 +343,6 @@ fn current_module_names_for_typed_artifact(artifact: &TypedArtifact<'_>) -> Vec<
         }
     }
     names
-}
-
-pub fn input_cmt_translate_type_declarations_from_cmt(
-    config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    input_cmt: &InputCmt<'_>,
-) -> crate::gentype::translation::T {
-    // Mirrors compiler/gentype/GenTypeMain.ml:26-52.
-    let type_env = crate::gentype::type_env::root();
-    let translations = match &input_cmt.cmt_annots {
-        BinaryAnnots::Implementation(structure) => structure
-            .str_items
-            .iter()
-            .filter(|item| structure_item_is_declaration(item))
-            .map(|item| {
-                crate::gentype::translate_structure::translate_structure_item(
-                    input_cmt.ctx,
-                    &input_cmt.arena,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    item,
-                )
-            })
-            .collect(),
-        BinaryAnnots::Interface(signature) => signature
-            .sig_items
-            .iter()
-            .filter(|item| signature_item_is_declaration(item))
-            .map(|item| {
-                crate::gentype::translate_signature::translate_signature_item(
-                    input_cmt.ctx,
-                    &input_cmt.arena,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    item,
-                )
-            })
-            .collect(),
-        BinaryAnnots::Packed
-        | BinaryAnnots::PartialImplementation
-        | BinaryAnnots::PartialInterface => {
-            vec![]
-        }
-    };
-    crate::gentype::translation::add_type_declarations_from_module_equations(
-        &type_env,
-        crate::gentype::translation::combine(&translations),
-    )
 }
 
 pub fn typed_artifact_translate_type_declarations(
@@ -495,75 +397,22 @@ pub fn typed_artifact_translate_type_declarations(
     };
     crate::gentype::translation::add_type_declarations_from_module_equations(
         &type_env,
-        crate::gentype::translation::combine(&translations),
+        crate::gentype::translation::combine(translations),
     )
 }
 
 pub fn input_cmt_translate_type_declarations(
-    config: &mut crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
+    _config: &mut crate::gentype::config::T,
+    _output_file_relative: &str,
+    _resolver: &crate::gentype::module_resolver::Resolver,
     cmt_file: &str,
-) -> crate::gentype::translation::T {
+) -> std::sync::Arc<InProcessTypeDeclarations> {
     // This is the Rust callback boundary used by emit_js.rs for
     // compiler/gentype/EmitJs.ml:449-453.
-    if let Some(type_declarations) = lookup_in_process_type_declarations(cmt_file) {
-        return crate::gentype::translation::T {
-            import_types: vec![],
-            code_items: vec![],
-            type_declarations,
-        };
+    match lookup_in_process_type_declarations(cmt_file) {
+        Some(type_declarations) => type_declarations,
+        None => read_cmt(cmt_file),
     }
-    let input_cmt = read_cmt(cmt_file);
-    input_cmt_translate_type_declarations_from_cmt(
-        config,
-        output_file_relative,
-        resolver,
-        &input_cmt,
-    )
-}
-
-pub fn translate_c_m_t(
-    config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    input_cmt: &InputCmt<'_>,
-) -> crate::gentype::translation::T {
-    // Mirrors compiler/gentype/GenTypeMain.ml:53-70.
-    let type_env = crate::gentype::type_env::root();
-    let translations = match &input_cmt.cmt_annots {
-        BinaryAnnots::Implementation(structure) => {
-            crate::gentype::translate_structure::translate_structure(
-                input_cmt.ctx,
-                &input_cmt.arena,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                structure,
-            )
-        }
-        BinaryAnnots::Interface(signature) => {
-            crate::gentype::translate_signature::translate_signature(
-                input_cmt.ctx,
-                &input_cmt.arena,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                signature,
-            )
-        }
-        BinaryAnnots::Packed
-        | BinaryAnnots::PartialImplementation
-        | BinaryAnnots::PartialInterface => {
-            vec![]
-        }
-    };
-    crate::gentype::translation::add_type_declarations_from_module_equations(
-        &type_env,
-        crate::gentype::translation::combine(&translations),
-    )
 }
 
 pub fn emit_translation(
@@ -602,9 +451,10 @@ pub fn emit_translation(
     crate::gentype::generated_files::write_file_if_required(output_file, &file_contents)
 }
 
-pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
-    // Mirrors compiler/gentype/GenTypeMain.ml:85-91. Actual CMT decoding is
-    // wired later; this staged port preserves the stale-artifact error boundary.
+fn read_cmt(cmt_file: &str) -> ! {
+    // Mirrors the error boundary of compiler/gentype/GenTypeMain.ml:85-91.
+    // Rust has no standalone CMT decoder: imported declarations come from the
+    // in-process registry, so a .cmt that is only on disk is a fatal error.
     match std::fs::read(cmt_file) {
         Ok(data) if data.starts_with(b"Caml1999T039") => {
             crate::gentype::log_::item(&format!("Error loading {cmt_file}\n\n"));
@@ -627,131 +477,6 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
             )
         }
     }
-}
-
-fn chop_extension(path: &str) -> String {
-    match path.rfind('.') {
-        Some(idx) => path[..idx].to_string(),
-        None => path.to_string(),
-    }
-}
-
-pub fn read_input_cmt(is_interface: bool, cmt_file: &str) -> (InputCmt<'static>, bool) {
-    // Mirrors compiler/gentype/GenTypeMain.ml:93-134.
-    let input_cmt = read_cmt(cmt_file);
-    let ignore_interface = Cell::new(false);
-    let check_annotation = |arena: &ParseArena, _loc: LocIdx, attributes: &Attributes| {
-        if crate::gentype::annotation::get_attribute_payload(
-            arena,
-            crate::gentype::annotation::tag_is_gentype_ignore_interface,
-            attributes,
-        )
-        .is_some()
-        {
-            ignore_interface.set(true);
-        }
-        crate::gentype::annotation::get_attribute_payload(
-            arena,
-            crate::gentype::annotation::tag_is_one_of_the_gentype_annotations,
-            attributes,
-        )
-        .is_some()
-    };
-    let has_gentype_annotations = cmt_check_annotations(&check_annotation, &input_cmt);
-
-    if is_interface {
-        let cmt_file_impl = format!("{}.cmt", chop_extension(cmt_file));
-        let input_cmt_impl = read_cmt(&cmt_file_impl);
-        let has_gentype_annotations_impl = cmt_check_annotations(
-            &|arena, loc, attributes| {
-                if check_annotation(arena, loc, attributes) {
-                    if !ignore_interface.get() {
-                        crate::gentype::log_::color::setup();
-                        let loc = arena.to_location(loc);
-                        crate::gentype::log_::info(
-                            || "Annotation is ignored as there's a .resi file".to_string(),
-                            &loc,
-                            "Warning genType",
-                        );
-                    }
-                    true
-                } else {
-                    false
-                }
-            },
-            &input_cmt_impl,
-        );
-        if ignore_interface.get() {
-            (input_cmt_impl, has_gentype_annotations_impl)
-        } else {
-            (input_cmt, has_gentype_annotations)
-        }
-    } else {
-        (input_cmt, has_gentype_annotations)
-    }
-}
-
-pub fn process_cmt_file(cmt: &str) -> std::io::Result<()> {
-    // Mirrors compiler/gentype/GenTypeMain.ml:136-175.
-    let mut config =
-        crate::gentype::paths::read_config(crate::gentype::paths::find_name_space(cmt));
-    if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
-        crate::gentype::log_::item(&format!("Cmt {cmt}\n"));
-    }
-    let cmt_file = crate::gentype::paths::get_cmt_file(cmt);
-    if !cmt_file.is_empty() {
-        let file_name = crate::gentype::paths::get_module_name(cmt);
-        let is_interface = cmt_file.ends_with(".cmti");
-        let (input_cmt, has_gentype_annotations) = read_input_cmt(is_interface, &cmt_file);
-        let source_file =
-            match crate::gentype::find_source_file::cmt(&input_cmt.arena, &input_cmt.cmt_annots) {
-                Some(source_file) => source_file,
-                None => format!(
-                    "{}{}",
-                    crate::gentype::module_name::to_string(&file_name),
-                    match is_interface {
-                        true => ".resi",
-                        false => ".res",
-                    }
-                ),
-            };
-        let output_file = crate::gentype::paths::get_output_file(&config, &source_file);
-        let output_file_relative =
-            crate::gentype::paths::get_output_file_relative(&config, &source_file);
-        let resolver = crate::gentype::module_resolver::create_lazy_resolver(
-            &config,
-            &[".res".to_string(), ".shim.ts".to_string()],
-            |fname| fname == "React.res" || fname == "ReasonReact.res",
-        );
-        if has_gentype_annotations {
-            let translation =
-                translate_c_m_t(&config, &output_file_relative, &resolver, &input_cmt);
-            emit_translation(
-                &mut config,
-                &file_name,
-                &output_file,
-                &output_file_relative,
-                &resolver,
-                &crate::gentype::paths::get_cmt_file,
-                &source_file,
-                &translation,
-            )?;
-        } else if cmt_has_type_errors(&input_cmt) {
-            crate::gentype::generated_files::log_file_action(
-                crate::gentype::generated_files::FileAction::TypeError,
-                &output_file,
-            );
-        } else {
-            crate::gentype::generated_files::log_file_action(
-                crate::gentype::generated_files::FileAction::NoMatch,
-                &output_file,
-            );
-            if Path::new(&output_file).exists() {
-                std::fs::remove_file(&output_file)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 pub fn process_typed_artifact(
@@ -783,12 +508,12 @@ pub fn process_typed_artifact(
                 }
             )
         });
-    let output_file = crate::gentype::paths::get_output_file(&config, &source_file);
+    let output_file = crate::gentype::paths::get_output_file(config, &source_file);
     let output_file_relative =
-        crate::gentype::paths::get_output_file_relative(&config, &source_file);
+        crate::gentype::paths::get_output_file_relative(config, &source_file);
     let local_resolver = shared_resolver.is_none().then(|| {
         crate::gentype::module_resolver::create_lazy_resolver(
-            &config,
+            config,
             &[".res".to_string(), ".shim.ts".to_string()],
             |fname| fname == "React.res" || fname == "ReasonReact.res",
         )
@@ -797,13 +522,12 @@ pub fn process_typed_artifact(
         .or(local_resolver.as_ref())
         .expect("GenType resolver must be available");
     let type_declaration_translation = typed_artifact_translate_type_declarations(
-        &config,
+        config,
         &output_file_relative,
         resolver,
         &artifact,
     );
-    if let Some(cmt_file) =
-        cmt_file_for_typed_artifact(&config, &source_file, artifact.is_interface)
+    if let Some(cmt_file) = cmt_file_for_typed_artifact(config, &source_file, artifact.is_interface)
     {
         register_in_process_type_declarations(
             &artifact.compiler_module_name,
@@ -827,7 +551,7 @@ pub fn process_typed_artifact(
     );
     if has_gentype_annotations {
         let translation =
-            translate_typed_artifact(&config, &output_file_relative, resolver, &artifact);
+            translate_typed_artifact(config, &output_file_relative, resolver, &artifact);
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         // Only emitting mutates the config; modules without GenType

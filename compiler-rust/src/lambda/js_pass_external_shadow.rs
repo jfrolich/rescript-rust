@@ -120,13 +120,19 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label,
             id,
-            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
+            Box::new(rewrite_global_static_index_expr(
+                *iterable,
+                shadowed_globals,
+            )),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
             label,
             id,
-            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
+            Box::new(rewrite_global_static_index_expr(
+                *iterable,
+                shadowed_globals,
+            )),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label),
@@ -215,11 +221,18 @@ fn rewrite_global_static_index_expr(
             ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
                 if id.is_global() && shadowed_globals.contains(id.name()) =>
             {
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(global_this_field(id.name())),
-                    field,
-                    pos,
-                ))
+                // `{expr with expression_desc = Static_index (obj, field, pos)}`
+                // (js_pass_external_shadow.ml:86) keeps the comment and
+                // source location.
+                Expression {
+                    source_loc,
+                    desc: ExpressionDesc::StaticIndex(
+                        Box::new(global_this_field(id.name())),
+                        field,
+                        pos,
+                    ),
+                    comment,
+                }
             }
             _ => Expression {
                 source_loc,
@@ -292,10 +305,12 @@ fn rewrite_expr_children(
             strings,
             values.into_iter().map(&mut *rewrite).collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values.into_iter().map(&mut *rewrite).collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values.into_iter().map(&mut *rewrite).collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(obj, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(rewrite(*obj)), field, pos)
         }
@@ -496,5 +511,36 @@ impl<'a> crate::js_ir::walk::Visitor<'a> for ReferencedNames<'a> {
 
     fn visit_declaration(&mut self, declaration: &'a VariableDeclaration) {
         self.bindings.insert(declaration.ident.name());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::IdentFlags;
+    use crate::js_ir::VIdent;
+
+    #[test]
+    fn shadowed_static_index_keeps_comment() {
+        let global = Ident::new("Map", 0, IdentFlags::GLOBAL);
+        let mut expr = Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::new(ExpressionDesc::Var(VIdent::Id(global)))),
+            "size".to_string(),
+            None,
+        ));
+        expr.comment = Some(Box::new("note".to_string()));
+        let shadowed: HashSet<String> = ["Map".to_string()].into_iter().collect();
+
+        let rewritten = rewrite_global_static_index_expr(expr, &shadowed);
+
+        assert_eq!(
+            rewritten.comment.as_deref().map(String::as_str),
+            Some("note")
+        );
+        let ExpressionDesc::StaticIndex(obj, field, _) = &rewritten.desc else {
+            panic!("expected a static index");
+        };
+        assert_eq!(field, "size");
+        assert!(!matches!(obj.desc, ExpressionDesc::Var(VIdent::Id(_))));
     }
 }

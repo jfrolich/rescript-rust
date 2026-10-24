@@ -26,7 +26,6 @@
 use super::asttypes::{ArgLabel, Label, PrivateFlag};
 use super::path::Path;
 use crate::parser::longident::Longident;
-use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 
@@ -105,26 +104,6 @@ impl TypeExpr {
     /// Get the unique ID.
     pub fn id(&self) -> i32 {
         self.id
-    }
-
-    /// Check if this type is at the generic level.
-    pub fn is_generic(&self) -> bool {
-        self.level.get() == GENERIC_LEVEL
-    }
-
-    /// Check if this is a type variable.
-    pub fn is_var(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tvar(_))
-    }
-
-    /// Check if this is a universal type variable.
-    pub fn is_univar(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tunivar(_))
-    }
-
-    /// Check if this is a type constructor application.
-    pub fn is_constr(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tconstr { .. })
     }
 }
 
@@ -455,7 +434,7 @@ pub(crate) const STORE_REF_TAG: u32 = 1 << 31;
 /// worker store. Shared references are also `is_store()`: every non-local
 /// cell is read-only outside a store build and written through overlays.
 pub(crate) const SHARED_REF_TAG: u32 = 1 << 30;
-const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
+pub(crate) const SHARED_REF_BITS: u32 = STORE_REF_TAG | SHARED_REF_TAG;
 
 /// Compact physical identity for a type node, matching OCaml `type_expr`
 /// identity (`compiler/ml/types.ml:22`, `compiler/ml/btype.ml:46-48`).
@@ -517,7 +496,10 @@ impl TypeExprRef {
     /// Index into the shared pool.
     #[inline]
     pub(crate) fn shared_index(self) -> u32 {
-        debug_assert!(self.is_shared(), "non-shared type reference used as a shared index");
+        debug_assert!(
+            self.is_shared(),
+            "non-shared type reference used as a shared index"
+        );
         self.0 & !SHARED_REF_BITS
     }
 
@@ -790,7 +772,6 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
-
 /// Number of keys a `TypeExprRefSet` holds inline before it spills to a
 /// hash set.
 const TYPE_EXPR_SET_INLINE: usize = 16;
@@ -1053,7 +1034,8 @@ pub enum FieldMutability {
 pub struct MutabilityRef(pub u32);
 
 /// Next persistent cell identity, process-wide.
-static NEXT_PERSISTENT_MUTABILITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static NEXT_PERSISTENT_MUTABILITY: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 impl MutabilityRef {
     #[inline]
@@ -1196,33 +1178,6 @@ impl RowFieldRef {
     }
 }
 
-// ============================================================================
-// Serialization support
-// ============================================================================
-
-/// Serializable version of TypeDesc for FFI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TypeDescSer {
-    Tvar(Option<String>),
-    Tarrow {
-        args: Vec<(ArgLabel, usize)>,
-        ret_type: usize,
-    },
-    Ttuple(Vec<usize>),
-    Tconstr {
-        path: Path,
-        args: Vec<usize>,
-    },
-    Tlink(usize),
-    Tunivar(Option<String>),
-    Tpoly {
-        body: usize,
-        vars: Vec<usize>,
-    },
-    // Simplified for now
-    Other,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,8 +1253,7 @@ mod tests {
         let ty = TypeExpr::new(TypeDesc::Tvar(Some("a".to_string())), GENERIC_LEVEL, 1);
         assert_eq!(ty.id(), 1);
         assert_eq!(ty.level(), GENERIC_LEVEL);
-        assert!(ty.is_generic());
-        assert!(ty.is_var());
+        assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(_)));
     }
 
     #[test]

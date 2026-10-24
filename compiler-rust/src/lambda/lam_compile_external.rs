@@ -4,32 +4,25 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{
-    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr,
-    is_nullish_literal, is_optional_block, is_pure_subexpression,
-    js_expr_no_side_effects, js_seq, poly_var_tag_access, poly_var_value_access,
-    remove_pure_subexpression, runtime_member_for_eta_wrapped_primitive, string_switch_iife,
+    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, js_seq,
+    poly_var_tag_access, poly_var_value_access, runtime_member_for_eta_wrapped_primitive,
+    string_switch_iife,
 };
-use super::lam_compile::{
-    Compiled, ExternalModuleCacheKey, LambdaCompiler, call_info_of_apply_status,
-};
+use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
 use super::lam_compile_input::{FunctionInput, LambdaInput, LambdaInputView};
 use crate::ident::Ident;
-use crate::js_ir::op::{
-    IdentInfo, ImportAttributes as JsImportAttributes, Kind, Number, PropertyName, UsedStats,
-};
-use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
+use crate::js_ir::op::{IdentInfo, ImportAttributes as JsImportAttributes, Kind, PropertyName};
+use crate::js_ir::printer::js_export_name;
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
-    VIdent, VariableDeclaration, expression_has_no_side_effects,
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, VariableDeclaration,
+    expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
-use crate::lambda::lam_constant::Constant;
-use crate::js_ir::printer::js_export_name;
 use crate::lambda::lam_primitive::{
-    Attr, Cst, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label,
-    LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
+    Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
+    ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
-use crate::lambda::{ApplyStatus, Lambda, TagInfo};
+use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
 
 pub(crate) fn external_module_import_attributes(
@@ -176,15 +169,15 @@ impl LambdaCompiler {
             ExpressionDesc::CamlBlock(items, _, tag)
                 if matches!(**tag, TagInfo::PolyVar(_))
                     && matches!(
-                    items.as_slice(),
-                    [
-                        Expression {
-                            desc: ExpressionDesc::Str(_),
-                            ..
-                        },
-                        value,
-                    ] if expression_has_no_side_effects(value)
-                ) =>
+                        items.as_slice(),
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Str(_),
+                                ..
+                            },
+                            value,
+                        ] if expression_has_no_side_effects(value)
+                    ) =>
             {
                 let [
                     Expression {
@@ -296,9 +289,9 @@ impl LambdaCompiler {
             return None;
         };
         if func.params.len() != args.len()
-            || !func.params.iter().zip(args.iter()).all(|(param, arg)| {
-                matches!(arg.view(), LambdaInputView::Var(id) if id.same(param))
-            })
+            || !func.params.iter().zip(args.iter()).all(
+                |(param, arg)| matches!(arg.view(), LambdaInputView::Var(id) if id.same(param)),
+            )
         {
             return None;
         }
@@ -332,7 +325,7 @@ impl LambdaCompiler {
                     {
                         return None;
                     }
-                    module_target_var.get_or_insert_with(|| id.clone());
+                    module_target_var.get_or_insert(*id);
                     Some(())
                 }
                 LambdaInputView::GlobalModule(id) => {
@@ -343,7 +336,7 @@ impl LambdaCompiler {
                     {
                         return None;
                     }
-                    module_target_global.get_or_insert_with(|| id.clone());
+                    module_target_global.get_or_insert(*id);
                     Some(())
                 }
                 _ => None,
@@ -367,7 +360,7 @@ impl LambdaCompiler {
                     let target = args.first()?;
                     note_target(target)?;
 
-                    alias_chain.push((alias_id.clone(), *index, name.clone()));
+                    alias_chain.push((*alias_id, *index, name.clone()));
                     cursor = body;
                 }
                 LambdaInputView::Prim(primitive, args, _) => {
@@ -421,17 +414,17 @@ impl LambdaCompiler {
 
                     return if let Some(id) = module_target_var {
                         Some(Expression::var(id))
-                    } else if let Some(id) = module_target_global {
-                        Some(Expression::qualified(
-                            ModuleId {
-                                id,
-                                kind: Kind::Ml,
-                                dynamic_import: false,
-                            },
-                            None,
-                        ))
                     } else {
-                        None
+                        module_target_global.map(|id| {
+                            Expression::qualified(
+                                ModuleId {
+                                    id,
+                                    kind: Kind::Ml,
+                                    dynamic_import: false,
+                                },
+                                None,
+                            )
+                        })
                     };
                 }
                 _ => return None,
@@ -451,11 +444,10 @@ impl LambdaCompiler {
             bundle: module_name.bundle.clone(),
             default,
         };
-        let id = self
+        let id = *self
             .external_module_ids
             .entry(key)
-            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)))
-            .clone();
+            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)));
 
         ModuleId {
             id,
@@ -615,10 +607,12 @@ impl LambdaCompiler {
     ) -> (Expression, Option<Expression>) {
         let (values, effect) =
             self.lower_external_arg_values_and_effect(raw_arg, arg_label, arg_type);
-        match values.as_slice() {
-            [value] => (value.clone(), effect),
-            [] => panic!("object field lowering expected one JS arg for {arg_type:?}"),
-            _ => panic!(
+        match <[Expression; 1]>::try_from(values) {
+            Ok([value]) => (value, effect),
+            Err(values) if values.is_empty() => {
+                panic!("object field lowering expected one JS arg for {arg_type:?}")
+            }
+            Err(values) => panic!(
                 "object field lowering expected one JS arg, got {:?}",
                 values
             ),
@@ -632,8 +626,8 @@ impl LambdaCompiler {
         arg_type: &Attr,
     ) -> (Vec<Expression>, Option<Expression>) {
         // Only `Unwrap` of an optional argument reads the raw argument again.
-        let keep_raw = matches!(arg_type, Attr::Unwrap)
-            && matches!(arg_label, LabelNoname::ArgOptional);
+        let keep_raw =
+            matches!(arg_type, Attr::Unwrap) && matches!(arg_label, LabelNoname::ArgOptional);
         let (arg, raw_arg) = match arg_label {
             LabelNoname::ArgOptional => {
                 let raw_copy = keep_raw.then(|| raw_arg.clone());
@@ -661,9 +655,7 @@ impl LambdaCompiler {
                 self.external_polyvar_event_exprs(arg, descr.as_deref()),
                 None,
             ),
-            Attr::Int(dispatches) => {
-                (vec![self.external_polyvar_int_expr(arg, dispatches)], None)
-            }
+            Attr::Int(dispatches) => (vec![self.external_polyvar_int_expr(arg, dispatches)], None),
             Attr::Unwrap => {
                 let value = match arg_label {
                     LabelNoname::ArgOptional => self.external_option_unwrap_expr(
@@ -924,7 +916,7 @@ impl LambdaCompiler {
 
         let obj = self.fresh_tmp_ident();
         prelude.push(Statement::variable(VariableDeclaration {
-            ident: obj.clone(),
+            ident: obj,
             value: Some(object),
             property: LetKind::Variable,
             ident_info: IdentInfo::default(),
@@ -936,7 +928,7 @@ impl LambdaCompiler {
             } else {
                 let tmp = self.fresh_tmp_ident();
                 prelude.push(Statement::variable(VariableDeclaration {
-                    ident: tmp.clone(),
+                    ident: tmp,
                     value: Some(pending.arg),
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
@@ -957,7 +949,7 @@ impl LambdaCompiler {
             let cond = Expression::bin(BinOp::NotEqEq, prepared, Expression::undefined(false));
             let assign = Expression::bin(
                 BinOp::Eq,
-                self.static_index(Expression::var(obj.clone()), &pending.name),
+                self.static_index(Expression::var(obj), &pending.name),
                 self.add_external_effect(effect, value),
             );
             prelude.push(Statement::if_(cond, vec![Statement::exp(assign)], vec![]));
@@ -1046,18 +1038,19 @@ impl LambdaCompiler {
                 self.add_external_effect(effect, expr)
             }
             DeclKind::DeclSend { name } => {
-                let Some((receiver, rest)) = args.split_first() else {
+                let mut args = args.into_iter();
+                let Some(receiver) = args.next() else {
                     unreachable!("@send external called without a receiver")
                 };
                 let (rest_args, effect) = self.assemble_external_args(
                     arg_types.get(1..).unwrap_or(&[]),
-                    rest.to_vec(),
+                    args.collect(),
                     splice,
                 );
                 self.add_external_effect(
                     effect,
                     Expression::call(
-                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name),
+                        self.static_index(self.apply_scoped_access(receiver, scopes), name),
                         rest_args,
                         call_info,
                     ),
@@ -1065,11 +1058,11 @@ impl LambdaCompiler {
             }
             DeclKind::DeclGet { name } => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver] => {
-                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name)
+                let expr = match <[Expression; 1]>::try_from(assembled) {
+                    Ok([receiver]) => {
+                        self.static_index(self.apply_scoped_access(receiver, scopes), name)
                     }
-                    _ => panic!(
+                    Err(_) => panic!(
                         "Internal compiler error: @get external called with wrong number of arguments. Expected exactly one object argument."
                     ),
                 };
@@ -1077,66 +1070,52 @@ impl LambdaCompiler {
             }
             DeclKind::DeclSet { name } => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver, value] => Expression::bin(
+                let expr = match <[Expression; 2]>::try_from(assembled) {
+                    Ok([receiver, value]) => Expression::bin(
                         BinOp::Eq,
-                        self.static_index(self.apply_scoped_access(receiver.clone(), scopes), name),
-                        value.clone(),
+                        self.static_index(self.apply_scoped_access(receiver, scopes), name),
+                        value,
                     ),
-                    _ => unreachable!("@set external takes an object and a value"),
+                    Err(_) => unreachable!("@set external takes an object and a value"),
                 };
                 self.add_external_effect(effect, expr)
             }
             DeclKind::DeclGetIndex => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver, index] => Expression::new(ExpressionDesc::ArrayIndex(
-                        Box::new(self.apply_scoped_access(receiver.clone(), scopes)),
-                        Box::new(index.clone()),
+                let expr = match <[Expression; 2]>::try_from(assembled) {
+                    Ok([receiver, index]) => Expression::new(ExpressionDesc::ArrayIndex(
+                        Box::new(self.apply_scoped_access(receiver, scopes)),
+                        Box::new(index),
                     )),
-                    _ => unreachable!("@get_index external takes an object and an index"),
+                    Err(_) => unreachable!("@get_index external takes an object and an index"),
                 };
                 self.add_external_effect(effect, expr)
             }
             DeclKind::DeclSetIndex => {
                 let (assembled, effect) = self.assemble_external_args_no_splice(arg_types, args);
-                let expr = match assembled.as_slice() {
-                    [receiver, index, value] => Expression::bin(
+                let expr = match <[Expression; 3]>::try_from(assembled) {
+                    Ok([receiver, index, value]) => Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::ArrayIndex(
-                            Box::new(self.apply_scoped_access(receiver.clone(), scopes)),
-                            Box::new(index.clone()),
+                            Box::new(self.apply_scoped_access(receiver, scopes)),
+                            Box::new(index),
                         )),
-                        value.clone(),
+                        value,
                     ),
-                    _ => unreachable!("@set_index external takes an object, an index and a value"),
+                    Err(_) => {
+                        unreachable!("@set_index external takes an object, an index and a value")
+                    }
                 };
                 self.add_external_effect(effect, expr)
             }
         }
     }
 
-    pub(crate) fn compile_plain_js_call(
-        &self,
-        prim_name: &str,
-        args: Vec<Expression>,
-        transformed_jsx: bool,
-    ) -> Expression {
-        Expression::call(
-            Expression::var(Ident::create_persistent(prim_name)),
-            args,
-            CallInfo {
-                call_transformed_jsx: transformed_jsx,
-                ..CallInfo::default()
-            },
-        )
-    }
-
     /// `[import(...).then(m => m.<p0>.<p1>...)]`
     /// (`Lam_compile_primitive.wrap_then_path`).
     fn wrap_then_path(&self, import: Expression, path: &[String]) -> Expression {
         let param = self.fresh_ident("m");
-        let mut value = Expression::var(param.clone());
+        let mut value = Expression::var(param);
         for segment in path {
             value = self.static_index(value, segment);
         }
@@ -1149,7 +1128,11 @@ impl LambdaCompiler {
             async_: false,
             directive: None,
         });
-        Expression::call(self.static_index(import, "then"), vec![callback], CallInfo::default())
+        Expression::call(
+            self.static_index(import, "then"),
+            vec![callback],
+            CallInfo::default(),
+        )
     }
 
     fn import_of_path(path: String) -> Expression {
@@ -1168,7 +1151,7 @@ impl LambdaCompiler {
         match source {
             ImportSource::ImportModule { module_, path } => {
                 let oid = ModuleId {
-                    id: module_.clone(),
+                    id: *module_,
                     kind: Kind::Ml,
                     dynamic_import: true,
                 };
@@ -1188,12 +1171,9 @@ impl LambdaCompiler {
                     _ => {
                         // a nested path is importable when the target is a
                         // hoisted root-level export; the cmj knows
-                        let hoisted = self
-                            .module_path_resolver
-                            .as_ref()
-                            .and_then(|resolver| {
-                                resolver.module_cmj_hoisted_export(module_.name(), path)
-                            });
+                        let hoisted = self.module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_hoisted_export(module_.name(), path)
+                        });
                         match hoisted {
                             Some(hoisted_name) => {
                                 self.wrap_then_path(import, &[js_export_name(&hoisted_name)])

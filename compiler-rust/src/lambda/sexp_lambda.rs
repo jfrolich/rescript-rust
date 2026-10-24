@@ -10,8 +10,8 @@ use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
-    ApInfo, Apply, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction,
-    Lambda, LambdaSwitch, PrimInfo,
+    ApInfo, Apply, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction, Lambda,
+    LambdaSwitch, PrimInfo,
 };
 use crate::parser::ast::MutableFlag;
 
@@ -30,26 +30,38 @@ impl Sexp {
         Sexp::List(items)
     }
 
-    fn to_string_indent(&self, indent: usize) -> String {
-        let spaces = " ".repeat(indent * 2);
+    /// Append the rendering to `out`. A multi-item list puts each item
+    /// after the first on its own line, indented by `2 * (indent + 1)`
+    /// spaces, and renders the items at `indent + 1`; a one-item list keeps
+    /// the current indent.
+    fn write_to(&self, out: &mut String, indent: usize) {
         match self {
-            Sexp::Atom(s) => s.clone(),
-            Sexp::List(items) if items.is_empty() => "()".to_string(),
-            Sexp::List(items) if items.len() == 1 => {
-                format!("({})", items[0].to_string_indent(indent))
-            }
+            Sexp::Atom(s) => out.push_str(s),
             Sexp::List(items) => {
-                let inner: Vec<String> = items
-                    .iter()
-                    .map(|item| item.to_string_indent(indent + 1))
-                    .collect();
-                format!("({})", inner.join(&format!("\n{}  ", spaces)))
+                out.push('(');
+                match items.as_slice() {
+                    [] => {}
+                    [only] => only.write_to(out, indent),
+                    [first, rest @ ..] => {
+                        first.write_to(out, indent + 1);
+                        for item in rest {
+                            out.push('\n');
+                            out.extend(std::iter::repeat_n(' ', 2 * (indent + 1)));
+                            item.write_to(out, indent + 1);
+                        }
+                    }
+                }
+                out.push(')');
             }
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.to_string_indent(0)
+impl std::fmt::Display for Sexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = String::new();
+        self.write_to(&mut out, 0);
+        f.write_str(&out)
     }
 }
 
@@ -423,9 +435,12 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PinitMod => Sexp::atom("Pinit_mod"),
         Primitive::PupdateMod => Sexp::atom("Pupdate_mod"),
         Primitive::PjsApply => Sexp::atom("Pjs_apply"),
-        Primitive::PjsRuntimeApply => Sexp::atom("Pjs_runtime_apply"),
-        Primitive::PjsObjectGet(name) => Sexp::list(vec![Sexp::atom("Pjs_object_get"), string(name)]),
-        Primitive::PjsObjectSet(name) => Sexp::list(vec![Sexp::atom("Pjs_object_set"), string(name)]),
+        Primitive::PjsObjectGet(name) => {
+            Sexp::list(vec![Sexp::atom("Pjs_object_get"), string(name)])
+        }
+        Primitive::PjsObjectSet(name) => {
+            Sexp::list(vec![Sexp::atom("Pjs_object_set"), string(name)])
+        }
         Primitive::PfnArity => Sexp::atom("Pfn_arity"),
         Primitive::PjsFnMethod => Sexp::atom("Pjs_fn_method"),
         Primitive::Pdebugger => Sexp::atom("Pdebugger"),
@@ -569,11 +584,9 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         }
         Primitive::Ptemplate(segments) => {
             let mut items = vec![Sexp::atom("Ptemplate")];
-            items.extend(
-                segments
-                    .iter()
-                    .map(|segment| Sexp::list(vec![string(segment.source()), string(segment.semantic())])),
-            );
+            items.extend(segments.iter().map(|segment| {
+                Sexp::list(vec![string(segment.source()), string(segment.semantic())])
+            }));
             Sexp::list(items)
         }
         Primitive::Phash => Sexp::atom("Phash"),
@@ -606,10 +619,7 @@ fn function_attribute(attr: &FunctionAttribute) -> Sexp {
 fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
     match lam {
         Lambda::Lvar(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        Lambda::LglobalModule(id) => Sexp::list(vec![
-            Sexp::atom("Lglobal_module"),
-            ident(id),
-        ]),
+        Lambda::LglobalModule(id) => Sexp::list(vec![Sexp::atom("Lglobal_module"), ident(id)]),
         Lambda::Lconst(c) => Sexp::list(vec![Sexp::atom("Lconst"), constant(c)]),
         Lambda::Lapply(__apply2) => {
             let Apply {
@@ -630,10 +640,7 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             // compiler/core/sexp_lambda.ml prints no arity: Lambda functions
             // are n-ary by their parameter list.
             let LFunction {
-                params,
-                body,
-                attr,
-                ..
+                params, body, attr, ..
             } = __func1.as_ref();
             Sexp::list(vec![
                 Sexp::atom("Lfunction"),
@@ -797,96 +804,6 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
     ])
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{constant, escape_ocaml_string, switch_key};
-    use crate::lambda::lam_constant::Constant;
-
-    #[test]
-    fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
-        let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
-        let location = crate::location::Location::new_for_error("printer.res", 3, 9);
-        let lambda = crate::lambda::Lambda::prim(
-            crate::lambda::Primitive::Pidentity,
-            vec![crate::lambda::Lambda::var(id)],
-            location,
-        );
-        let context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
-        let mut indexed = Vec::new();
-        super::print_indexed_context(&context, true, &mut indexed).unwrap();
-        let mut recursive = Vec::new();
-        super::print_lambda_with_locs(&lambda, &mut recursive).unwrap();
-        assert_eq!(indexed, recursive);
-    }
-
-    #[test]
-    fn prints_semantic_constructor_switch_keys() {
-        let constant_key = crate::lambda::SwitchKey::Constructor(
-            crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                name: "Null".to_string(),
-                literal: None,
-            }),
-        );
-        let block_key = crate::lambda::SwitchKey::Constructor(
-            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
-                crate::types::TaggedBlock {
-                    tag: crate::types::VariantTag {
-                        name: "Boolean".to_string(),
-                        literal: None,
-                    },
-                    tag_name: None,
-                },
-            )),
-        );
-
-        let constant_printed = switch_key(&constant_key).to_string();
-        let block_printed = switch_key(&block_key).to_string();
-        assert!(constant_printed.contains("Switch_constructor"));
-        assert!(constant_printed.contains("\"Null\""));
-        assert!(block_printed.contains("Switch_constructor"));
-        assert!(block_printed.contains("\"Boolean\""));
-    }
-
-    #[test]
-    fn prints_const_string_without_delimiter() {
-        let printed = constant(&Constant::String("hello".to_string())).to_string();
-
-        assert!(printed.contains("\"hello\""));
-        assert!(!printed.contains("DNone"));
-    }
-
-    #[test]
-    fn prints_bigint_sign_as_ocaml_positive_flag() {
-        let printed = constant(&Constant::BigInt {
-            negative: false,
-            value: "100".to_string(),
-        })
-        .to_string();
-
-        assert!(printed.contains("true"));
-    }
-
-    #[test]
-    fn does_not_escape_apostrophes_in_strings() {
-        assert_eq!(escape_ocaml_string("l'"), "l'");
-        assert_eq!(escape_ocaml_string("a'b\"c"), "a'b\\\"c");
-    }
-
-    #[test]
-    fn escapes_non_ascii_bytes_as_ocaml_decimal_escapes() {
-        assert_eq!(
-            escape_ocaml_string("\u{00e4}\u{00bd}\u{00a0}"),
-            "\\228\\189\\160"
-        );
-        assert_eq!(escape_ocaml_string("\u{00d7}"), "\\215");
-    }
-
-    #[test]
-    fn keeps_standard_control_character_escapes() {
-        assert_eq!(escape_ocaml_string("a\n\t\r\\\""), "a\\n\\t\\r\\\\\\\"");
-    }
-}
-
 fn indexed_lambda(
     store: &crate::lambda::indexed::IndexedLambda,
     node: crate::lambda::indexed::NodeId,
@@ -896,10 +813,7 @@ fn indexed_lambda(
     let child = |node| indexed_lambda(store, node, with_locs);
     match store.view(node) {
         NodeView::Var(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
-        NodeView::GlobalModule(id) => Sexp::list(vec![
-            Sexp::atom("Lglobal_module"),
-            ident(id),
-        ]),
+        NodeView::GlobalModule(id) => Sexp::list(vec![Sexp::atom("Lglobal_module"), ident(id)]),
         NodeView::Const(value) => Sexp::list(vec![Sexp::atom("Lconst"), constant(value)]),
         NodeView::Apply(function, args, info, jsx) => Sexp::list(vec![
             Sexp::atom("Lapply"),
@@ -1046,11 +960,7 @@ pub(crate) fn print_indexed_node(
     with_locs: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "{}",
-        indexed_lambda(store, node, with_locs).to_string()
-    )
+    writeln!(out, "{}", indexed_lambda(store, node, with_locs))
 }
 
 pub(crate) fn print_indexed_context(
@@ -1064,11 +974,111 @@ pub(crate) fn print_indexed_context(
 /// Print lambda as sexp (without locations)
 pub fn print_lambda(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
     let sexp = lambda(lam, false);
-    writeln!(out, "{}", sexp.to_string())
+    writeln!(out, "{sexp}")
 }
 
 /// Print lambda as sexp (with locations)
 pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {
     let sexp = lambda(lam, true);
-    writeln!(out, "{}", sexp.to_string())
+    writeln!(out, "{sexp}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Sexp, constant, escape_ocaml_string, switch_key};
+    use crate::lambda::lam_constant::Constant;
+
+    #[test]
+    fn sexp_layout_indents_multi_item_lists() {
+        let sexp = Sexp::list(vec![
+            Sexp::atom("a"),
+            Sexp::list(vec![Sexp::atom("b"), Sexp::atom("c")]),
+            Sexp::list(vec![Sexp::list(vec![Sexp::atom("d"), Sexp::atom("e")])]),
+            Sexp::list(vec![]),
+        ]);
+        assert_eq!(sexp.to_string(), "(a\n  (b\n    c)\n  ((d\n    e))\n  ())");
+    }
+
+    #[test]
+    fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
+        let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
+        let location = crate::location::Location::new_for_error("printer.res", 3, 9);
+        let lambda = crate::lambda::Lambda::prim(
+            crate::lambda::Primitive::Pidentity,
+            vec![crate::lambda::Lambda::var(id)],
+            location,
+        );
+        let context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        let mut indexed = Vec::new();
+        super::print_indexed_context(&context, true, &mut indexed).unwrap();
+        let mut recursive = Vec::new();
+        super::print_lambda_with_locs(&lambda, &mut recursive).unwrap();
+        assert_eq!(indexed, recursive);
+    }
+
+    #[test]
+    fn prints_semantic_constructor_switch_keys() {
+        let constant_key = crate::lambda::SwitchKey::Constructor(
+            crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                name: "Null".to_string(),
+                literal: None,
+            }),
+        );
+        let block_key =
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
+                    tag: crate::types::VariantTag {
+                        name: "Boolean".to_string(),
+                        literal: None,
+                    },
+                    tag_name: None,
+                }),
+            ));
+
+        let constant_printed = switch_key(&constant_key).to_string();
+        let block_printed = switch_key(&block_key).to_string();
+        assert!(constant_printed.contains("Switch_constructor"));
+        assert!(constant_printed.contains("\"Null\""));
+        assert!(block_printed.contains("Switch_constructor"));
+        assert!(block_printed.contains("\"Boolean\""));
+    }
+
+    #[test]
+    fn prints_const_string_without_delimiter() {
+        let printed = constant(&Constant::String("hello".to_string())).to_string();
+
+        assert!(printed.contains("\"hello\""));
+        assert!(!printed.contains("DNone"));
+    }
+
+    #[test]
+    fn prints_bigint_sign_as_ocaml_positive_flag() {
+        let printed = constant(&Constant::BigInt {
+            negative: false,
+            value: "100".to_string(),
+        })
+        .to_string();
+
+        assert!(printed.contains("true"));
+    }
+
+    #[test]
+    fn does_not_escape_apostrophes_in_strings() {
+        assert_eq!(escape_ocaml_string("l'"), "l'");
+        assert_eq!(escape_ocaml_string("a'b\"c"), "a'b\\\"c");
+    }
+
+    #[test]
+    fn escapes_non_ascii_bytes_as_ocaml_decimal_escapes() {
+        assert_eq!(
+            escape_ocaml_string("\u{00e4}\u{00bd}\u{00a0}"),
+            "\\228\\189\\160"
+        );
+        assert_eq!(escape_ocaml_string("\u{00d7}"), "\\215");
+    }
+
+    #[test]
+    fn keeps_standard_control_character_escapes() {
+        assert_eq!(escape_ocaml_string("a\n\t\r\\\""), "a\\n\\t\\r\\\\\\\"");
+    }
 }

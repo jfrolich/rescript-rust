@@ -49,8 +49,7 @@ where
     V: serde::Deserialize<'de>,
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let map = std::collections::HashMap::<K, V>::deserialize(deserializer)?;
-        Ok(AHashMap(map.into_iter().collect()))
+        std::collections::HashMap::<K, V, FastState>::deserialize(deserializer).map(AHashMap)
     }
 }
 
@@ -89,7 +88,9 @@ impl<T> AHashSet<T> {
 impl<K, V> AHashMap<K, V> {
     #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hasher: FastState) -> Self {
-        AHashMap(std::collections::HashMap::with_capacity_and_hasher(capacity, hasher))
+        AHashMap(std::collections::HashMap::with_capacity_and_hasher(
+            capacity, hasher,
+        ))
     }
 
     #[inline]
@@ -153,7 +154,9 @@ impl<K: Eq + Hash, V> AHashMap<K, V> {
 impl<T: Eq + Hash> AHashSet<T> {
     #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hasher: FastState) -> Self {
-        AHashSet(std::collections::HashSet::with_capacity_and_hasher(capacity, hasher))
+        AHashSet(std::collections::HashSet::with_capacity_and_hasher(
+            capacity, hasher,
+        ))
     }
 
     #[inline]

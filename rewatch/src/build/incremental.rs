@@ -103,19 +103,20 @@ pub struct IncrementalPlan {
 }
 
 /// A unit's interface digest (its whole-unit item digest) with its item
-/// digests.
-fn whole_and_items(items: ItemDigests) -> (u64, ItemDigests) {
-    (items[item_deps::WHOLE], items)
+/// digests, shared so lookups do not copy the map.
+type UnitDigest = (u64, std::sync::Arc<ItemDigests>);
+
+fn whole_and_items(items: ItemDigests) -> UnitDigest {
+    (items[item_deps::WHOLE], std::sync::Arc::new(items))
 }
 
-/// The build record to save for `package` after this build.
 /// The interface and item digests of registered modules, computed once for
 /// a set of lookups.
 pub struct UnitDigests {
     registry: rescript_compiler::cmi::persistent_env::ModuleRegistry,
-    cache: std::sync::Mutex<AHashMap<String, Option<std::sync::Arc<(u64, ItemDigests)>>>>,
+    cache: std::sync::Mutex<AHashMap<String, Option<UnitDigest>>>,
     /// Computed up front for every module (see [`UnitDigests::all`]).
-    all: Option<AHashMap<String, std::sync::Arc<(u64, ItemDigests)>>>,
+    all: Option<AHashMap<String, UnitDigest>>,
 }
 
 impl UnitDigests {
@@ -136,7 +137,7 @@ impl UnitDigests {
             .par_iter()
             .filter_map(|(module_name, _)| {
                 let digests = whole_and_items(registry.item_digests(module_name)?);
-                Some((module_name.clone(), std::sync::Arc::new(digests)))
+                Some((module_name.clone(), digests))
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -168,17 +169,14 @@ impl UnitDigests {
 
     /// The module's interface digest and item digests, `None` when it is not
     /// registered.
-    pub fn get(&self, module_name: &str) -> Option<std::sync::Arc<(u64, ItemDigests)>> {
+    pub fn get(&self, module_name: &str) -> Option<UnitDigest> {
         if let Some(all) = &self.all {
             return all.get(module_name).cloned();
         }
         if let Some(known) = self.cache.lock().unwrap().get(module_name) {
             return known.clone();
         }
-        let computed = self
-            .registry
-            .item_digests(module_name)
-            .map(|items| std::sync::Arc::new(whole_and_items(items)));
+        let computed = self.registry.item_digests(module_name).map(whole_and_items);
         self.cache
             .lock()
             .unwrap()
@@ -228,6 +226,7 @@ pub fn expected_outputs(build_state: &BuildCommandState, package_name: &str) -> 
     outputs
 }
 
+/// The build record to save for `package` after this build.
 pub fn current_record(
     build_state: &BuildCommandState,
     package_name: &str,
@@ -828,7 +827,7 @@ fn recorded_as_is(module_name: &str, module: &Module, record: Option<&PackageRec
     record
         .sources
         .get(module_name)
-        .is_some_and(|recorded| recorded.iter().map(PathBuf::as_path).eq(paths.into_iter()))
+        .is_some_and(|recorded| recorded.iter().map(PathBuf::as_path).eq(paths))
 }
 
 /// Facts about one source module, gathered from the file system.
@@ -1149,9 +1148,7 @@ pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -
         }
     }
     affected_by_changed_imports(build_state, candidates, &|unit| {
-        digests
-            .get(unit)
-            .map(|digests| std::sync::Arc::new(digests.1.clone()))
+        digests.get(unit).map(|digests| digests.1)
     })
 }
 
@@ -1186,20 +1183,7 @@ pub fn support_modules(
             .cloned()
             .collect();
     }
-    let mut support = AHashSet::new();
-    let mut frontier: Vec<&String> = universe.iter().collect();
-    while let Some(module_name) = frontier.pop() {
-        let Some(module) = build_state.get_module(module_name) else {
-            continue;
-        };
-        for dep in &module.deps {
-            if build_state.get_module(dep).is_some() && !universe.contains(dep) && support.insert(dep.clone())
-            {
-                frontier.push(dep);
-            }
-        }
-    }
-    support
+    dependency_closure(build_state, universe, |_| false)
 }
 
 /// The support modules of a later round: the dependencies of `universe`
@@ -1209,6 +1193,18 @@ pub fn round_support(
     universe: &AHashSet<String>,
     compiled: &AHashSet<String>,
 ) -> AHashSet<String> {
+    // A namespace map is a no-op in the scheduler, but its members are what
+    // a reference through the namespace needs.
+    dependency_closure(build_state, universe, |dep| compiled.contains(dep))
+}
+
+/// The modules `universe` depends on, transitively, outside `universe`,
+/// not entering (or including) modules for which `exclude` holds.
+fn dependency_closure(
+    build_state: &BuildCommandState,
+    universe: &AHashSet<String>,
+    exclude: impl Fn(&str) -> bool,
+) -> AHashSet<String> {
     let mut support = AHashSet::new();
     let mut frontier: Vec<&String> = universe.iter().collect();
     while let Some(module_name) = frontier.pop() {
@@ -1216,11 +1212,9 @@ pub fn round_support(
             continue;
         };
         for dep in &module.deps {
-            // A namespace map is a no-op in the scheduler, but its members
-            // are what a reference through the namespace needs.
             if build_state.get_module(dep).is_some()
                 && !universe.contains(dep)
-                && !compiled.contains(dep)
+                && !exclude(dep)
                 && support.insert(dep.clone())
             {
                 frontier.push(dep);
@@ -1294,7 +1288,7 @@ fn written_interface(
         digest: own.0,
         imports,
         reads,
-        items: own.1.clone(),
+        items: ItemDigests::clone(&own.1),
     })
 }
 

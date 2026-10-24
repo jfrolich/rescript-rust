@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Annotation.ml:1-295.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
@@ -91,10 +90,16 @@ pub fn tag_is_intern_local(s: &str) -> bool {
 
 fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> {
     // Mirrors compiler/gentype/Annotation.ml:43-68.
-    if let Some(s) = crate::ast_payload::semantic_string_of_expression(arena, expr).ok().flatten() {
+    if let Some(s) = crate::ast_payload::semantic_string_of_expression(arena, expr)
+        .ok()
+        .flatten()
+    {
         return Some(AttributePayload::StringPayload(s));
     }
-    match crate::ast_payload::unwrap_braces(arena, expr).pexp_desc.as_ref() {
+    match crate::ast_payload::unwrap_braces(arena, expr)
+        .pexp_desc
+        .as_ref()
+    {
         ExpressionDesc::Pexp_constant(constant) => match constant.as_ref() {
             Constant::Integer(n, _) => Some(AttributePayload::IntPayload(n.to_string())),
             Constant::Float(s, _) => Some(AttributePayload::FloatPayload(s.to_string())),
@@ -295,8 +300,7 @@ pub fn module_type_check_annotation(
         | ModuleTypeDesc::Tmty_functor(_, _, _, _)
         | ModuleTypeDesc::Tmty_with(_, _)
         | ModuleTypeDesc::Tmty_typeof(_)
-        | ModuleTypeDesc::Tmty_alias(_, _)
-        | ModuleTypeDesc::Tmty_placeholder => false,
+        | ModuleTypeDesc::Tmty_alias(_, _) => false,
     }
 }
 
@@ -521,10 +525,10 @@ fn decl_attribute_payload_as_int(payload: &crate::types::decl::AttributePayload)
     }
 }
 
-pub fn get_decl_attribute_payload<'a>(
+pub fn get_decl_attribute_payload(
     check_text: impl Fn(&str) -> bool + Copy,
-    attributes: &'a [crate::types::decl::Attribute],
-) -> Option<&'a crate::types::decl::AttributePayload> {
+    attributes: &[crate::types::decl::Attribute],
+) -> Option<&crate::types::decl::AttributePayload> {
     // Mirrors compiler/gentype/Annotation.ml:69-95 for Types.signature
     // attributes. Rust stores these payloads in decl::Attribute instead of
     // parser::Payload after typemod conversion.

@@ -1,33 +1,34 @@
 use super::build_types::*;
 use super::packages;
 use crate::helpers;
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::Dependencies;
 
+/// What resolving a module's raw dependency names needs from its package.
+struct DepContext<'a> {
+    namespace: Option<String>,
+    package_modules: &'a AHashSet<String>,
+    /// The packages this package may depend on (dependencies and dev
+    /// dependencies).
+    allowed_dependencies: &'a AHashSet<String>,
+}
+
 fn resolve_dep_modules<'a>(
     raw_deps: impl Iterator<Item = &'a String>,
-    namespace: Option<String>,
-    package_modules: &AHashSet<String>,
+    ctx: &DepContext,
     valid_modules: &AHashSet<String>,
     package: &packages::Package,
     build_state: &BuildState,
 ) -> AHashSet<String> {
-    let deps = raw_deps.cloned().collect::<AHashSet<String>>();
-
-    // Get the list of allowed dependency packages for this package
-    let allowed_dependencies: AHashSet<String> = package
-        .config
-        .get_dependency_names()
-        .into_iter()
-        .chain(package.config.get_dev_dependency_names())
-        .collect();
-
-    deps.iter()
+    let namespace = ctx.namespace.as_deref();
+    raw_deps
         .map(|dep| {
-            let dep_first = dep.split('.').next().unwrap();
-            let dep_second = dep.split('.').nth(1);
-            match &namespace {
+            let (dep_first, dep_second) = match dep.split_once('.') {
+                Some((first, rest)) => (first, Some(rest.split('.').next().unwrap_or(rest))),
+                None => (dep.as_str(), None),
+            };
+            match namespace {
                 Some(namespace) => {
                     // if the module is in the own namespace, take the submodule -- so:
                     // if the module is TeamwalnutApp.MyModule inside of the namespace TeamwalnutApp
@@ -37,7 +38,8 @@ fn resolve_dep_modules<'a>(
                         _ => dep_first,
                     };
                     let namespaced_name = dep.to_owned() + "-" + namespace;
-                    if package_modules.contains(&namespaced_name) || valid_modules.contains(&namespaced_name)
+                    if ctx.package_modules.contains(&namespaced_name)
+                        || valid_modules.contains(&namespaced_name)
                     {
                         namespaced_name
                     } else {
@@ -49,11 +51,7 @@ fn resolve_dep_modules<'a>(
         })
         .filter(|dep| {
             // First check if the module exists
-            let module_exists = valid_modules.contains(dep)
-                && match namespace.to_owned() {
-                    Some(namespace) => !dep.eq(&namespace),
-                    None => true,
-                };
+            let module_exists = valid_modules.contains(dep) && Some(dep.as_str()) != namespace;
 
             if !module_exists {
                 return false;
@@ -66,7 +64,7 @@ fn resolve_dep_modules<'a>(
                 }
 
                 // If it's in a different package, check if that package is a declared dependency
-                return allowed_dependencies.contains(&dep_module.package_name);
+                return ctx.allowed_dependencies.contains(&dep_module.package_name);
             }
 
             true
@@ -76,8 +74,7 @@ fn resolve_dep_modules<'a>(
 
 fn get_dep_modules(
     ast_file: &str,
-    namespace: Option<String>,
-    package_modules: &AHashSet<String>,
+    ctx: &DepContext,
     valid_modules: &AHashSet<String>,
     package: &packages::Package,
     build_state: &BuildState,
@@ -104,32 +101,7 @@ fn get_dep_modules(
         }
     }
 
-    resolve_dep_modules(
-        deps.iter(),
-        namespace,
-        package_modules,
-        valid_modules,
-        package,
-        build_state,
-    )
-}
-
-fn get_dep_modules_from_memory(
-    deps: &Dependencies,
-    namespace: Option<String>,
-    package_modules: &AHashSet<String>,
-    valid_modules: &AHashSet<String>,
-    package: &packages::Package,
-    build_state: &BuildState,
-) -> AHashSet<String> {
-    resolve_dep_modules(
-        deps.iter(),
-        namespace,
-        package_modules,
-        valid_modules,
-        package,
-        build_state,
-    )
+    resolve_dep_modules(deps.iter(), ctx, valid_modules, package, build_state)
 }
 
 fn rebuild_dependents(modules: &mut ahash::AHashMap<String, Module>) {
@@ -158,6 +130,19 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
     let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
     let in_process_mode = build_state.build_mode().is_in_process();
     let in_memory_deps = in_process_mode.then(|| build_state.snapshot_in_memory_deps());
+    let allowed_dependencies: AHashMap<&str, AHashSet<String>> = build_state
+        .packages
+        .iter()
+        .map(|(name, package)| {
+            let allowed = package
+                .config
+                .get_dependency_names()
+                .into_iter()
+                .chain(package.config.get_dev_dependency_names())
+                .collect();
+            (name.as_str(), allowed)
+        })
+        .collect();
     build_state
         .modules
         .par_iter()
@@ -169,20 +154,18 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                     .expect("Package not found");
                 let ast_path = helpers::get_ast_path(&source_file.implementation.path);
                 if module.deps_dirty || !build_state.deps_initialized {
+                    let ctx = DepContext {
+                        namespace: package.namespace.to_suffix(),
+                        package_modules: package.modules.as_ref().unwrap(),
+                        allowed_dependencies: &allowed_dependencies[module.package_name.as_str()],
+                    };
                     let impl_key = format!("{module_name}:impl");
                     let mut deps = if in_process_mode {
                         in_memory_deps
                             .as_ref()
                             .and_then(|deps| deps.get(&impl_key))
                             .map(|in_memory_dep| {
-                                get_dep_modules_from_memory(
-                                    in_memory_dep,
-                                    package.namespace.to_suffix(),
-                                    package.modules.as_ref().unwrap(),
-                                    all_mod,
-                                    package,
-                                    build_state,
-                                )
+                                resolve_dep_modules(in_memory_dep.iter(), &ctx, all_mod, package, build_state)
                             })
                             .unwrap_or_else(|| {
                                 panic!(
@@ -191,14 +174,7 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                                 )
                             })
                     } else {
-                        get_dep_modules(
-                            &ast_path.to_string_lossy(),
-                            package.namespace.to_suffix(),
-                            package.modules.as_ref().unwrap(),
-                            all_mod,
-                            package,
-                            build_state,
-                        )
+                        get_dep_modules(&ast_path.to_string_lossy(), &ctx, all_mod, package, build_state)
                     };
 
                     if let Some(interface) = &source_file.interface {
@@ -210,14 +186,7 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                                 .as_ref()
                                 .and_then(|deps| deps.get(&intf_key))
                                 .map(|in_memory_dep| {
-                                    get_dep_modules_from_memory(
-                                        in_memory_dep,
-                                        package.namespace.to_suffix(),
-                                        package.modules.as_ref().unwrap(),
-                                        all_mod,
-                                        package,
-                                        build_state,
-                                    )
+                                    resolve_dep_modules(in_memory_dep.iter(), &ctx, all_mod, package, build_state)
                                 })
                                 .unwrap_or_else(|| {
                                     panic!(
@@ -226,14 +195,7 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                                     )
                                 })
                         } else {
-                            get_dep_modules(
-                                &iast_path.to_string_lossy(),
-                                package.namespace.to_suffix(),
-                                package.modules.as_ref().unwrap(),
-                                all_mod,
-                                package,
-                                build_state,
-                            )
+                            get_dep_modules(&iast_path.to_string_lossy(), &ctx, all_mod, package, build_state)
                         };
                         deps.extend(intf_deps)
                     }

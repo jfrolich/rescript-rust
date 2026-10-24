@@ -273,7 +273,8 @@ impl Constant {
                 Some(crate::types::VariantLiteralTag::Int(value)) => *value != 0,
                 Some(crate::types::VariantLiteralTag::Bool(value)) => *value,
                 Some(
-                    crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined,
+                    crate::types::VariantLiteralTag::Null
+                    | crate::types::VariantLiteralTag::Undefined,
                 ) => false,
                 Some(
                     crate::types::VariantLiteralTag::Float(_)

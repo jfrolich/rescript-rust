@@ -4,8 +4,6 @@ use crate::helpers;
 use crate::project_context::ProjectContext;
 use anyhow::anyhow;
 use std::fs;
-use std::fs::File;
-use std::io::Read;
 use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 
@@ -349,21 +347,12 @@ pub fn file_path_to_module_name(path: &Path, namespace: &packages::Namespace) ->
     capitalize(&file_path_to_compiler_asset_basename(path, namespace))
 }
 
-pub fn contains_ascii_characters(str: &str) -> bool {
-    for chr in str.chars() {
-        if chr.is_ascii_alphanumeric() {
-            return true;
-        }
-    }
-    false
+pub fn has_ascii_alphanumeric(str: &str) -> bool {
+    str.chars().any(|chr| chr.is_ascii_alphanumeric())
 }
 
-pub fn create_path(path: &Path) {
-    fs::DirBuilder::new().recursive(true).create(path).unwrap();
-}
-
-pub fn create_path_for_path(path: &Path) {
-    fs::DirBuilder::new().recursive(true).create(path).unwrap();
+pub fn create_path(path: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().recursive(true).create(path)
 }
 
 fn get_bin_dir() -> PathBuf {
@@ -478,10 +467,8 @@ pub fn is_source_file(extension: &str) -> bool {
 
 pub fn is_non_exotic_module_name(module_name: &str) -> bool {
     let mut chars = module_name.chars();
-    if chars.next().unwrap().is_ascii_uppercase() && chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return true;
-    }
-    false
+    chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 pub fn get_extension(path: &Path) -> String {
@@ -531,16 +518,13 @@ pub fn get_nearest_config(path_buf: &Path) -> Option<PathBuf> {
 }
 
 pub fn read_file(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = File::open(path).expect("file not found");
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(contents)
+    fs::read_to_string(path)
 }
 
 pub fn get_source_file_from_rescript_file(path: &Path, suffix: &str) -> PathBuf {
     path.with_extension(
         // suffix.to_string includes the ., so we need to remove it
-        &suffix.to_string()[1..],
+        &suffix[1..],
     )
 }
 

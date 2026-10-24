@@ -135,7 +135,7 @@ fn boolean_location(store: &IndexedLambda, node: NodeId) -> Option<crate::locati
             | Primitive::Pstringcomp(_),
             _,
             loc,
-        ) => Some(loc.clone()),
+        ) => Some(*loc),
         _ => None,
     }
 }
@@ -233,7 +233,8 @@ fn append_if(
                 Some(crate::types::VariantLiteralTag::Int(value)) => Some(*value != 0),
                 Some(crate::types::VariantLiteralTag::Bool(value)) => Some(*value),
                 Some(
-                    crate::types::VariantLiteralTag::Null | crate::types::VariantLiteralTag::Undefined,
+                    crate::types::VariantLiteralTag::Null
+                    | crate::types::VariantLiteralTag::Undefined,
                 ) => Some(false),
                 Some(
                     crate::types::VariantLiteralTag::Float(_)
@@ -432,7 +433,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                             if let Some(args) = eta_args(store, &params, &inner_args, &args) {
                                 let inner = append_rebuilt(
                                     store,
-                                    NodeSnapshot::Prim(inner_primitive, args, info.loc.clone()),
+                                    NodeSnapshot::Prim(inner_primitive, args, info.loc),
                                 );
                                 return append_rebuilt(
                                     store,
@@ -448,8 +449,10 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                             && matches!(store.view(second), NodeView::Const(_))
                             && let Some(args) = eta_args(store, &params, &inner, &args)
                         {
-                            let call =
-                                append_rebuilt(store, NodeSnapshot::Prim(primitive, args, info.loc));
+                            let call = append_rebuilt(
+                                store,
+                                NodeSnapshot::Prim(primitive, args, info.loc),
+                            );
                             return append_rebuilt(store, NodeSnapshot::Sequence(call, second));
                         }
                     }
@@ -478,9 +481,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         [source],
                         _,
                     ) if name == &fields[0] => match store.view(*source) {
-                        NodeView::Var(id) | NodeView::GlobalModule(id) => {
-                            Some((*source, id.clone()))
-                        }
+                        NodeView::Var(id) | NodeView::GlobalModule(id) => Some((*source, *id)),
                         _ => None,
                     },
                     _ => None,
@@ -539,7 +540,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                     _ => unreachable!(),
                 })
                 .collect::<Vec<_>>();
-            match crate::lambda::Lambda::prim(primitive.clone(), lambda_args, loc.clone()) {
+            match crate::lambda::Lambda::prim(primitive.clone(), lambda_args, loc) {
                 crate::lambda::Lambda::Lconst(value) => store.append(NodeSnapshot::Const(value)),
                 _ => store.append(NodeSnapshot::Prim(primitive, args, loc)),
             }
@@ -600,11 +601,12 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                 NodeView::Const(Constant::String(_)) | NodeView::Const(Constant::ImmString(_))
             );
             let selected = match store.view(scrutinee) {
-                NodeView::Const(Constant::String(s))
-                | NodeView::Const(Constant::ImmString(s)) => cases
-                    .iter()
-                    .find(|(key, _)| key == s)
-                    .map(|(_, node)| *node),
+                NodeView::Const(Constant::String(s)) | NodeView::Const(Constant::ImmString(s)) => {
+                    cases
+                        .iter()
+                        .find(|(key, _)| key == s)
+                        .map(|(_, node)| *node)
+                }
                 _ => None,
             };
             if known_constant {
@@ -636,7 +638,9 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
         // `Lambda.prim` folds a primitive over one or two constants.
         NodeSnapshot::Prim(primitive, args, loc)
             if matches!(args.len(), 1 | 2)
-                && args.iter().all(|arg| matches!(store.view(*arg), NodeView::Const(_))) =>
+                && args
+                    .iter()
+                    .all(|arg| matches!(store.view(*arg), NodeView::Const(_))) =>
         {
             let consts = args
                 .iter()
@@ -645,7 +649,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                     _ => unreachable!(),
                 })
                 .collect();
-            match crate::lambda::Lambda::prim(primitive.clone(), consts, loc.clone()) {
+            match crate::lambda::Lambda::prim(primitive.clone(), consts, loc) {
                 folded @ crate::lambda::Lambda::Lconst(_) => store.append_compat_lambda(folded),
                 _ => store.append(NodeSnapshot::Prim(primitive, args, loc)),
             }

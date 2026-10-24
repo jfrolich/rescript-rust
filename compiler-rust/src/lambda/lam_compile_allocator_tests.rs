@@ -1,4 +1,5 @@
 use super::*;
+use crate::lambda::{FunctionAttribute, InlineAttribute};
 
 #[test]
 fn shared_generator_is_the_actual_js_temporary_allocator() {
@@ -51,9 +52,10 @@ fn indexed_cmj_beta_imports_into_owner_store_and_reuses_argument_ids() {
 
     let parameter = Ident::new("cmjArg", 40, crate::ident::IdentFlags::NONE);
     let exception = Ident::new("cmjExn", 41, crate::ident::IdentFlags::JS_OBJECT);
-    let function = LFunction { loc: crate::location::Location::none(),
+    let function = LFunction {
+        loc: crate::location::Location::none(),
         arity: 1,
-        params: vec![parameter.clone()],
+        params: vec![parameter],
         body: Box::new(Lambda::LtryWith(
             Box::new(Lambda::var(parameter)),
             exception,
@@ -109,7 +111,7 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
                 0,
                 crate::lambda::FieldDbgInfo::Module { name: "run".into() },
             ),
-            vec![Lambda::global_module(module.clone())],
+            vec![Lambda::global_module(module)],
             Location::none(),
         ),
         vec![argument],
@@ -131,9 +133,10 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
     let parameter = Ident::new("value", 2, crate::ident::IdentFlags::NONE);
     let external = Lambda::function_(
         1,
-        vec![parameter.clone()],
+        vec![parameter],
         Lambda::var(parameter),
-        FunctionAttribute::default(), crate::location::Location::none(),
+        FunctionAttribute::default(),
+        crate::location::Location::none(),
     );
     compiler.cmj_lambda_cache.insert(
         module.name().to_string(),
@@ -169,7 +172,7 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
                 0,
                 crate::lambda::FieldDbgInfo::Module { name: "run".into() },
             ),
-            vec![Lambda::global_module(module.clone())],
+            vec![Lambda::global_module(module)],
             Location::none(),
         ),
         vec![Lambda::unit()],
@@ -190,7 +193,13 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
         module.name().to_string(),
         Some(Arc::new(AHashMap::from_iter([(
             "run".to_string(),
-            Lambda::function_(1, vec![parameter.clone()], Lambda::var(parameter), attr, crate::location::Location::none()),
+            Lambda::function_(
+                1,
+                vec![parameter],
+                Lambda::var(parameter),
+                attr,
+                crate::location::Location::none(),
+            ),
         )]))),
     );
 

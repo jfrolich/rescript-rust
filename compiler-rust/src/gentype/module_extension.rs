@@ -1,5 +1,4 @@
 // Port of compiler/gentype/ModuleExtension.ml:1-28.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::config::{ModuleResolution, T};
 

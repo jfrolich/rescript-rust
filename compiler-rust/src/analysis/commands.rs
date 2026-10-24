@@ -1,12 +1,12 @@
 //! Commands on a typed module: a port of the matching parts of
 //! analysis/src/commands.ml and cli.ml.
 
+use super::Output;
 use super::json::Json;
 use super::references;
 use super::session::{Loaded, ProjectSession};
 use super::shared_types::{Loc, LocType, Pos};
 use super::uri::UriStyle;
-use super::Output;
 
 /// `Lsp.Types.Location.yojson_of_t`.
 fn location_json(uri: String, loc: &Loc) -> Json {
@@ -30,7 +30,10 @@ pub fn definition(
     }
     let is_interface = super::uri::is_interface(&full.file.uri);
     let pos_is_zero = |p: &Pos| p.line == 1 && p.cnum - p.bol == 0;
-    let is_module = matches!(loc_item.loc_type, LocType::LModule(_) | LocType::TopLevelModule(_));
+    let is_module = matches!(
+        loc_item.loc_type,
+        LocType::LModule(_) | LocType::TopLevelModule(_)
+    );
     let skip_loc = !is_module && !is_interface && pos_is_zero(&loc.start) && pos_is_zero(&loc.end);
     if skip_loc {
         None
@@ -69,13 +72,14 @@ pub fn references(
     let Some(loc_item) = references::get_loc_item(full, pos, debug, out) else {
         return Vec::new();
     };
-    let mut locations: Vec<Json> = references::all_references_for_loc_item(session, full, &loc_item)
-        .into_iter()
-        .map(|r| {
-            let loc = r.loc.unwrap_or_else(references::top_level_loc);
-            location_json(style.lsp_string(&r.uri), &loc)
-        })
-        .collect();
+    let mut locations: Vec<Json> =
+        references::all_references_for_loc_item(session, full, &loc_item)
+            .into_iter()
+            .map(|r| {
+                let loc = r.loc.unwrap_or_else(references::top_level_loc);
+                location_json(style.lsp_string(&r.uri), &loc)
+            })
+            .collect();
     locations.reverse();
     locations
 }
@@ -100,7 +104,10 @@ pub fn hover(
             None
         }
         Some(loc_item) => {
-            let is_module = matches!(loc_item.loc_type, LocType::LModule(_) | LocType::TopLevelModule(_));
+            let is_module = matches!(
+                loc_item.loc_type,
+                LocType::LModule(_) | LocType::TopLevelModule(_)
+            );
             let skip_zero = match references::definition_for_loc_item(session, full, &loc_item) {
                 None => false,
                 Some((_, loc)) => {
@@ -123,7 +130,10 @@ pub fn hover(
     }?;
     Some(Json::assoc([(
         "contents",
-        Json::assoc([("kind", Json::String("markdown".to_string())), ("value", Json::String(value))]),
+        Json::assoc([
+            ("kind", Json::String("markdown".to_string())),
+            ("value", Json::String(value)),
+        ]),
     )]))
 }
 
@@ -131,13 +141,21 @@ pub fn hover(
 fn dirname(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
-        return if path.is_empty() { ".".to_string() } else { "/".to_string() };
+        return if path.is_empty() {
+            ".".to_string()
+        } else {
+            "/".to_string()
+        };
     }
     match trimmed.rfind('/') {
         None => ".".to_string(),
         Some(i) => {
             let dir = trimmed[..i].trim_end_matches('/');
-            if dir.is_empty() { "/".to_string() } else { dir.to_string() }
+            if dir.is_empty() {
+                "/".to_string()
+            } else {
+                dir.to_string()
+            }
         }
     }
 }
@@ -183,13 +201,17 @@ pub fn rename(
         let new_path = concat(&dir, &format!("{new_name}{}", extension(&path)));
         Json::assoc([
             ("kind", Json::String("rename".to_string())),
-            ("newUri", Json::String(style.lsp_string_of_path_string(&new_path))),
+            (
+                "newUri",
+                Json::String(style.lsp_string_of_path_string(&new_path)),
+            ),
             ("oldUri", Json::String(style.lsp_string(&r.uri))),
         ])
     });
     // `String_map`: by URI; each URI's edits in reverse; the fold conses, so
     // the URIs come out in descending order.
-    let mut edits_by_uri: std::collections::BTreeMap<String, Vec<Json>> = std::collections::BTreeMap::new();
+    let mut edits_by_uri: std::collections::BTreeMap<String, Vec<Json>> =
+        std::collections::BTreeMap::new();
     for r in &all_references {
         let Some(loc) = r.loc else {
             continue;
@@ -198,15 +220,21 @@ pub fn rename(
             ("newText", Json::String(new_name.to_string())),
             ("range", loc.range().to_json()),
         ]);
-        edits_by_uri.entry(style.to_string(&r.uri)).or_default().insert(0, edit);
+        edits_by_uri
+            .entry(style.to_string(&r.uri))
+            .or_default()
+            .push(edit);
     }
     let text_document_edits = edits_by_uri.into_iter().rev().map(|(uri, edits)| {
         Json::assoc([
-            ("edits", Json::List(edits)),
+            ("edits", Json::List(edits.into_iter().rev().collect())),
             (
                 "textDocument",
                 Json::assoc([
-                    ("uri", Json::String(super::uri::to_lsp_string(&super::uri::of_string(&uri)))),
+                    (
+                        "uri",
+                        Json::String(super::uri::to_lsp_string(&super::uri::of_string(&uri))),
+                    ),
                     ("version", Json::Int(0)),
                 ]),
             ),
@@ -216,14 +244,22 @@ pub fn rename(
 }
 
 /// `Commands.prepare_rename`, as `Cli.prepare_rename` prints it.
-pub fn prepare_rename(full: Option<&Loaded>, pos: (i32, i32), debug: bool, out: &mut Output) -> Option<Json> {
+pub fn prepare_rename(
+    full: Option<&Loaded>,
+    pos: (i32, i32),
+    debug: bool,
+    out: &mut Output,
+) -> Option<Json> {
     let full = full?;
     let loc_item = references::get_loc_item(full, pos, debug, out)?;
     let range = loc_item.loc.range().to_json();
     match &loc_item.loc_type {
-        LocType::Typed(name, _, _) | LocType::TopLevelModule(name) | LocType::TypeDefinition(name, _, _) => {
-            Some(Json::assoc([("range", range), ("placeholder", Json::String(name.clone()))]))
-        }
+        LocType::Typed(name, _, _)
+        | LocType::TopLevelModule(name)
+        | LocType::TypeDefinition(name, _, _) => Some(Json::assoc([
+            ("range", range),
+            ("placeholder", Json::String(name.clone())),
+        ])),
         _ => Some(range),
     }
 }

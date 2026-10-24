@@ -222,12 +222,11 @@ impl<'a> Checker<'a> {
     ) -> PpxResult<()> {
         match deriving_process_derive_type(tdcls, self.arena, &mut self.warnings)? {
             Some(payload) => {
-                let payload = payload.clone();
                 let last = tdcls.len() - 1;
                 for (index, tdcl) in tdcls.iter().enumerate() {
                     self.type_declaration(tdcl, index == last)?;
                 }
-                run_derivers(tdcls, self.arena, in_structure, &payload, &mut self.warnings)
+                run_derivers(tdcls, self.arena, in_structure, payload, &mut self.warnings)
             }
             None => {
                 for tdcl in tdcls {
@@ -496,7 +495,8 @@ impl<'a> Checker<'a> {
                         | WithConstraint::Pwith_typesubst(_, tdcl) => {
                             self.type_declaration(tdcl, false)?;
                         }
-                        WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
+                        WithConstraint::Pwith_module(_, _)
+                        | WithConstraint::Pwith_modsubst(_, _) => {}
                     }
                 }
                 self.module_type(*mod_type)
@@ -554,18 +554,7 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            CoreTypeDesc::Ptyp_object(inner) => {
-                for field in &inner.0 {
-                    match field {
-                        ObjectField::Otag(_label, attrs, field_type) => {
-                            self.typ(*field_type)?;
-                            self.attributes(attrs)?;
-                        }
-                        ObjectField::Oinherit(field_type) => self.typ(*field_type)?,
-                    }
-                }
-                Ok(())
-            }
+            CoreTypeDesc::Ptyp_object(_) => unreachable!("object types are handled by typ"),
             CoreTypeDesc::Ptyp_alias(inner) => self.typ(inner.0),
             CoreTypeDesc::Ptyp_variant(inner) => {
                 for row in &inner.0 {
@@ -624,8 +613,9 @@ impl<'a> Checker<'a> {
             | PatternDesc::Ppat_interval(_)
             | PatternDesc::Ppat_type(_)
             | PatternDesc::Ppat_unpack(_) => Ok(()),
-            PatternDesc::Ppat_alias(inner, _)
-            | PatternDesc::Ppat_exception(inner) => self.pat(*inner),
+            PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
+                self.pat(*inner)
+            }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
                 for item in items.iter() {
                     self.pat(*item)?;
@@ -688,7 +678,10 @@ impl<'a> Checker<'a> {
             _ => false,
         };
         if awaits && !self.async_context {
-            return Err(PpxError::at_loc(expr.pexp_loc, AWAIT_NOT_ASYNC_CONTEXT_ERROR));
+            return Err(PpxError::at_loc(
+                expr.pexp_loc,
+                AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+            ));
         }
         Ok(())
     }
@@ -707,17 +700,19 @@ impl<'a> Checker<'a> {
             }
             // `Pexp_braces`: forward `@this` to a braced function.
             ExpressionDesc::Pexp_braces(braces) => {
+                let has_this = expr
+                    .pexp_attributes
+                    .iter()
+                    .any(|(name, _)| self.arena.get_string(name.txt) == "this");
+                if !has_this {
+                    return self.default_expr(expr);
+                }
                 let (this_attrs, other_attrs): (Vec<Attribute>, Vec<Attribute>) = expr
                     .pexp_attributes
                     .iter()
                     .cloned()
                     .partition(|(name, _)| self.arena.get_string(name.txt) == "this");
-                let forwarded = if this_attrs.is_empty() {
-                    None
-                } else {
-                    add_this_to_braced_function(&this_attrs, braces.expr, self.arena)
-                };
-                match forwarded {
+                match add_this_to_braced_function(&this_attrs, braces.expr, self.arena) {
                     Some(inner) => {
                         let rewritten = Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
@@ -762,7 +757,7 @@ impl<'a> Checker<'a> {
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (_name, mod_expr_idx, body) = &**inner;
                 let mod_expr = self.arena.get_mod_expr(*mod_expr_idx);
-                if letmodule_expr_has_await_attribute(mod_expr, self.arena) {
+                if letmodule_expr_has_await_payload(mod_expr, self.arena) {
                     // bs_builtin_ppx.ml:344-383: the module becomes
                     // `Ast_await.create_await_module_expression`; only the body
                     // is mapped.
@@ -870,8 +865,11 @@ impl<'a> Checker<'a> {
             && self.arena.value_constraint(vb.pvb_pat).is_none()
             && self.is_record_pattern(vb.pvb_pat)
             && !matches!(
-                &*crate::parser::parsetree_viewer::unwrap_braces(self.arena, self.arena.get_expr(vb.pvb_expr))
-                    .pexp_desc,
+                &*crate::parser::parsetree_viewer::unwrap_braces(
+                    self.arena,
+                    self.arena.get_expr(vb.pvb_expr)
+                )
+                .pexp_desc,
                 ExpressionDesc::Pexp_pack(_)
             )
         {
@@ -909,19 +907,19 @@ impl<'a> Checker<'a> {
                         message: payload_semantic_string(payload, self.arena),
                     },
                 });
-                return Ok(());
+                Ok(())
             }
             // `Ast_payload.raw_as_string_exp_exn` warns about the Flow parse
             // errors of a string payload before `handle_ffi` rejects one that
             // is not a function.
             "ffi" => {
                 push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
-                return validate_expression_extension_payload_error(extension, self.arena);
+                validate_expression_extension_payload_error(extension, self.arena)
             }
             "raw" => {
                 validate_expression_extension_payload_error(extension, self.arena)?;
                 push_raw_js_expression_warning(payload, self.arena, &mut self.warnings);
-                return Ok(());
+                Ok(())
             }
             _ => validate_expression_extension_payload_error(extension, self.arena),
         }
@@ -1004,7 +1002,8 @@ impl<'a> Checker<'a> {
             }
             ExpressionDesc::Pexp_braces(braces) => self.expr(braces.expr),
             ExpressionDesc::Pexp_regexp(_) => Ok(()),
-            ExpressionDesc::Pexp_sequence(first, second) | ExpressionDesc::Pexp_while(first, second) => {
+            ExpressionDesc::Pexp_sequence(first, second)
+            | ExpressionDesc::Pexp_while(first, second) => {
                 self.expr(*second)?;
                 self.expr(*first)
             }
@@ -1084,9 +1083,8 @@ impl<'a> Checker<'a> {
                     self.jsx_props(&element.props)
                 }
             },
-            ExpressionDesc::Pexp_comptime_typeinfo(typ) | ExpressionDesc::Pexp_comptime_typename(typ) => {
-                self.typ(*typ)
-            }
+            ExpressionDesc::Pexp_comptime_typeinfo(typ)
+            | ExpressionDesc::Pexp_comptime_typename(typ) => self.typ(*typ),
             ExpressionDesc::Pexp_comptime_field(inner) => {
                 self.expr(inner.1)?;
                 self.expr(inner.0)
@@ -1156,10 +1154,4 @@ impl<'a> Checker<'a> {
             _ => false,
         }
     }
-}
-
-/// `Res_parsetree_viewer.has_await_attribute` on a `let module` expression
-/// (bs_builtin_ppx.ml:344-383).
-fn letmodule_expr_has_await_attribute(mod_expr: &ModuleExpr, arena: &ParseArena) -> bool {
-    letmodule_expr_has_await_payload(mod_expr, arena)
 }

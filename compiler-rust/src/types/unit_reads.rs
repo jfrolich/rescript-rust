@@ -7,14 +7,46 @@
 use super::context::TypeContext;
 use super::decl::{ConstructorDescription, ConstructorKind, LabelDescription};
 use super::tast_iterator::{self as ti, TastIterator};
-use super::type_expr::{TypeDesc, TypeExprRef};
+use super::type_expr::{SHARED_REF_BITS, SHARED_REF_TAG, STORE_REF_TAG, TypeDesc, TypeExprRef};
 use super::typedtree::*;
 use crate::cmi::item_deps::{Kind, UnitRead, read_of_path};
 use crate::types::path::Path;
 
+/// Visited type nodes: one bitset per reference space (local arena,
+/// per-thread store, shared store), indexed by node index.
+#[derive(Default)]
+struct SeenTypes {
+    spaces: [Vec<u64>; 3],
+}
+
+impl SeenTypes {
+    /// Mark `ty`; false when it was already marked.
+    #[inline]
+    fn insert(&mut self, ty: TypeExprRef) -> bool {
+        let raw = ty.0;
+        let (space, index) = if raw & STORE_REF_TAG == 0 {
+            (0, raw)
+        } else if raw & SHARED_REF_TAG == 0 {
+            (1, raw & !SHARED_REF_BITS)
+        } else {
+            (2, raw & !SHARED_REF_BITS)
+        };
+        let index = index as usize;
+        let bits = &mut self.spaces[space];
+        let word = index / 64;
+        if word >= bits.len() {
+            bits.resize((word + 1).max(bits.len() * 2), 0);
+        }
+        let mask = 1u64 << (index % 64);
+        let fresh = bits[word] & mask == 0;
+        bits[word] |= mask;
+        fresh
+    }
+}
+
 struct Collector<'a> {
     ctx: &'a TypeContext,
-    seen: ahash::AHashSet<TypeExprRef>,
+    seen: SeenTypes,
     out: Vec<UnitRead>,
 }
 
@@ -24,30 +56,48 @@ impl Collector<'_> {
     }
 
     fn ty(&mut self, root: TypeExprRef) {
+        let ctx = self.ctx;
         let mut stack = vec![root];
         while let Some(ty) = stack.pop() {
             if !self.seen.insert(ty) {
                 continue;
             }
-            let mut paths: Vec<(Path, Kind)> = Vec::new();
-            {
-                let desc = self.ctx.borrow_desc(ty);
-                match &*desc {
-                    TypeDesc::Tconstr { path, .. } => paths.push((path.clone(), Kind::Type)),
-                    TypeDesc::Tpackage { path, .. } => paths.push((path.clone(), Kind::Modtype)),
-                    TypeDesc::Tvariant(row) => {
-                        // `iter_type_expr` visits the row fields.
-                        if let Some((path, _)) = &row.row_name {
-                            paths.push((path.clone(), Kind::Type));
-                        }
+            // The children are those `btype::iter_type_expr` visits; only a
+            // variant goes through it, for its row walk.
+            let desc = ctx.borrow_desc(ty);
+            match &*desc {
+                TypeDesc::Tconstr { path, args, .. } => {
+                    read_of_path(path, Kind::Type, None, &mut self.out);
+                    stack.extend(args.iter().copied());
+                }
+                TypeDesc::Tpackage { path, args, .. } => {
+                    read_of_path(path, Kind::Modtype, None, &mut self.out);
+                    stack.extend(args.iter().copied());
+                }
+                TypeDesc::Tarrow { args, ret } => {
+                    stack.extend(args.iter().map(|arg| arg.typ));
+                    stack.push(*ret);
+                }
+                TypeDesc::Ttuple(types) => stack.extend(types.iter().copied()),
+                TypeDesc::Tobject { fields } => stack.push(*fields),
+                TypeDesc::Tfield { typ, rest, .. } => {
+                    stack.push(*typ);
+                    stack.push(*rest);
+                }
+                TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => stack.push(*t),
+                TypeDesc::Tpoly { body, vars } => {
+                    stack.push(*body);
+                    stack.extend(vars.iter().copied());
+                }
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+                TypeDesc::Tvariant(row) => {
+                    if let Some((path, _)) = &row.row_name {
+                        read_of_path(path, Kind::Type, None, &mut self.out);
                     }
-                    _ => {}
+                    drop(desc);
+                    super::btype::iter_type_expr(ctx, ty, |child| stack.push(child));
                 }
             }
-            for (path, kind) in paths {
-                self.path(&path, kind);
-            }
-            super::btype::iter_type_expr(self.ctx, ty, |child| stack.push(child));
         }
     }
 
@@ -193,7 +243,7 @@ pub fn structure_reads(
 ) -> Vec<UnitRead> {
     let mut collector = Collector {
         ctx,
-        seen: ahash::AHashSet::new(),
+        seen: SeenTypes::default(),
         out: opened(opens).collect(),
     };
     collector.structure(structure);
@@ -208,7 +258,7 @@ pub fn signature_reads(
 ) -> Vec<UnitRead> {
     let mut collector = Collector {
         ctx,
-        seen: ahash::AHashSet::new(),
+        seen: SeenTypes::default(),
         out: opened(opens).collect(),
     };
     collector.signature(signature);

@@ -216,7 +216,7 @@ impl LayoutRef {
     pub(crate) fn from_store_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("variant layout store index exceeds u32::MAX");
         assert!(
-            raw & super::type_expr::STORE_REF_TAG == 0,
+            raw & super::type_expr::SHARED_REF_BITS == 0,
             "variant layout store index exceeds the tag range"
         );
         Self(raw | super::type_expr::STORE_REF_TAG)
@@ -225,21 +225,24 @@ impl LayoutRef {
     /// Layout `idx` of the process-wide shared pool.
     #[inline]
     pub(crate) fn from_shared_index(idx: u32) -> Self {
-        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
-        assert!(idx & bits == 0, "shared variant layout index exceeds the tag range");
+        let bits = super::type_expr::SHARED_REF_BITS;
+        assert!(
+            idx & bits == 0,
+            "shared variant layout index exceeds the tag range"
+        );
         Self(idx | bits)
     }
 
     #[inline]
     pub(crate) fn is_shared(self) -> bool {
-        let bits = super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG;
+        let bits = super::type_expr::SHARED_REF_BITS;
         self.0 & bits == bits
     }
 
     #[inline]
     pub(crate) fn shared_index(self) -> u32 {
         debug_assert!(self.is_shared());
-        self.0 & !(super::type_expr::STORE_REF_TAG | super::type_expr::SHARED_REF_TAG)
+        self.0 & !super::type_expr::SHARED_REF_BITS
     }
 
     /// Whether this layout lives in the per-thread store.
@@ -260,8 +263,8 @@ impl LayoutRef {
     #[inline]
     pub(crate) fn store_index(self) -> usize {
         debug_assert!(
-            self.is_store(),
-            "local variant layout used as a store index"
+            self.is_store() && !self.is_shared(),
+            "non-store variant layout used as a store index"
         );
         (self.0 & !super::type_expr::STORE_REF_TAG) as usize
     }
@@ -293,15 +296,19 @@ impl Layout {
                         LiteralTag::Undefined => has_undefined = true,
                         _ => has_other_literal = true,
                     }
-                    literal_tags.insert(0, literal);
+                    literal_tags.push(literal);
                 }
                 ConstructorCase::Block(block) => {
                     if let Block::Untagged { block_type, .. } = block {
-                        block_types.insert(0, block_type.clone());
+                        block_types.push(block_type.clone());
                     }
                 }
             }
         }
+        // OCaml conses each tag onto the front of its list; build in source
+        // order and reverse once to get the same order.
+        block_types.reverse();
+        literal_tags.reverse();
         Self {
             unboxed: configuration.unboxed,
             constructors,
@@ -361,9 +368,15 @@ pub fn plain_layout(
     let constructors = cases
         .into_iter()
         .map(|(name, has_payload)| {
-            let tag = Tag { name, literal: None };
+            let tag = Tag {
+                name,
+                literal: None,
+            };
             if has_payload {
-                ConstructorCase::Block(Block::Tagged(TaggedBlock { tag, tag_name: None }))
+                ConstructorCase::Block(Block::Tagged(TaggedBlock {
+                    tag,
+                    tag_name: None,
+                }))
             } else {
                 ConstructorCase::Constant(tag)
             }

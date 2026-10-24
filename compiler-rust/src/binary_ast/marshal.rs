@@ -24,7 +24,6 @@
 //! - OCaml runtime: runtime/extern.c
 //! - OCaml runtime: runtime/caml/intext.h
 
-use std::borrow::Cow;
 use crate::fast_hash::AHashMap as HashMap;
 
 use crate::location::{Location, Position};
@@ -106,19 +105,31 @@ impl PrimListShareKind {
     }
 }
 
-/// Writer for OCaml Marshal binary format
+/// Sharing table keyed by `(tyvar name, LocIdx)`.
 ///
-/// This struct maintains the serialization state and provides methods for
-/// encoding OCaml values to the Marshal format.
-///
-/// # Usage
-///
-/// ```ignore
-/// let mut writer = MarshalWriter::new();
-/// writer.write_int(42);
-/// writer.write_string(b"hello");
-/// let bytes = writer.finish();
-/// ```
+/// Grouped by location so lookups borrow the name and only a first insertion
+/// allocates; a location rarely carries more than one tyvar name.
+#[derive(Debug, Default)]
+struct TyvarShareTable(HashMap<LocIdx, Vec<(String, u32)>>);
+
+impl TyvarShareTable {
+    fn get(&self, name: &str, loc: LocIdx) -> Option<u32> {
+        self.0
+            .get(&loc)?
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|&(_, idx)| idx)
+    }
+
+    /// Insert or overwrite the entry for `(name, loc)`, like `HashMap::insert`.
+    fn insert(&mut self, name: &str, loc: LocIdx, obj_idx: u32) {
+        let entries = self.0.entry(loc).or_default();
+        match entries.iter_mut().find(|(n, _)| n == name) {
+            Some(entry) => entry.1 = obj_idx,
+            None => entries.push((name.to_owned(), obj_idx)),
+        }
+    }
+}
 
 /// A self-contained marshalled value: its encoded payload plus the object and
 /// heap-size counts it contributes. Shared references inside a fragment are
@@ -136,17 +147,23 @@ pub struct MarshalFragment {
     pub size_64: u32,
 }
 
+/// Writer for OCaml Marshal binary format
+///
+/// This struct maintains the serialization state and provides methods for
+/// encoding OCaml values to the Marshal format.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut writer = MarshalWriter::new();
+/// writer.write_int(42);
+/// writer.write_string(b"hello");
+/// let bytes = writer.finish();
+/// ```
 #[derive(Debug)]
 pub struct MarshalWriter<'a> {
-    /// Debug tracing is configured once per serialization, not per AST node.
-    debug_marshal: bool,
-    pub(super) debug_const_share: bool,
-
     /// The output buffer containing encoded data
     buffer: Vec<u8>,
-
-    /// Maps pointer identity to object counter at time of serialization (for sharing)
-    obj_table: HashMap<usize, u32>,
 
     /// Maps StrIdx to object counter (for arena-based string sharing)
     /// Same StrIdx = same object, will be shared in output
@@ -179,9 +196,10 @@ pub struct MarshalWriter<'a> {
     /// Used to share repeated `Spice.*` longidents constructed as constants.
     longident_value_table: HashMap<Longident, u32>,
 
-    /// Maps Option<Cow<'static, str>> values to object counter (for content-based sharing)
-    /// This enables sharing of common delimiter values like Some("js")
-    option_string_table: HashMap<Option<Cow<'static, str>>, u32>,
+    /// Maps the contents of `Some(s)` string options to object counter (for
+    /// content-based sharing). This enables sharing of common delimiter values
+    /// like Some("js"); `None` is an immediate and never shared.
+    option_string_table: HashMap<String, u32>,
 
     /// Maps string values to object counter (for content-based sharing)
     /// Used for shared constant strings in PPX output (e.g. spice keys, delimiters).
@@ -230,12 +248,12 @@ pub struct MarshalWriter<'a> {
     /// In OCaml's `from_labels`, the same tyvar CoreType object is physically shared
     /// between Otag fields and Labelled args. We replicate this by sharing CoreTypes
     /// with Ptyp_var desc, empty attributes, and matching (name, loc) pairs.
-    tyvar_core_type_table: HashMap<(String, LocIdx), u32>,
+    tyvar_core_type_table: TyvarShareTable,
 
     /// Maps (tyvar_name, LocIdx) to object counter for sharing Ptyp_var name strings.
     /// Even when OCaml rebuilds surrounding core_type wrappers, it can still reuse
     /// the same underlying tyvar name string object for the same source location.
-    tyvar_name_table: HashMap<(String, LocIdx), u32>,
+    tyvar_name_table: TyvarShareTable,
 
     /// Maps Location values to object counter for content-based sharing.
     /// In OCaml, Location.none is a module-level let binding, so all references
@@ -326,64 +344,13 @@ impl Default for MarshalWriter<'_> {
 impl<'a> MarshalWriter<'a> {
     /// Create a new MarshalWriter
     pub fn new() -> Self {
-        Self {
-            debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
-            debug_const_share: std::env::var("DEBUG_CONST_SHARE").is_ok(),
-            buffer: Vec::with_capacity(4096),
-            obj_table: HashMap::new(),
-            str_idx_table: HashMap::new(),
-            position_idx_table: HashMap::new(),
-            location_idx_table: HashMap::new(),
-            lident_idx_table: HashMap::new(),
-            string_lident_table: HashMap::new(),
-            longident_lident_table: HashMap::new(),
-            longident_value_table: HashMap::new(),
-            option_string_table: HashMap::new(),
-            string_value_table: HashMap::new(),
-            arity_idx_table: HashMap::new(),
-
-            string_loc_table: HashMap::new(),
-            lident_loc_table: HashMap::new(),
-            arg_label_table: HashMap::new(),
-            pmod_ident_table: HashMap::new(),
-            attr_tuple_table: HashMap::new(),
-            vd_name_type_table: HashMap::new(),
-            singleton_attr_list_table: HashMap::new(),
-            tyvar_core_type_table: HashMap::new(),
-            tyvar_name_table: HashMap::new(),
-
-            location_value_table: HashMap::new(),
-            position_value_table: HashMap::new(),
-
-            pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
-            prim_list_table: [None; PrimListShareKind::COUNT],
-            jsx_depth: 0,
-            extension_depth: 0,
-            external_ext_depth: 0,
-            pack_depth: 0,
-            letmodule_expr_depth: 0,
-            module_typeof_depth: 0,
-            simple_core_type_table: HashMap::new(),
-            raw_template_attr_list_stack: Vec::new(),
-            raw_expansion_expr_table: HashMap::new(),
-            internal_expansive_attr_tuple: None,
-
-            arena: None,
-            current_expr_idx: None,
-            case_owner_stack: Vec::new(),
-            obj_counter: 0,
-            size_32: 0,
-            size_64: 0,
-        }
+        Self::with_capacity(4096)
     }
 
     /// Create a new MarshalWriter with expected capacity
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
-            debug_const_share: std::env::var("DEBUG_CONST_SHARE").is_ok(),
             buffer: Vec::with_capacity(capacity),
-            obj_table: HashMap::new(),
             str_idx_table: HashMap::new(),
             position_idx_table: HashMap::new(),
             location_idx_table: HashMap::new(),
@@ -402,8 +369,8 @@ impl<'a> MarshalWriter<'a> {
             attr_tuple_table: HashMap::new(),
             vd_name_type_table: HashMap::new(),
             singleton_attr_list_table: HashMap::new(),
-            tyvar_core_type_table: HashMap::new(),
-            tyvar_name_table: HashMap::new(),
+            tyvar_core_type_table: TyvarShareTable::default(),
+            tyvar_name_table: TyvarShareTable::default(),
 
             location_value_table: HashMap::new(),
             position_value_table: HashMap::new(),
@@ -438,7 +405,7 @@ impl<'a> MarshalWriter<'a> {
     }
 
     /// Get the arena reference, panics if not set.
-    pub fn get_arena(&self) -> &ParseArena {
+    pub fn get_arena(&self) -> &'a ParseArena {
         self.arena
             .expect("MarshalWriter::set_arena must be called before marshalling LocIdx")
     }
@@ -638,44 +605,20 @@ impl<'a> MarshalWriter<'a> {
         self.obj_counter
     }
 
-    /// Reset the writer state for reuse
+    /// Reset the writer state for reuse.
+    ///
+    /// Rebuilds every sharing table from scratch so no back-reference can leak
+    /// into the next stream; only the output buffer allocation and the arena
+    /// reference are kept.
     pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.obj_table.clear();
-        self.str_idx_table.clear();
-        self.position_idx_table.clear();
-        self.location_idx_table.clear();
-        self.lident_idx_table.clear();
-        self.string_lident_table.clear();
-        self.longident_lident_table.clear();
-        self.longident_value_table.clear();
-        self.option_string_table.clear();
-        self.string_value_table.clear();
-        self.string_loc_table.clear();
-        self.lident_loc_table.clear();
-        self.arg_label_table.clear();
-        self.pmod_ident_table.clear();
-        self.attr_tuple_table.clear();
-        self.vd_name_type_table.clear();
-        self.singleton_attr_list_table.clear();
-        self.tyvar_core_type_table.clear();
-        self.tyvar_name_table.clear();
-        self.pstr_empty_table = [None; EmptyPayloadShareKind::COUNT];
-        self.prim_list_table = [None; PrimListShareKind::COUNT];
-        self.jsx_depth = 0;
-        self.extension_depth = 0;
-        self.external_ext_depth = 0;
-        self.pack_depth = 0;
-        self.letmodule_expr_depth = 0;
-        self.module_typeof_depth = 0;
-        self.simple_core_type_table.clear();
-        self.raw_expansion_expr_table.clear();
-        self.internal_expansive_attr_tuple = None;
-        self.current_expr_idx = None;
-        self.case_owner_stack.clear();
-        self.obj_counter = 0;
-        self.size_32 = 0;
-        self.size_64 = 0;
+        let mut buffer = std::mem::take(&mut self.buffer);
+        buffer.clear();
+        let arena = self.arena;
+        *self = Self {
+            buffer,
+            arena,
+            ..Self::with_capacity(0)
+        };
     }
 
     // ========== Low-level byte writing ==========
@@ -768,16 +711,16 @@ impl<'a> MarshalWriter<'a> {
     /// - -2^30 to 2^30-1: CODE_INT32 + 4 bytes
     /// - larger: CODE_INT64 + 8 bytes
     pub fn write_int(&mut self, n: i64) {
-        if n >= 0 && n < 0x40 {
+        if (0..0x40).contains(&n) {
             // Small int: single byte 0x40 | n
             self.write_u8(PREFIX_SMALL_INT + (n as u8));
-        } else if n >= -128 && n < 128 {
+        } else if (-128..128).contains(&n) {
             self.write_u8(CODE_INT8);
             self.write_i8(n as i8);
-        } else if n >= -32768 && n < 32768 {
+        } else if (-32768..32768).contains(&n) {
             self.write_u8(CODE_INT16);
             self.write_i16_be(n as i16);
-        } else if n >= -(1 << 30) && n < (1 << 30) {
+        } else if (-(1 << 30)..(1 << 30)).contains(&n) {
             self.write_u8(CODE_INT32);
             self.write_i32_be(n as i32);
         } else {
@@ -892,15 +835,14 @@ impl<'a> MarshalWriter<'a> {
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
-        let s = self.get_arena().get_string(idx).to_string();
-        if self.get_arena().is_shareable_literal(&s) && !self.string_value_table.contains_key(&s) {
-            self.string_value_table.insert(s.clone(), obj_idx);
+        let arena = self.get_arena();
+        let s: &'a str = arena.get_string(idx);
+        if arena.is_shareable_literal(s) && !self.string_value_table.contains_key(s) {
+            self.string_value_table.insert(s.to_owned(), obj_idx);
         }
-        // Use Latin-1 conversion: source strings are read as Latin-1 (each byte → char),
-        // so non-ASCII chars (0x80-0xFF) are stored as 2-byte UTF-8 in Rust Strings.
-        // Convert back to Latin-1 (each char → byte) to match OCaml's byte-level output.
-        let latin1_bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
-        self.write_string(&latin1_bytes);
+        // Latin-1 conversion (see `write_str`): source strings are read as Latin-1,
+        // so non-ASCII chars (0x80-0xFF) are written back as single bytes.
+        self.write_str(s);
 
         // Record for future sharing
         self.str_idx_table.insert(idx, obj_idx);
@@ -918,20 +860,11 @@ impl<'a> MarshalWriter<'a> {
         // Check if this position index was already written
         if let Some(&obj_idx) = self.position_idx_table.get(&idx) {
             let d = self.obj_counter - obj_idx;
-            // DEBUG
-            if self.debug_marshal {
-                let pos = self.get_arena().get_position(idx);
-                eprintln!(
-                    "SHARE PosIdx({}) at obj_counter={}, obj_idx={}, dist={}, pos=({},{},{})",
-                    idx.0, self.obj_counter, obj_idx, d, pos.line, pos.bol, pos.cnum
-                );
-            }
             self.write_shared_ref(d);
             return false;
         }
 
-        // Look up the position in the arena and copy it to end the borrow
-        let pos = *self.get_arena().get_position(idx);
+        let pos = self.get_arena().get_position(idx);
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
@@ -945,13 +878,6 @@ impl<'a> MarshalWriter<'a> {
         self.write_int(pos.cnum as i64);
 
         // Record for future sharing
-        // DEBUG
-        if self.debug_marshal {
-            eprintln!(
-                "WRITE PosIdx({}) at obj_idx={}, pos=({},{},{})",
-                idx.0, obj_idx, pos.line, pos.bol, pos.cnum
-            );
-        }
         self.position_idx_table.insert(idx, obj_idx);
 
         true
@@ -974,23 +900,13 @@ impl<'a> MarshalWriter<'a> {
             return;
         }
 
-        // Look up the location in the arena and clone it to end the borrow
-        let loc = self.get_arena().get_location(idx).clone();
+        let loc = self.get_arena().get_location(idx);
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
         // Write the Location block
         self.write_block_header(0, 3);
-        // DEBUG
-        if self.debug_marshal {
-            let start = self.get_arena().get_position(loc.loc_start);
-            let end = self.get_arena().get_position(loc.loc_end);
-            eprintln!(
-                "WRITE LocIdx({}) at obj_idx={}, start_pos=({},{},{}), end_pos=({},{},{})",
-                idx.0, obj_idx, start.line, start.bol, start.cnum, end.line, end.bol, end.cnum
-            );
-        }
         // Write start and end positions (with sharing by their indices)
         self.write_pos_idx(loc.loc_start);
         self.write_pos_idx(loc.loc_end);
@@ -1179,13 +1095,13 @@ impl<'a> MarshalWriter<'a> {
 
     /// Look up a tyvar core_type in the sharing table.
     /// Used to share Ptyp_var core_types from from_labels (handle_obj).
-    pub fn tyvar_core_type_table_get(&self, key: &(String, LocIdx)) -> Option<&u32> {
-        self.tyvar_core_type_table.get(key)
+    pub fn tyvar_core_type_table_get(&self, name: &str, loc: LocIdx) -> Option<u32> {
+        self.tyvar_core_type_table.get(name, loc)
     }
 
     /// Insert a tyvar core_type into the sharing table.
-    pub fn tyvar_core_type_table_insert(&mut self, key: (String, LocIdx), obj_idx: u32) {
-        self.tyvar_core_type_table.insert(key, obj_idx);
+    pub fn tyvar_core_type_table_insert(&mut self, name: &str, loc: LocIdx, obj_idx: u32) {
+        self.tyvar_core_type_table.insert(name, loc, obj_idx);
     }
 
     /// Write a Ptyp_var name string with sharing scoped by (name, location).
@@ -1194,8 +1110,7 @@ impl<'a> MarshalWriter<'a> {
     /// object for a given tyvar source location. Keying by (name, LocIdx)
     /// mirrors that behavior without global value-based sharing.
     pub fn write_tyvar_name_shared(&mut self, name: &str, loc: LocIdx) {
-        let key = (name.to_string(), loc);
-        if let Some(&obj_idx) = self.tyvar_name_table.get(&key) {
+        if let Some(obj_idx) = self.tyvar_name_table.get(name, loc) {
             let d = self.obj_counter - obj_idx;
             self.write_shared_ref(d);
             return;
@@ -1203,7 +1118,7 @@ impl<'a> MarshalWriter<'a> {
 
         let obj_idx = self.obj_counter;
         self.write_str(name);
-        self.tyvar_name_table.insert(key, obj_idx);
+        self.tyvar_name_table.insert(name, loc, obj_idx);
     }
 
     /// Write a Longident by arena index with sharing.
@@ -1267,76 +1182,28 @@ impl<'a> MarshalWriter<'a> {
         }
 
         // Special-case static longidents that share prefix nodes in OCaml.
-        let array_set = self.get_arena().array_set_lid();
-        let array_get = self.get_arena().array_get_lid();
-        let belt_array_concat = self.get_arena().belt_array_concat_many_lid();
-        let belt_list_concat = self.get_arena().belt_list_concat_many_lid();
-        let belt_array_lident = self.get_arena().belt_array_lident();
-        let belt_list_lident = self.get_arena().belt_list_lident();
-
-        if idx == array_set || idx == array_get {
-            let name = match self.get_arena().get_longident(idx) {
-                Longident::Ldot(_, name) => *name,
-                other => {
-                    let lid = other.clone();
-                    obj_idx = self.write_longident(&lid);
-                    self.lident_idx_table.insert(idx, obj_idx);
-                    if let Some(name_idx) = string_lident_key {
-                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
-                    }
-                    return true;
-                }
-            };
-            let array_lident = self.get_arena().array_lident();
-            self.write_ldot_with_prefix_idx(array_lident, name);
-        } else if idx == belt_array_concat {
-            let name = match self.get_arena().get_longident(idx) {
-                Longident::Ldot(_, name) => *name,
-                other => {
-                    let lid = other.clone();
-                    obj_idx = self.write_longident(&lid);
-                    self.lident_idx_table.insert(idx, obj_idx);
-                    if let Some(name_idx) = string_lident_key {
-                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
-                    }
-                    return true;
-                }
-            };
-            self.write_ldot_with_prefix_idx(belt_array_lident, name);
-        } else if idx == belt_list_concat {
-            let name = match self.get_arena().get_longident(idx) {
-                Longident::Ldot(_, name) => *name,
-                other => {
-                    let lid = other.clone();
-                    obj_idx = self.write_longident(&lid);
-                    self.lident_idx_table.insert(idx, obj_idx);
-                    if let Some(name_idx) = string_lident_key {
-                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
-                    }
-                    return true;
-                }
-            };
-            self.write_ldot_with_prefix_idx(belt_list_lident, name);
-        } else if idx == belt_array_lident || idx == belt_list_lident {
-            let name = match self.get_arena().get_longident(idx) {
-                Longident::Ldot(_, name) => *name,
-                other => {
-                    let lid = other.clone();
-                    obj_idx = self.write_longident(&lid);
-                    self.lident_idx_table.insert(idx, obj_idx);
-                    if let Some(name_idx) = string_lident_key {
-                        self.string_lident_table.entry(name_idx).or_insert(obj_idx);
-                    }
-                    return true;
-                }
-            };
-            let belt_lident = self.get_arena().belt_lident();
-            self.write_ldot_with_prefix_idx(belt_lident, name);
+        let arena = self.get_arena();
+        let static_prefix = if idx == arena.array_set_lid() || idx == arena.array_get_lid() {
+            Some(arena.array_lident())
+        } else if idx == arena.belt_array_concat_many_lid() {
+            Some(arena.belt_array_lident())
+        } else if idx == arena.belt_list_concat_many_lid() {
+            Some(arena.belt_list_lident())
+        } else if idx == arena.belt_array_lident() || idx == arena.belt_list_lident() {
+            Some(arena.belt_lident())
         } else {
-            // Look up the longident in the arena and clone it to end the borrow.
-            // `write_longident` may return a shared object index for value-shared roots.
-            let lid = self.get_arena().get_longident(idx).clone();
-            obj_idx = self.write_longident(&lid);
+            None
+        };
+
+        let lid = arena.get_longident(idx);
+        match (static_prefix, lid) {
+            (Some(prefix), Longident::Ldot(_, name)) => {
+                self.write_ldot_with_prefix_idx(prefix, *name);
+            }
+            _ => {
+                // `write_longident` may return a shared object index for value-shared roots.
+                obj_idx = self.write_longident(lid);
+            }
         }
 
         self.lident_idx_table.insert(idx, obj_idx);
@@ -1489,47 +1356,6 @@ impl<'a> MarshalWriter<'a> {
 
     // ========== Sharing support ==========
 
-    /// Check if an object with the given identity has been seen before
-    ///
-    /// If found, writes a shared reference and returns true.
-    /// If not found, returns false and the caller should serialize the object.
-    ///
-    /// The `ptr` parameter should be a unique identifier for the object,
-    /// typically derived from a pointer address.
-    pub fn check_shared(&mut self, ptr: usize) -> bool {
-        if let Some(&pos) = self.obj_table.get(&ptr) {
-            // Calculate distance from current position
-            let d = self.obj_counter - pos;
-            self.write_shared_ref(d);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Record that an object has been serialized at the current position
-    ///
-    /// Call this after serializing a sharable object (strings, blocks).
-    /// The `ptr` parameter should match what was passed to `check_shared`.
-    /// Record a pointer location for sharing.
-    ///
-    /// Note: This does NOT increment obj_counter because the object should
-    /// have already been written (and counted) by write_block_header or write_string.
-    /// The caller should pass the object index that was used when writing.
-    pub fn record_location_at(&mut self, ptr: usize, obj_idx: u32) {
-        self.obj_table.insert(ptr, obj_idx);
-    }
-
-    /// Record a pointer location for sharing using the current counter value.
-    ///
-    /// DEPRECATED: Use record_location_at with the correct object index instead.
-    /// This is kept for backwards compatibility with tests.
-    pub fn record_location(&mut self, ptr: usize) {
-        // Record at the previous object index (obj_counter - 1) since the object
-        // was already written and the counter was incremented
-        self.obj_table.insert(ptr, self.obj_counter - 1);
-    }
-
     /// Write a shared reference
     pub fn write_shared_ref(&mut self, d: u32) {
         if d < 0x100 {
@@ -1630,21 +1456,24 @@ impl<'a> MarshalWriter<'a> {
     ///
     /// - None → integer 0
     /// - Some(s) → Block(tag=0, [s]) with content-based sharing
-    pub fn write_option_string(&mut self, opt: &Option<Cow<'static, str>>) {
+    pub fn write_option_string(&mut self, opt: Option<&str>) {
+        let Some(s) = opt else {
+            // None is encoded as integer 0, not a block, so no sharing needed
+            self.write_int(0);
+            return;
+        };
+
         // OCaml does not reliably share Some("json") wrappers across contexts.
         // Avoid global content-based sharing for this delimiter.
-        if matches!(opt, Some(s) if &**s == "json") {
+        if s == "json" {
             self.write_block_header(0, 1);
-            match opt {
-                Some(s) => self.write_str(s),
-                None => self.write_int(0),
-            }
+            self.write_str(s);
             return;
         }
 
         // `%external` rewrites use Some("") delimiters with a shared inner string
         // but fresh wrapper allocation.
-        if matches!(opt, Some(s) if s.is_empty()) && self.in_external_ext() {
+        if s.is_empty() && self.in_external_ext() {
             self.write_block_header(0, 1);
             if self.arena.is_some() {
                 let empty_idx = self.get_arena().ppx_empty_str();
@@ -1655,38 +1484,30 @@ impl<'a> MarshalWriter<'a> {
             return;
         }
 
-        // Check if we've written this exact Option<String> before
-        match opt {
-            None => {
-                // None is encoded as integer 0, not a block, so no sharing needed
-                self.write_int(0);
-            }
-            Some(s) => {
-                if self.get_arena().is_shareable_literal(s) {
-                    // For shareable literals (spice), share the string itself but
-                    // avoid sharing the wrapper to match OCaml's pointer behavior.
-                    self.write_block_header(0, 1);
-                    self.write_str_value_shared(s);
-                    return;
-                }
-
-                if let Some(&obj_idx) = self.option_string_table.get(opt) {
-                    let d = self.obj_counter - obj_idx;
-                    self.write_shared_ref(d);
-                    return;
-                }
-
-                // Record the object index BEFORE writing the block
-                let obj_idx = self.obj_counter;
-
-                // Write Some(s) as Block(tag=0, [s])
-                self.write_block_header(0, 1);
-                self.write_str(s);
-
-                // Record for future sharing
-                self.option_string_table.insert(opt.clone(), obj_idx);
-            }
+        if self.get_arena().is_shareable_literal(s) {
+            // For shareable literals (spice), share the string itself but
+            // avoid sharing the wrapper to match OCaml's pointer behavior.
+            self.write_block_header(0, 1);
+            self.write_str_value_shared(s);
+            return;
         }
+
+        // Check if we've written this exact Some(s) before
+        if let Some(&obj_idx) = self.option_string_table.get(s) {
+            let d = self.obj_counter - obj_idx;
+            self.write_shared_ref(d);
+            return;
+        }
+
+        // Record the object index BEFORE writing the block
+        let obj_idx = self.obj_counter;
+
+        // Write Some(s) as Block(tag=0, [s])
+        self.write_block_header(0, 1);
+        self.write_str(s);
+
+        // Record for future sharing
+        self.option_string_table.insert(s.to_owned(), obj_idx);
     }
 
     /// Write a shared `PStr []` payload for a specific sharing group.
@@ -1980,35 +1801,6 @@ mod tests {
 
         // Payload
         assert_eq!(output[20], 0x6A);
-    }
-
-    #[test]
-    fn test_sharing() {
-        let mut w = MarshalWriter::new();
-
-        // Simulate serializing two objects, second references first
-        let ptr1 = 0x1000;
-        let ptr2 = 0x2000;
-
-        // First object: not shared
-        assert!(!w.check_shared(ptr1));
-        w.write_block_header(0, 1);
-        w.write_int(42);
-        w.record_location(ptr1);
-
-        // Second object: also not shared
-        assert!(!w.check_shared(ptr2));
-        w.write_block_header(0, 1);
-        w.write_int(99);
-        w.record_location(ptr2);
-
-        // First object again: should be shared
-        assert!(w.check_shared(ptr1));
-        // Distance = 2 - 0 = 2
-        // CODE_SHARED8, 2
-        let payload = w.payload();
-        let len = payload.len();
-        assert_eq!(&payload[len - 2..], &[CODE_SHARED8, 2]);
     }
 
     #[test]

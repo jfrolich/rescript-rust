@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateSignature.ml:1-169.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::parse_arena::ParseArena;
 use crate::types::typedtree::{
@@ -70,7 +69,7 @@ pub fn translate_module_declaration(
     let type_env = crate::gentype::type_env::new_module(name, type_env);
     match &module_declaration.md_type.mty_desc {
         ModuleTypeDesc::Tmty_signature(signature) => {
-            crate::gentype::translation::combine(&translate_signature(
+            crate::gentype::translation::combine(translate_signature(
                 ctx,
                 arena,
                 config,
@@ -84,7 +83,7 @@ pub fn translate_module_declaration(
             match crate::gentype::type_env::lookup_module_type_signature(path, &type_env) {
                 None => crate::gentype::translation::empty(),
                 Some((signature, _, type_env)) => {
-                    crate::gentype::translation::combine(&translate_signature(
+                    crate::gentype::translation::combine(translate_signature(
                         ctx,
                         arena,
                         config,
@@ -100,7 +99,6 @@ pub fn translate_module_declaration(
         ModuleTypeDesc::Tmty_with(_, _) => not_implemented("Tmty_with"),
         ModuleTypeDesc::Tmty_typeof(_) => not_implemented("Tmty_typeof"),
         ModuleTypeDesc::Tmty_alias(_, _) => not_implemented("Tmty_alias"),
-        ModuleTypeDesc::Tmty_placeholder => crate::gentype::translation::empty(),
     }
 }
 
@@ -129,7 +127,7 @@ pub fn translate_module_type_declaration(
                 signature_without_values
                     .sig_items
                     .retain(|item| !matches!(item.sig_desc, TypedSignatureItemDesc::Tsig_value(_)));
-                crate::gentype::translation::combine(&translate_signature(
+                crate::gentype::translation::combine(translate_signature(
                     ctx,
                     arena,
                     config,
@@ -151,7 +149,6 @@ pub fn translate_module_type_declaration(
             ModuleTypeDesc::Tmty_with(_, _) => not_implemented("Tmty_with"),
             ModuleTypeDesc::Tmty_typeof(_) => not_implemented("Tmty_typeof"),
             ModuleTypeDesc::Tmty_alias(_, _) => not_implemented("Tmty_alias"),
-            ModuleTypeDesc::Tmty_placeholder => crate::gentype::translation::empty(),
         },
     }
 }

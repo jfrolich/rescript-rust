@@ -12,14 +12,14 @@
 //! - `persistent_env`: Caches loaded modules and provides lookup functions
 
 pub mod cmi_format;
-pub mod ffi_decode;
 pub mod digest_ser;
+pub mod ffi_decode;
 pub mod item_deps;
-pub mod stored_module;
 pub mod marshal_reader;
 pub mod persistent_env;
 pub mod portable_types;
 pub mod sig_reader;
+pub mod stored_module;
 
 pub use cmi_format::CmiInfos;
 pub use persistent_env::PersistentEnv;

@@ -39,14 +39,14 @@ pub mod context;
 pub mod ctype;
 pub mod decl;
 pub mod env;
-pub mod external_ffi_types;
 pub(crate) mod env_lazy;
+pub mod external_ffi_types;
 pub mod includemod;
 pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
-pub mod record_runtime;
 pub mod printtyp;
+pub mod record_runtime;
 pub mod sexp_typedtree;
 pub mod shared_store;
 pub mod tast_iterator;
@@ -61,10 +61,7 @@ pub mod variance;
 pub mod variant_runtime;
 
 // Re-exports for convenience
-pub use asttypes::{
-    ArgLabel, ArgLabelNoloc, Arity, ClosedFlag, Constant, DirectionFlag, Label, Located,
-    MutableFlag, OverrideFlag, PrivateFlag, RecFlag, VarianceAnnotation, VirtualFlag,
-};
+pub use asttypes::{ArgLabel, Label, Located, MutableFlag, PrivateFlag};
 pub use context::TypeContext;
 pub use decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
@@ -78,23 +75,22 @@ pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, LOWEST_LEVEL, MutabilityRef,
-    PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeDescSer, TypeExpr,
-    TypeExprRef,
+    PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 pub use variance::{Variance, VarianceFlag};
 pub use variant_runtime::{
-    Block as VariantBlock, BlockType as VariantBlockType, TaggedBlock,
-    Configuration as VariantConfiguration, ConstructorCase as VariantConstructorCase,
-    ConstructorReference, Instance as VariantInstance, Layout as VariantLayout,
-    LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
-    TagType as VariantTagType, LiteralTag as VariantLiteralTag, MatchableTag as VariantMatchableTag,
+    Block as VariantBlock, BlockType as VariantBlockType, Configuration as VariantConfiguration,
+    ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
+    Layout as VariantLayout, LayoutRef as VariantLayoutRef, LiteralTag as VariantLiteralTag,
+    MatchableTag as VariantMatchableTag, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
+    TagType as VariantTagType, TaggedBlock,
 };
 
 // btype exports
 pub use btype::{
     hash_variant, is_row_name, is_tconstr, is_tunivar, is_tvar, iter_type_expr,
-    iter_type_expr_kind, mark_type, mark_type_node, row_field, row_field_repr, row_fixed, row_more,
-    row_repr, static_row, unmark_type,
+    iter_type_expr_kind, mark_type_node, row_field, row_field_repr, row_fixed, row_more, row_repr,
+    static_row, unmark_type,
 };
 
 // ctype exports
@@ -106,7 +102,7 @@ pub use ctype::{
 };
 
 // env exports
-pub use env::{Env, EnvError, EnvFlags, EnvResult, EnvSummary, IdTbl, TycompTbl, initial_env};
+pub use env::{Env, EnvError, EnvFlags, EnvResult, IdTbl, TycompTbl, initial_env};
 
 // typecore exports
 pub use typecore::{

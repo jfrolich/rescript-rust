@@ -5,7 +5,7 @@
 //! This corresponds to OCaml's `js_dump_program.ml`.
 
 use super::op::Kind;
-use super::printer::{JsPrinter, convert_ident_name};
+use super::printer::{JsPrinter, js_export_name};
 use super::source_map::{SourceMapBuilder, SourceMapMode, inline_comment, linked_comment};
 use super::{
     Block, DepsProgram, Expression, ExpressionDesc, ModuleFormat, ModulePathResolver, Program,
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-impl JsPrinter {
+impl JsPrinter<'_> {
     /// Print a program
     pub fn print_program(&mut self, program: &Program) {
         self.at_least_two_lines();
@@ -102,7 +102,6 @@ impl JsPrinter {
 
     fn current_module_format(&self) -> ModuleFormat {
         self.module_path_resolver
-            .as_ref()
             .map(ModulePathResolver::module_format)
             .unwrap_or(ModuleFormat::EsModule)
     }
@@ -120,7 +119,6 @@ impl JsPrinter {
 
             let path = self
                 .module_path_resolver
-                .as_ref()
                 .and_then(|resolver| resolver.resolve_module_path(module));
             let Some(path) = path else {
                 continue;
@@ -195,11 +193,7 @@ impl JsPrinter {
             self.newline();
             let local_name = self.ident_name(export);
             self.write(&local_name);
-            let export_name = if export.name() == "default" {
-                "default".to_string()
-            } else {
-                convert_ident_name(export.name())
-            };
+            let export_name = js_export_name(export.name());
             if local_name != export_name {
                 self.write(" as ");
                 self.write(&export_name);
@@ -217,11 +211,7 @@ impl JsPrinter {
                 self.newline();
             }
             let local_name = self.ident_name(export);
-            let export_name = if export.name() == "default" {
-                "default".to_string()
-            } else {
-                convert_ident_name(export.name())
-            };
+            let export_name = js_export_name(export.name());
             self.write("exports.");
             self.write(&export_name);
             self.write(" = ");
@@ -334,15 +324,14 @@ pub fn print_deps_program_with_directives(
     debug: bool,
     jsx_preserve: bool,
 ) -> String {
-    let capacity = estimated_deps_program_output_capacity(program, directives, true);
-    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+    print_deps_program_with_directives_and_options(
+        program,
         module_path_resolver,
+        directives,
         debug,
         jsx_preserve,
-        capacity,
-    );
-    printer.print_deps_program_with_directives(program, directives);
-    printer.into_output()
+        true,
+    )
 }
 
 pub fn print_deps_program_with_directives_and_options(
@@ -381,13 +370,7 @@ pub fn print_deps_program_with_source_map(
     source_root: &str,
     source_file_names: Arc<HashMap<StrIdx, String>>,
 ) -> (String, Option<String>) {
-    let capacity = estimated_block_output_capacity(
-        program.program.block.len(),
-        program.program.exports.len(),
-        program.modules.len(),
-        directives.iter().map(String::len).sum(),
-        emit_header,
-    );
+    let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
     let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
         module_path_resolver,
         debug,
@@ -411,7 +394,7 @@ pub fn print_deps_program_with_source_map(
     let mut output = printer.into_output();
     match mode {
         SourceMapMode::Linked => {
-            output.push_str(&linked_comment(&Path::new(&format!(
+            output.push_str(&linked_comment(Path::new(&format!(
                 "{}.map",
                 target_file.display()
             ))));
@@ -790,7 +773,7 @@ mod tests {
             &DepsProgram {
                 program: Program::new(
                     vec![Statement::variable(VariableDeclaration {
-                        ident: default_ident.clone(),
+                        ident: default_ident,
                         value: Some(Expression::string("xx")),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),

@@ -3,6 +3,7 @@
 //! This module contains the type expression parsing logic, converting tokens
 //! into type AST nodes.
 
+use super::module::parse_attributes;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -239,7 +240,10 @@ pub fn substitute_type_vars(
                                         .map(|substituted| arena.push_core_type(substituted))
                                 })
                                 .collect::<Result<_, _>>()?;
-                            new_groups.push(Located { txt, loc: group.loc });
+                            new_groups.push(Located {
+                                txt,
+                                loc: group.loc,
+                            });
                         }
                         Ok(RowField::Rtag(name, attrs, empty, new_groups))
                     }
@@ -338,7 +342,8 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
-                    let return_type = without_inline_types_context(p, |p| parse_typ_expr_inner(p, true));
+                    let return_type =
+                        without_inline_types_context(p, |p| parse_typ_expr_inner(p, true));
                     let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
                     let end_pos_idx = p.prev_end_pos_idx();
                     let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
@@ -396,7 +401,7 @@ fn parse_type_var_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
 /// Returns a `Ptyp_poly(Box::new((vars, body)))` where body has `Ptyp_constr` for the type vars
 /// (the caller is responsible for substituting to `Ptyp_var`).
 pub fn parse_locally_abstract_type(p: &mut Parser<'_>) -> CoreType {
-    let start_pos = p.start_pos.clone();
+    let start_pos = p.start_pos;
     p.expect(Token::Typ);
     let mut vars: Vec<StringLoc> = vec![];
 
@@ -877,16 +882,20 @@ fn parse_type_constr_with_start(
     // OCaml `parse_atomic_typ_expr` reads the constructor with `parse_value_path`
     // (compiler/syntax/src/res_core.ml:742-776): a lowercase name ends the path
     // immediately; an uppercase head goes through `aux` + `next_unsafe`.
-    let path_parts: Vec<String> = match &p.token {
+    let lid = match &p.token {
         Token::Lident(name) => {
-            let name = name.to_string();
+            // `next` only touches the position arena, so interning first
+            // keeps the string table in the same order.
+            let name = name.clone();
+            let name_idx = p.arena_mut().push_interned_string(&name);
             p.next();
-            vec![name]
+            Longident::Lident(name_idx)
         }
-        _ => super::module::parse_value_path_for_type(p).0,
+        _ => {
+            let path_parts = super::module::parse_value_path_for_type(p).0;
+            super::core::build_longident(p.arena_mut(), &path_parts)
+        }
     };
-
-    let lid = super::core::build_longident(p.arena_mut(), &path_parts);
     let lid_idx = p.push_longident(lid);
 
     // Capture end position for identifier - use caching so it can be shared
@@ -915,8 +924,8 @@ fn parse_type_constr_with_start(
             .count();
         if count > 1 {
             p.err_at(
-                p.arena().get_position(start_pos_idx).clone(),
-                p.prev_end_pos.clone(),
+                *p.arena().get_position(start_pos_idx),
+                p.prev_end_pos,
                 DiagnosticCategory::Message(
                     "Only one inline record definition is allowed per record field. This defines more than one inline record.".to_string(),
                 ),
@@ -938,14 +947,13 @@ fn parse_type_constr_with_start(
     ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
 }
 
-
 /// OCaml `parse_type_constructor_args ~constr_name` (res_core.ml:5140-5180).
 pub(super) fn parse_type_constructor_args(
     p: &mut Parser<'_>,
     lid_idx: crate::parse_arena::LidentIdx,
     lid_loc: &LocIdx,
 ) -> Vec<CoreType> {
-    let lid_loc = lid_loc.clone();
+    let lid_loc = *lid_loc;
     if p.token == Token::LessThan || p.token == Token::Lparen {
         let opening = p.token.clone().into_owned();
         // Report before recovery to suppress cascading errors. The
@@ -976,7 +984,7 @@ pub(super) fn parse_type_constructor_args(
                 .collect();
             let typ = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                    with_loc(lid_idx, lid_loc.clone()),
+                    with_loc(lid_idx, lid_loc),
                     arg_idxs,
                 )))),
                 ptyp_loc: LocIdx::none(),
@@ -1143,7 +1151,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // here; later ones are read by `parse_attributes`.
         let mut doc_attrs = vec![];
         if let Token::DocComment { loc, content } = &p.token {
-            let loc = loc.clone();
+            let loc = *loc;
             let content = content.clone();
             p.next();
             let loc = p.from_location(&loc);
@@ -1159,10 +1167,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // res_core.ml:4827-4831); `parse_comma_delimited_region` then stops at
         // `)`/EOF/abort or reports the token and skips it
         // (res_core.ml:1068-1105).
-        if !has_dot
-            && p.token != Token::Tilde
-            && !super::grammar::is_typ_expr_start(&p.token)
-        {
+        if !has_dot && p.token != Token::Tilde && !super::grammar::is_typ_expr_start(&p.token) {
             if p.token == Token::Eof
                 || p.token == Token::Rparen
                 || super::core::recover::should_abort_list_parse(p)
@@ -1343,7 +1348,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 let first_arg_start = p.loc_start(arg_typ.ptyp_loc);
                 // If first arg location starts exactly at post_doc_start, it's a direct arrow
                 // If it starts elsewhere (before due to inner `.` or after due to parens), don't extend
-                let post_doc_start = p.arena().get_position(post_doc_start_idx).clone();
+                let post_doc_start = *p.arena().get_position(post_doc_start_idx);
                 let is_direct_arrow = first_arg_start.cnum == post_doc_start.cnum;
                 if is_direct_arrow {
                     // Extend arrow location to include `.`
@@ -1559,58 +1564,6 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
     super::core::parse_lident(p)
 }
 
-/// Parse attributes (including doc comments which become res.doc attributes).
-fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
-    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
-    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
-    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
-    let mut attrs = Attributes::new();
-    loop {
-        match &p.token {
-            Token::At => {
-                if let Some(attr) = parse_attribute(p) {
-                    attrs.push(attr);
-                }
-            }
-            Token::DocComment { loc, content } => {
-                let loc_cloned = loc.clone();
-                let content = content.clone();
-                p.next();
-                let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(
-                    p.arena_mut(),
-                    loc,
-                    content,
-                ));
-            }
-            _ => break,
-        }
-    }
-    p.eat_breadcrumb();
-    attrs
-}
-
-/// Parse a single attribute.
-fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
-    if p.token != Token::At {
-        return None;
-    }
-    // Use push_start_pos() to get a cached PosIdx for position sharing.
-    // In OCaml, when parsing type parameters with attributes, both the
-    // parameter's start_pos and the attribute's location start point to the
-    // same position object (pointer equality). Using the cache ensures we
-    // get the same PosIdx if someone else already captured this position.
-    let start_pos_idx = p.start_pos_idx();
-    p.next();
-
-    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
-    let attr_id = super::module::parse_extension_id(p, start_pos_idx);
-
-    let payload = super::module::parse_payload_region(p);
-
-    Some((attr_id, payload))
-}
-
 // ============================================================================
 // Tuple Type
 // ============================================================================
@@ -1641,8 +1594,8 @@ fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) 
     // OCaml: A tuple needs at least two elements
     if types.len() == 1 {
         p.err_at(
-            p.arena().get_position(start_pos_idx).clone(),
-            p.prev_end_pos.clone(),
+            *p.arena().get_position(start_pos_idx),
+            p.prev_end_pos,
             DiagnosticCategory::Message("A tuple needs at least two elements".to_string()),
         );
     }
@@ -1707,7 +1660,7 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
                 0,
                 (
                     inline_type_idx,
-                    loc.clone(),
+                    loc,
                     TypeKind::Ptype_record(labels),
                     params.clone(),
                 ),
@@ -1720,7 +1673,7 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
         (
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                    with_loc(lid_idx, loc.clone()),
+                    with_loc(lid_idx, loc),
                     type_args,
                 )))),
                 ptyp_loc: loc,
@@ -1796,9 +1749,6 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     }
 }
 
-
-
-
 /// OCaml `parse_string_field_declaration` (compiler/syntax/src/res_core.ml:5186-5222).
 pub(super) fn parse_string_field_declaration(p: &mut Parser<'_>) -> Option<ObjectField> {
     // OCaml res_core.ml:5186-5222 parses object field types with plain
@@ -1869,7 +1819,10 @@ fn parse_polymorphic_variant_type_args(p: &mut Parser<'_>) -> VariantTypeArgs {
         });
     p.expect(Token::Rparen);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let txt = args.into_iter().map(|a| p.arena_mut().push_core_type(a)).collect();
+    let txt = args
+        .into_iter()
+        .map(|a| p.arena_mut().push_core_type(a))
+        .collect();
     Located { txt, loc }
 }
 
@@ -1939,7 +1892,7 @@ fn parse_tag_names(p: &mut Parser<'_>) -> Vec<Label> {
 /// A leading doc comment becomes a `res.doc` attribute.
 fn parse_optional_doc_comment_attr(p: &mut Parser<'_>) -> Attributes {
     if let Token::DocComment { loc, content } = &p.token {
-        let loc = loc.clone();
+        let loc = *loc;
         let content = content.clone();
         p.next();
         let loc = p.from_location(&loc);
@@ -2102,7 +2055,11 @@ fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
 /// Parse a package type without leading paren: S [with type constraints].
 /// Used for first-class module constraints: module(Expr: S)
 /// OCaml `parse_package_type ~start_pos ~attrs` (res_core.ml:4694-4704).
-pub fn parse_package_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> CoreType {
+pub fn parse_package_type(
+    p: &mut Parser<'_>,
+    start_pos_idx: PosIdx,
+    attrs: Attributes,
+) -> CoreType {
     let lid = super::module::parse_module_type_long_ident(p);
 
     // Parse optional constraints ("with" is not a keyword)

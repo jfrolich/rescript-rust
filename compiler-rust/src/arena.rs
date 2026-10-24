@@ -77,6 +77,15 @@ impl<T, Idx: ArenaIdx> Default for Arena<T, Idx> {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn out_of_bounds<T>(index: usize, len: usize) -> ! {
+    panic!(
+        "{} arena index {index} out of bounds for length {len}",
+        std::any::type_name::<T>()
+    )
+}
+
 impl<T, Idx: ArenaIdx> Arena<T, Idx> {
     /// Create a new empty arena.
     pub fn new() -> Self {
@@ -113,24 +122,25 @@ impl<T, Idx: ArenaIdx> Arena<T, Idx> {
 
     /// Initialize or replace a previously reserved slot.
     pub fn initialize(&mut self, idx: Idx, item: T) {
-        self.items[idx.to_u32() as usize] = item;
+        *self.get_mut(idx) = item;
     }
 
     /// Get a reference to a value by typed index.
     pub fn get(&self, idx: Idx) -> &T {
         let index = idx.to_u32() as usize;
-        self.items.get(index).unwrap_or_else(|| {
-            panic!(
-                "{} arena index {index} out of bounds for length {}",
-                std::any::type_name::<T>(),
-                self.items.len()
-            )
-        })
+        let len = self.items.len();
+        self.items
+            .get(index)
+            .unwrap_or_else(|| out_of_bounds::<T>(index, len))
     }
 
     /// Get a mutable reference to a value by typed index.
     pub fn get_mut(&mut self, idx: Idx) -> &mut T {
-        &mut self.items[idx.to_u32() as usize]
+        let index = idx.to_u32() as usize;
+        let len = self.items.len();
+        self.items
+            .get_mut(index)
+            .unwrap_or_else(|| out_of_bounds::<T>(index, len))
     }
 
     /// Get the number of items in the arena.

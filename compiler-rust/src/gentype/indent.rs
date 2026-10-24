@@ -1,5 +1,4 @@
 // Port of compiler/gentype/Indent.ml:1-23.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 pub type T = Option<String>;
 
@@ -11,10 +10,7 @@ pub fn break_(indent: &T) -> String {
 }
 
 pub fn more(indent: &T) -> T {
-    match indent {
-        None => None,
-        Some(s) => Some(format!("  {s}")),
-    }
+    indent.as_ref().map(|s| format!("  {s}"))
 }
 
 pub fn heuristic_fields<TField>(indent: &T, fields: &[TField]) -> T {

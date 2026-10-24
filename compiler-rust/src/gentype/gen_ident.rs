@@ -1,5 +1,4 @@
 // Port of compiler/gentype/GenIdent.ml:1-23.
-// This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;

@@ -102,7 +102,7 @@ pub fn generate_asts(
                         inc();
                         let ast_result = generate_ast(
                             package,
-                            &source_file.implementation.path.to_owned(),
+                            &source_file.implementation.path,
                             build_state,
                             build_state.get_warn_error_override(),
                             use_rust_parser,
@@ -112,11 +112,11 @@ pub fn generate_asts(
                         )
                         .map_err(|e| e.to_string());
 
-                        let iast_result = match source_file.interface.as_ref().map(|i| i.path.to_owned()) {
-                            Some(interface_file_path) => {
+                        let iast_result = match source_file.interface.as_ref() {
+                            Some(interface) => {
                                 match generate_ast(
                                     package,
-                                    &interface_file_path.to_owned(),
+                                    &interface.path,
                                     build_state,
                                     build_state.get_warn_error_override(),
                                     use_rust_parser,
@@ -163,264 +163,57 @@ pub fn generate_asts(
         )>>()
         .into_iter()
         .for_each(|(module_name, ast_result, iast_result, is_dirty)| {
-            // Get package name first to avoid borrow checker issues
-            let package_name = build_state
-                .build_state
-                .modules
-                .get(&module_name)
-                .map(|module| module.package_name.clone())
-                .unwrap_or_else(|| {
-                    eprintln!("Module not found: {module_name}");
-                    String::new()
-                });
-
+            let Some(module) = build_state.build_state.modules.get_mut(&module_name) else {
+                eprintln!("Module not found: {module_name}");
+                return;
+            };
             let package = build_state
                 .build_state
                 .packages
-                .get(&package_name)
+                .get(&module.package_name)
                 .expect("Package not found");
-
-            if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
-                // if the module is dirty, mark it also compile_dirty
-                // do NOT set to false if the module is not parse_dirty, it needs to keep
-                // the compile_dirty flag if it was set before
-                if is_dirty {
-                    module.compile_dirty = true;
-                    module.deps_dirty = true;
-                    // Re-parsed: its warnings, if any, are recorded below.
-                    let mut parse_warnings = build_state.parse_warnings.lock().unwrap();
-                    parse_warnings.remove(&format!("{module_name}:impl"));
-                    parse_warnings.remove(&format!("{module_name}:intf"));
-                }
-                if let SourceType::SourceFile(ref mut source_file) = module.source_type {
-                    // We get Err(x) when there is a parse error. When it's Ok(_, Some(
-                    // stderr_warnings )), the outputs are warnings
-                    match ast_result {
-                        // In case of an internal dependency, we want to keep on
-                        // propagating the warning with every compile. So we mark it as dirty for
-                        // the next round
-                        Ok(GeneratedAst {
-                            stderr: Some(stderr_warnings),
-                            stored_ast,
-                            deps,
-                            ..
-                        }) if package.is_local_dep => {
-                            source_file.implementation.parse_state = ParseState::Warning;
-                            source_file.implementation.parse_dirty = true;
-                            if !build_state.parse_warnings_replayed {
-                                logs::append(package, &stderr_warnings);
-                            }
-                            stderr.push_str(&stderr_warnings);
-                            record_parse_warnings(
-                                &build_state.parse_warnings,
-                                format!("{module_name}:impl"),
-                                &package.name,
-                                &stderr_warnings,
-                            );
-                            if let Some(ast) = stored_ast {
-                                build_state
-                                    .stored_asts
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:impl"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state
-                                    .in_memory_deps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:impl"), deps);
-                            }
-                        }
-                        Ok(GeneratedAst {
-                            stderr: Some(stderr_warnings),
-                            stored_ast,
-                            deps,
-                            ..
-                        }) => {
-                            source_file.implementation.parse_state = ParseState::Success;
-                            source_file.implementation.parse_dirty = false;
-                            // External dep: surface only the critical warnings
-                            // (e.g. legacy `(. ...)` uncurried syntax) so
-                            // downstream users can report breakage upstream.
-                            if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
-                                if !build_state.parse_warnings_replayed {
-                                    logs::append(package, &kept);
-                                }
-                                stderr.push_str(&kept);
-                                record_parse_warnings(
-                                    &build_state.parse_warnings,
-                                    format!("{module_name}:impl"),
-                                    &package.name,
-                                    &kept,
-                                );
-                            }
-                            if let Some(ast) = stored_ast {
-                                build_state
-                                    .stored_asts
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:impl"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state
-                                    .in_memory_deps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:impl"), deps);
-                            }
-                        }
-                        Ok(GeneratedAst {
-                            stderr: None,
-                            stored_ast,
-                            deps,
-                            ..
-                        }) => {
-                            source_file.implementation.parse_state = ParseState::Success;
-                            source_file.implementation.parse_dirty = false;
-                            if let Some(ast) = stored_ast {
-                                build_state
-                                    .stored_asts
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:impl"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state
-                                    .in_memory_deps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:impl"), deps);
-                            }
-                        }
-                        Err(err) => {
-                            // Some compilation error
-                            source_file.implementation.parse_state = ParseState::ParseError;
-                            source_file.implementation.parse_dirty = true;
-                            logs::append(package, &err);
-                            has_failure = true;
-                            stderr.push_str(&err);
-                        }
-                    };
-
-                    // We get Err(x) when there is a parse error. When it's Ok(_, Some(( _path,
-                    // stderr_warnings ))), the outputs are warnings
-                    match iast_result {
-                        // In case of an internal dependency, we want to keep on
-                        // propagating the warning with every compile. So we mark it as dirty for
-                        // the next round
-                        Ok(Some(GeneratedAst {
-                            stderr: Some(stderr_warnings),
-                            stored_ast,
-                            deps,
-                            ..
-                        })) if package.is_local_dep => {
-                            if let Some(interface) = source_file.interface.as_mut() {
-                                interface.parse_state = ParseState::Warning;
-                                interface.parse_dirty = true;
-                            }
-                            if !build_state.parse_warnings_replayed {
-                                logs::append(package, &stderr_warnings);
-                            }
-                            stderr.push_str(&stderr_warnings);
-                            record_parse_warnings(
-                                &build_state.parse_warnings,
-                                format!("{module_name}:intf"),
-                                &package.name,
-                                &stderr_warnings,
-                            );
-                            if let Some(ast) = stored_ast {
-                                build_state
-                                    .stored_asts
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:intf"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state
-                                    .in_memory_deps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:intf"), deps);
-                            }
-                        }
-                        Ok(Some(GeneratedAst {
-                            stderr: Some(stderr_warnings),
-                            stored_ast,
-                            deps,
-                            ..
-                        })) => {
-                            if let Some(interface) = source_file.interface.as_mut() {
-                                interface.parse_state = ParseState::Success;
-                                interface.parse_dirty = false;
-                            }
-                            if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
-                                if !build_state.parse_warnings_replayed {
-                                    logs::append(package, &kept);
-                                }
-                                stderr.push_str(&kept);
-                                record_parse_warnings(
-                                    &build_state.parse_warnings,
-                                    format!("{module_name}:intf"),
-                                    &package.name,
-                                    &kept,
-                                );
-                            }
-                            if let Some(ast) = stored_ast {
-                                build_state
-                                    .stored_asts
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:intf"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state
-                                    .in_memory_deps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:intf"), deps);
-                            }
-                        }
-                        Ok(Some(GeneratedAst {
-                            stderr: None,
-                            stored_ast,
-                            deps,
-                            ..
-                        })) => {
-                            if let Some(interface) = source_file.interface.as_mut() {
-                                interface.parse_state = ParseState::Success;
-                                interface.parse_dirty = false;
-                            }
-                            if let Some(ast) = stored_ast {
-                                build_state
-                                    .stored_asts
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:intf"), ast);
-                            }
-                            if let Some(deps) = deps {
-                                build_state
-                                    .in_memory_deps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(format!("{module_name}:intf"), deps);
-                            }
-                        }
-                        Err(err) => {
-                            // Some compilation error
-                            if let Some(interface) = source_file.interface.as_mut() {
-                                interface.parse_state = ParseState::ParseError;
-                                interface.parse_dirty = true;
-                            }
-                            logs::append(package, &err);
-                            has_failure = true;
-                            stderr.push_str(&err);
-                        }
-                        Ok(None) => {
-                            // The file had no interface file associated
-                        }
-                    }
+            // if the module is dirty, mark it also compile_dirty
+            // do NOT set to false if the module is not parse_dirty, it needs to keep
+            // the compile_dirty flag if it was set before
+            if is_dirty {
+                module.compile_dirty = true;
+                module.deps_dirty = true;
+                // Re-parsed: its warnings, if any, are recorded below.
+                let mut parse_warnings = build_state.parse_warnings.lock().unwrap();
+                parse_warnings.remove(&format!("{module_name}:impl"));
+                parse_warnings.remove(&format!("{module_name}:intf"));
+            }
+            if let SourceType::SourceFile(ref mut source_file) = module.source_type {
+                let sinks = ParseSinks {
+                    stored_asts: &build_state.stored_asts,
+                    in_memory_deps: &build_state.in_memory_deps,
+                    parse_warnings: &build_state.parse_warnings,
+                    warnings_replayed: build_state.parse_warnings_replayed,
                 };
+                let (parse_state, parse_dirty) = sinks.apply(
+                    package,
+                    format!("{module_name}:impl"),
+                    ast_result,
+                    &mut stderr,
+                    &mut has_failure,
+                );
+                source_file.implementation.parse_state = parse_state;
+                source_file.implementation.parse_dirty = parse_dirty;
+
+                // `None` when the file has no interface file associated.
+                if let Some(iast_result) = iast_result.transpose() {
+                    let (parse_state, parse_dirty) = sinks.apply(
+                        package,
+                        format!("{module_name}:intf"),
+                        iast_result,
+                        &mut stderr,
+                        &mut has_failure,
+                    );
+                    if let Some(interface) = source_file.interface.as_mut() {
+                        interface.parse_state = parse_state;
+                        interface.parse_dirty = parse_dirty;
+                    }
+                }
             }
         });
 
@@ -712,7 +505,8 @@ fn generate_ast(
     let parser_args = if use_rust_parser {
         Vec::new()
     } else {
-        let contents = helpers::read_file(&file_path).expect("Error reading file");
+        let contents = helpers::read_file(&file_path)
+            .with_context(|| format!("Error reading file {}", file_path.display()))?;
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
             &package.config,
@@ -733,7 +527,8 @@ fn generate_ast(
     // generate the dir of the ast_path (it mirrors the source file dir)
     if !in_process {
         let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
-        helpers::create_path(&ast_parent_path);
+        helpers::create_path(&ast_parent_path)
+            .with_context(|| format!("Could not create {}", ast_parent_path.display()))?;
     }
 
     /* Create .ast */
@@ -756,51 +551,37 @@ fn generate_ast(
             deps,
         })
     } else {
-        match Some(
-            Command::new(&build_state.compiler_info.bsc_path)
-                .current_dir(&build_path_abs)
-                .args(parser_args)
-                .output()
-                .map_err(|e| {
-                    anyhow!(
-                        "Error running bsc for parsing {}: {}",
-                        filename.to_string_lossy(),
-                        e
-                    )
-                })?,
-        ) {
-            Some(res_to_ast) => {
-                let stderr = String::from_utf8_lossy(&res_to_ast.stderr).to_string();
+        let res_to_ast = Command::new(&build_state.compiler_info.bsc_path)
+            .current_dir(&build_path_abs)
+            .args(parser_args)
+            .output()
+            .map_err(|e| {
+                anyhow!(
+                    "Error running bsc for parsing {}: {}",
+                    filename.to_string_lossy(),
+                    e
+                )
+            })?;
+        let stderr = String::from_utf8_lossy(&res_to_ast.stderr).into_owned();
 
-                if helpers::contains_ascii_characters(&stderr) {
-                    if res_to_ast.status.success() {
-                        Ok(GeneratedAst {
-                            path: ast_path.clone(),
-                            stderr: Some(stderr.to_string()),
-                            stored_ast: None,
-                            deps: None,
-                        })
-                    } else {
-                        Err(anyhow!("Error in {}:\n{}", package.name, stderr))
-                    }
-                } else {
-                    Ok(GeneratedAst {
-                        path: ast_path.clone(),
-                        stderr: None,
-                        stored_ast: None,
-                        deps: None,
-                    })
-                }
+        if helpers::has_ascii_alphanumeric(&stderr) {
+            if res_to_ast.status.success() {
+                Ok(GeneratedAst {
+                    path: ast_path.clone(),
+                    stderr: Some(stderr),
+                    stored_ast: None,
+                    deps: None,
+                })
+            } else {
+                Err(anyhow!("Error in {}:\n{}", package.name, stderr))
             }
-            _ => {
-                log::info!("Parsing file {}...", filename.display());
-
-                Err(anyhow!(
-                    "Could not find canonicalize_string_path for file {} in package {}",
-                    filename.display(),
-                    package.name
-                ))
-            }
+        } else {
+            Ok(GeneratedAst {
+                path: ast_path.clone(),
+                stderr: None,
+                stored_ast: None,
+                deps: None,
+            })
         }
     };
     if !in_process && let Ok(GeneratedAst { path: ast_path, .. }) = &result {
@@ -838,10 +619,10 @@ fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < flags.len() {
         if flags[i] == "-open" {
-            if let Some(dep) = flags.get(i + 1) {
-                if seen.insert(dep.clone()) {
-                    deps.push(dep.clone());
-                }
+            if let Some(dep) = flags.get(i + 1)
+                && seen.insert(dep.clone())
+            {
+                deps.push(dep.clone());
             }
             i += 1;
         }
@@ -1013,6 +794,84 @@ fn filter_ppx_flags(
     })
 }
 
+/// Record a source file's parse warnings (keyed `Module:impl` or
+/// `Module:intf`) for the in-process manifest.
+/// Where a parsed source's warnings, stored AST and dependencies go.
+struct ParseSinks<'a> {
+    stored_asts: &'a std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>,
+    in_memory_deps: &'a std::sync::Mutex<ahash::AHashMap<String, Dependencies>>,
+    parse_warnings: &'a ParseWarnings,
+    warnings_replayed: bool,
+}
+
+impl ParseSinks<'_> {
+    /// Records the result of parsing one source (`key` is `Module:impl` or
+    /// `Module:intf`) and returns its parse state and `parse_dirty` flag.
+    ///
+    /// We get Err(x) when there is a parse error. When the AST has stderr, the
+    /// outputs are warnings.
+    fn apply(
+        &self,
+        package: &Package,
+        key: String,
+        result: Result<GeneratedAst, String>,
+        stderr: &mut String,
+        has_failure: &mut bool,
+    ) -> (ParseState, bool) {
+        let generated = match result {
+            Ok(generated) => generated,
+            Err(err) => {
+                // Some compilation error
+                logs::append(package, &err);
+                *has_failure = true;
+                stderr.push_str(&err);
+                return (ParseState::ParseError, true);
+            }
+        };
+        let state = match generated.stderr {
+            // In case of an internal dependency, we want to keep on
+            // propagating the warning with every compile. So we mark it as
+            // dirty for the next round
+            Some(warnings) if package.is_local_dep => {
+                if !self.warnings_replayed {
+                    logs::append(package, &warnings);
+                }
+                stderr.push_str(&warnings);
+                record_parse_warnings(self.parse_warnings, key.clone(), &package.name, &warnings);
+                (ParseState::Warning, true)
+            }
+            Some(warnings) => {
+                // External dep: surface only the critical warnings
+                // (e.g. legacy `(. ...)` uncurried syntax) so
+                // downstream users can report breakage upstream.
+                if let Some(kept) = retain_critical_external_warnings(&warnings) {
+                    if !self.warnings_replayed {
+                        logs::append(package, &kept);
+                    }
+                    stderr.push_str(&kept);
+                    record_parse_warnings(self.parse_warnings, key.clone(), &package.name, &kept);
+                }
+                (ParseState::Success, false)
+            }
+            None => (ParseState::Success, false),
+        };
+        if let Some(ast) = generated.stored_ast {
+            self.stored_asts.lock().unwrap().insert(key.clone(), ast);
+        }
+        if let Some(deps) = generated.deps {
+            self.in_memory_deps.lock().unwrap().insert(key, deps);
+        }
+        state
+    }
+}
+
+fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_name: &str, warnings: &str) {
+    parse_warnings
+        .lock()
+        .unwrap()
+        .insert(key, (package_name.to_string(), warnings.to_string()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1137,13 +996,4 @@ mod tests {
             OneOrMore::Single(command) if command == "unconditional-ppx"
         ));
     }
-}
-
-/// Record a source file's parse warnings (keyed `Module:impl` or
-/// `Module:intf`) for the in-process manifest.
-fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_name: &str, warnings: &str) {
-    parse_warnings
-        .lock()
-        .unwrap()
-        .insert(key, (package_name.to_string(), warnings.to_string()));
 }

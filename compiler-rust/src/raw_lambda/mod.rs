@@ -3,9 +3,11 @@
 //! This module exists to mirror OCaml's staged pipeline:
 //! typedtree -> raw lambda -> lowered lambda -> JS IR.
 //!
-//! The initial scaffolding keeps the raw stage structurally separate
-//! from the existing lowered [`crate::lambda`] IR, so `-drawlambda`
-//! can evolve independently without perturbing JS generation.
+//! [`convert`] translates the typedtree into [`RawLambda`] (using
+//! [`matching`] for pattern matching and [`switch`] for integer switches),
+//! [`print`] renders it for `-drawlambda`, and [`lower`] turns it into the
+//! lowered [`crate::lambda`] IR that the optimization passes and JS
+//! generation consume.
 
 pub mod convert;
 pub(crate) mod lambda_scc;
@@ -17,7 +19,7 @@ pub(crate) mod typeopt;
 
 use crate::ident::Ident;
 use crate::lambda::{ApInfo, DirectionFlag, FunctionAttribute, Lambda, LetKind};
-use crate::lambda::{Comparison, Constant, FieldDbgInfo, Primitive, SetFieldDbgInfo};
+use crate::lambda::{Comparison, Constant, Primitive};
 use crate::location::Location;
 
 /// Raw-lambda switch construct.
@@ -171,7 +173,7 @@ impl RawLambda {
             | RawLambda::Lcontinue => {}
             RawLambda::Lapply(apply) => {
                 f(&mut apply.ap_func);
-                apply.ap_args.iter_mut().for_each(|arg| f(arg));
+                apply.ap_args.iter_mut().for_each(&mut *f);
             }
             RawLambda::Lfunction(func) => f(&mut func.body),
             RawLambda::Llet(_, _, value, body) => {
@@ -182,7 +184,7 @@ impl RawLambda {
                 bindings.iter_mut().for_each(|(_, value)| f(value));
                 f(body);
             }
-            RawLambda::Lprim(info) => info.args.iter_mut().for_each(|arg| f(arg)),
+            RawLambda::Lprim(info) => info.args.iter_mut().for_each(&mut *f),
             RawLambda::Lswitch(arg, sw) => {
                 f(arg);
                 sw.sw_consts.iter_mut().for_each(|(_, act)| f(act));
@@ -198,7 +200,7 @@ impl RawLambda {
                     f(default);
                 }
             }
-            RawLambda::LstaticRaise(_, args) => args.iter_mut().for_each(|arg| f(arg)),
+            RawLambda::LstaticRaise(_, args) => args.iter_mut().for_each(&mut *f),
             RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
                 f(body);
                 f(handler);
@@ -290,15 +292,18 @@ impl RawLambda {
     /// the form OCaml builds them (raw constants keep a few encodings, such
     /// as an int-named polymorphic variant, until they are lowered).
     pub fn prim_folded(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
-        if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_))) {
+        if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_)))
+        {
             let consts = args
                 .iter()
                 .map(|arg| match arg {
-                    RawLambda::Lconst(c) => Lambda::Lconst(crate::raw_lambda::lower::lower_constant(c.clone())),
+                    RawLambda::Lconst(c) => {
+                        Lambda::Lconst(crate::raw_lambda::lower::lower_constant(c.clone()))
+                    }
                     _ => unreachable!(),
                 })
                 .collect();
-            if let Lambda::Lconst(c) = Lambda::prim(primitive.clone(), consts, loc.clone()) {
+            if let Lambda::Lconst(c) = Lambda::prim(primitive.clone(), consts, loc) {
                 return RawLambda::Lconst(c);
             }
         }
@@ -330,22 +335,19 @@ impl RawLambda {
             cond if is_assertfalse(&then_) => RawLambda::seq(cond, else_),
             // lambda.ml `if_`: `if a then true else false` is `a`, and
             // `if a then false else true` is `not a`, when `a` is boolean.
-            cond if matches!(
-                (&then_, &else_),
-                (RawLambda::Lconst(Constant::JsTrue), RawLambda::Lconst(Constant::JsFalse))
-            ) && raw_has_boolean_type(&cond).is_some() =>
-            {
-                cond
-            }
-            cond if matches!(
-                (&then_, &else_),
-                (RawLambda::Lconst(Constant::JsFalse), RawLambda::Lconst(Constant::JsTrue))
-            ) && raw_has_boolean_type(&cond).is_some() =>
-            {
-                let loc = raw_has_boolean_type(&cond).expect("checked above");
-                raw_not(loc, cond)
-            }
-            cond => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+            cond => match (raw_has_boolean_type(&cond), &then_, &else_) {
+                (
+                    Some(_),
+                    RawLambda::Lconst(Constant::JsTrue),
+                    RawLambda::Lconst(Constant::JsFalse),
+                ) => cond,
+                (
+                    Some(loc),
+                    RawLambda::Lconst(Constant::JsFalse),
+                    RawLambda::Lconst(Constant::JsTrue),
+                ) => raw_not(loc, cond),
+                _ => RawLambda::LifThenElse(Box::new(cond), Box::new(then_), Box::new(else_)),
+            },
         }
     }
 
@@ -493,9 +495,7 @@ impl RawLambda {
         match self {
             RawLambda::Lshared(inner) => std::sync::Arc::unwrap_or_clone(inner).into_lowered(),
             RawLambda::Lvar(id) => Lambda::Lvar(id),
-            RawLambda::LglobalModule(id) => {
-                Lambda::LglobalModule(id)
-            }
+            RawLambda::LglobalModule(id) => Lambda::LglobalModule(id),
             RawLambda::Lconst(c) => Lambda::Lconst(c),
             RawLambda::Lapply(apply) => Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(apply.ap_func.into_lowered()),
@@ -608,9 +608,6 @@ impl RawLambda {
     }
 }
 
-#[allow(dead_code)]
-fn _keep_public_types_used(_cmp: Comparison, _field: FieldDbgInfo, _set_field: SetFieldDbgInfo) {}
-
 /// `Lambda.has_boolean_type` (`compiler/ml/lambda.ml:1137-1147`).
 fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
     match lam {
@@ -629,7 +626,7 @@ fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
                     | Primitive::Pstringcomp(_)
             ) =>
         {
-            Some(info.loc.clone())
+            Some(info.loc)
         }
         _ => None,
     }
@@ -638,10 +635,150 @@ fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
 /// `Lambda.not_` (`compiler/ml/lambda.ml:1131-1135`).
 fn raw_not(loc: Location, lam: RawLambda) -> RawLambda {
     match lam {
-        RawLambda::Lprim(mut info) if matches!(info.primitive, Primitive::Pintcomp(Comparison::Neq)) => {
+        RawLambda::Lprim(mut info)
+            if matches!(info.primitive, Primitive::Pintcomp(Comparison::Neq)) =>
+        {
             info.primitive = Primitive::Pintcomp(Comparison::Eq);
             RawLambda::Lprim(info)
         }
         lam => RawLambda::prim(Primitive::Pnot, vec![lam], loc),
+    }
+}
+
+/// Identifier set used by [`collect_free_variables`].
+pub(crate) trait FreeVarSet {
+    fn add(&mut self, id: Ident);
+    fn discard(&mut self, id: &Ident);
+}
+
+impl FreeVarSet for crate::fast_hash::AHashSet<Ident> {
+    fn add(&mut self, id: Ident) {
+        self.insert(id);
+    }
+    fn discard(&mut self, id: &Ident) {
+        self.remove(id);
+    }
+}
+
+impl FreeVarSet for std::collections::BTreeSet<Ident> {
+    fn add(&mut self, id: Ident) {
+        self.insert(id);
+    }
+    fn discard(&mut self, id: &Ident) {
+        self.remove(id);
+    }
+}
+
+/// Add the free variables of `lam` to `fv`.
+///
+/// Port of `Lambda_traverse.free_ids` with `free_variables`' getter
+/// (`compiler/ml/lambda_traverse.ml:200-231`): children are visited first,
+/// then the node's own variable is added or its binders removed.
+pub(crate) fn collect_free_variables<S: FreeVarSet>(lam: &RawLambda, fv: &mut S) {
+    let collect = collect_free_variables::<S>;
+    match lam {
+        RawLambda::Lshared(inner) => collect(inner, fv),
+        RawLambda::Lvar(id) => {
+            fv.add(*id);
+        }
+        RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
+        RawLambda::Lapply(apply) => {
+            collect(&apply.ap_func, fv);
+            for arg in &apply.ap_args {
+                collect(arg, fv);
+            }
+        }
+        RawLambda::Lfunction(func) => {
+            collect(&func.body, fv);
+            for param in &func.params {
+                fv.discard(param);
+            }
+        }
+        RawLambda::Llet(_, id, arg, body) => {
+            collect(arg, fv);
+            collect(body, fv);
+            fv.discard(id);
+        }
+        RawLambda::Lletrec(bindings, body) => {
+            collect(body, fv);
+            for (_, expr) in bindings {
+                collect(expr, fv);
+            }
+            for (id, _) in bindings {
+                fv.discard(id);
+            }
+        }
+        RawLambda::Lprim(info) => {
+            for arg in &info.args {
+                collect(arg, fv);
+            }
+        }
+        RawLambda::Lswitch(arg, sw) => {
+            collect(arg, fv);
+            for (_, lam) in &sw.sw_consts {
+                collect(lam, fv);
+            }
+            for (_, lam) in &sw.sw_blocks {
+                collect(lam, fv);
+            }
+            if let Some(fail) = &sw.sw_failaction {
+                collect(fail, fv);
+            }
+        }
+        RawLambda::LstringSwitch(arg, cases, default) => {
+            collect(arg, fv);
+            for (_, lam) in cases {
+                collect(lam, fv);
+            }
+            if let Some(default) = default {
+                collect(default, fv);
+            }
+        }
+        RawLambda::LstaticRaise(_, args) => {
+            for arg in args {
+                collect(arg, fv);
+            }
+        }
+        RawLambda::LstaticCatch(body, (_, vars), handler) => {
+            collect(body, fv);
+            collect(handler, fv);
+            for var in vars {
+                fv.discard(var);
+            }
+        }
+        RawLambda::LtryWith(body, exn, handler) => {
+            collect(body, fv);
+            collect(handler, fv);
+            fv.discard(exn);
+        }
+        RawLambda::LifThenElse(cond, ifso, ifnot) => {
+            collect(cond, fv);
+            collect(ifso, fv);
+            collect(ifnot, fv);
+        }
+        RawLambda::Lsequence(first, second) => {
+            collect(first, fv);
+            collect(second, fv);
+        }
+        RawLambda::Lwhile(cond, body) => {
+            collect(cond, fv);
+            collect(body, fv);
+        }
+        RawLambda::Lfor(var, lo, hi, _, body) => {
+            collect(lo, fv);
+            collect(hi, fv);
+            collect(body, fv);
+            fv.discard(var);
+        }
+        RawLambda::Lfor_of(var, iterable, body) | RawLambda::Lfor_await_of(var, iterable, body) => {
+            collect(iterable, fv);
+            collect(body, fv);
+            fv.discard(var);
+        }
+        RawLambda::Lassign(id, expr) => {
+            collect(expr, fv);
+            fv.add(*id);
+        }
+        RawLambda::Lbreak | RawLambda::Lcontinue => {}
     }
 }

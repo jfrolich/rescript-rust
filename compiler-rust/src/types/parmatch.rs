@@ -14,17 +14,17 @@
 
 use std::borrow::Cow;
 
+use crate::ident::Ident;
 use crate::parse_arena::{LidentIdx, LocIdx};
-use crate::types::decl::{
-    same_constructor, ConstructorDescription, ConstructorKind, LabelDescription,
-};
-use crate::types::path::Path;
 use crate::parser::ast::ClosedFlag;
-use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
-use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
 use crate::types::MutableFlag;
 use crate::types::context::TypeContext;
-use crate::ident::Ident;
+use crate::types::decl::{
+    ConstructorDescription, ConstructorKind, LabelDescription, same_constructor,
+};
+use crate::types::path::Path;
+use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
+use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 
 /// A pattern node in the matrix arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -38,7 +38,8 @@ pub(crate) trait Oracle {
     fn expand_head(&mut self, env: EnvRef, ty: TypeExprRef) -> TypeExprRef;
     /// `get_variant_constructors env ty` (parmatch.ml:492-503): the
     /// constructors of the variant type, in declaration order.
-    fn variant_constructors(&mut self, env: EnvRef, ty: TypeExprRef) -> Vec<ConstructorDescription>;
+    fn variant_constructors(&mut self, env: EnvRef, ty: TypeExprRef)
+    -> Vec<ConstructorDescription>;
     /// `lbl.lbl_all` for a label of the record type `record_ty`, in position order.
     fn record_labels(&mut self, env: EnvRef, record_ty: TypeExprRef) -> Vec<LabelDescription>;
     /// The part of `pats_of_type` that needs `Env.find_type`
@@ -213,7 +214,13 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             zero: P(0),
         };
         pm.omega = pm.push(Desc::Any, None, EnvRef(0), LocIdx::none(), None);
-        pm.extra = pm.push(Desc::Var(VarKind::Extra), None, EnvRef(0), LocIdx::none(), None);
+        pm.extra = pm.push(
+            Desc::Var(VarKind::Extra),
+            None,
+            EnvRef(0),
+            LocIdx::none(),
+            None,
+        );
         pm.zero = pm.push(
             Desc::Constant(Cow::Owned(Constant::Int(0))),
             None,
@@ -222,10 +229,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             None,
         );
         pm
-    }
-
-    pub fn omega(&self) -> P {
-        self.omega
     }
 
     /// `irrefutable pat` (parmatch.ml:2260): `le_pat pat omega`.
@@ -324,11 +327,15 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_array(items) => {
                 Desc::Array(items.iter().map(|item| self.import(item)).collect())
             }
-            PatternDesc::Tpat_or(left, right, _) => {
-                Desc::Or(self.import(left), self.import(right))
-            }
+            PatternDesc::Tpat_or(left, right, _) => Desc::Or(self.import(left), self.import(right)),
         };
-        self.push(desc, Some(pat.pat_type), pat.pat_env, pat.pat_loc, Some(pat))
+        self.push(
+            desc,
+            Some(pat.pat_type),
+            pat.pat_env,
+            pat.pat_loc,
+            Some(pat),
+        )
     }
 
     // ---------------------------------------------------------------------
@@ -366,11 +373,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             TypeDesc::Tconstr { path, .. } => Some(path.clone()),
             _ => None,
         }
-    }
-
-    fn record_label_count(&mut self, p: P, lbl: &LabelDescription) -> usize {
-        let env = self.node(p).env;
-        self.oracle.record_labels(env, lbl.lbl_res).len()
     }
 
     fn coherent_heads(&mut self, hp1: P, hp2: P) -> bool {
@@ -503,13 +505,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Or(p1, p2), _) => self.compat(*p1, q) || self.compat(*p2, q),
             (_, Desc::Or(q1, q2)) => self.compat(p, *q1) || self.compat(p, *q2),
             (
-                Desc::Construct { cstr: c1, args: a1, .. },
-                Desc::Construct { cstr: c2, args: a2, .. },
+                Desc::Construct {
+                    cstr: c1, args: a1, ..
+                },
+                Desc::Construct {
+                    cstr: c2, args: a2, ..
+                },
             ) => same_constructor(c1, c2) && self.compats(a1, a2),
-            (
-                Desc::Variant { label: l1, arg: a1 },
-                Desc::Variant { label: l2, arg: a2 },
-            ) => {
+            (Desc::Variant { label: l1, arg: a1 }, Desc::Variant { label: l2, arg: a2 }) => {
                 l1 == l2
                     && match (a1, a2) {
                         (None, None) => true,
@@ -517,7 +520,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         _ => false,
                     }
             }
-            (Desc::Constant(c1), Desc::Constant(c2)) => const_compare(c1, c2) == std::cmp::Ordering::Equal,
+            (Desc::Constant(c1), Desc::Constant(c2)) => {
+                const_compare(c1, c2) == std::cmp::Ordering::Equal
+            }
             (Desc::Tuple(ps), Desc::Tuple(qs)) => self.compats(ps, qs),
             (Desc::Record { fields: l1, .. }, Desc::Record { fields: l2, .. }) => {
                 let (ps, qs) = self.records_args(l1, l2);
@@ -549,7 +554,9 @@ pub(crate) fn const_compare(x: &Constant, y: &Constant) -> std::cmp::Ordering {
                 (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
             }
         }
-        (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => bigint_compare((*s1, b1), (*s2, b2)),
+        (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => {
+            bigint_compare((*s1, b1), (*s2, b2))
+        }
         (Constant::String(s1), Constant::String(s2)) => s1.as_bytes().cmp(s2.as_bytes()),
         _ => constant_structural_compare(x, y),
     }
@@ -576,7 +583,11 @@ fn bigint_compare((p0, s0): (bool, &String), (p1, s1): (bool, &String)) -> std::
                     s1.as_bytes().cmp(s0.as_bytes())
                 }
             } else if len0 > len1 {
-                if p0 { Ordering::Greater } else { Ordering::Less }
+                if p0 {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
             } else if p0 {
                 Ordering::Less
             } else {
@@ -605,7 +616,6 @@ fn constant_structural_compare(x: &Constant, y: &Constant) -> std::cmp::Ordering
         _ => rank(x).cmp(&rank(y)),
     }
 }
-
 
 /// OCaml `string_of_float` (`valid_float_lexem (format_float "%.12g" f)`) for
 /// the integral values `build_other_constant` produces.
@@ -678,7 +688,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     /// `all_record_args lbls` (parmatch.ml:538-573).
-    fn all_record_args(&mut self, env: crate::types::typedtree::EnvRef, lbls: &[Field<'a>]) -> Vec<Field<'a>> {
+    fn all_record_args(
+        &mut self,
+        env: crate::types::typedtree::EnvRef,
+        lbls: &[Field<'a>],
+    ) -> Vec<Field<'a>> {
         let Some(first) = lbls.first() else {
             return Vec::new();
         };
@@ -786,7 +800,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let desc = Desc::Record {
                     fields: fields
                         .into_iter()
-                        .map(|field| Field { pat: omega, ..field })
+                        .map(|field| Field {
+                            pat: omega,
+                            ..field
+                        })
                         .collect(),
                     closed,
                     has_rest,
@@ -874,13 +891,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .into_iter()
                     .zip(args)
                     .map(|(field, arg)| {
-                        let pat = if erase_mutable
-                            && matches!(field.lbl.lbl_mut, MutableFlag::Mutable)
-                        {
-                            omega
-                        } else {
-                            arg
-                        };
+                        let pat =
+                            if erase_mutable && matches!(field.lbl.lbl_mut, MutableFlag::Mutable) {
+                                omega
+                            } else {
+                                arg
+                            };
                         Field { pat, ..field }
                     })
                     .collect();
@@ -893,7 +909,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             }
             Desc::Construct { lid, cstr, args } => {
                 let (args, rest) = Self::read_args(args.len(), r);
-                (self.make_pat_like(Desc::Construct { lid, cstr, args }, q), rest)
+                (
+                    self.make_pat_like(Desc::Construct { lid, cstr, args }, q),
+                    rest,
+                )
             }
             Desc::Variant { label, arg } => {
                 let (arg, rest) = match (arg, r.split_first()) {
@@ -1040,11 +1059,15 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         while let Some(row) = stack.pop() {
             match row.split_first() {
                 Some((&p, ps)) if matches!(self.desc(p), Desc::Alias(_)) => {
-                    let Desc::Alias(inner) = self.desc(p) else { unreachable!() };
+                    let Desc::Alias(inner) = self.desc(p) else {
+                        unreachable!()
+                    };
                     stack.push(prepend(*inner, ps));
                 }
                 Some((&p, ps)) if matches!(self.desc(p), Desc::Or(..)) => {
-                    let Desc::Or(p1, p2) = self.desc(p) else { unreachable!() };
+                    let Desc::Or(p1, p2) = self.desc(p) else {
+                        unreachable!()
+                    };
                     let (p1, p2) = (*p1, *p2);
                     stack.push(prepend(p2, ps));
                     stack.push(prepend(p1, ps));
@@ -1085,20 +1108,25 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let row = self.oracle.row_of(penv, pty);
                 let ctx = self.oracle.ctx();
                 if closing && !crate::types::btype::row_fixed(ctx, &row) {
-                    row.row_fields.iter().all(|(tag, f)| {
-                        match crate::types::btype::row_field_repr(ctx, f) {
-                            RowField::Rabsent
-                            | RowField::Reither { matched: false, .. } => true,
-                            RowField::Reither { matched: true, .. } | RowField::Rpresent(_) => {
-                                fields.iter().any(|t| t == tag.as_str())
-                            }
-                        }
-                    })
+                    row.row_fields
+                        .iter()
+                        .all(
+                            |(tag, f)| match crate::types::btype::row_field_repr(ctx, f) {
+                                RowField::Rabsent | RowField::Reither { matched: false, .. } => {
+                                    true
+                                }
+                                RowField::Reither { matched: true, .. } | RowField::Rpresent(_) => {
+                                    fields.iter().any(|t| t == tag.as_str())
+                                }
+                            },
+                        )
                 } else {
                     row.row_closed
                         && row.row_fields.iter().all(|(tag, f)| {
-                            matches!(crate::types::btype::row_field_repr(ctx, f), RowField::Rabsent)
-                                || fields.iter().any(|t| t == tag.as_str())
+                            matches!(
+                                crate::types::btype::row_field_repr(ctx, f),
+                                RowField::Rabsent
+                            ) || fields.iter().any(|t| t == tag.as_str())
                         })
                 }
             }
@@ -1165,7 +1193,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
     }
 
-    fn pat_of_constrs(&mut self, ex_pat: P, cstrs: Vec<ConstructorDescription>) -> Result<P, Empty> {
+    fn pat_of_constrs(
+        &mut self,
+        ex_pat: P,
+        cstrs: Vec<ConstructorDescription>,
+    ) -> Result<P, Empty> {
         if cstrs.is_empty() {
             return Err(Empty);
         }
@@ -1216,7 +1248,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     /// `complete_constrs p seen_constrs` (parmatch.ml:1014-1028).
-    fn complete_constrs(&mut self, p: P, seen: &[ConstructorDescription]) -> Vec<ConstructorDescription> {
+    fn complete_constrs(
+        &mut self,
+        p: P,
+        seen: &[ConstructorDescription],
+    ) -> Vec<ConstructorDescription> {
         let Desc::Construct { cstr, .. } = self.desc(p).clone() else {
             panic!("Parmatch.complete_constrs");
         };
@@ -1234,7 +1270,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `build_other_constrs env p` (parmatch.ml:1030-1040).
     fn build_other_constrs(&mut self, env: &[(P, Vec<Row>)], p: P) -> Result<P, Empty> {
         match self.desc(p) {
-            Desc::Construct { cstr, .. } if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_)) => {
+            Desc::Construct { cstr, .. }
+                if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_)) =>
+            {
                 let seen: Vec<ConstructorDescription> = env
                     .iter()
                     .map(|(q, _)| match self.desc(*q) {
@@ -1348,9 +1386,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         .iter()
                         .filter_map(|(q, _)| match self.desc(*q) {
                             Desc::Constant(c) => match c.as_ref() {
-                                Constant::BigInt(sign, digits) => Some(
-                                    if *sign { digits.len() } else { digits.len() + 1 },
-                                ),
+                                Constant::BigInt(sign, digits) => Some(if *sign {
+                                    digits.len()
+                                } else {
+                                    digits.len() + 1
+                                }),
                                 _ => None,
                             },
                             _ => None,
@@ -1593,10 +1633,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let mut row = self.simple_match_args(q0, q);
                 row.extend_from_slice(qs_rest);
                 let results = self.satisfiables(&filtered, &row);
-                results
-                    .into_iter()
-                    .map(|r| self.set_args(q0, &r))
-                    .collect()
+                results.into_iter().map(|r| self.set_args(q0, &r)).collect()
             }
         }
     }
@@ -1668,7 +1705,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             } else {
                 let arity = self.simple_match_args(*p, omega).len();
                 self.exhaust_gadt_aux(count, ext, pss, (arity + n).saturating_sub(1))
-                    .map(|rows| rows.into_iter().map(|row| self.set_args(*p, &row)).collect())
+                    .map(|rows| {
+                        rows.into_iter()
+                            .map(|row| self.set_args(*p, &row))
+                            .collect()
+                    })
             };
             before = rappend(before, r);
         }
@@ -1901,7 +1942,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let mut out = Vec::new();
         let mut stack: Vec<URow> = rs.iter().rev().cloned().collect();
         while let Some(r) = stack.pop() {
-            let (&p, ps) = r.active.split_first().expect("Parmatch.filter_one: empty row");
+            let (&p, ps) = r
+                .active
+                .split_first()
+                .expect("Parmatch.filter_one: empty row");
             match self.desc(p) {
                 Desc::Alias(inner) => stack.push(URow {
                     active: prepend(*inner, ps),
@@ -1922,7 +1966,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     if self.simple_match(q, p) {
                         let mut active = self.simple_match_args(q, p);
                         active.extend_from_slice(ps);
-                        out.push(URow { active, ..r.clone() });
+                        out.push(URow {
+                            active,
+                            ..r.clone()
+                        });
                     }
                 }
             }
@@ -2105,8 +2152,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 Step::Done(const_compare(c1, c2) == std::cmp::Ordering::Equal)
             }
             (
-                Desc::Construct { cstr: c1, args: ps, .. },
-                Desc::Construct { cstr: c2, args: qs, .. },
+                Desc::Construct {
+                    cstr: c1, args: ps, ..
+                },
+                Desc::Construct {
+                    cstr: c2, args: qs, ..
+                },
             ) => {
                 if same_constructor(c1, c2) {
                     Step::Pats(ps.clone(), qs.clone())
@@ -2115,8 +2166,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
             }
             (
-                Desc::Variant { label: l1, arg: Some(p1) },
-                Desc::Variant { label: l2, arg: Some(p2) },
+                Desc::Variant {
+                    label: l1,
+                    arg: Some(p1),
+                },
+                Desc::Variant {
+                    label: l2,
+                    arg: Some(p2),
+                },
             ) => {
                 if l1 == l2 {
                     Step::Pat(*p1, *p2)
@@ -2125,8 +2182,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
             }
             (
-                Desc::Variant { label: l1, arg: None },
-                Desc::Variant { label: l2, arg: None },
+                Desc::Variant {
+                    label: l1,
+                    arg: None,
+                },
+                Desc::Variant {
+                    label: l2,
+                    arg: None,
+                },
             ) => Step::Done(l1 == l2),
             (Desc::Variant { .. }, Desc::Variant { .. }) => Step::Done(false),
             (Desc::Tuple(ps), Desc::Tuple(qs)) => Step::Pats(ps.clone(), qs.clone()),
@@ -2234,7 +2297,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let desc = match node.desc {
             Desc::Any | Desc::Var(VarKind::Extra) => PatternDesc::Tpat_any,
             Desc::Var(VarKind::Source) => match node.src.map(|src| &src.pat_desc) {
-                Some(PatternDesc::Tpat_var(id, name)) => PatternDesc::Tpat_var(id.clone(), name.clone()),
+                Some(PatternDesc::Tpat_var(id, name)) => PatternDesc::Tpat_var(*id, name.clone()),
                 _ => PatternDesc::Tpat_any,
             },
             Desc::Var(VarKind::Extension(ident, loc)) => PatternDesc::Tpat_var(
@@ -2248,7 +2311,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let inner = self.export(inner);
                 match node.src.map(|src| &src.pat_desc) {
                     Some(PatternDesc::Tpat_alias(_, id, name)) => {
-                        PatternDesc::Tpat_alias(Box::new(inner), id.clone(), name.clone())
+                        PatternDesc::Tpat_alias(Box::new(inner), *id, name.clone())
                     }
                     _ => return inner,
                 }
@@ -2295,7 +2358,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                                 txt: placeholder,
                                 loc: LocIdx::none(),
                             });
-                            (lid, std::sync::Arc::new(field.lbl.into_owned()), self.export(field.pat), field.opt)
+                            (
+                                lid,
+                                std::sync::Arc::new(field.lbl.into_owned()),
+                                self.export(field.pat),
+                                field.opt,
+                            )
                         })
                         .collect(),
                     closed,
@@ -2422,7 +2490,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let Some(v) = self.oracle.pred(PredKind::Partial, u, None) else {
                     return Partiality::Total;
                 };
-                if self.oracle.is_active(&ParmatchWarning::PartialMatch(String::new())) {
+                if self
+                    .oracle
+                    .is_active(&ParmatchWarning::PartialMatch(String::new()))
+                {
                     let mut errmsg = String::from("| ");
                     errmsg.push_str(&self.oracle.print_pattern(&v));
                     if self.check_partial_all(&v, casel).is_some() {
@@ -2517,7 +2588,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         let pss = self.get_mins(pss);
         let total = self.do_check_partial(hint, loc, casel, &pss);
         if total == Partiality::Total
-            && self.oracle.is_active(&ParmatchWarning::FragileMatch(String::new()))
+            && self
+                .oracle
+                .is_active(&ParmatchWarning::FragileMatch(String::new()))
         {
             self.do_check_fragile(loc, casel, &pss);
         }
@@ -2535,7 +2608,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         if self.node_has_dict_pattern(p) {
             return true;
         }
-        self.children(p).into_iter().any(|c| self.contains_dict_pattern(c))
+        self.children(p)
+            .into_iter()
+            .any(|c| self.contains_dict_pattern(c))
     }
 
     fn children(&self, p: P) -> Vec<P> {
@@ -2558,12 +2633,23 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
         let desc = match self.desc(p).clone() {
             Desc::Alias(inner) => Desc::Alias(self.opaque_dict_patterns(inner)),
-            Desc::Tuple(ps) => Desc::Tuple(ps.into_iter().map(|p| self.opaque_dict_patterns(p)).collect()),
-            Desc::Array(ps) => Desc::Array(ps.into_iter().map(|p| self.opaque_dict_patterns(p)).collect()),
+            Desc::Tuple(ps) => Desc::Tuple(
+                ps.into_iter()
+                    .map(|p| self.opaque_dict_patterns(p))
+                    .collect(),
+            ),
+            Desc::Array(ps) => Desc::Array(
+                ps.into_iter()
+                    .map(|p| self.opaque_dict_patterns(p))
+                    .collect(),
+            ),
             Desc::Construct { lid, cstr, args } => Desc::Construct {
                 lid,
                 cstr,
-                args: args.into_iter().map(|p| self.opaque_dict_patterns(p)).collect(),
+                args: args
+                    .into_iter()
+                    .map(|p| self.opaque_dict_patterns(p))
+                    .collect(),
             },
             Desc::Variant { label, arg } => Desc::Variant {
                 label,
@@ -2634,7 +2720,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 || !self.oracle.is_active(&ParmatchWarning::UnreachableCase);
             if !skip {
                 let (pss, qs) = if self.contains_dict_pattern(q)
-                    || pss.iter().any(|ps| ps.iter().any(|p| self.contains_dict_pattern(*p)))
+                    || pss
+                        .iter()
+                        .any(|ps| ps.iter().any(|p| self.contains_dict_pattern(*p)))
                 {
                     let pss: Vec<Row> = pss
                         .into_iter()
@@ -2664,15 +2752,20 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     // otherwise.
                     if self.may_refute(u) && {
                         let u = self.export(u);
-                        self.oracle.pred(PredKind::Unused, u, Some(case.lhs.pat_loc)).is_none()
+                        self.oracle
+                            .pred(PredKind::Unused, u, Some(case.lhs.pat_loc))
+                            .is_none()
                     } {
-                        self.oracle.warn(case.lhs.pat_loc, ParmatchWarning::UnreachableCase);
+                        self.oracle
+                            .warn(case.lhs.pat_loc, ParmatchWarning::UnreachableCase);
                         r = Answer::Used;
                     }
                 }
             }
             match r {
-                Answer::Unused => self.oracle.warn(case.lhs.pat_loc, ParmatchWarning::UnusedMatch),
+                Answer::Unused => self
+                    .oracle
+                    .warn(case.lhs.pat_loc, ParmatchWarning::UnusedMatch),
                 Answer::Upartial(ps) => {
                     for p in ps {
                         let node = self.node(p);
@@ -2700,10 +2793,14 @@ pub(crate) fn contains_extension(pat: &Pattern) -> bool {
         PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => true,
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
         PatternDesc::Tpat_alias(p, _, _) => contains_extension(p),
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ps.iter().any(contains_extension),
+        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
+            ps.iter().any(contains_extension)
+        }
         PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(contains_extension),
         PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(contains_extension),
-        PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| contains_extension(p)),
+        PatternDesc::Tpat_record(fields, _, _) => {
+            fields.iter().any(|(_, _, p, _)| contains_extension(p))
+        }
         PatternDesc::Tpat_or(p1, p2, _) => contains_extension(p1) || contains_extension(p2),
     }
 }
@@ -2733,14 +2830,21 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     fn bound_ident(&self, p: P) -> Option<Ident> {
         match self.node(p).src.map(|src| &src.pat_desc) {
             Some(PatternDesc::Tpat_var(id, _)) | Some(PatternDesc::Tpat_alias(_, id, _)) => {
-                Some(id.clone())
+                Some(*id)
             }
             _ => None,
         }
     }
 
     /// `do_push r p ps seen k` (parmatch.ml:2374-2381).
-    fn amb_do_push(&self, mut r: IdSet, p: P, ps: &[P], seen: &[IdSet], out: &mut Vec<(P, AmbRow)>) {
+    fn amb_do_push(
+        &self,
+        mut r: IdSet,
+        p: P,
+        ps: &[P],
+        seen: &[IdSet],
+        out: &mut Vec<(P, AmbRow)>,
+    ) {
         match self.desc(p) {
             Desc::Alias(inner) => {
                 if let Some(x) = self.bound_ident(p) {
@@ -2965,8 +3069,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 .map(|id| id.name().to_string())
                 .collect();
             if !ambiguous.is_empty() {
-                self.oracle
-                    .warn(case.lhs.pat_loc, ParmatchWarning::AmbiguousPattern(ambiguous));
+                self.oracle.warn(
+                    case.lhs.pat_loc,
+                    ParmatchWarning::AmbiguousPattern(ambiguous),
+                );
             }
         }
     }
@@ -2976,16 +3082,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
-            out.insert(id.clone());
+            out.insert(*id);
         }
         PatternDesc::Tpat_alias(p, id, _) => {
             pat_bound_idents(p, out);
-            out.insert(id.clone());
+            out.insert(*id);
         }
         PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(p1, out),
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
-                out.insert(rest.rest_ident.clone());
+                out.insert(rest.rest_ident);
             }
             for (_, _, p, _) in fields {
                 pat_bound_idents(p, out);

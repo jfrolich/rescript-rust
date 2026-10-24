@@ -30,7 +30,8 @@
 //! ├─────────────────────────────────────────────────────────────────────┤
 //! │ Magic: 0x84 0x95 0xA6 0xBE (4 bytes)                                │
 //! │ Header: data_len(4) + obj_count(4) + size_32(4) + size_64(4)        │
-//! │ Payload: Encoded parsetree0 AST                                     │
+//! │ Payload: Encoded AST (current parsetree for -bs-ast,                │
+//! │          frozen parsetree0 for the external PPX protocol)           │
 //! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -38,9 +39,17 @@
 //!
 //! - [`marshal`] - OCaml Marshal format writer
 //! - [`serialize`] - Marshal trait and implementations for basic types
-//! - [`parsetree0`] - Frozen PPX-compatible AST type definitions (TODO)
+//! - [`current_marshal`] - Marshal implementations for the current parsetree (`-bs-ast`)
+//! - [`parsetree0`] - Frozen PPX-compatible AST type definitions
 //! - [`parsetree0_marshal`] - Marshal implementations for parsetree0
+//! - [`parsetree0_unmarshal`] - Decoder for parsetree0 values returned by external PPXs
 //! - [`mapper_to0`] - Current parsetree → parsetree0 conversion
+//! - [`mapper_from0`] - parsetree0 → current parsetree conversion
+//! - [`ppx`] - Built-in PPX rewrites applied before marshalling
+//! - [`spice_ppx`] - Built-in spice PPX
+//! - [`ast_iter`] - Port of OCaml `Ast_iterator` for the current parsetree
+//! - [`ffi_types`] - Marshalling of digested externals (`External_ffi_types`)
+//! - [`types`] - Marshal implementations for core types (Position, Location, Longident)
 //! - [`deps`] - Module dependency extraction
 //! - [`writer`] - Binary AST file writer
 
@@ -67,9 +76,7 @@ pub use marshal::MarshalWriter;
 pub use parsetree0::*;
 pub use serialize::Marshal;
 pub use writer::{
-    write_external_ppx_signature_input, write_external_ppx_structure_input, write_signature_ast,
-    write_signature_ast_current, write_signature_ast_current_with_extra_deps,
-    write_signature_ast_current_with_extra_deps_and_builtin_ppx, write_signature_ast_to_vec,
-    write_structure_ast, write_structure_ast_current, write_structure_ast_current_with_extra_deps,
-    write_structure_ast_current_with_extra_deps_and_builtin_ppx, write_structure_ast_to_vec,
+    write_external_ppx_signature_input, write_external_ppx_structure_input,
+    write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };

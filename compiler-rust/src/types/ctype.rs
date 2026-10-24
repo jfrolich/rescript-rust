@@ -30,13 +30,12 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField,
-    TypeDesc, TypeExprRef,
-    TypeExprRefSet,
+    TypeDesc, TypeExprRef, TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 fn in_process_module_resolution_env(
@@ -316,15 +315,18 @@ impl std::hash::Hasher for PairKeyHasher {
 
 /// Unordered type pairs already entered by `unify`, packed as
 /// `(smaller id << 32) | larger id`.
-type UnifiedPairSet =
-    std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
+type UnifiedPairSet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<PairKeyHasher>>;
 
 /// A unified-pair set moved out of a [`UnifyState`].
 pub(crate) struct UnifiedPairSetOwned(UnifiedPairSet);
 
 #[inline]
 fn unified_pair_key(t1: TypeExprRef, t2: TypeExprRef) -> u64 {
-    let (lo, hi) = if t1.0 < t2.0 { (t1.0, t2.0) } else { (t2.0, t1.0) };
+    let (lo, hi) = if t1.0 < t2.0 {
+        (t1.0, t2.0)
+    } else {
+        (t2.0, t1.0)
+    };
     (u64::from(lo) << 32) | u64::from(hi)
 }
 
@@ -583,11 +585,6 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     lookup_type_decl_for_path(ctx, env, path).map(super::decl::TypeDeclarationRef::into_owned)
 }
 
-fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
-    let mut pending_type_lookup_paths = None;
-    get_level_with_lookup_capture(ctx, env, path, &mut pending_type_lookup_paths)
-}
-
 fn get_level_with_lookup_capture(
     ctx: &TypeContext,
     env: &Env,
@@ -609,13 +606,13 @@ fn get_level_with_lookup_capture(
     // (compiler/ml/subst.ml:292), so the lookup would fall back to the
     // binding time anyway.
     if path_root_is_persistent(path) {
-        return path_binding_time(path);
+        return path.binding_time();
     }
     // `Env.find_type` answers from bindings fixed within one module scope, so
     // repeated level checks of the same path reuse the first lookup.
     let scope_id = env.scope_id();
     if let Some(found_level) = ctx.find_type_newtype_level(scope_id, path) {
-        return found_level.unwrap_or_else(|| path_binding_time(path));
+        return found_level.unwrap_or_else(|| path.binding_time());
     }
     let found_level = match path {
         Path::Pident(id) => env
@@ -643,7 +640,7 @@ fn get_level_with_lookup_capture(
         Path::Papply(_, _) => None,
     };
     ctx.register_type_newtype_level(scope_id, path, found_level);
-    found_level.unwrap_or_else(|| path_binding_time(path))
+    found_level.unwrap_or_else(|| path.binding_time())
 }
 
 pub(crate) fn path_root_is_persistent(path: &Path) -> bool {
@@ -652,25 +649,6 @@ pub(crate) fn path_root_is_persistent(path: &Path) -> bool {
         Path::Pdot(parent, _, _) => path_root_is_persistent(parent),
         Path::Papply(_, _) => false,
     }
-}
-
-fn path_root_ident(path: &Path) -> Option<&Ident> {
-    match path {
-        Path::Pident(id) => Some(id),
-        Path::Pdot(parent, _, _) => path_root_ident(parent),
-        Path::Papply(_, _) => None,
-    }
-}
-
-fn path_root_is_local_module_alias(env: &Env, path: &Path) -> bool {
-    let Some(root) = path_root_ident(path) else {
-        return false;
-    };
-    !root.is_persistent()
-        && env
-            .find_module_same(root)
-            .ok()
-            .is_some_and(|md| matches!(md.md_type, super::decl::ModuleType::MtyAlias(..)))
 }
 
 fn is_contractive(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
@@ -753,9 +731,6 @@ fn local_non_recursive_abbrev(
     go(ctx, env, source, false, &mut visited, ty)
 }
 
-/// Add a GADT equation: source_path = destination type.
-/// Creates a local constraint with a manifest type declaration.
-/// Matches OCaml's `add_gadt_equation` in ctype.ml.
 // ============================================================================
 // Pattern compatibility (OCaml `mcomp`, compiler/ml/ctype.ml:1729-1964)
 // ============================================================================
@@ -774,7 +749,9 @@ fn non_aliasable(path: &Path, decl: &super::TypeDeclaration) -> bool {
 fn is_datatype(decl: &super::TypeDeclaration) -> bool {
     matches!(
         decl.type_kind,
-        super::TypeKind::TypeRecord(..) | super::TypeKind::TypeVariant(..) | super::TypeKind::TypeOpen
+        super::TypeKind::TypeRecord(..)
+            | super::TypeKind::TypeVariant(..)
+            | super::TypeKind::TypeOpen
     )
 }
 
@@ -808,7 +785,9 @@ fn same_record_representation(
         (R::RecordRegular, R::RecordRegular)
         | (R::RecordFloatUnused, R::RecordFloatUnused)
         | (R::RecordExtension, R::RecordExtension) => true,
-        (R::RecordInlined { name: left, .. }, R::RecordInlined { name: right, .. }) => left == right,
+        (R::RecordInlined { name: left, .. }, R::RecordInlined { name: right, .. }) => {
+            left == right
+        }
         (R::RecordUnboxed(left), R::RecordUnboxed(right)) => left == right,
         _ => false,
     }
@@ -861,8 +840,12 @@ fn mcomp_rec(
         match (&*d1, &*d2) {
             (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => return Ok(()),
             (
-                TypeDesc::Tconstr { path: p1, args: a1, .. },
-                TypeDesc::Tconstr { path: p2, args: a2, .. },
+                TypeDesc::Tconstr {
+                    path: p1, args: a1, ..
+                },
+                TypeDesc::Tconstr {
+                    path: p2, args: a2, ..
+                },
             ) if a1.is_empty() && a2.is_empty() && p1.same(p2) => return Ok(()),
             _ => {}
         }
@@ -881,12 +864,20 @@ fn mcomp_rec(
         (TypeDesc::Tvar(_), TypeDesc::Tvar(_)) => {
             panic!("Ctype.mcomp: unexpected pair of type variables")
         }
-        (TypeDesc::Tarrow { args: params1, ret: ret1 }, TypeDesc::Tarrow { args: params2, ret: ret2 })
-            if params1.len() == params2.len()
-                && params1.iter().zip(params2.iter()).all(|(a1, a2)| {
-                    a1.label().same_label(a2.label())
-                        || !(a1.label().is_optional() || a2.label().is_optional())
-                }) =>
+        (
+            TypeDesc::Tarrow {
+                args: params1,
+                ret: ret1,
+            },
+            TypeDesc::Tarrow {
+                args: params2,
+                ret: ret2,
+            },
+        ) if params1.len() == params2.len()
+            && params1.iter().zip(params2.iter()).all(|(a1, a2)| {
+                a1.label().same_label(a2.label())
+                    || !(a1.label().is_optional() || a2.label().is_optional())
+            }) =>
         {
             for (a1, a2) in params1.iter().zip(params2.iter()) {
                 mcomp_rec(ctx, env, state, a1.typ, a2.typ)?;
@@ -894,9 +885,18 @@ fn mcomp_rec(
             mcomp_rec(ctx, env, state, *ret1, *ret2)
         }
         (TypeDesc::Ttuple(tl1), TypeDesc::Ttuple(tl2)) => mcomp_list(ctx, env, state, tl1, tl2),
-        (TypeDesc::Tconstr { path: p1, args: tl1, .. }, TypeDesc::Tconstr { path: p2, args: tl2, .. }) => {
-            mcomp_type_decl(ctx, env, state, p1, p2, tl1, tl2)
-        }
+        (
+            TypeDesc::Tconstr {
+                path: p1,
+                args: tl1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: p2,
+                args: tl2,
+                ..
+            },
+        ) => mcomp_type_decl(ctx, env, state, p1, p2, tl1, tl2),
         (TypeDesc::Tconstr { path, .. }, _) | (_, TypeDesc::Tconstr { path, .. }) => {
             match lookup_type_decl_for_path(ctx, env, path) {
                 Some(decl) if non_aliasable(path, &decl) || is_datatype(&decl) => mcomp_fail(),
@@ -910,7 +910,9 @@ fn mcomp_rec(
         (TypeDesc::Tobject { fields: fi1 }, TypeDesc::Tobject { fields: fi2 }) => {
             mcomp_fields(ctx, env, state, *fi1, *fi2)
         }
-        (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => mcomp_fields(ctx, env, state, t1p, t2p),
+        (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => {
+            mcomp_fields(ctx, env, state, t1p, t2p)
+        }
         (TypeDesc::Tnil, TypeDesc::Tnil) => Ok(()),
         (TypeDesc::Tpoly { body: b1, vars: v1 }, TypeDesc::Tpoly { body: b2, vars: v2 })
             if v1.is_empty() && v2.is_empty() =>
@@ -986,7 +988,9 @@ fn mcomp_univars_escape(
                                 && occur(ctx, env, family, visited, arg)
                         })
                     }
-                    None => args.iter().any(|&arg| occur(ctx, env, family, visited, arg)),
+                    None => args
+                        .iter()
+                        .any(|&arg| occur(ctx, env, family, visited, arg)),
                 }
             }
             _ => {
@@ -1017,21 +1021,12 @@ fn mcomp_enter_poly(
     body2: TypeExprRef,
     vars2: &[TypeExprRef],
 ) -> TypeResult<()> {
-    let known: HashSet<TypeExprRef> = state
-        .univar_pairs
-        .iter()
-        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
-        .collect();
-    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
-    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
-    if (tl1.iter().any(|t| known.contains(t))
-        && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl1, body2, &tl2))
-        || (tl2.iter().any(|t| known.contains(t))
-            && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl2, body1, &tl1))
-    {
+    let Some((tl1, tl2)) =
+        enter_poly_univars(ctx, env, &state.univar_pairs, body1, vars1, body2, vars2)
+    else {
         return mcomp_fail();
-    }
-    let mut new_slot = |state: &mut McompState| {
+    };
+    let new_slot = |state: &mut McompState| {
         state.univar_slots.push(None);
         state.univar_slots.len() - 1
     };
@@ -1046,59 +1041,91 @@ fn mcomp_enter_poly(
     result
 }
 
-/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464).
+/// OCaml `enter_poly` (compiler/ml/ctype.ml:1561-1584) escape check, shared
+/// by `mcomp` and `unify`. Returns the represented `(tl1, tl2)`, or `None`
+/// when a univar would escape.
+fn enter_poly_univars(
+    ctx: &TypeContext,
+    env: &Env,
+    univar_pairs: &[UnivarPairEntry],
+    body1: TypeExprRef,
+    vars1: &[TypeExprRef],
+    body2: TypeExprRef,
+    vars2: &[TypeExprRef],
+) -> Option<(Vec<TypeExprRef>, Vec<TypeExprRef>)> {
+    let known: HashSet<TypeExprRef> = univar_pairs
+        .iter()
+        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
+        .collect();
+    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
+    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
+    let escapes = (tl1.iter().any(|t| known.contains(t))
+        && mcomp_univars_escape(ctx, env, univar_pairs, &tl1, body2, &tl2))
+        || (tl2.iter().any(|t| known.contains(t))
+            && mcomp_univars_escape(ctx, env, univar_pairs, &tl2, body1, &tl1));
+    (!escapes).then_some((tl1, tl2))
+}
+
+/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464), shared by `mcomp`
+/// and `unify`. Returns whether `t1` and `t2` are bound to each other.
+fn univars_unify(
+    ctx: &TypeContext,
+    univar_pairs: &[UnivarPairEntry],
+    univar_slots: &mut [Option<TypeExprRef>],
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> bool {
+    for (cl1, cl2) in univar_pairs.iter().rev() {
+        let r1 = cl1
+            .iter()
+            .find(|(t, _)| ctx.repr(*t) == t1)
+            .map(|(_, r)| *r);
+        let r2 = cl2
+            .iter()
+            .find(|(t, _)| ctx.repr(*t) == t2)
+            .map(|(_, r)| *r);
+        match (r1, r2) {
+            (Some(r1), Some(_)) if univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) => {
+                return true;
+            }
+            (Some(r1), Some(r2)) if univar_slots[r1].is_none() && univar_slots[r2].is_none() => {
+                univar_slots[r1] = Some(t2);
+                univar_slots[r2] = Some(t1);
+                return true;
+            }
+            (None, None) => continue,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// OCaml `unify_univar` (compiler/ml/ctype.ml:1449-1464) for `mcomp`.
 fn mcomp_unify_univar(
     ctx: &TypeContext,
     state: &mut McompState,
     t1: TypeExprRef,
     t2: TypeExprRef,
 ) -> TypeResult<()> {
-    for idx in (0..state.univar_pairs.len()).rev() {
-        let (cl1, cl2) = &state.univar_pairs[idx];
-        let r1 = cl1.iter().find(|(t, _)| ctx.repr(*t) == t1).map(|(_, r)| *r);
-        let r2 = cl2.iter().find(|(t, _)| ctx.repr(*t) == t2).map(|(_, r)| *r);
-        match (r1, r2) {
-            (Some(r1), Some(_))
-                if state.univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) =>
-            {
-                return Ok(());
-            }
-            (Some(r1), Some(r2))
-                if state.univar_slots[r1].is_none() && state.univar_slots[r2].is_none() =>
-            {
-                state.univar_slots[r1] = Some(t2);
-                state.univar_slots[r2] = Some(t1);
-                return Ok(());
-            }
-            (None, None) => continue,
-            _ => return mcomp_fail(),
-        }
+    if univars_unify(ctx, &state.univar_pairs, &mut state.univar_slots, t1, t2) {
+        Ok(())
+    } else {
+        mcomp_fail()
     }
-    mcomp_fail()
 }
 
 /// OCaml `unify_univar` (ctype.ml) over the unifier's `univar_pairs`.
-fn unify_univar(ctx: &TypeContext, state: &mut UnifyState, t1: TypeExprRef, t2: TypeExprRef) -> TypeResult<()> {
-    for idx in (0..state.univar_pairs.len()).rev() {
-        let (cl1, cl2) = &state.univar_pairs[idx];
-        let r1 = cl1.iter().find(|(t, _)| ctx.repr(*t) == t1).map(|(_, r)| *r);
-        let r2 = cl2.iter().find(|(t, _)| ctx.repr(*t) == t2).map(|(_, r)| *r);
-        match (r1, r2) {
-            (Some(r1), Some(_)) if state.univar_slots[r1].is_some_and(|t| ctx.repr(t) == t2) => {
-                return Ok(());
-            }
-            (Some(r1), Some(r2))
-                if state.univar_slots[r1].is_none() && state.univar_slots[r2].is_none() =>
-            {
-                state.univar_slots[r1] = Some(t2);
-                state.univar_slots[r2] = Some(t1);
-                return Ok(());
-            }
-            (None, None) => continue,
-            _ => return Err(TypeError::Unify(Vec::new())),
-        }
+fn unify_univar(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    if univars_unify(ctx, &state.univar_pairs, &mut state.univar_slots, t1, t2) {
+        Ok(())
+    } else {
+        Err(TypeError::Unify(Vec::new()))
     }
-    Err(TypeError::Unify(Vec::new()))
 }
 
 /// OCaml `enter_poly env univar_pairs t1 tl1 t2 tl2 (unify env)`.
@@ -1110,13 +1137,6 @@ fn unify_enter_poly(
     body2: TypeExprRef,
     vars2: &[TypeExprRef],
 ) -> TypeResult<()> {
-    let known: HashSet<TypeExprRef> = state
-        .univar_pairs
-        .iter()
-        .flat_map(|(cl, _)| cl.iter().map(|(t, _)| ctx.repr(*t)))
-        .collect();
-    let tl1: Vec<_> = vars1.iter().map(|&t| ctx.repr(t)).collect();
-    let tl2: Vec<_> = vars2.iter().map(|&t| ctx.repr(t)).collect();
     let empty_env;
     let env = match state.env() {
         Some(env) => env,
@@ -1125,15 +1145,13 @@ fn unify_enter_poly(
             &empty_env
         }
     };
-    if (tl1.iter().any(|t| known.contains(t))
-        && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl1, body2, &tl2))
-        || (tl2.iter().any(|t| known.contains(t))
-            && mcomp_univars_escape(ctx, env, &state.univar_pairs, &tl2, body1, &tl1))
-    {
+    let Some((tl1, tl2)) =
+        enter_poly_univars(ctx, env, &state.univar_pairs, body1, vars1, body2, vars2)
+    else {
         return Err(TypeError::Unify(Vec::new()));
-    }
+    };
     let saved_slots = state.univar_slots.len();
-    let mut new_slot = |state: &mut UnifyState| {
+    let new_slot = |state: &mut UnifyState| {
         state.univar_slots.push(None);
         state.univar_slots.len() - 1
     };
@@ -1183,7 +1201,12 @@ fn mcomp_fields(
     ty1: TypeExprRef,
     ty2: TypeExprRef,
 ) -> TypeResult<()> {
-    let concrete = |ty| !matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, ty)), TypeDesc::Tvar(_));
+    let concrete = |ty| {
+        !matches!(
+            &*ctx.borrow_desc(object_row_of_fields(ctx, ty)),
+            TypeDesc::Tvar(_)
+        )
+    };
     if !(concrete(ty1) && concrete(ty2)) {
         panic!("Ctype.mcomp_fields: non-concrete object");
     }
@@ -1191,7 +1214,12 @@ fn mcomp_fields(
     let (fields1, rest1) = flatten_fields(ctx, ty1);
     let (pairs, miss1, miss2) = associate_fields(fields1, fields2);
     mcomp_rec(ctx, env, state, rest1, rest2)?;
-    let row_is_nil = |ty| matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, ty)), TypeDesc::Tnil);
+    let row_is_nil = |ty| {
+        matches!(
+            &*ctx.borrow_desc(object_row_of_fields(ctx, ty)),
+            TypeDesc::Tnil
+        )
+    };
     if (!miss1.is_empty() && row_is_nil(ty2)) || (!miss2.is_empty() && row_is_nil(ty1)) {
         return mcomp_fail();
     }
@@ -1211,7 +1239,8 @@ fn mcomp_row(
     let row1 = row_repr(ctx, row1);
     let row2 = row_repr(ctx, row2);
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
-    let cannot_erase = |f: &RowField| matches!(btype::row_field_repr(ctx, f), RowField::Rpresent(_));
+    let cannot_erase =
+        |f: &RowField| matches!(btype::row_field_repr(ctx, f), RowField::Rpresent(_));
     if (row1.row_closed && r2.iter().any(|(_, f)| cannot_erase(f)))
         || (row2.row_closed && r1.iter().any(|(_, f)| cannot_erase(f)))
     {
@@ -1219,7 +1248,12 @@ fn mcomp_row(
     }
     let pairs: Vec<(RowField, RowField)> = pairs
         .into_iter()
-        .map(|(_, f1, f2)| (btype::row_field_repr(ctx, f1), btype::row_field_repr(ctx, f2)))
+        .map(|(_, f1, f2)| {
+            (
+                btype::row_field_repr(ctx, f1),
+                btype::row_field_repr(ctx, f2),
+            )
+        })
         .collect();
     for (f1, f2) in pairs {
         match (&f1, &f2) {
@@ -1239,12 +1273,26 @@ fn mcomp_row(
             (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => {
                 mcomp_rec(ctx, env, state, *t1, *t2)?;
             }
-            (RowField::Rpresent(Some(t1)), RowField::Reither { constant: false, types, .. }) => {
+            (
+                RowField::Rpresent(Some(t1)),
+                RowField::Reither {
+                    constant: false,
+                    types,
+                    ..
+                },
+            ) => {
                 for &t2 in types {
                     mcomp_rec(ctx, env, state, *t1, t2)?;
                 }
             }
-            (RowField::Reither { constant: false, types, .. }, RowField::Rpresent(Some(t2))) => {
+            (
+                RowField::Reither {
+                    constant: false,
+                    types,
+                    ..
+                },
+                RowField::Rpresent(Some(t2)),
+            ) => {
                 for &t1 in types {
                     mcomp_rec(ctx, env, state, *t2, t1)?;
                 }
@@ -1273,7 +1321,10 @@ fn mcomp_type_decl(
     // compatible_paths (compiler/ml/ctype.ml:1743) is `Path.same`.
     if p1.same(p2) {
         let inj: Vec<bool> = if decl.type_variance.len() == tl1.len() {
-            decl.type_variance.iter().map(|v| v.mem(VarianceFlag::Inj)).collect()
+            decl.type_variance
+                .iter()
+                .map(|v| v.mem(VarianceFlag::Inj))
+                .collect()
         } else {
             vec![false; tl1.len()]
         };
@@ -1381,7 +1432,9 @@ fn unify_same_path_constructor_args(
         state.mode = UnifyMode::Pattern;
         state.generate_equations = true;
         state.assume_injective = false;
-        let result = pairs.into_iter().try_for_each(|(a, b)| unify(ctx, state, a, b));
+        let result = pairs
+            .into_iter()
+            .try_for_each(|(a, b)| unify(ctx, state, a, b));
         (state.mode, state.generate_equations, state.assume_injective) = saved;
         return result;
     }
@@ -1405,7 +1458,10 @@ fn unify_same_path_constructor_args(
             if decl.type_variance.len() != pairs.len() {
                 panic!("Ctype.unify3: variance arity mismatch in List.iter2");
             }
-            decl.type_variance.iter().map(|v| v.mem(VarianceFlag::Inj)).collect()
+            decl.type_variance
+                .iter()
+                .map(|v| v.mem(VarianceFlag::Inj))
+                .collect()
         }
         None => vec![false; pairs.len()],
     };
@@ -1438,7 +1494,11 @@ fn unify_same_path_constructor_args(
 }
 
 /// OCaml `reify env t` using the unifier's environment and newtype level.
-fn reify_in_unify_state(ctx: &TypeContext, state: &mut UnifyState, ty: TypeExprRef) -> TypeResult<()> {
+fn reify_in_unify_state(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    ty: TypeExprRef,
+) -> TypeResult<()> {
     let Some(newtype_level) = state.newtype_level else {
         panic!("Ctype.reify: get_newtype_level called outside pattern unification");
     };
@@ -1553,7 +1613,7 @@ fn create_reified_constr(
     let name = ctx.next_reified_abstract_name(&prefix);
     let ident = ctx.create_ident(&name);
     let decl = reified_type_decl(newtype_level);
-    env.add_type(ident.clone(), decl.clone());
+    env.add_type(ident, decl.clone());
     ctx.register_type_decl_by_stamp(ident.stamp(), decl);
     let path = Path::Pident(ident);
     let abbrev = ctx.alloc_abbrev(AbbrevMemo::Mnil);
@@ -1624,7 +1684,8 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
                             row_more: t,
                             ..row.clone()
                         };
-                        let fixed = ctx.alloc_type_at_level(TypeDesc::Tvariant(Box::new(fixed_row)), m_level);
+                        let fixed = ctx
+                            .alloc_type_at_level(TypeDesc::Tvariant(Box::new(fixed_row)), m_level);
                         link_type(ctx, m, fixed);
                         if m_level < newtype_level {
                             let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), m_level);
@@ -1706,7 +1767,9 @@ fn reaches_quick(
     match &*desc {
         TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_) if shallow_rows => Some(false),
         TypeDesc::Tvar(_) | TypeDesc::Tnil | TypeDesc::Tunivar(_) => Some(false),
-        TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => search(&mut args.iter().copied()),
+        TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => {
+            search(&mut args.iter().copied())
+        }
         TypeDesc::Tarrow { args, ret } => {
             search(&mut args.iter().map(|arg| arg.typ).chain(std::iter::once(*ret)))
         }
@@ -1896,9 +1959,9 @@ pub(crate) fn occur_check(
                     visited.push(ty);
                     let mut children = Vec::new();
                     iter_type_expr(ctx, ty, |child| children.push(child));
-                    let result = children
-                        .into_iter()
-                        .try_for_each(|child| occur_rec(ctx, env, allow_recursive, visited, ty0, child));
+                    let result = children.into_iter().try_for_each(|child| {
+                        occur_rec(ctx, env, allow_recursive, visited, ty0, child)
+                    });
                     visited.pop();
                     result
                 };
@@ -1925,9 +1988,9 @@ pub(crate) fn occur_check(
                 visited.push(ty);
                 let mut children = Vec::new();
                 iter_type_expr(ctx, ty, |child| children.push(child));
-                let result = children
-                    .into_iter()
-                    .try_for_each(|child| occur_rec(ctx, env, allow_recursive, visited, ty0, child));
+                let result = children.into_iter().try_for_each(|child| {
+                    occur_rec(ctx, env, allow_recursive, visited, ty0, child)
+                });
                 visited.pop();
                 result
             }
@@ -1964,7 +2027,9 @@ pub(crate) fn occur_check(
                 | TypeDesc::Tunivar(_)
                 | TypeDesc::Tobject { .. }
                 | TypeDesc::Tvariant(_) => return true,
-                TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } if args.is_empty() => {
+                TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. }
+                    if args.is_empty() =>
+                {
                     return true;
                 }
                 TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => {
@@ -2260,7 +2325,7 @@ pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
 /// is above the target, expand the abbreviation and link the original type
 /// to its expansion. This normalizes module-alias paths (e.g.,
 /// `Pdot(Pident("U"), "t")` → `Pident("list")`).
-pub fn update_level_expand<'a>(ctx: &'a TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
+pub fn update_level_expand(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
     // Callers of this form ignore an escaping constructor, like the memoized
     // expansion in OCaml `expand_abbrev` (ctype.ml:1153-1160).
     let _ = update_level_checked(ctx, env, level, ty, &mut None, &mut None);
@@ -2341,8 +2406,8 @@ fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
 
 /// OCaml `update_level env level expand` (ctype.ml:561-613). Returns the type
 /// whose constructor would escape its scope.
-fn update_level_expand_with_lookup_capture<'a>(
-    ctx: &'a TypeContext,
+fn update_level_expand_with_lookup_capture(
+    ctx: &TypeContext,
     env: &Env,
     level: i32,
     expand: bool,
@@ -2366,7 +2431,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // it needs no copy unless it is recorded or expanded.
                 let persistent_level = (path_root_is_persistent(path)
                     && (pending_type_lookup_paths.is_none() || !matches!(path, Path::Pdot(..))))
-                .then(|| path_binding_time(path));
+                .then(|| path.binding_time());
                 let path_level = match persistent_level {
                     Some(path_level) => path_level,
                     None => {
@@ -2444,7 +2509,10 @@ fn update_level_expand_with_lookup_capture<'a>(
                 );
             }
             TypeDesc::Tvariant(row) => {
-                let name_path = row_repr_ref(ctx, row).row_name.as_ref().map(|(path, _)| path.clone());
+                let name_path = row_repr_ref(ctx, row)
+                    .row_name
+                    .as_ref()
+                    .map(|(path, _)| path.clone());
                 drop(desc);
                 // OCaml compiler/ml/ctype.ml:723-730 checks the polymorphic
                 // variant `row_name` path with `get_level env p` before
@@ -2487,7 +2555,8 @@ fn update_level_expand_with_lookup_capture<'a>(
                 );
             }
         }
-    }    Ok(())
+    }
+    Ok(())
 }
 
 /// `iter_type_expr (update_level env level expand) ty`.
@@ -2514,28 +2583,6 @@ fn update_level_children(
         )?;
     }
     Ok(())
-}
-
-/// Get the binding time of a path (matches OCaml's Path.binding_time).
-/// Returns the stamp of the root identifier.
-fn path_binding_time(path: &Path) -> i32 {
-    match path {
-        Path::Pident(id) => id.stamp() as i32,
-        Path::Pdot(parent, _, _) => path_binding_time(parent),
-        Path::Papply(p1, p2) => std::cmp::max(path_binding_time(p1), path_binding_time(p2)),
-    }
-}
-
-/// Check if a path is "local" (non-persistent root identifier with non-zero stamp).
-/// Matches OCaml's `Path.binding_time > 0` — local module aliases and type aliases
-/// have high stamps, while persistent (CMI-loaded) modules have stamp 0.
-#[inline]
-fn is_local_path(path: &Path) -> bool {
-    match path {
-        Path::Pident(id) => id.stamp() != 0,
-        Path::Pdot(parent, _, _) => is_local_path(parent),
-        Path::Papply(p1, p2) => is_local_path(p1) || is_local_path(p2),
-    }
 }
 
 // ============================================================================
@@ -2578,15 +2625,7 @@ fn is_predef_type_name(name: &str) -> bool {
 // Type Alias Expansion
 // ============================================================================
 
-/// Resolve a type declaration by walking through module signatures.
-///
-/// For a path like `Pdot(Pdot(Pident(Js), "Promise"), "t")`:
-/// 1. Load the root module's CMI (`Js.cmi`)
-/// 2. Find the sub-module `Promise` in its signature
-/// 3. If it's an alias, load the aliased module
-/// 4. Find type `t` in the resolved module's signature
-///
-/// Returns the type declaration and caches it in the path store.
+/// Find `<module_name>.cmi` (or its uncapitalized spelling) in the load paths.
 fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option<String> {
     let cmi_filename = format!("{}.cmi", module_name);
     for dir in load_paths {
@@ -2607,8 +2646,8 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
     None
 }
 
-pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn resolve_module_signature_through_cmi_shared(
+    ctx: &TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -2651,7 +2690,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
             crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, module_path, ctx);
             crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, module_path);
             // Also recursively substitute submodule paths.
-            crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, module_path, ctx);
+            crate::cmi::persistent_env::substitute_submodule_paths(&sig, module_path, ctx);
             Some(Arc::new(sig))
         }
         Path::Pdot(parent, module_name, _) => {
@@ -2697,18 +2736,8 @@ pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
     result
 }
 
-pub(crate) fn resolve_module_signature_through_cmi<'a>(
-    ctx: &'a TypeContext,
-    load_paths: &[std::path::PathBuf],
-    module_path: &Path,
-    visiting: &mut HashSet<Path>,
-) -> Option<super::decl::Signature> {
-    resolve_module_signature_through_cmi_shared(ctx, load_paths, module_path, visiting)
-        .map(|sig| sig.as_ref().clone())
-}
-
-fn resolve_module_signature_through_persistent_env_shared<'a>(
-    ctx: &'a TypeContext,
+fn resolve_module_signature_through_persistent_env_shared(
+    ctx: &TypeContext,
     module_path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<Arc<super::decl::Signature>> {
@@ -2774,8 +2803,8 @@ fn resolve_module_signature_through_persistent_env_shared<'a>(
     result
 }
 
-fn normalize_module_path_through_components<'a>(
-    ctx: &'a TypeContext,
+fn normalize_module_path_through_components(
+    ctx: &TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -2791,7 +2820,7 @@ fn normalize_module_path_through_components<'a>(
             let parent =
                 normalize_module_path_through_components(ctx, load_paths, parent, visiting)
                     .unwrap_or_else(|| (**parent).clone());
-            Path::Pdot(std::sync::Arc::new(parent), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(parent), *name, *pos)
         }
         Path::Papply(functor, arg) => {
             let functor =
@@ -2838,8 +2867,17 @@ fn normalize_module_path_through_components<'a>(
     }
 }
 
-pub(crate) fn resolve_type_item_through_modules<'a>(
-    ctx: &'a TypeContext,
+/// Resolve a type declaration by walking through module signatures.
+///
+/// For a path like `Pdot(Pdot(Pident(Js), "Promise"), "t")`:
+/// 1. Load the root module's CMI (`Js.cmi`)
+/// 2. Find the sub-module `Promise` in its signature
+/// 3. If it's an alias, load the aliased module
+/// 4. Find type `t` in the resolved module's signature
+///
+/// Returns the type declaration and caches it in the path store.
+pub(crate) fn resolve_type_item_through_modules(
+    ctx: &TypeContext,
     path: &Path,
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use crate::types::decl::SignatureItem;
@@ -2921,8 +2959,8 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
                 let path_name = path_name.clone().unwrap_or_else(|| path.name());
                 ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
                 ctx.register_type_decl_by_exact_path(path.clone(), qualified_decl.clone());
-                ctx.register_type_item_by_path(&path_name, id.clone(), qualified_decl.clone());
-                result = Some((id.clone(), qualified_decl));
+                ctx.register_type_item_by_path(&path_name, *id, qualified_decl.clone());
+                result = Some((*id, qualified_decl));
             }
         }
     }
@@ -2942,8 +2980,8 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     result
 }
 
-pub fn resolve_type_through_modules<'a>(
-    ctx: &'a TypeContext,
+pub fn resolve_type_through_modules(
+    ctx: &TypeContext,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
     if path_root_is_persistent(path) {
@@ -2956,11 +2994,8 @@ pub fn resolve_type_through_modules<'a>(
     resolve_type_item_through_modules(ctx, path).map(|(_, decl)| decl)
 }
 
-/// Try to expand a type alias (type abbreviation).
-///
-/// If the type is `Tconstr(path, args)` and the type declaration for `path`
-fn resolve_module_type_through_env_path<'a>(
-    ctx: &'a TypeContext,
+fn resolve_module_type_through_env_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     path: &Path,
     visiting: &mut HashSet<Path>,
@@ -2972,7 +3007,7 @@ fn resolve_module_type_through_env_path<'a>(
         return None;
     }
 
-    let result = match path {
+    match path {
         Path::Pident(id) => {
             let name = id.name();
             if id.is_persistent() {
@@ -2984,9 +3019,9 @@ fn resolve_module_type_through_env_path<'a>(
                 if let Some(sig) = direct_persistent_env
                     .as_mut()
                     .and_then(|pers| pers.find_pers_struct(name, ctx))
-                    .map(|ps| ps.ps_sig.as_ref().clone())
+                    .map(|ps| ps.ps_sig.clone())
                 {
-                    Some(super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)))
+                    Some(super::decl::ModuleType::MtySignature(sig))
                 } else {
                     let mut persistent_env = in_process_module_resolution_env(ctx);
                     crate::types::typecore::resolve_module_signature_for_path(
@@ -3006,15 +3041,13 @@ fn resolve_module_type_through_env_path<'a>(
                             // above so persistent module lookups share the same
                             // qualified-view source of truth as other hot callers.
                             let mut cmi_visiting = HashSet::new();
-                            resolve_module_signature_through_cmi(
+                            resolve_module_signature_through_cmi_shared(
                                 ctx,
                                 &load_paths,
                                 path,
                                 &mut cmi_visiting,
                             )
-                            .map(|signature| {
-                                super::decl::ModuleType::MtySignature(Arc::new(signature))
-                            })
+                            .map(super::decl::ModuleType::MtySignature)
                         }
                     })
                 }
@@ -3047,7 +3080,9 @@ fn resolve_module_type_through_env_path<'a>(
                     // the selected component signature and leave the
                     // module-declaration force to env.ml:865-882-equivalent
                     // callers that actually ask for `find_module`.
-                    return Some(super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)));
+                    return Some(super::decl::ModuleType::MtySignature(std::sync::Arc::new(
+                        sig,
+                    )));
                 }
             }
             let mut persistent_env = in_process_module_resolution_env(ctx);
@@ -3071,7 +3106,7 @@ fn resolve_module_type_through_env_path<'a>(
                         let parent_is_opened_component =
                             env.path_starts_with_opened_component(parent);
                         let preferred_child_path = (!parent_is_opened_component)
-                            .then(|| parent_alias_target.as_ref())
+                            .then_some(parent_alias_target.as_ref())
                             .flatten()
                             .map(|target_parent_path| {
                                 Path::pdot(target_parent_path.clone(), name.to_string())
@@ -3101,7 +3136,9 @@ fn resolve_module_type_through_env_path<'a>(
                                 )
                             })
                         })
-                        .map(|(_, sig)| super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)))
+                        .map(|(_, sig)| {
+                            super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig))
+                        })
                     }
                     other => {
                         let child_mty = other.clone();
@@ -3133,13 +3170,11 @@ fn resolve_module_type_through_env_path<'a>(
             }
         }
         Path::Papply(_, _) => None,
-    };
-
-    result
+    }
 }
 
-pub fn resolve_module_type_through_env<'a>(
-    ctx: &'a TypeContext,
+pub fn resolve_module_type_through_env(
+    ctx: &TypeContext,
     env: &super::env::Env,
     path: &Path,
 ) -> Option<super::decl::ModuleType> {
@@ -3147,8 +3182,8 @@ pub fn resolve_module_type_through_env<'a>(
     resolve_module_type_through_env_path(ctx, env, path, &mut visiting)
 }
 
-fn resolve_signature_through_env_module_type<'a>(
-    ctx: &'a TypeContext,
+fn resolve_signature_through_env_module_type(
+    ctx: &TypeContext,
     env: &super::env::Env,
     mty: &super::decl::ModuleType,
     visiting: &mut HashSet<Path>,
@@ -3177,8 +3212,8 @@ fn resolve_signature_through_env_module_type<'a>(
     }
 }
 
-fn strengthen_type_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_type_decl_for_module_access_path(
+    ctx: &TypeContext,
     module_access_path: &Path,
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
@@ -3233,8 +3268,8 @@ fn qualify_type_decl_for_module_access_path(
     qualified
 }
 
-fn strengthen_module_type_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_module_type_for_module_access_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -3273,29 +3308,29 @@ fn strengthen_module_type_for_module_access_path<'a>(
     let scraped = scrape_modtype_ident_for_strengthen(env, mty, &mut visiting);
 
     match &scraped {
-        ModuleType::MtySignature(sig) => {
-            ModuleType::MtySignature(std::sync::Arc::new(strengthen_signature_for_module_access_path(
+        ModuleType::MtySignature(sig) => ModuleType::MtySignature(std::sync::Arc::new(
+            strengthen_signature_for_module_access_path(
                 ctx,
                 env,
                 aliasable,
                 module_access_path,
                 sig,
                 0,
-            )))
-        }
+            ),
+        )),
         ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => scraped,
         ModuleType::MtyFunctor {
             param,
             param_type,
             result,
         } if param.name() != "*" => ModuleType::MtyFunctor {
-            param: param.clone(),
+            param: *param,
             param_type: param_type.clone(),
             result: Box::new(strengthen_module_type_for_module_access_path(
                 ctx,
                 env,
                 false,
-                &Path::papply(module_access_path.clone(), Path::pident(param.clone())),
+                &Path::papply(module_access_path.clone(), Path::pident(*param)),
                 result,
             )),
         },
@@ -3303,8 +3338,8 @@ fn strengthen_module_type_for_module_access_path<'a>(
     }
 }
 
-pub fn strengthen_module_type_for_inclusion_path<'a>(
-    ctx: &'a TypeContext,
+pub fn strengthen_module_type_for_inclusion_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
@@ -3312,8 +3347,8 @@ pub fn strengthen_module_type_for_inclusion_path<'a>(
     strengthen_module_type_for_module_access_path(ctx, env, true, module_access_path, mty)
 }
 
-pub fn strengthen_module_type_for_non_aliasable_path<'a>(
-    ctx: &'a TypeContext,
+pub fn strengthen_module_type_for_non_aliasable_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
@@ -3321,8 +3356,8 @@ pub fn strengthen_module_type_for_non_aliasable_path<'a>(
     strengthen_module_type_for_module_access_path(ctx, env, false, module_access_path, mty)
 }
 
-fn strengthen_module_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_module_decl_for_module_access_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -3347,8 +3382,8 @@ fn strengthen_module_decl_for_module_access_path<'a>(
     strengthened
 }
 
-fn strengthen_signature_for_module_access_path<'a>(
-    ctx: &'a TypeContext,
+fn strengthen_signature_for_module_access_path(
+    ctx: &TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -3366,7 +3401,7 @@ fn strengthen_signature_for_module_access_path<'a>(
             && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
             && let Some(SignatureItem::SigType(next_id, next_decl, _)) = sig.get(index + 1)
             && next_decl.type_private == PrivateFlag::Private
-            && id.name() == format!("{}#row", next_id.name())
+            && id.name().strip_suffix("#row") == Some(next_id.name())
         {
             index += 1;
             continue;
@@ -3376,16 +3411,21 @@ fn strengthen_signature_for_module_access_path<'a>(
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                     pos += 1;
                 }
-                SignatureItem::SigValue(id.clone(), desc.clone())
+                SignatureItem::SigValue(*id, desc.clone())
             }
             SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
-                id.clone(),
-                std::sync::Arc::new(strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl)),
+                *id,
+                std::sync::Arc::new(strengthen_type_decl_for_module_access_path(
+                    ctx,
+                    module_access_path,
+                    id,
+                    decl,
+                )),
                 *rec_status,
             ),
             SignatureItem::SigTypext(id, ext, ext_status) => {
                 pos += 1;
-                SignatureItem::SigTypext(id.clone(), ext.clone(), *ext_status)
+                SignatureItem::SigTypext(*id, ext.clone(), *ext_status)
             }
             SignatureItem::SigModule(id, md, rec_status) => {
                 let child_path = Path::pdot_pos(module_access_path.clone(), id.name(), pos);
@@ -3397,8 +3437,8 @@ fn strengthen_signature_for_module_access_path<'a>(
                     &child_path,
                     md,
                 );
-                let new_item = SignatureItem::SigModule(id.clone(), strengthened_md, *rec_status);
-                env.add_module(id.clone(), md.clone());
+                let new_item = SignatureItem::SigModule(*id, strengthened_md, *rec_status);
+                env.add_module(*id, md.clone());
                 new_item
             }
             SignatureItem::SigModtype(id, mtd) => {
@@ -3408,8 +3448,8 @@ fn strengthen_signature_for_module_access_path<'a>(
                     strengthened_mtd.mtd_type =
                         Some(super::decl::ModuleType::MtyIdent(modtype_path));
                 }
-                let new_item = SignatureItem::SigModtype(id.clone(), strengthened_mtd);
-                env.add_modtype(id.clone(), mtd.clone());
+                let new_item = SignatureItem::SigModtype(*id, strengthened_mtd);
+                env.add_modtype(*id, mtd.clone());
                 new_item
             }
             SignatureItem::SigClass => SignatureItem::SigClass,
@@ -3424,8 +3464,8 @@ fn strengthen_signature_for_module_access_path<'a>(
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
-fn lookup_component_module_sig_type<'a>(
-    ctx: &'a TypeContext,
+fn lookup_component_module_sig_type(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
@@ -3450,7 +3490,7 @@ fn lookup_component_module_sig_type<'a>(
             |components| {
                 components
                     .lookup_type(type_name)
-                    .map(|(id, decl)| (id.clone(), decl.clone()))
+                    .map(|(id, decl)| (*id, decl.clone()))
             },
         )
         .flatten();
@@ -3477,15 +3517,13 @@ fn lookup_component_module_sig_type<'a>(
         Path::Pdot(..) | Path::Papply(..) => None,
     }?;
     raw_sig.iter().find_map(|item| match item {
-        SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-            Some((id.clone(), decl.clone()))
-        }
+        SignatureItem::SigType(id, decl, _) if id.name() == type_name => Some((*id, decl.clone())),
         _ => None,
     })
 }
 
-fn lookup_raw_module_sig_type<'a>(
-    ctx: &'a TypeContext,
+fn lookup_raw_module_sig_type(
+    ctx: &TypeContext,
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
@@ -3518,7 +3556,7 @@ fn lookup_raw_module_sig_type<'a>(
             .with_raw_module_sig(id.name(), |raw_sig| {
                 raw_sig.iter().find_map(|item| match item {
                     SignatureItem::SigType(raw_id, raw_decl, _) if raw_id.name() == type_name => {
-                        Some((raw_id.clone(), raw_decl.clone()))
+                        Some((*raw_id, raw_decl.clone()))
                     }
                     _ => None,
                 })
@@ -3532,9 +3570,7 @@ fn lookup_raw_module_sig_type<'a>(
             resolve_signature_through_env_module_type(ctx, env, &resolved, &mut visiting)
         })?;
     raw_sig.iter().find_map(|item| match item {
-        SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
-            Some((id.clone(), decl.clone()))
-        }
+        SignatureItem::SigType(id, decl, _) if id.name() == type_name => Some((*id, decl.clone())),
         _ => None,
     })
 }
@@ -3557,13 +3593,14 @@ fn resolve_type_item_through_env<'a>(
     if let Some((id, decl)) = ctx.find_resolved_type_item(scope_id, path, strengthen_alias_types) {
         return Some((id, super::decl::TypeDeclarationRef::Shared(decl)));
     }
-    let (id, decl) = resolve_type_item_through_env_uncached(ctx, env, path, strengthen_alias_types)?;
+    let (id, decl) =
+        resolve_type_item_through_env_uncached(ctx, env, path, strengthen_alias_types)?;
     let decl = match decl {
         super::decl::TypeDeclarationRef::Borrowed(decl) => Arc::new(decl.clone()),
         super::decl::TypeDeclarationRef::Shared(decl) => decl,
         super::decl::TypeDeclarationRef::Owned(decl) => Arc::new(*decl),
     };
-    ctx.register_resolved_type_item(scope_id, path, strengthen_alias_types, id.clone(), decl.clone());
+    ctx.register_resolved_type_item(scope_id, path, strengthen_alias_types, id, decl.clone());
     Some((id, super::decl::TypeDeclarationRef::Shared(decl)))
 }
 
@@ -3643,10 +3680,7 @@ fn resolve_type_item_through_env_uncached<'a>(
                 ) {
                     target_decl.type_private = PrivateFlag::Public;
                 }
-                return Some((
-                    id.clone(),
-                    super::decl::TypeDeclarationRef::owned(target_decl),
-                ));
+                return Some((id, super::decl::TypeDeclarationRef::owned(target_decl)));
             }
             let raw_module_path = alias_target_for_strengthening
                 .as_ref()
@@ -3659,7 +3693,7 @@ fn resolve_type_item_through_env_uncached<'a>(
         }
         if let Some(target_path) = alias_target_for_strengthening.as_ref() {
             return Some((
-                id.clone(),
+                id,
                 super::decl::TypeDeclarationRef::owned(
                     strengthen_type_decl_for_module_access_path(
                         ctx,
@@ -3700,7 +3734,7 @@ fn resolve_type_through_env<'a>(
 /// 1. Recursively normalizes the prefix `p`
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
-pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
+pub(crate) fn normalize_path_full(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
     // Normalization only reads module-level bindings (see `Env::scope_id`).
     let env_id = env.scope_id();
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
@@ -3712,8 +3746,8 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     normalized
 }
 
-pub(crate) fn normalize_path_full_strict<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn normalize_path_full_strict(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Result<Path, Path> {
@@ -3728,11 +3762,7 @@ pub(crate) fn normalize_path_full_strict<'a>(
     }
 }
 
-fn module_path_exists_for_strict_normalize<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    path: &Path,
-) -> bool {
+fn module_path_exists_for_strict_normalize(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
     match path {
         Path::Pident(id) => {
             if env.find_module_same(id).is_ok() {
@@ -3774,8 +3804,8 @@ fn module_path_exists_for_strict_normalize<'a>(
         .is_some()
 }
 
-pub(crate) fn force_normalize_path_full_side_effects<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn force_normalize_path_full_side_effects(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Path {
@@ -3797,7 +3827,7 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     normalized
 }
 
-fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
+fn normalize_path_forward_only(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
     // Like `normalize_path_full`, this only reads module-level bindings, so
     // memoize it per `Env::scope_id`; unification asks for the same abstract
     // type heads many times per scope.
@@ -3811,8 +3841,8 @@ fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path)
     normalized
 }
 
-fn normalize_path_full_inner<'a>(
-    ctx: &'a TypeContext,
+fn normalize_path_full_inner(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
     depth: usize,
@@ -3880,7 +3910,7 @@ fn normalize_path_full_inner<'a>(
             if p_norm == **p {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
             }
         }
         Path::Papply(p1, p2) => {
@@ -3971,21 +4001,19 @@ fn normalize_path_full_inner<'a>(
             return path;
         }
         let mut resolve_visiting = HashSet::new();
-        if let Some(mty) =
+        if let Some(super::decl::ModuleType::MtyAlias(_, alias_path)) =
             resolve_module_type_through_env_path(ctx, env, &path, &mut resolve_visiting)
         {
-            if let super::decl::ModuleType::MtyAlias(_, alias_path) = &mty {
-                return normalize_path_full_inner(
-                    ctx,
-                    env,
-                    alias_path,
-                    depth + 1,
-                    visiting,
-                    allow_reverse_local_aliases,
-                    force_module_lookup_side_effects,
-                    None,
-                );
-            }
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                &alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
+                None,
+            );
         }
     } else {
         let md = match &path {
@@ -4060,10 +4088,6 @@ fn pdot_expansion(
     mode: ExpandHeadMode,
     can_expand_decl_manifest: &dyn Fn(&super::decl::TypeDeclaration, TypeExprRef) -> bool,
 ) -> PdotExpansion {
-    // The general route looks the path up in the flat Env first; for a
-    // dotted path that result is not used, but the lookup is kept so the
-    // first expansion touches the Env exactly as before.
-    let _ = env.lookup_type(path);
     if let Some(decl) = resolve_type_through_env(ctx, env, path, true)
         && let Some(manifest) = decl.type_manifest
     {
@@ -4094,7 +4118,7 @@ fn pdot_expansion(
                 )
                 .filter(|target_module_path| !target_module_path.same(parent))
                 .map(|target_module_path| {
-                    Path::Pdot(std::sync::Arc::new(target_module_path), type_name.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(target_module_path), *type_name, *pos)
                 });
                 if let Some(target) = target {
                     return PdotExpansion::Rewrite(target);
@@ -4126,8 +4150,8 @@ enum ExpandHeadMode {
     Optimize,
 }
 
-fn try_expand_head_with_mode<'a>(
-    ctx: &'a TypeContext,
+fn try_expand_head_with_mode(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
@@ -4151,7 +4175,6 @@ fn try_expand_head_with_mode<'a>(
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
                 _ => None,
             };
-
 
             drop(desc);
 
@@ -4221,7 +4244,9 @@ fn try_expand_head_with_mode<'a>(
             // `IdTbl.find_same` and stops without expanding.
             if let Path::Pident(id) = &path
                 && super::predef::is_predef_type_ident(id)
-                && env.find_type_by_ident(id).is_ok_and(|decl| decl.type_manifest.is_none())
+                && env
+                    .find_type_by_ident(id)
+                    .is_ok_and(|decl| decl.type_manifest.is_none())
             {
                 return None;
             }
@@ -4232,11 +4257,18 @@ fn try_expand_head_with_mode<'a>(
             if matches!(&path, Path::Pdot(..)) {
                 let scope_id = env.scope_id();
                 let mode_tag = mode as u8;
-                let expansion = match ctx.find_pdot_expansion(scope_id, mode_tag, args.len(), &path) {
+                let expansion = match ctx.find_pdot_expansion(scope_id, mode_tag, args.len(), &path)
+                {
                     Some(expansion) => expansion,
                     None => {
-                        let expansion =
-                            pdot_expansion(ctx, env, &path, args.len(), mode, &can_expand_decl_manifest);
+                        let expansion = pdot_expansion(
+                            ctx,
+                            env,
+                            &path,
+                            args.len(),
+                            mode,
+                            &can_expand_decl_manifest,
+                        );
                         ctx.register_pdot_expansion(
                             scope_id,
                             mode_tag,
@@ -4441,7 +4473,7 @@ fn try_expand_head_with_mode<'a>(
                                 .map(|target_module_path| {
                                     Path::Pdot(
                                         std::sync::Arc::new(target_module_path),
-                                        type_name.clone(),
+                                        *type_name,
                                         *pos,
                                     )
                                 })
@@ -4585,31 +4617,19 @@ fn try_expand_head_with_mode<'a>(
     }
 }
 
-fn try_expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
+fn try_expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
-}
-
-fn try_expand_head_unif<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<TypeExprRef> {
-    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
 }
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-pub fn expand_head_once<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<TypeExprRef> {
+pub fn expand_head_once(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
     try_expand_head(ctx, env, ty).map(|expanded| ctx.repr(expanded))
 }
 
-pub(crate) fn expand_abbrev_opt_once<'a>(
-    ctx: &'a TypeContext,
+pub(crate) fn expand_abbrev_opt_once(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -4635,12 +4655,12 @@ pub(crate) fn instance_declaration(
             labels
                 .iter()
                 .map(|label| crate::types::decl::LabelDeclaration {
-                    ld_id: label.ld_id.clone(),
+                    ld_id: label.ld_id,
                     ld_runtime_name: label.ld_runtime_name.clone(),
                     ld_mutable: label.ld_mutable,
                     ld_optional: label.ld_optional,
                     ld_type: copy(label.ld_type),
-                    ld_loc: label.ld_loc.clone(),
+                    ld_loc: label.ld_loc,
                     ld_attributes: label.ld_attributes.clone(),
                 })
                 .collect(),
@@ -4732,19 +4752,15 @@ pub fn same_constr(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRe
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-pub fn expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+pub fn expand_head(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
-pub(crate) fn expand_head_unif<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> TypeExprRef {
+pub(crate) fn expand_head_unif(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
 }
 
-pub(crate) fn expand_head_opt<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+pub(crate) fn expand_head_opt(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
 }
 
@@ -4764,12 +4780,6 @@ fn primitive_coercion_path(path: &Path) -> bool {
         || path.same(&crate::types::predef::path_int())
         || path.same(&crate::types::predef::path_float())
         || path.same(&crate::types::predef::path_bigint())
-}
-
-fn can_try_coerce_variant_to_primitive(path: &Path, decl: &crate::types::TypeDeclaration) -> bool {
-    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_, _))
-        && decl.type_params.is_empty()
-        && !path.same(&crate::types::predef::path_bool())
 }
 
 fn variant_runtime_configuration(
@@ -5119,7 +5129,6 @@ impl std::ops::DerefMut for SubtypeAcc {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SubtypeChange {
     Unchanged,
-    Equiv,
     Changed,
 }
 
@@ -5227,10 +5236,18 @@ impl BuildSubtype<'_, '_> {
                 }
                 let mut visited = visited.to_vec();
                 visited.insert(0, t);
-                let tlist2: Vec<_> = tlist.iter().map(|t| self.build(&visited, posi, level, *t)).collect();
-                let c = tlist2.iter().fold(SubtypeChange::Unchanged, |acc, (_, c)| acc.max(*c));
+                let tlist2: Vec<_> = tlist
+                    .iter()
+                    .map(|t| self.build(&visited, posi, level, *t))
+                    .collect();
+                let c = tlist2
+                    .iter()
+                    .fold(SubtypeChange::Unchanged, |acc, (_, c)| acc.max(*c));
                 if c > SubtypeChange::Unchanged {
-                    (ctx.new_tuple(tlist2.into_iter().map(|(t, _)| t).collect()), c)
+                    (
+                        ctx.new_tuple(tlist2.into_iter().map(|(t, _)| t).collect()),
+                        c,
+                    )
                 } else {
                     (t, SubtypeChange::Unchanged)
                 }
@@ -5244,7 +5261,11 @@ impl BuildSubtype<'_, '_> {
                 let expanded = try_expand_head(ctx, self.env, t).expect("safe_abbrev");
                 let t1 = ctx.repr(expanded);
                 let (t2, c) = self.build(visited, posi, pred_expand(level), t1);
-                if c > SubtypeChange::Unchanged { (t2, c) } else { (t, SubtypeChange::Unchanged) }
+                if c > SubtypeChange::Unchanged {
+                    (t2, c)
+                } else {
+                    (t, SubtypeChange::Unchanged)
+                }
             }
             TypeDesc::Tconstr { path, args, .. } => {
                 // Must check recursion on constructors, since we do not
@@ -5283,9 +5304,14 @@ impl BuildSubtype<'_, '_> {
                         }
                     })
                     .collect();
-                let c = tl2.iter().fold(SubtypeChange::Unchanged, |acc, (_, c)| acc.max(*c));
+                let c = tl2
+                    .iter()
+                    .fold(SubtypeChange::Unchanged, |acc, (_, c)| acc.max(*c));
                 if c > SubtypeChange::Unchanged {
-                    (ctx.new_constr(path, tl2.into_iter().map(|(t, _)| t).collect()), c)
+                    (
+                        ctx.new_constr(path, tl2.into_iter().map(|(t, _)| t).collect()),
+                        c,
+                    )
                 } else {
                     (t, SubtypeChange::Unchanged)
                 }
@@ -5296,7 +5322,11 @@ impl BuildSubtype<'_, '_> {
                     return (t, SubtypeChange::Unchanged);
                 }
                 let level2 = pred_enlarge(level);
-                let mut visited = if level2 < level { Vec::new() } else { self.filter_visited(visited) };
+                let mut visited = if level2 < level {
+                    Vec::new()
+                } else {
+                    self.filter_visited(visited)
+                };
                 visited.insert(0, t);
                 // `filter_row_fields false`: drop absent fields.
                 let fields: Vec<_> = row
@@ -5343,13 +5373,23 @@ impl BuildSubtype<'_, '_> {
                         _ => unreachable!("build_subtype: non-static row field"),
                     })
                     .collect();
-                let c = fields.iter().fold(SubtypeChange::Unchanged, |acc, (_, c)| acc.max(*c));
+                let c = fields
+                    .iter()
+                    .fold(SubtypeChange::Unchanged, |acc, (_, c)| acc.max(*c));
                 let row = RowDesc {
-                    row_fields: fields.into_iter().map(|(f, _)| f).collect::<Vec<_>>().into(),
+                    row_fields: fields
+                        .into_iter()
+                        .map(|(f, _)| f)
+                        .collect::<Vec<_>>()
+                        .into(),
                     row_more: ctx.new_var(None),
                     row_closed: posi,
                     row_fixed: false,
-                    row_name: if c > SubtypeChange::Unchanged { None } else { row.row_name.clone() },
+                    row_name: if c > SubtypeChange::Unchanged {
+                        None
+                    } else {
+                        row.row_name.clone()
+                    },
                 };
                 (ctx.new_variant(row), SubtypeChange::Changed)
             }
@@ -5358,7 +5398,11 @@ impl BuildSubtype<'_, '_> {
                     return (t, SubtypeChange::Unchanged);
                 }
                 let level2 = pred_enlarge(level);
-                let mut visited = if level2 < level { Vec::new() } else { self.filter_visited(visited) };
+                let mut visited = if level2 < level {
+                    Vec::new()
+                } else {
+                    self.filter_visited(visited)
+                };
                 visited.insert(0, t);
                 let (t2, c) = self.build(&visited, posi, level2, t1);
                 if c > SubtypeChange::Unchanged {
@@ -5379,7 +5423,9 @@ impl BuildSubtype<'_, '_> {
                     // performed after enlargement will then require the
                     // source and target field types to be equivalent.
                     crate::types::asttypes::MutableFlag::Mutable => (t1, SubtypeChange::Unchanged),
-                    crate::types::asttypes::MutableFlag::Immutable => self.build(visited, posi, level, t1),
+                    crate::types::asttypes::MutableFlag::Immutable => {
+                        self.build(visited, posi, level, t1)
+                    }
                 };
                 let (t2b, c2) = self.build(visited, posi, level, t2);
                 let c = c1.max(c2);
@@ -5426,7 +5472,11 @@ impl BuildSubtype<'_, '_> {
 /// ctype.ml `enlarge_type env ty`: a supertype approximation of `ty` and
 /// whether double coercion might do better.
 pub fn enlarge_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> (TypeExprRef, bool) {
-    let mut builder = BuildSubtype { ctx, env, warn: false };
+    let mut builder = BuildSubtype {
+        ctx,
+        env,
+        warn: false,
+    };
     // `level = 4` allows 2 expansions involving objects/variants.
     let (ty, _) = builder.build(&[], true, 4, ty);
     (ty, builder.warn)
@@ -5484,7 +5534,12 @@ pub fn force_subtype(ctx: &TypeContext, env: &Env, cstrs: SubtypeConstraints) ->
 }
 
 /// `subtype env ty1 ty2 ()`: build and enforce the constraints at once.
-pub fn subtype_now(ctx: &TypeContext, env: &Env, ty1: TypeExprRef, ty2: TypeExprRef) -> TypeResult<()> {
+pub fn subtype_now(
+    ctx: &TypeContext,
+    env: &Env,
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeResult<()> {
     let cstrs = subtype(ctx, env, ty1, ty2)?;
     force_subtype(ctx, env, cstrs)
 }
@@ -5575,7 +5630,12 @@ fn can_try_coerce_variant_to_primitive_opt(
             if decl.type_params.is_empty() && !path.same(&crate::types::predef::path_bool()) =>
         {
             let unboxed = variant_runtime_configuration(ctx, &decl).unboxed;
-            Some((path, constructors.to_vec(), ctx.variant_layout(*layout_ref), unboxed))
+            Some((
+                path,
+                constructors.to_vec(),
+                ctx.variant_layout(*layout_ref),
+                unboxed,
+            ))
         }
         _ => None,
     }
@@ -5603,24 +5663,52 @@ fn subtype_rec(
             push_subtype_cstr(cstrs, trace, t1, t2, None);
             Ok(())
         }
-        (TypeDesc::Tarrow { args: args1, ret: ret1 }, TypeDesc::Tarrow { args: args2, ret: ret2 })
-            if args1.len() == args2.len()
-                && args1
-                    .iter()
-                    .zip(args2)
-                    .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
+        (
+            TypeDesc::Tarrow {
+                args: args1,
+                ret: ret1,
+            },
+            TypeDesc::Tarrow {
+                args: args2,
+                ret: ret2,
+            },
+        ) if args1.len() == args2.len()
+            && args1
+                .iter()
+                .zip(args2)
+                .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
         {
             for (a1, a2) in args1.iter().zip(args2) {
-                subtype_rec(ctx, env, subtypes, &with_trace(trace, a2.typ, a1.typ), a2.typ, a1.typ, cstrs)?;
+                subtype_rec(
+                    ctx,
+                    env,
+                    subtypes,
+                    &with_trace(trace, a2.typ, a1.typ),
+                    a2.typ,
+                    a1.typ,
+                    cstrs,
+                )?;
             }
-            subtype_rec(ctx, env, subtypes, &with_trace(trace, *ret1, *ret2), *ret1, *ret2, cstrs)
+            subtype_rec(
+                ctx,
+                env,
+                subtypes,
+                &with_trace(trace, *ret1, *ret2),
+                *ret1,
+                *ret2,
+                cstrs,
+            )
         }
         (TypeDesc::Ttuple(tl1), TypeDesc::Ttuple(tl2)) => {
             subtype_list(ctx, env, subtypes, trace, tl1, tl2, cstrs)
         }
         (
-            TypeDesc::Tconstr { path: p1, args: a1, .. },
-            TypeDesc::Tconstr { path: p2, args: a2, .. },
+            TypeDesc::Tconstr {
+                path: p1, args: a1, ..
+            },
+            TypeDesc::Tconstr {
+                path: p2, args: a2, ..
+            },
         ) if a1.is_empty() && a2.is_empty() && p1.same(p2) => Ok(()),
         (TypeDesc::Tconstr { path: p1, .. }, _)
             if generic_abbrev(ctx, env, p1) && try_expand_head(ctx, env, t1).is_some() =>
@@ -5635,33 +5723,80 @@ fn subtype_rec(
             subtype_rec(ctx, env, subtypes, trace, t1, expanded, cstrs)
         }
         (
-            TypeDesc::Tconstr { path: p1, args: tl1, .. },
-            TypeDesc::Tconstr { path: p2, args: tl2, .. },
+            TypeDesc::Tconstr {
+                path: p1,
+                args: tl1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: p2,
+                args: tl2,
+                ..
+            },
         ) if p1.same(p2) => {
             let Some(decl) = lookup_type_decl_for_path(ctx, env, p1) else {
                 push_subtype_cstr(cstrs, trace, t1, t2, None);
                 return Ok(());
             };
-            for (variance, (&a1, &a2)) in decl.type_variance.iter().zip(tl1.iter().zip(tl2.iter())) {
+            for (variance, (&a1, &a2)) in decl.type_variance.iter().zip(tl1.iter().zip(tl2.iter()))
+            {
                 let (co, cn) = variance.get_upper();
                 if co && cn {
                     // Invariant argument: check both ways.
                     let mut forward = cstrs.child();
-                    subtype_rec(ctx, env, subtypes, &with_trace(trace, a1, a2), a1, a2, &mut forward)?;
+                    subtype_rec(
+                        ctx,
+                        env,
+                        subtypes,
+                        &with_trace(trace, a1, a2),
+                        a1,
+                        a2,
+                        &mut forward,
+                    )?;
                     let mut backward = cstrs.child();
                     let both_empty = forward.is_empty() && {
-                        subtype_rec(ctx, env, subtypes, &with_trace(trace, a2, a1), a2, a1, &mut backward)?;
+                        subtype_rec(
+                            ctx,
+                            env,
+                            subtypes,
+                            &with_trace(trace, a2, a1),
+                            a2,
+                            a1,
+                            &mut backward,
+                        )?;
                         backward.is_empty()
                     };
                     if !both_empty {
-                        let tuple1 = ctx.alloc_type_at_level(TypeDesc::Ttuple(vec![a1].into()), ctx.get_level(a1));
-                        let tuple2 = ctx.alloc_type_at_level(TypeDesc::Ttuple(vec![a2].into()), ctx.get_level(a2));
+                        let tuple1 = ctx.alloc_type_at_level(
+                            TypeDesc::Ttuple(vec![a1].into()),
+                            ctx.get_level(a1),
+                        );
+                        let tuple2 = ctx.alloc_type_at_level(
+                            TypeDesc::Ttuple(vec![a2].into()),
+                            ctx.get_level(a2),
+                        );
                         push_subtype_cstr(cstrs, trace, tuple1, tuple2, None);
                     }
                 } else if co {
-                    subtype_rec(ctx, env, subtypes, &with_trace(trace, a1, a2), a1, a2, cstrs)?;
+                    subtype_rec(
+                        ctx,
+                        env,
+                        subtypes,
+                        &with_trace(trace, a1, a2),
+                        a1,
+                        a2,
+                        cstrs,
+                    )?;
                 } else if cn {
-                    subtype_rec(ctx, env, subtypes, &with_trace(trace, a2, a1), a2, a1, cstrs)?;
+                    subtype_rec(
+                        ctx,
+                        env,
+                        subtypes,
+                        &with_trace(trace, a2, a1),
+                        a2,
+                        a1,
+                        cstrs,
+                    )?;
                 }
             }
             Ok(())
@@ -5676,8 +5811,12 @@ fn subtype_rec(
             }
         }
         (
-            TypeDesc::Tconstr { path: p1, args: a1, .. },
-            TypeDesc::Tconstr { path: p2, args: a2, .. },
+            TypeDesc::Tconstr {
+                path: p1, args: a1, ..
+            },
+            TypeDesc::Tconstr {
+                path: p2, args: a2, ..
+            },
         ) if a1.is_empty()
             && a2.is_empty()
             && p1.same(&crate::types::predef::path_int())
@@ -5686,19 +5825,22 @@ fn subtype_rec(
             // Int can always be coerced to float.
             Ok(())
         }
-        (
-            TypeDesc::Tconstr { path, args: a1, .. },
-            TypeDesc::Tconstr { args: a2, .. },
-        ) if a1.is_empty()
-            && a2.is_empty()
-            && primitive_coercion_path(path)
-            && can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t2))
+        (TypeDesc::Tconstr { path, args: a1, .. }, TypeDesc::Tconstr { args: a2, .. })
+            if a1.is_empty()
+                && a2.is_empty()
+                && primitive_coercion_path(path)
+                && can_try_coerce_variant_to_primitive_opt(
+                    ctx,
+                    extract_concrete_typedecl(ctx, env, t2),
+                )
                 .is_some() =>
         {
             // Primitive to an eligible unboxed variant.
-            let (p, constructors, _, unboxed) =
-                can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t2))
-                    .expect("checked above");
+            let (p, constructors, _, unboxed) = can_try_coerce_variant_to_primitive_opt(
+                ctx,
+                extract_concrete_typedecl(ctx, env, t2),
+            )
+            .expect("checked above");
             if !unboxed {
                 push_subtype_cstr(
                     cstrs,
@@ -5727,30 +5869,36 @@ fn subtype_rec(
             }
             Ok(())
         }
-        (
-            TypeDesc::Tconstr { args: a1, .. },
-            TypeDesc::Tconstr { path, args: a2, .. },
-        ) if a1.is_empty()
-            && a2.is_empty()
-            && primitive_coercion_path(path)
-            && can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t1))
+        (TypeDesc::Tconstr { args: a1, .. }, TypeDesc::Tconstr { path, args: a2, .. })
+            if a1.is_empty()
+                && a2.is_empty()
+                && primitive_coercion_path(path)
+                && can_try_coerce_variant_to_primitive_opt(
+                    ctx,
+                    extract_concrete_typedecl(ctx, env, t1),
+                )
                 .is_some() =>
         {
             // Variant to a primitive.
-            let (p, constructors, layout, unboxed) =
-                can_try_coerce_variant_to_primitive_opt(ctx, extract_concrete_typedecl(ctx, env, t1))
-                    .expect("checked above");
-            let issues = variant_runtime_representation_issues(ctx, &constructors, &layout, path, unboxed);
+            let (p, constructors, layout, unboxed) = can_try_coerce_variant_to_primitive_opt(
+                ctx,
+                extract_concrete_typedecl(ctx, env, t1),
+            )
+            .expect("checked above");
+            let issues =
+                variant_runtime_representation_issues(ctx, &constructors, &layout, path, unboxed);
             if !issues.is_empty() {
                 push_subtype_cstr(
                     cstrs,
                     trace,
                     t1,
                     t2,
-                    Some(SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
-                        variant_name: p,
-                        issues,
-                    }),
+                    Some(
+                        SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
+                            variant_name: p,
+                            issues,
+                        },
+                    ),
                 );
             }
             Ok(())
@@ -5761,8 +5909,13 @@ fn subtype_rec(
             subtype_concrete_typedecls(ctx, env, subtypes, trace, t1, t2, cstrs)
         }
         (TypeDesc::Tobject { fields: f1, .. }, TypeDesc::Tobject { fields: f2, .. })
-            if matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, *f1)), TypeDesc::Tvar(_))
-                && matches!(&*ctx.borrow_desc(object_row_of_fields(ctx, *f2)), TypeDesc::Tvar(_)) =>
+            if matches!(
+                &*ctx.borrow_desc(object_row_of_fields(ctx, *f1)),
+                TypeDesc::Tvar(_)
+            ) && matches!(
+                &*ctx.borrow_desc(object_row_of_fields(ctx, *f2)),
+                TypeDesc::Tvar(_)
+            ) =>
         {
             // Same row variable implies same object.
             push_subtype_cstr(cstrs, trace, t1, t2, None);
@@ -5790,7 +5943,8 @@ fn subtype_rec(
             // Polymorphic variant to variant.
             let row = row_repr(ctx, row);
             if let Some((_, _, decl)) = extract_concrete_typedecl(ctx, env, t2)
-                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) = &decl.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                    &decl.type_kind
                 && can_coerce_polyvariant_to_variant(
                     ctx,
                     &row,
@@ -5805,18 +5959,41 @@ fn subtype_rec(
             Ok(())
         }
         (TypeDesc::Tvariant(row), _) if variant_row_is_subtype_of_primitive(ctx, row, t2) => Ok(()),
-        (TypeDesc::Tpoly { body: u1, vars: tl1 }, TypeDesc::Tpoly { body: u2, vars: tl2 })
-            if tl1.is_empty() && tl2.is_empty() =>
-        {
+        (
+            TypeDesc::Tpoly {
+                body: u1,
+                vars: tl1,
+            },
+            TypeDesc::Tpoly {
+                body: u2,
+                vars: tl2,
+            },
+        ) if tl1.is_empty() && tl2.is_empty() => {
             subtype_rec(ctx, env, subtypes, trace, *u1, *u2, cstrs)
         }
-        (TypeDesc::Tpoly { body: u1, vars: tl1 }, TypeDesc::Tpoly { body: u2, vars: tl2 })
-            if tl2.is_empty() =>
-        {
+        (
+            TypeDesc::Tpoly {
+                body: u1,
+                vars: tl1,
+            },
+            TypeDesc::Tpoly {
+                body: u2,
+                vars: tl2,
+            },
+        ) if tl2.is_empty() => {
             let (_, u1) = instance_poly(ctx, false, false, tl1, *u1);
             subtype_rec(ctx, env, subtypes, trace, u1, *u2, cstrs)
         }
-        (TypeDesc::Tpoly { body: u1, vars: tl1 }, TypeDesc::Tpoly { body: u2, vars: tl2 }) => {
+        (
+            TypeDesc::Tpoly {
+                body: u1,
+                vars: tl1,
+            },
+            TypeDesc::Tpoly {
+                body: u2,
+                vars: tl2,
+            },
+        ) => {
             // ctype.ml: `try enter_poly env univar_pairs u1 tl1 u2 tl2 (fun t1
             // t2 -> subtype_rec env trace t1 t2 cstrs) with Unify _ -> (trace,
             // t1, t2, !univar_pairs, None) :: cstrs`.
@@ -5836,7 +6013,7 @@ fn subtype_rec(
                 push_subtype_cstr(cstrs, trace, t1, t2, None);
                 return Ok(());
             }
-            let mut new_slot = |cstrs: &mut SubtypeAcc| {
+            let new_slot = |cstrs: &mut SubtypeAcc| {
                 cstrs.univar_slots.push(None);
                 cstrs.univar_slots.len() - 1
             };
@@ -5870,7 +6047,15 @@ fn subtype_list(
         return Err(subtype_error(ctx, env, trace));
     }
     for (&t1, &t2) in tl1.iter().zip(tl2) {
-        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+        subtype_rec(
+            ctx,
+            env,
+            subtypes,
+            &with_trace(trace, t1, t2),
+            t1,
+            t2,
+            cstrs,
+        )?;
     }
     Ok(())
 }
@@ -5891,7 +6076,15 @@ fn subtype_fields(
     let rest2_is_nil = matches!(&*ctx.borrow_desc(ctx.repr(rest2)), TypeDesc::Tnil);
     if !rest2_is_nil {
         if miss1.is_empty() {
-            subtype_rec(ctx, env, subtypes, &with_trace(trace, rest1, rest2), rest1, rest2, cstrs)?;
+            subtype_rec(
+                ctx,
+                env,
+                subtypes,
+                &with_trace(trace, rest1, rest2),
+                rest1,
+                rest2,
+                cstrs,
+            )?;
         } else {
             let level = ctx.get_level(ctx.repr(ty1));
             let built = build_fields(ctx, level, &miss1, rest1);
@@ -5909,7 +6102,15 @@ fn subtype_fields(
             // write permission.
             MutableFlag::Immutable => {
                 let (t1, t2) = (f1.typ, f2.typ);
-                subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+                subtype_rec(
+                    ctx,
+                    env,
+                    subtypes,
+                    &with_trace(trace, t1, t2),
+                    t1,
+                    t2,
+                    cstrs,
+                )?;
             }
             // A writable target requires equivalent field types: a deferred
             // unification constraint over transient one-field fragments. The
@@ -5955,7 +6156,15 @@ fn subtype_row(
     let more2_desc = (*ctx.get_desc(more2)).clone();
     match (&more1_desc, &more2_desc) {
         (TypeDesc::Tconstr { path: p1, .. }, TypeDesc::Tconstr { path: p2, .. }) if p1.same(p2) => {
-            subtype_rec(ctx, env, subtypes, &with_trace(trace, more1, more2), more1, more2, cstrs)?;
+            subtype_rec(
+                ctx,
+                env,
+                subtypes,
+                &with_trace(trace, more1, more2),
+                more1,
+                more2,
+                cstrs,
+            )?;
             Ok(true)
         }
         (
@@ -5963,17 +6172,44 @@ fn subtype_row(
             TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
         ) if row1.row_closed && r1.is_empty() => {
             for (_, f1, f2) in pairs {
-                match (btype::row_field_repr(ctx, f1), btype::row_field_repr(ctx, f2)) {
-                    (RowField::Rpresent(None) | RowField::Reither { constant: true, .. }, RowField::Rpresent(None))
+                match (
+                    btype::row_field_repr(ctx, f1),
+                    btype::row_field_repr(ctx, f2),
+                ) {
+                    (
+                        RowField::Rpresent(None) | RowField::Reither { constant: true, .. },
+                        RowField::Rpresent(None),
+                    )
                     | (RowField::Rabsent, _) => {}
                     (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => {
-                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+                        subtype_rec(
+                            ctx,
+                            env,
+                            subtypes,
+                            &with_trace(trace, t1, t2),
+                            t1,
+                            t2,
+                            cstrs,
+                        )?;
                     }
-                    (RowField::Reither { constant: false, types, .. }, RowField::Rpresent(Some(t2)))
-                        if !types.is_empty() =>
-                    {
+                    (
+                        RowField::Reither {
+                            constant: false,
+                            types,
+                            ..
+                        },
+                        RowField::Rpresent(Some(t2)),
+                    ) if !types.is_empty() => {
                         let t1 = types[0];
-                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+                        subtype_rec(
+                            ctx,
+                            env,
+                            subtypes,
+                            &with_trace(trace, t1, t2),
+                            t1,
+                            t2,
+                            cstrs,
+                        )?;
                     }
                     _ => return Ok(false),
                 }
@@ -5983,24 +6219,67 @@ fn subtype_row(
         (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_))
             if row1.row_closed == row2.row_closed && r1.is_empty() && r2.is_empty() =>
         {
-            subtype_rec(ctx, env, subtypes, &with_trace(trace, more1, more2), more1, more2, cstrs)?;
+            subtype_rec(
+                ctx,
+                env,
+                subtypes,
+                &with_trace(trace, more1, more2),
+                more1,
+                more2,
+                cstrs,
+            )?;
             for (_, f1, f2) in pairs {
-                match (btype::row_field_repr(ctx, f1), btype::row_field_repr(ctx, f2)) {
+                match (
+                    btype::row_field_repr(ctx, f1),
+                    btype::row_field_repr(ctx, f2),
+                ) {
                     (RowField::Rpresent(None), RowField::Rpresent(None))
                     | (RowField::Rabsent, RowField::Rabsent) => {}
                     (
-                        RowField::Reither { constant: true, types: types1, .. },
-                        RowField::Reither { constant: true, types: types2, .. },
+                        RowField::Reither {
+                            constant: true,
+                            types: types1,
+                            ..
+                        },
+                        RowField::Reither {
+                            constant: true,
+                            types: types2,
+                            ..
+                        },
                     ) if types1.is_empty() && types2.is_empty() => {}
                     (RowField::Rpresent(Some(t1)), RowField::Rpresent(Some(t2))) => {
-                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+                        subtype_rec(
+                            ctx,
+                            env,
+                            subtypes,
+                            &with_trace(trace, t1, t2),
+                            t1,
+                            t2,
+                            cstrs,
+                        )?;
                     }
                     (
-                        RowField::Reither { constant: false, types: types1, .. },
-                        RowField::Reither { constant: false, types: types2, .. },
+                        RowField::Reither {
+                            constant: false,
+                            types: types1,
+                            ..
+                        },
+                        RowField::Reither {
+                            constant: false,
+                            types: types2,
+                            ..
+                        },
                     ) if types1.len() == 1 && types2.len() == 1 => {
                         let (t1, t2) = (types1[0], types2[0]);
-                        subtype_rec(ctx, env, subtypes, &with_trace(trace, t1, t2), t1, t2, cstrs)?;
+                        subtype_rec(
+                            ctx,
+                            env,
+                            subtypes,
+                            &with_trace(trace, t1, t2),
+                            t1,
+                            t2,
+                            cstrs,
+                        )?;
                     }
                     _ => return Ok(false),
                 }
@@ -6023,9 +6302,10 @@ fn subtype_concrete_typedecls(
     t2: TypeExprRef,
     cstrs: &mut SubtypeAcc,
 ) -> TypeResult<()> {
-    let (Some((p1, _, decl1)), Some((p2, _, decl2))) =
-        (extract_concrete_typedecl(ctx, env, t1), extract_concrete_typedecl(ctx, env, t2))
-    else {
+    let (Some((p1, _, decl1)), Some((p2, _, decl2))) = (
+        extract_concrete_typedecl(ctx, env, t1),
+        extract_concrete_typedecl(ctx, env, t2),
+    ) else {
         push_subtype_cstr(cstrs, trace, t1, t2, None);
         return Ok(());
     };
@@ -6064,37 +6344,46 @@ fn subtype_concrete_typedecls(
                     Some(SubtypeContext::VariantConfigurationsMismatch {
                         left_variant_name: p1,
                         right_variant_name: p2,
-                        issue: VariantConfigurationIssue::IncompatibleConstructorCount { constructor_names },
+                        issue: VariantConfigurationIssue::IncompatibleConstructorCount {
+                            constructor_names,
+                        },
                     }),
                 );
                 return Ok(());
             }
             let layout1 = ctx.variant_layout(*layout_ref1);
             let layout2 = ctx.variant_layout(*layout_ref2);
-            let c2_by_name: HashMap<&str, (usize, &crate::types::decl::ConstructorDeclaration)> = c2
-                .iter()
-                .enumerate()
-                .map(|(position, c)| (c.cd_id.name(), (position, c)))
-                .collect();
+            let c2_by_name: HashMap<&str, (usize, &crate::types::decl::ConstructorDeclaration)> =
+                c2.iter()
+                    .enumerate()
+                    .map(|(position, c)| (c.cd_id.name(), (position, c)))
+                    .collect();
             let mut has_violation = false;
             for (position1, c) in c1.iter().enumerate() {
                 let violation = match (&c.cd_args, c2_by_name.get(c.cd_id.name())) {
                     (
                         crate::types::decl::ConstructorArguments::CstrRecord(fields1),
-                        Some((position2, crate::types::decl::ConstructorDeclaration {
-                            cd_args: crate::types::decl::ConstructorArguments::CstrRecord(fields2),
-                            ..
-                        })),
+                        Some((
+                            position2,
+                            crate::types::decl::ConstructorDeclaration {
+                                cd_args:
+                                    crate::types::decl::ConstructorArguments::CstrRecord(fields2),
+                                ..
+                            },
+                        )),
                     ) => {
                         if variant_constructor_tag(&layout1, position1)
                             == variant_constructor_tag(&layout2, *position2)
                         {
-                            let (violations, mut tl1, mut tl2) = check_record_fields(fields1, fields2);
+                            let (violations, mut tl1, mut tl2) =
+                                check_record_fields(fields1, fields2);
                             if violations.is_empty() {
                                 tl1.reverse();
                                 tl2.reverse();
                                 let mut probe = cstrs.clone();
-                                match subtype_list(ctx, env, subtypes, trace, &tl1, &tl2, &mut probe) {
+                                match subtype_list(
+                                    ctx, env, subtypes, trace, &tl1, &tl2, &mut probe,
+                                ) {
                                     Ok(()) => probe.len() != cstrs.len(),
                                     Err(_) => true,
                                 }
@@ -6107,10 +6396,13 @@ fn subtype_concrete_typedecls(
                     }
                     (
                         crate::types::decl::ConstructorArguments::CstrTuple(tl1),
-                        Some((position2, crate::types::decl::ConstructorDeclaration {
-                            cd_args: crate::types::decl::ConstructorArguments::CstrTuple(tl2),
-                            ..
-                        })),
+                        Some((
+                            position2,
+                            crate::types::decl::ConstructorDeclaration {
+                                cd_args: crate::types::decl::ConstructorArguments::CstrTuple(tl2),
+                                ..
+                            },
+                        )),
                     ) => {
                         if variant_constructor_tag(&layout1, position1)
                             == variant_constructor_tag(&layout2, *position2)
@@ -6197,55 +6489,47 @@ fn check_record_fields(
             .iter()
             .find(|field1| field1.ld_id.name() == field2.ld_id.name())
         else {
-            issues.insert(
-                0,
-                RecordFieldSubtypeViolation::FieldMissing {
-                    label: field2.ld_id.name().to_string(),
-                },
-            );
+            issues.push(RecordFieldSubtypeViolation::FieldMissing {
+                label: field2.ld_id.name().to_string(),
+            });
             continue;
         };
 
         if field1.ld_optional != field2.ld_optional {
-            issues.insert(
-                0,
-                RecordFieldSubtypeViolation::OptionalMismatch {
-                    label: field1.ld_id.name().to_string(),
-                    left_optional: field1.ld_optional,
-                    right_optional: field2.ld_optional,
-                },
-            );
+            issues.push(RecordFieldSubtypeViolation::OptionalMismatch {
+                label: field1.ld_id.name().to_string(),
+                left_optional: field1.ld_optional,
+                right_optional: field2.ld_optional,
+            });
         }
 
         if label_declaration_runtime_name(field1) != label_declaration_runtime_name(field2) {
-            issues.insert(
-                0,
-                RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
-                    label: field1.ld_id.name().to_string(),
-                    left_as: label_declaration_as_name(field1),
-                    right_as: label_declaration_as_name(field2),
-                },
-            );
+            issues.push(RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
+                label: field1.ld_id.name().to_string(),
+                left_as: field1.ld_runtime_name.clone(),
+                right_as: field2.ld_runtime_name.clone(),
+            });
         }
 
         field_types1.push(field1.ld_type);
         field_types2.push(field2.ld_type);
     }
 
+    // Issues are accumulated by prepending (OCaml list cons order).
+    issues.reverse();
     (issues, field_types1, field_types2)
 }
 
-fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    // `Record_runtime.declaration_name`.
-    label.declaration_name()
+/// `Record_runtime.declaration_name`, without allocating.
+fn label_declaration_runtime_name(label: &LabelDeclaration) -> &str {
+    label
+        .ld_runtime_name
+        .as_deref()
+        .unwrap_or_else(|| label.ld_id.name())
 }
 
-fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_runtime_name.clone()
-}
-
-fn expand_head_with_mode<'a>(
-    ctx: &'a TypeContext,
+fn expand_head_with_mode(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
@@ -6256,15 +6540,7 @@ fn expand_head_with_mode<'a>(
     let mut seen = [TypeExprRef(0); 20];
     let mut seen_len: usize = 0;
     for _ in 0..20 {
-        // Check if current was already seen
-        let mut already_seen = false;
-        for i in 0..seen_len {
-            if seen[i] == current {
-                already_seen = true;
-                break;
-            }
-        }
-        if already_seen {
+        if seen[..seen_len].contains(&current) {
             break;
         }
         seen[seen_len] = current;
@@ -6275,15 +6551,7 @@ fn expand_head_with_mode<'a>(
                 if expanded == current {
                     break;
                 }
-                // Check if expanded was already seen
-                let mut exp_seen = false;
-                for i in 0..seen_len {
-                    if seen[i] == expanded {
-                        exp_seen = true;
-                        break;
-                    }
-                }
-                if exp_seen {
+                if seen[..seen_len].contains(&expanded) {
                     break;
                 }
                 current = expanded;
@@ -6328,15 +6596,23 @@ fn filter_method_field(
 ) -> TypeResult<TypeExprRef> {
     let ty = expand_head(ctx, env, ty);
     enum FieldAction {
-        FreshField { level: i32 },
-        ExistingField { matches: bool, typ: TypeExprRef, rest: TypeExprRef },
+        FreshField {
+            level: i32,
+        },
+        ExistingField {
+            matches: bool,
+            typ: TypeExprRef,
+            rest: TypeExprRef,
+        },
         Error,
     }
     let action = match &*ctx.get_desc(ty) {
         TypeDesc::Tvar(_) => FieldAction::FreshField {
             level: ctx.get_level(ty),
         },
-        TypeDesc::Tfield { name, typ, rest, .. } => FieldAction::ExistingField {
+        TypeDesc::Tfield {
+            name, typ, rest, ..
+        } => FieldAction::ExistingField {
             matches: name == method_name,
             typ: *typ,
             rest: *rest,
@@ -6360,7 +6636,9 @@ fn filter_method_field(
             link_type(ctx, ty, linked);
             Ok(field_ty)
         }
-        FieldAction::ExistingField { matches: true, typ, .. } => Ok(typ),
+        FieldAction::ExistingField {
+            matches: true, typ, ..
+        } => Ok(typ),
         FieldAction::ExistingField { rest, .. } => filter_method_field(ctx, env, method_name, rest),
         FieldAction::Error => Err(TypeError::Unify(vec![])),
     }
@@ -6426,7 +6704,12 @@ pub fn filter_object_field_for_write(
         let ty = expand_head(ctx, env, ty);
         enum Action {
             Fresh(i32),
-            Field { matches: bool, mutability: MutabilityRef, typ: TypeExprRef, rest: TypeExprRef },
+            Field {
+                matches: bool,
+                mutability: MutabilityRef,
+                typ: TypeExprRef,
+                rest: TypeExprRef,
+            },
             Missing,
         }
         let action = match &*ctx.get_desc(ty) {
@@ -6796,8 +7079,8 @@ fn package_longident_same_label(
 /// # Errors
 ///
 /// Returns `TypeError::Unify` if the types cannot be unified.
-pub fn unify<'a>(
-    ctx: &'a TypeContext,
+pub fn unify(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -7028,8 +7311,8 @@ pub(crate) fn record_trace_expansions(
 /// OCaml compiler/ml/ctype.ml:2820-2837 links a left-hand `Tvar` directly
 /// after the occurs check and level update, falling back to full `unify` for
 /// constructor self-occurrences and non-variable left sides.
-pub fn unify_var<'a>(
-    ctx: &'a TypeContext,
+pub fn unify_var(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -7097,8 +7380,8 @@ pub fn unify_var<'a>(
 // and unify3 links t1' -> t2 for expression-mode unification.
 // We mirror that branch choice so alias identity is preserved for both
 // one-sided and two-sided expansion cases.
-fn unify_after_expansion<'a>(
-    ctx: &'a TypeContext,
+fn unify_after_expansion(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t1_expanded: TypeExprRef,
@@ -7296,8 +7579,8 @@ fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef)
 }
 
 /// Internal unification logic.
-fn unify_types<'a>(
-    ctx: &'a TypeContext,
+fn unify_types(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -7351,10 +7634,9 @@ fn unify_types<'a>(
         let lowered = if capture_type_lookup_paths {
             let mut capture = Some(&mut pending_type_lookup_paths);
             let mut expansion_capture = Some(&mut pending_type_expansion_paths);
-            update_level_checked(ctx, env, lv, t2, &mut capture, &mut expansion_capture)
-                .and_then(|()| {
-                    update_level_checked(ctx, env, lv, t1, &mut capture, &mut expansion_capture)
-                })
+            update_level_checked(ctx, env, lv, t2, &mut capture, &mut expansion_capture).and_then(
+                |()| update_level_checked(ctx, env, lv, t1, &mut capture, &mut expansion_capture),
+            )
         } else {
             update_level_checked(ctx, env, lv, t2, &mut None, &mut None)
                 .and_then(|()| update_level_checked(ctx, env, lv, t1, &mut None, &mut None))
@@ -8276,16 +8558,16 @@ fn unify_rows<'a>(
     let row1 = row1.as_ref();
     let row2 = row2.as_ref();
 
-    let rm1 = row_more(ctx, &row1);
-    let rm2 = row_more(ctx, &row2);
+    let rm1 = row_more(ctx, row1);
+    let rm2 = row_more(ctx, row2);
     if rm1 == rm2 {
         return Ok(());
     }
 
     let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
-    let fixed1 = row_fixed(ctx, &row1);
-    let fixed2 = row_fixed(ctx, &row2);
+    let fixed1 = row_fixed(ctx, row1);
+    let fixed2 = row_fixed(ctx, row2);
     let more = if fixed1 {
         rm1
     } else if fixed2 {
@@ -8385,7 +8667,11 @@ fn unify_rows<'a>(
             // ctype.ml:2463-2464.
             let t1 = mkvariant(ctx, Vec::new(), true);
             let t2 = mkvariant(ctx, rest, false);
-            return Err(TypeError::Unify(vec![if is_row1 { (t1, t2) } else { (t2, t1) }]));
+            return Err(TypeError::Unify(vec![if is_row1 {
+                (t1, t2)
+            } else {
+                (t2, t1)
+            }]));
         }
         let rm = row_more(ctx, row);
         if row_is_fixed {
@@ -8417,8 +8703,8 @@ fn unify_rows<'a>(
         (*desc).clone()
     };
     let result = (|| -> TypeResult<()> {
-        set_more(ctx, state, &row2, false, &r1)?;
-        set_more(ctx, state, &row1, true, &r2)?;
+        set_more(ctx, state, row2, false, &r1)?;
+        set_more(ctx, state, row1, true, &r2)?;
         for (label, f1, f2) in &pairs {
             // ctype.ml:2485-2491 prefixes the single-field variants.
             if let Err(err) = unify_row_field(ctx, state, fixed1, fixed2, more, label, f1, f2) {
@@ -8435,8 +8721,8 @@ fn unify_rows<'a>(
                 });
             }
         }
-        if super::btype::static_row(ctx, &row1) {
-            let rm = row_more(ctx, &row1);
+        if super::btype::static_row(ctx, row1) {
+            let rm = row_more(ctx, row1);
             if super::btype::is_tvar(ctx, rm) {
                 let nil = ctx.new_type(TypeDesc::Tnil);
                 ctx.set_level(nil, ctx.get_level(rm));
@@ -8468,8 +8754,8 @@ fn mkvariant(ctx: &TypeContext, fields: Vec<(Label, RowField)>, closed: bool) ->
 
 /// Unify two row fields.
 /// Matches OCaml's `unify_row_field` behavior, including Reither link updates.
-fn unify_row_field<'a>(
-    ctx: &'a TypeContext,
+fn unify_row_field(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     fixed1: bool,
     fixed2: bool,
@@ -8750,7 +9036,12 @@ pub(crate) fn associate_fields(
 
 /// Build a Tfield chain from a list of fields with a given rest.
 /// Matches OCaml `build_fields` in ctype.ml.
-fn build_fields(ctx: &TypeContext, level: i32, fields: &[FieldInfo], rest: TypeExprRef) -> TypeExprRef {
+fn build_fields(
+    ctx: &TypeContext,
+    level: i32,
+    fields: &[FieldInfo],
+    rest: TypeExprRef,
+) -> TypeExprRef {
     let mut current = rest;
     for field in fields.iter().rev() {
         current = ctx.alloc_type_at_level(
@@ -8768,8 +9059,8 @@ fn build_fields(ctx: &TypeContext, level: i32, fields: &[FieldInfo], rest: TypeE
 
 /// Unify two object field chains using OCaml's field-order-independent algorithm.
 /// Matches OCaml `unify_fields` in ctype.ml.
-fn unify_object_fields<'a>(
-    ctx: &'a TypeContext,
+fn unify_object_fields(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     fields1: TypeExprRef,
     fields2: TypeExprRef,
@@ -8823,8 +9114,8 @@ fn unify_object_fields<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unify_object_field_pairs<'a>(
-    ctx: &'a TypeContext,
+fn unify_object_field_pairs(
+    ctx: &TypeContext,
     state: &mut UnifyState,
     pairs: &[(FieldInfo, FieldInfo)],
     miss1: &[FieldInfo],
@@ -9462,10 +9753,7 @@ fn closed_schema_rec(
     enum Action {
         Tvar,
         Tconstr(Vec<TypeExprRef>),
-        Tfield {
-            typ: TypeExprRef,
-            rest: TypeExprRef,
-        },
+        Tfield { typ: TypeExprRef, rest: TypeExprRef },
         Tvariant(RowDesc),
         Children(Vec<TypeExprRef>),
     }
@@ -9836,7 +10124,6 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
 
     enum Action {
         LowerVar,
-        LowerTo(i32),
         PromoteAndRecurse {
             children: Vec<TypeExprRef>,
             clear_abbrev: Option<AbbrevMemoRef>,
@@ -9878,9 +10165,6 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
     match action {
         Action::LowerVar => {
             ctx.set_level(ty, var_level);
-        }
-        Action::LowerTo(level) => {
-            ctx.set_level(ty, level);
         }
         Action::PromoteAndRecurse {
             children,
@@ -9942,7 +10226,9 @@ fn generalize_expansive_rec(
                 path: path.clone(),
                 args: args.to_vec(),
             },
-            TypeDesc::Tpackage { args, .. } => Action::Package { args: args.to_vec() },
+            TypeDesc::Tpackage { args, .. } => Action::Package {
+                args: args.to_vec(),
+            },
             TypeDesc::Tarrow { args, ret } => Action::Arrow {
                 args: args.iter().map(|arg| arg.typ).collect(),
                 ret: *ret,
@@ -10081,7 +10367,15 @@ pub fn compute_variance_decl(
             for cstr in constructors {
                 tyl.extend(for_constr(&cstr.cd_args));
             }
-            compute_variance_type(ctx, env, params, is_abstract, decl.type_private, required, &tyl)
+            compute_variance_type(
+                ctx,
+                env,
+                params,
+                is_abstract,
+                decl.type_private,
+                required,
+                &tyl,
+            )
         }
         super::TypeKind::TypeVariant(constructors, _) => {
             // `compute_variance_gadt` on the manifest and on each
@@ -10093,15 +10387,8 @@ pub fn compute_variance_decl(
             }
             let mut varl: Option<Vec<Variance>> = None;
             for (tl, ret_type) in &tll {
-                let vari = compute_variance_gadt(
-                    ctx,
-                    env,
-                    params,
-                    is_abstract,
-                    required,
-                    tl,
-                    *ret_type,
-                );
+                let vari =
+                    compute_variance_gadt(ctx, env, params, is_abstract, required, tl, *ret_type);
                 varl = Some(match varl {
                     None => vari,
                     Some(acc) => acc
@@ -10130,7 +10417,15 @@ pub fn compute_variance_decl(
                     label.ld_type,
                 ));
             }
-            compute_variance_type(ctx, env, params, is_abstract, decl.type_private, required, &tyl)
+            compute_variance_type(
+                ctx,
+                env,
+                params,
+                is_abstract,
+                decl.type_private,
+                required,
+                &tyl,
+            )
         }
     }
 }
@@ -10148,14 +10443,30 @@ fn compute_variance_gadt(
     ret_type: Option<TypeExprRef>,
 ) -> Vec<Variance> {
     match ret_type {
-        None => compute_variance_type(ctx, env, params, is_abstract, PrivateFlag::Private, required, tl),
+        None => compute_variance_type(
+            ctx,
+            env,
+            params,
+            is_abstract,
+            PrivateFlag::Private,
+            required,
+            tl,
+        ),
         Some(ret_type) => {
             let ret_type = ctx.repr(ret_type);
             let tyl: Vec<TypeExprRef> = match &*ctx.get_desc(ret_type) {
                 TypeDesc::Tconstr { args, .. } => args.iter().map(|ty| ctx.repr(*ty)).collect(),
                 _ => params.to_vec(),
             };
-            compute_variance_type(ctx, env, &tyl, is_abstract, PrivateFlag::Private, required, tl)
+            compute_variance_type(
+                ctx,
+                env,
+                &tyl,
+                is_abstract,
+                PrivateFlag::Private,
+                required,
+                tl,
+            )
         }
     }
 }
@@ -10193,7 +10504,8 @@ fn compute_variance_type(
         compute_variance_rec(ctx, env, &mut visited, initial_variance, *ty, 0);
     }
 
-    let is_type_var = |ty: TypeExprRef| matches!(&*ctx.borrow_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
+    let is_type_var =
+        |ty: TypeExprRef| matches!(&*ctx.borrow_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
     let is_concrete = !is_abstract;
 
     // OCaml typedecl.ml:1200-1224: occurrence variance is unioned with the
@@ -10302,7 +10614,13 @@ pub(crate) struct EqtypeState {
 }
 
 /// `Ctype.equal env rename tyl1 tyl2` (ctype.ml:3161-3165).
-pub(crate) fn equal(ctx: &TypeContext, env: &Env, rename: bool, left: &[TypeExprRef], right: &[TypeExprRef]) -> bool {
+pub(crate) fn equal(
+    ctx: &TypeContext,
+    env: &Env,
+    rename: bool,
+    left: &[TypeExprRef],
+    right: &[TypeExprRef],
+) -> bool {
     let mut state = EqtypeState {
         pairs: HashSet::new(),
         subst: Vec::new(),
@@ -10926,14 +11244,14 @@ fn compute_variance_rec(
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
-pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, Vec<Path>) {
+pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, Vec<Path>) {
     let mut seen = Vec::new();
     let mut current = ty;
     let mut pending_type_lookup_paths = Vec::new();
     let mut pending_type_expansion_paths = Vec::new();
     loop {
         let expanded = expand_head(ctx, env, current);
-        if seen.iter().any(|&s| s == expanded) {
+        if seen.contains(&expanded) {
             return (pending_type_lookup_paths, pending_type_expansion_paths);
         }
         let arrow = {
@@ -10993,25 +11311,6 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeExprRef {
     let mut cache = CopyCache::new_partial(ctx, ty, keep);
     copy_type_cached(ctx, ty, &mut cache)
-}
-
-/// Like instance(), but guarantees a fresh top-level node is returned.
-/// Used in try_expand_head to prevent manifest corruption: when instance()
-/// returns identity (same node) for non-generic types, subsequent unification
-/// can link the original manifest node, creating self-referential expansion
-/// loops. This creates a shallow copy of the top-level node when identity
-/// is returned, protecting the original declaration's manifest.
-fn instance_for_expansion(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
-    let result = instance(ctx, ty);
-    let result_repr = ctx.repr(result);
-    let ty_repr = ctx.repr(ty);
-    if result_repr == ty_repr {
-        // instance returned identity — create a shallow copy to protect the original
-        let desc = ctx.get_desc(result_repr);
-        ctx.new_type((*desc).clone())
-    } else {
-        result
-    }
 }
 
 /// Like instance_for_expansion, but also caches the result in simple_expansion_cache
@@ -11444,7 +11743,7 @@ fn copy_sep_inner(
             let fixed_prime = fixed && super::btype::is_tvar(ctx, ctx.repr(more_copy));
             TypeDesc::Tvariant(Box::new(copy_sep_row(
                 ctx,
-                &row,
+                row,
                 fixed_prime,
                 keep,
                 more_copy,
@@ -11764,51 +12063,6 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
-    let summarize = |ty: TypeExprRef| -> String {
-        let ty = ctx.repr(ty);
-        let desc = ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                let args_summary = args
-                    .iter()
-                    .map(|arg| {
-                        let arg = ctx.repr(*arg);
-                        let arg_desc = ctx.get_desc(arg);
-                        let kind = match &*arg_desc {
-                            TypeDesc::Tconstr { path, .. } => path.name(),
-                            TypeDesc::Tvar(name) => format!("Tvar({name:?})"),
-                            TypeDesc::Tunivar(name) => format!("Tunivar({name:?})"),
-                            _ => format!("ty#{}", arg.0),
-                        };
-                        format!("{}:{}", arg.0, kind)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    "{}#{}@{}[{}]",
-                    path.name(),
-                    ty.0,
-                    ctx.get_level(ty),
-                    args_summary
-                )
-            }
-            TypeDesc::Tvar(name) => {
-                format!("Tvar({:?})#{}@{}", name, ty.0, ctx.get_level(ty))
-            }
-            TypeDesc::Tunivar(name) => {
-                format!("Tunivar({:?})#{}@{}", name, ty.0, ctx.get_level(ty))
-            }
-            TypeDesc::Tpoly { body, vars } => format!(
-                "Tpoly#{}@{}(body=#{} vars={})",
-                ty.0,
-                ctx.get_level(ty),
-                ctx.repr(*body).0,
-                vars.len()
-            ),
-            other => format!("{:?}#{}@{}", other, ty.0, ctx.get_level(ty)),
-        }
-    };
-
     // Match OCaml ctype.ml instance_label:
     //   let ty_res = copy lbl.lbl_res
     //   let vars, ty_arg = match repr lbl.lbl_arg with
@@ -11860,13 +12114,10 @@ pub fn check_univars(ctx: &TypeContext, vars: &[TypeExprRef]) {
     for &v in vars {
         let v = ctx.repr(v);
         let desc = ctx.get_desc(v);
-        match &*desc {
-            super::TypeDesc::Tvar(name) => {
-                let name = name.clone();
-                drop(desc);
-                ctx.set_desc(v, super::TypeDesc::Tunivar(name));
-            }
-            _ => {}
+        if let super::TypeDesc::Tvar(name) = &*desc {
+            let name = name.clone();
+            drop(desc);
+            ctx.set_desc(v, super::TypeDesc::Tunivar(name));
         }
     }
 }
@@ -12111,11 +12362,6 @@ impl RowMoreMarkers {
         self.0.push((key, value));
         None
     }
-
-    fn remove(&mut self, key: &TypeExprRef) -> Option<CopyRowMoreMarker> {
-        let index = self.0.iter().position(|(k, _)| k == key)?;
-        Some(self.0.remove(index).1)
-    }
 }
 
 struct CopyPartial {
@@ -12173,140 +12419,6 @@ impl<'c> CopyCache<'c> {
 struct CopyRowMoreMarker {
     tuple: TypeExprRef,
     variant: TypeExprRef,
-}
-
-fn type_expr_contains_ident_stamp(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    target_stamp: i32,
-    seen: &mut TypeExprRefSet,
-) -> bool {
-    let ty = ctx.repr(ty);
-    if !seen.insert(ty) {
-        return false;
-    }
-
-    match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, args, .. } => {
-            matches!(path, Path::Pident(id) if id.stamp() == target_stamp)
-                || args
-                    .iter()
-                    .copied()
-                    .any(|arg| type_expr_contains_ident_stamp(ctx, arg, target_stamp, seen))
-        }
-        TypeDesc::Tarrow { args, ret } => {
-            args.iter()
-                .any(|arg| type_expr_contains_ident_stamp(ctx, arg.typ, target_stamp, seen))
-                || type_expr_contains_ident_stamp(ctx, *ret, target_stamp, seen)
-        }
-        TypeDesc::Ttuple(types) => types
-            .iter()
-            .copied()
-            .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen)),
-        TypeDesc::Tobject { fields } => {
-            type_expr_contains_ident_stamp(ctx, *fields, target_stamp, seen)
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            type_expr_contains_ident_stamp(ctx, *typ, target_stamp, seen)
-                || type_expr_contains_ident_stamp(ctx, *rest, target_stamp, seen)
-        }
-        TypeDesc::Tvariant(row) => {
-            type_expr_contains_ident_stamp(ctx, row.row_more, target_stamp, seen)
-                || row.row_fields.iter().any(|(_, field)| match field {
-                    RowField::Rpresent(Some(ty)) => {
-                        type_expr_contains_ident_stamp(ctx, *ty, target_stamp, seen)
-                    }
-                    RowField::Reither { types, .. } => types
-                        .iter()
-                        .copied()
-                        .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen)),
-                    _ => false,
-                })
-                || row.row_name.as_ref().is_some_and(|(_, args)| {
-                    args.iter()
-                        .copied()
-                        .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen))
-                })
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            type_expr_contains_ident_stamp(ctx, *body, target_stamp, seen)
-                || vars
-                    .iter()
-                    .copied()
-                    .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen))
-        }
-        TypeDesc::Tpackage { args, .. } => args
-            .iter()
-            .copied()
-            .any(|ty| type_expr_contains_ident_stamp(ctx, ty, target_stamp, seen)),
-        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-            type_expr_contains_ident_stamp(ctx, *target, target_stamp, seen)
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
-    }
-}
-
-pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext, path: &Path) -> bool {
-    let Path::Pident(id) = path else {
-        return false;
-    };
-
-    if id.is_persistent() || id.stamp() == 0 {
-        return false;
-    }
-
-    let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) else {
-        return false;
-    };
-
-    let contains_self = |ty: TypeExprRef| {
-        let mut seen = TypeExprRefSet::new();
-        type_expr_contains_ident_stamp(ctx, ty, id.stamp(), &mut seen)
-    };
-
-    match &decl.type_kind {
-        super::decl::TypeKind::TypeVariant(constructors, _) => constructors.iter().any(|ctor| {
-            let args_has_self = match &ctor.cd_args {
-                super::decl::ConstructorArguments::CstrTuple(args) => {
-                    args.iter().copied().any(contains_self)
-                }
-                super::decl::ConstructorArguments::CstrRecord(labels) => {
-                    labels.iter().any(|label| contains_self(label.ld_type))
-                }
-            };
-            args_has_self || ctor.cd_res.is_some_and(contains_self)
-        }),
-        super::decl::TypeKind::TypeRecord(labels, _) => {
-            labels.iter().any(|label| contains_self(label.ld_type))
-        }
-        super::decl::TypeKind::TypeAbstract => decl.type_manifest.is_some_and(contains_self),
-        super::decl::TypeKind::TypeOpen => false,
-    }
-}
-
-fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext, path: &Path) -> bool {
-    let Path::Pident(_) = path else {
-        return false;
-    };
-
-    is_recursive_local_type_for_identity(ctx, path)
-}
-
-/// Check if a type is a local TypeAbstract Pident. These are safe to return
-/// identity for in copy because they have no structural content (no variant
-/// constructors, no record fields). Includes both opaque types (`type t`) and
-/// type aliases (`type t = int`).
-fn is_local_abstract_type(ctx: &TypeContext, path: &Path) -> bool {
-    let Path::Pident(id) = path else {
-        return false;
-    };
-    if id.is_persistent() || id.stamp() == 0 {
-        return false;
-    }
-    let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) else {
-        return false;
-    };
-    matches!(decl.type_kind, super::decl::TypeKind::TypeAbstract)
 }
 
 /// Copy a type, creating fresh type variables for generic ones.
@@ -12508,7 +12620,9 @@ fn subst_identity_copy_rec(
                     // child.
                     let mutability = {
                         let seen = &*seen;
-                        ctx.copy_field_mutability(mutability, rest, false, &|t| seen.get(&t).copied())
+                        ctx.copy_field_mutability(mutability, rest, false, &|t| {
+                            seen.get(&t).copied()
+                        })
                     };
                     let rest_copy = subst_identity_copy_rec(
                         ctx,
@@ -12639,8 +12753,9 @@ fn subst_identity_copy_rec(
                                 row.row_name = None;
                             }
                         }
-                        let marker_tuple =
-                            ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder].into()));
+                        let marker_tuple = ctx.new_generic_type(TypeDesc::Ttuple(
+                            vec![more_copy, placeholder].into(),
+                        ));
                         // OCaml Subst.typexp keeps `more.desc <- Tsubst(Ttuple [...])`
                         // alive until the outer cleanup window, not just this
                         // single variant-copy branch. Keep the marker for the
@@ -12722,14 +12837,14 @@ fn subst_identity_copy_rec(
                                     .collect(),
                             )
                         });
-                        let row_copy = TypeDesc::Tvariant(Box::new(RowDesc {
+
+                        TypeDesc::Tvariant(Box::new(RowDesc {
                             row_fields: fields_copy.into(),
                             row_more: more_copy,
                             row_closed: row.row_closed,
                             row_fixed: row.row_fixed,
                             row_name: name_copy,
-                        }));
-                        row_copy
+                        }))
                     }
                 }
                 TypeDesc::Tpackage { path, lids, args } => {
@@ -12770,7 +12885,7 @@ fn subst_identity_copy_rec(
 pub(crate) fn copy_type_cached(
     ctx: &TypeContext,
     ty: TypeExprRef,
-    cache: &mut CopyCache,
+    cache: &mut CopyCache<'_>,
 ) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
@@ -12986,7 +13101,8 @@ pub(crate) fn copy_type_cached(
                         // project through the local copy cache to recover the same
                         // representative.
                         let found_repr = cache
-                            .nodes.get(found_ty)
+                            .nodes
+                            .get(found_ty)
                             .copied()
                             .or_else(|| cache.nodes.get(found_source).copied())
                             .unwrap_or(found_ty);
@@ -13026,7 +13142,9 @@ pub(crate) fn copy_type_cached(
                     // copying either child.
                     let mutability = {
                         let nodes = &cache.nodes;
-                        ctx.copy_field_mutability(mutability, rest, false, &|t| nodes.get(t).copied())
+                        ctx.copy_field_mutability(mutability, rest, false, &|t| {
+                            nodes.get(t).copied()
+                        })
                     };
                     let typ_copy = copy_type_cached(ctx, typ, cache);
                     let rest_copy = copy_type_cached(ctx, rest, cache);
@@ -13194,7 +13312,7 @@ fn copy_row_cached(
     fixed: bool,
     keep: bool,
     more: TypeExprRef,
-    cache: &mut CopyCache,
+    cache: &mut CopyCache<'_>,
 ) -> RowDesc {
     RowDesc {
         row_fields: row
@@ -13451,7 +13569,11 @@ fn normalize_type_rec(
         // ctype.ml:4058-4065 (PR#7348): name the private row type by its
         // declaration instead of the `#row` type.
         let renamed = match &*ctx.get_desc(tm) {
-            TypeDesc::Tconstr { path: Path::Pdot(m, i, pos), args, .. } => {
+            TypeDesc::Tconstr {
+                path: Path::Pdot(m, i, pos),
+                args,
+                ..
+            } => {
                 let i = i.as_str();
                 let i_prime = &i[..i.len() - 4];
                 TypeDesc::Tconstr {
@@ -13472,36 +13594,38 @@ fn normalize_type_rec(
                 // ctype.ml:4069-4092: drop conjuncts `equal` to an earlier one.
                 // `row_field_repr` always rebuilds a `Reither`, so OCaml's
                 // `f != f0` holds and the deduplicated list is used.
-                let mut fields: Vec<(Label, RowField)> = row
-                    .row_fields
-                    .iter()
-                    .map(|(label, field)| {
-                        let resolved = match btype::row_field_repr(ctx, field) {
-                            RowField::Reither {
-                                constant,
-                                types,
-                                matched,
-                                link,
-                            } if types.len() >= 2 => {
-                                let mut kept: Vec<TypeExprRef> = vec![types[0]];
-                                for t in types.iter().skip(1) {
-                                    if !kept.iter().any(|t_prime| equal(ctx, env, false, &[*t], &[*t_prime])) {
-                                        kept.push(*t);
-                                    }
-                                }
+                let mut fields: Vec<(Label, RowField)> =
+                    row.row_fields
+                        .iter()
+                        .map(|(label, field)| {
+                            let resolved = match btype::row_field_repr(ctx, field) {
                                 RowField::Reither {
                                     constant,
-                                    types: kept,
+                                    types,
                                     matched,
                                     link,
+                                } if types.len() >= 2 => {
+                                    let mut kept: Vec<TypeExprRef> = vec![types[0]];
+                                    for t in types.iter().skip(1) {
+                                        if !kept.iter().any(|t_prime| {
+                                            equal(ctx, env, false, &[*t], &[*t_prime])
+                                        }) {
+                                            kept.push(*t);
+                                        }
+                                    }
+                                    RowField::Reither {
+                                        constant,
+                                        types: kept,
+                                        matched,
+                                        link,
+                                    }
                                 }
-                            }
-                            resolved => resolved,
-                        };
-                        (label.clone(), resolved)
-                    })
-                    .filter(|(_, field)| !matches!(field, RowField::Rabsent))
-                    .collect();
+                                resolved => resolved,
+                            };
+                            (label.clone(), resolved)
+                        })
+                        .filter(|(_, field)| !matches!(field, RowField::Rabsent))
+                        .collect();
                 fields.sort_by(|(a, _), (b, _)| a.cmp(b));
                 ctx.set_desc(
                     ty,
@@ -13548,8 +13672,8 @@ fn normalize_type_rec(
 /// Copy a type while eliminating dependencies on module ident `mid`.
 /// Any `Tconstr(p, tl, _)` where `p.is_free(mid)` is expanded via `env`.
 /// Returns `None` if the dependency cannot be removed.
-pub fn nondep_type<'a>(
-    ctx: &'a TypeContext,
+pub fn nondep_type(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     ty: TypeExprRef,
@@ -13559,8 +13683,8 @@ pub fn nondep_type<'a>(
     ctx.with_copy_session(|| nondep_type_rec(ctx, env, mid, ty, &mut cache))
 }
 
-fn nondep_type_rec<'a>(
-    ctx: &'a TypeContext,
+fn nondep_type_rec(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     ty: TypeExprRef,
@@ -13691,7 +13815,10 @@ fn nondep_type_rec<'a>(
                 })
                 .collect::<Option<Vec<_>>>()?;
             let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
-            TypeDesc::Tarrow { args: args.into(), ret }
+            TypeDesc::Tarrow {
+                args: args.into(),
+                ret,
+            }
         }
         TypeDesc::Ttuple(types) => {
             let new_types: Option<Vec<_>> = types
@@ -13821,8 +13948,8 @@ fn nondep_type_rec<'a>(
 
 /// Eliminate dependencies on functor parameter `mid` from a type declaration.
 /// OCaml: Ctype.nondep_type_decl
-fn unroll_abbrev<'a>(
-    ctx: &'a TypeContext,
+fn unroll_abbrev(
+    ctx: &TypeContext,
     id: &Ident,
     params: &[TypeExprRef],
     ty: TypeExprRef,
@@ -13844,7 +13971,7 @@ fn unroll_abbrev<'a>(
     ctx.set_level(unrolled, level);
 
     let constr = ctx.new_type(TypeDesc::Tconstr {
-        path: Path::pident(id.clone()),
+        path: Path::pident(*id),
         args: params.to_vec().into(),
         abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
     });
@@ -13853,8 +13980,8 @@ fn unroll_abbrev<'a>(
     unrolled
 }
 
-pub fn nondep_type_decl<'a>(
-    ctx: &'a TypeContext,
+pub fn nondep_type_decl(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     _id: &Ident,
@@ -13900,8 +14027,8 @@ pub fn nondep_type_decl<'a>(
     })
 }
 
-fn nondep_type_kind<'a>(
-    ctx: &'a TypeContext,
+fn nondep_type_kind(
+    ctx: &TypeContext,
     env: &Env,
     mid: &Ident,
     kind: &super::decl::TypeKind,
@@ -13920,7 +14047,10 @@ fn nondep_type_kind<'a>(
                     })
                 })
                 .collect();
-            Some(super::decl::TypeKind::TypeRecord(crate::types::decl::SharedVec::from(new_labels?), repr.clone()))
+            Some(super::decl::TypeKind::TypeRecord(
+                crate::types::decl::SharedVec::from(new_labels?),
+                repr.clone(),
+            ))
         }
         super::decl::TypeKind::TypeVariant(constructors, layout) => {
             let new_constructors: Option<Vec<_>> = constructors
@@ -14156,7 +14286,9 @@ mod tests {
         ctx.restore_type_state(type_snapshot);
         state.restore_backtrack_state(state_snapshot);
 
-        assert!(matches!(&*ctx.borrow_desc(variable), TypeDesc::Tvar(Some(name)) if name == "kept"));
+        assert!(
+            matches!(&*ctx.borrow_desc(variable), TypeDesc::Tvar(Some(name)) if name == "kept")
+        );
     }
 
     #[test]
@@ -14276,16 +14408,13 @@ mod tests {
 
         let module_id = Ident::create_local("M");
         let type_id = Ident::create_local("t");
-        let module_path = Path::pident(module_id.clone());
+        let module_path = Path::pident(module_id);
         let type_path = Path::pdot(module_path, "t".to_string());
 
         let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
         env.add_module(
-            module_id.clone(),
-            module_with_t(
-                type_id.clone(),
-                manifest_decl(int_ty, Some(type_path.clone())),
-            ),
+            module_id,
+            module_with_t(type_id, manifest_decl(int_ty, Some(type_path.clone()))),
         );
 
         let first = ctx.new_constr(type_path.clone(), vec![]);
@@ -14340,9 +14469,7 @@ mod tests {
             type_arity: 0,
             type_kind: TypeKind::TypeAbstract,
             type_private: PrivateFlag::Public,
-            type_manifest: Some(
-                ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![]),
-            ),
+            type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id), vec![])),
             type_variance: vec![],
             type_newtype_level: None,
             type_loc: crate::location::Location::none(),
@@ -14354,11 +14481,19 @@ mod tests {
         };
 
         env.add_module(
-            module_id.clone(),
+            module_id,
             ModuleDeclaration {
                 md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![
-                    SignatureItem::SigType(sibling_id.clone(), std::sync::Arc::new(sibling_decl), RecStatus::TrecNot),
-                    SignatureItem::SigType(type_id, std::sync::Arc::new(type_decl), RecStatus::TrecNot),
+                    SignatureItem::SigType(
+                        sibling_id,
+                        std::sync::Arc::new(sibling_decl),
+                        RecStatus::TrecNot,
+                    ),
+                    SignatureItem::SigType(
+                        type_id,
+                        std::sync::Arc::new(type_decl),
+                        RecStatus::TrecNot,
+                    ),
                 ])),
                 md_attributes: vec![],
                 md_loc: crate::location::Location::none(),

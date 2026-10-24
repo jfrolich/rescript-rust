@@ -20,6 +20,7 @@ use ahash::AHashMap as HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::no_side_effects;
+use crate::lambda::lam_beta_reduce_indexed::reference_fold_order;
 use crate::lambda::lam_closure::StatsMap;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::{IdKind, IdentTable};
@@ -51,35 +52,46 @@ struct ArgUsage {
 /// Returns `Some(reduced)` if reduction is possible, `None` otherwise.
 pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Option<Lambda> {
     // Build parameter -> argument mapping
-    let mut param_map: HashMap<Ident, ArgUsage> = HashMap::new();
-    for (param, arg) in params.iter().zip(args.iter()) {
-        param_map.insert(
-            param.clone(),
-            ArgUsage {
-                lambda: arg.clone(),
-                used: false,
-            },
-        );
+    let indices: HashMap<Ident, usize> = params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| (*param, index))
+        .collect();
+    let mut usages: Vec<ArgUsage> = params
+        .iter()
+        .zip(args.iter())
+        .map(|(_, arg)| ArgUsage {
+            lambda: arg.clone(),
+            used: false,
+        })
+        .collect();
+
+    fn take_param(
+        indices: &HashMap<Ident, usize>,
+        usages: &mut [ArgUsage],
+        x: &Ident,
+    ) -> Option<Option<Lambda>> {
+        match indices.get(x).and_then(|index| usages.get_mut(*index)) {
+            Some(usage) if usage.used => None,
+            Some(usage) => {
+                usage.used = true;
+                Some(Some(usage.lambda.clone()))
+            }
+            None => Some(None),
+        }
     }
 
     // Try to substitute arguments in the body
     fn substitute_args(
         lams: &[Lambda],
-        param_map: &mut HashMap<Ident, ArgUsage>,
+        indices: &HashMap<Ident, usize>,
+        usages: &mut [ArgUsage],
     ) -> Option<Vec<Lambda>> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(lams.len());
         for lam in lams {
             match lam {
                 Lambda::Lvar(x) => {
-                    if let Some(usage) = param_map.get_mut(x) {
-                        if usage.used {
-                            return None;
-                        }
-                        usage.used = true;
-                        result.push(usage.lambda.clone());
-                    } else {
-                        result.push(lam.clone());
-                    }
+                    result.push(take_param(indices, usages, x)?.unwrap_or_else(|| lam.clone()));
                 }
                 Lambda::Lconst(_) => {
                     result.push(lam.clone());
@@ -93,24 +105,32 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
         Some(result)
     }
 
+    // OCaml folds the shared `param_hash` (lam_beta_reduce_util.ml:78-84,
+    // 112-116), so unused arguments are sequenced in `Hash_ident` bucket
+    // order. The tree path does not thread the retained table capacity, so
+    // it starts from the initial bucket count each call.
+    let wrap_unused = |usages: &[ArgUsage], mut result: Lambda| {
+        let mut capacity = 32;
+        for index in reference_fold_order(&params[..usages.len()], &mut capacity) {
+            let usage = &usages[index];
+            if !usage.used {
+                result = Lambda::seq(usage.lambda.clone(), result);
+            }
+        }
+        result
+    };
+
     match body {
         // Primitive application: (fun x y -> prim(x, y)) a b => prim(a, b)
         Lambda::Lprim(prim_info) => {
-            let new_args = substitute_args(&prim_info.args, &mut param_map)?;
+            let new_args = substitute_args(&prim_info.args, &indices, &mut usages)?;
 
             // lam_beta_reduce_util.ml:79-81 builds it through the folding
             // `Lambda.prim`.
-            let mut result =
-                Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc.clone());
+            let result = Lambda::prim(prim_info.primitive.clone(), new_args, prim_info.loc);
 
             // Add sequences for unused arguments (preserve side effects)
-            for (_param, usage) in param_map.iter() {
-                if !usage.used {
-                    result = Lambda::seq(usage.lambda.clone(), result);
-                }
-            }
-
-            Some(result)
+            Some(wrap_unused(&usages, result))
         }
 
         // Function application: (fun x y -> f(x, y)) a b => f(a, b)
@@ -146,26 +166,17 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
                 return None;
             }
 
-            let new_args = substitute_args(&apply.ap_args, &mut param_map)?;
+            let new_args = substitute_args(&apply.ap_args, &indices, &mut usages)?;
 
             // Handle function substitution if it's a variable
             let new_func = match &*apply.ap_func {
-                Lambda::Lvar(fn_name) => {
-                    if let Some(usage) = param_map.get_mut(fn_name) {
-                        if usage.used {
-                            return None;
-                        }
-                        usage.used = true;
-                        usage.lambda.clone()
-                    } else {
-                        (*apply.ap_func).clone()
-                    }
-                }
+                Lambda::Lvar(fn_name) => take_param(&indices, &mut usages, fn_name)?
+                    .unwrap_or_else(|| (*apply.ap_func).clone()),
                 _ => (*apply.ap_func).clone(),
             };
 
             // Build the new application
-            let mut result = Lambda::Lapply(Box::new(Apply {
+            let result = Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(new_func),
                 ap_args: new_args,
                 ap_info: apply.ap_info.clone(),
@@ -173,13 +184,7 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
             }));
 
             // Add sequences for unused arguments
-            for (_param, usage) in param_map.iter() {
-                if !usage.used {
-                    result = Lambda::seq(usage.lambda.clone(), result);
-                }
-            }
-
-            Some(result)
+            Some(wrap_unused(&usages, result))
         }
 
         _ => None,
@@ -199,7 +204,7 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
     // Fall back to creating let bindings
     let mut result = body.clone();
     for (param, arg) in params.iter().zip(args.iter()) {
-        result = refine_let(LetKind::Strict, param.clone(), arg.clone(), result);
+        result = refine_let(LetKind::Strict, *param, arg.clone(), result);
     }
     result
 }
@@ -214,6 +219,7 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
 /// Mirrors the OCaml signature change introduced by `Lam_beta_reduce` which takes
 /// `meta : Lam_stats.t`; the production call path uses
 /// [`propagate_beta_reduce_with_meta`] instead.
+#[cfg(test)]
 pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Lambda {
     let mut scratch = HashMap::new();
     propagate_beta_reduce_with_meta(&mut scratch, params, body, args)
@@ -228,6 +234,7 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
 /// see through the wrapper. Without this, `let X = {foo: funarg.foo}` stays
 /// alive as a dead binding after `simplify_alias` rewrites `X.foo` to
 /// `funarg.foo`.
+#[cfg(test)]
 pub fn propagate_beta_reduce_with_meta(
     ident_tbl: &mut IdentTable,
     params: &[Ident],
@@ -265,12 +272,12 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
     for (param, arg) in params.iter().zip(args.iter()) {
         match arg {
             Lambda::Lconst(_) | Lambda::Lvar(_) => {
-                substitution.insert(param.clone(), arg.clone());
+                substitution.insert(*param, arg.clone());
             }
             _ => {
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
-                substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
+                rest_bindings.push((new_param, bound_param_binding(arg)));
+                substitution.insert(*param, bound_param_substitution(new_param, arg));
             }
         }
     }
@@ -299,6 +306,7 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
 /// - Otherwise: bound to let variables
 ///
 /// Back-compat variant without meta threading — unit tests only.
+#[cfg(test)]
 pub fn propagate_beta_reduce_with_map(
     stats: &StatsMap,
     params: &[Ident],
@@ -314,6 +322,7 @@ pub fn propagate_beta_reduce_with_map(
 /// [`propagate_beta_reduce_with_meta`] — when a non-inlined argument is bound
 /// to a fresh variable, we register its shape in `ident_tbl` so later
 /// `simplify_alias` passes can continue to see through it.
+#[cfg(test)]
 pub fn propagate_beta_reduce_with_map_and_meta(
     ident_tbl: &mut IdentTable,
     stats: &StatsMap,
@@ -352,28 +361,28 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
         match arg {
             // Constants and variables can always be substituted
             Lambda::Lconst(_) | Lambda::Lvar(_) => {
-                substitution.insert(param.clone(), arg.clone());
+                substitution.insert(*param, arg.clone());
             }
             // Global modules need to be bound (for proper module loading)
             Lambda::LglobalModule(_) => {
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), arg.clone()));
-                substitution.insert(param.clone(), Lambda::var(new_param));
+                rest_bindings.push((new_param, arg.clone()));
+                substitution.insert(*param, Lambda::var(new_param));
             }
             _ => {
                 // Check if we can substitute based on usage stats
                 if no_side_effects(arg) {
                     if let Some(stat) = stats.get(param) {
                         if stat.top_and_used_zero_or_one() {
-                            substitution.insert(param.clone(), arg.clone());
+                            substitution.insert(*param, arg.clone());
                             continue;
                         }
                     }
                 }
                 // Bind to a new variable
                 let new_param = param.rename(id_gen);
-                rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
-                substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
+                rest_bindings.push((new_param, bound_param_binding(arg)));
+                substitution.insert(*param, bound_param_substitution(new_param, arg));
             }
         }
     }
@@ -419,7 +428,7 @@ fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &La
                 unreachable!()
             };
 
-            ident_tbl.insert(param.clone(), kind_of_lambda_block(args));
+            ident_tbl.insert(*param, kind_of_lambda_block(args));
         }
         Lambda::Lprim(__prim0)
             if matches!(__prim0.as_ref(), PrimInfo {
@@ -437,7 +446,7 @@ fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &La
                 unreachable!()
             };
 
-            ident_tbl.insert(param.clone(), IdKind::NormalOptional(args[0].clone()));
+            ident_tbl.insert(*param, IdKind::NormalOptional(args[0].clone()));
         }
         _ => {}
     }
@@ -473,6 +482,7 @@ fn is_boxed_optional_binding(arg: &Lambda) -> bool {
     )
 }
 
+#[cfg(test)]
 fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
     let params_max = params
         .iter()
@@ -487,7 +497,7 @@ fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
 fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
     fn rebind(id: &Ident, substitution: &mut Subst, id_gen: &IdGenerator) -> Ident {
         let renamed = id.rename(id_gen);
-        substitution.insert(id.clone(), Lambda::var(renamed.clone()));
+        substitution.insert(*id, Lambda::var(renamed));
         renamed
     }
 
@@ -548,7 +558,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .iter()
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
                 .collect(),
-            prim_info.loc.clone(),
+            prim_info.loc,
         ),
         Lambda::LglobalModule(_) => lam.clone(),
         Lambda::Lswitch(arg, switch) => Lambda::switch(
@@ -669,7 +679,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
         Lambda::Lbreak => Lambda::break_(),
         Lambda::Lcontinue => Lambda::continue_(),
         Lambda::Lassign(id, value) => Lambda::Lassign(
-            id.clone(),
+            *id,
             Box::new(rewrite_bounded_vars(substitution, value, id_gen)),
         ),
     }
@@ -772,10 +782,10 @@ mod tests {
         let y = Ident::create_local("y");
 
         // (fun x y -> x + y) 1 2 => 1 + 2
-        let params = vec![x.clone(), y.clone()];
+        let params = vec![x, y];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::var(y.clone())],
+            vec![Lambda::var(x), Lambda::var(y)],
             Location::none(),
         );
         let args = vec![
@@ -802,8 +812,8 @@ mod tests {
 
         // (fun x y -> x) 1 (side_effect) => side_effect; 1
         // Note: y is unused, but we need to evaluate the argument
-        let params = vec![x.clone(), y.clone()];
-        let body = Lambda::var(x.clone()); // Only uses x
+        let params = vec![x, y];
+        let body = Lambda::var(x); // Only uses x
 
         // For simple_beta_reduce, complex unused args prevent optimization
         let args = vec![
@@ -821,10 +831,10 @@ mod tests {
         let x = Ident::create_local("x");
 
         // (fun x -> x + x) 1 => should NOT simple reduce (x used twice)
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::var(x.clone())],
+            vec![Lambda::var(x), Lambda::var(x)],
             Location::none(),
         );
         let args = vec![Lambda::const_(Constant::int(1))];
@@ -841,17 +851,17 @@ mod tests {
         // (fun x y -> x + x + y) (f) (g)
         // x is used twice, so simple_beta_reduce won't work
         // => let x = f in let y = g in x + x + y
-        let params = vec![x.clone(), y.clone()];
+        let params = vec![x, y];
         // Body uses x twice, which prevents simple_beta_reduce
         let body = Lambda::prim(
             Primitive::Paddint,
             vec![
                 Lambda::prim(
                     Primitive::Paddint,
-                    vec![Lambda::var(x.clone()), Lambda::var(x.clone())],
+                    vec![Lambda::var(x), Lambda::var(x)],
                     Location::none(),
                 ),
-                Lambda::var(y.clone()),
+                Lambda::var(y),
             ],
             Location::none(),
         );
@@ -875,7 +885,7 @@ mod tests {
         // A sequence is deliberately outside `simple_beta_reduce`'s
         // primitive/application fast path, so both effectful arguments become
         // explicit strict bindings whose nesting order is observable.
-        let body = Lambda::seq(Lambda::var(x.clone()), Lambda::var(y.clone()));
+        let body = Lambda::seq(Lambda::var(x), Lambda::var(y));
         let call = |name: &str| {
             Lambda::prim(
                 Primitive::PjsCall {
@@ -928,13 +938,14 @@ mod tests {
         let params = vec![outer];
         let body = Lambda::let_(
             LetKind::Strict,
-            helper.clone(),
+            helper,
             Lambda::const_(Constant::int(1)),
             Lambda::function_(
                 1,
-                vec![inner.clone()],
+                vec![inner],
                 Lambda::const_(Constant::int(0)),
-                FunctionAttribute::default(), crate::location::Location::none(),
+                FunctionAttribute::default(),
+                crate::location::Location::none(),
             ),
         );
         let args = vec![Lambda::const_(Constant::String("".to_string()))];
@@ -955,16 +966,16 @@ mod tests {
     #[test]
     fn test_propagate_beta_reduce_marks_boxed_nullable_bindings_with_identity() {
         let x = Ident::create_local("x");
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::if_(
             Lambda::prim(
                 Primitive::PisNotNone,
-                vec![Lambda::var(x.clone())],
+                vec![Lambda::var(x)],
                 Location::none(),
             ),
             Lambda::prim(
                 Primitive::PvalFromOption,
-                vec![Lambda::var(x.clone())],
+                vec![Lambda::var(x)],
                 Location::none(),
             ),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
@@ -1041,12 +1052,13 @@ mod tests {
     #[test]
     fn test_propagate_beta_reduce_renames_reused_returned_function_params() {
         let none = Ident::create_local("none");
-        let params = vec![none.clone()];
+        let params = vec![none];
         let body = Lambda::function_(
             1,
-            vec![none.clone()],
-            Lambda::var(none.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            vec![none],
+            Lambda::var(none),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 
@@ -1074,17 +1086,17 @@ mod tests {
         // (fun x -> x + 1) 5
         // With stats showing x is used once in top position
         // => 5 + 1 (direct substitution)
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(1))],
+            vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
             Location::none(),
         );
         let args = vec![Lambda::const_(Constant::int(5))];
 
         let mut stats = StatsMap::new();
         stats.insert(
-            x.clone(),
+            x,
             VarStats {
                 top: true,
                 times: 1,
@@ -1109,18 +1121,18 @@ mod tests {
         // (fun x -> x + 1) y where y is pure
         // With stats showing x is used once in top position
         // => y + 1 (substitute because pure and used once)
-        let params = vec![x.clone()];
+        let params = vec![x];
         let body = Lambda::prim(
             Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::const_(Constant::int(1))],
+            vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
             Location::none(),
         );
         // Lambda::var is pure
-        let args = vec![Lambda::var(y.clone())];
+        let args = vec![Lambda::var(y)];
 
         let mut stats = StatsMap::new();
         stats.insert(
-            x.clone(),
+            x,
             VarStats {
                 top: true,
                 times: 1,
@@ -1142,18 +1154,19 @@ mod tests {
     #[test]
     fn test_propagate_beta_reduce_with_map_renames_reused_returned_function_params() {
         let none = Ident::create_local("none");
-        let params = vec![none.clone()];
+        let params = vec![none];
         let body = Lambda::function_(
             1,
-            vec![none.clone()],
-            Lambda::var(none.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            vec![none],
+            Lambda::var(none),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 
         let mut stats = StatsMap::new();
         stats.insert(
-            none.clone(),
+            none,
             VarStats {
                 top: true,
                 times: 1,
@@ -1183,7 +1196,7 @@ mod tests {
         let reduced = propagate_beta_reduce(
             std::slice::from_ref(&x),
             &Lambda::Lswitch(
-                Box::new(Lambda::var(x.clone())),
+                Box::new(Lambda::var(x)),
                 Box::new(LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
@@ -1214,7 +1227,7 @@ mod tests {
 
         // let x = v in x => v
         let value = Lambda::const_(Constant::int(42));
-        let body = Lambda::var(x.clone());
+        let body = Lambda::var(x);
 
         let result = refine_let(LetKind::Strict, x, value.clone(), body);
 

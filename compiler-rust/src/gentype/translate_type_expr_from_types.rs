@@ -1,5 +1,4 @@
 // Port of compiler/gentype/TranslateTypeExprFromTypes.ml:1-761.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
     ArgType, Case as VariantCase, ClosedFlag, Dep, Field, Function, Ident, Label, LabelJs, Mutable,
@@ -126,7 +125,9 @@ pub fn translate_constr(
             dependencies: concat_deps(&[key, value]),
             type_: common::weakmap_t(key.type_.clone(), value.type_.clone()),
         },
-        (["Set", "t"] | ["Stdlib", "Set", "t"], [param]) => with_type(param, common::set_t(param.type_.clone())),
+        (["Set", "t"] | ["Stdlib", "Set", "t"], [param]) => {
+            with_type(param, common::set_t(param.type_.clone()))
+        }
         (["WeakSet", "t"] | ["Stdlib", "WeakSet", "t"], [param]) => {
             with_type(param, common::weakset_t(param.type_.clone()))
         }
@@ -134,9 +135,10 @@ pub fn translate_constr(
         (
             [
                 "Stdlib",
-                name @ ("ArrayBuffer" | "DataView" | "Int8Array" | "Uint8Array" | "Uint8ClampedArray"
-                | "Int16Array" | "Uint16Array" | "Int32Array" | "Uint32Array" | "Float32Array"
-                | "Float64Array" | "BigInt64Array" | "BigUint64Array"),
+                name @ ("ArrayBuffer" | "DataView" | "Int8Array" | "Uint8Array"
+                | "Uint8ClampedArray" | "Int16Array" | "Uint16Array" | "Int32Array"
+                | "Uint32Array" | "Float32Array" | "Float64Array" | "BigInt64Array"
+                | "BigUint64Array"),
                 "t",
             ],
             [],
@@ -150,15 +152,24 @@ pub fn translate_constr(
         (
             [
                 "Stdlib",
-                name @ ("Iterator" | "IteratorObject" | "IterableIterator" | "Generator" | "AsyncIterator"
-                | "AsyncIterableIterator" | "AsyncGenerator"),
+                name @ ("Iterator"
+                | "IteratorObject"
+                | "IterableIterator"
+                | "Generator"
+                | "AsyncIterator"
+                | "AsyncIterableIterator"
+                | "AsyncGenerator"),
                 "t",
             ],
             [yield_t, return_t, next_t],
         ) => Translation {
             dependencies: concat_deps(&[yield_t, return_t, next_t]),
             type_: builtin(
-                vec![yield_t.type_.clone(), return_t.type_.clone(), next_t.type_.clone()],
+                vec![
+                    yield_t.type_.clone(),
+                    return_t.type_.clone(),
+                    next_t.type_.clone(),
+                ],
                 name,
             ),
         },
@@ -167,12 +178,14 @@ pub fn translate_constr(
         }
         (["Stdlib", "Ordering", "t"], []) => tr(common::number_t()),
         (["unit"], []) => tr(common::unit_t()),
-        (["array"] | ["Stdlib", "Array", "t"], [param]) => {
-            with_type(param, Type::Array(Box::new(param.type_.clone()), Mutable::Mutable))
-        }
-        (["ImmutableArray", "t"], [param]) => {
-            with_type(param, Type::Array(Box::new(param.type_.clone()), Mutable::Immutable))
-        }
+        (["array"] | ["Stdlib", "Array", "t"], [param]) => with_type(
+            param,
+            Type::Array(Box::new(param.type_.clone()), Mutable::Mutable),
+        ),
+        (["ImmutableArray", "t"], [param]) => with_type(
+            param,
+            Type::Array(Box::new(param.type_.clone()), Mutable::Immutable),
+        ),
         (["Pervasives", "ref"], [param]) => with_type(
             param,
             Type::Object(
@@ -187,7 +200,10 @@ pub fn translate_constr(
             ),
         ),
         (
-            ["Pervasives", "result"] | ["Belt", "Result", "t"] | ["result"] | ["Stdlib", "Result", "t"],
+            ["Pervasives", "result"]
+            | ["Belt", "Result", "t"]
+            | ["result"]
+            | ["Stdlib", "Result", "t"],
             [ok_t, error_t],
         ) => result_translation(ok_t, error_t),
         (["React", "callback"], [from_t, to_t]) => function_translation(from_t, to_t),
@@ -203,26 +219,36 @@ pub fn translate_constr(
                 type_vars: vec![],
             }),
         ),
-        (["React", "Context", "t"], [param]) => {
-            with_type(param, crate::gentype::emit_type::type_react_context(param.type_.clone()))
-        }
-        (["React", "Ref", "t"] | ["React", "ref"], [param]) => {
-            with_type(param, crate::gentype::emit_type::type_react_ref(param.type_.clone()))
-        }
+        (["React", "Context", "t"], [param]) => with_type(
+            param,
+            crate::gentype::emit_type::type_react_context(param.type_.clone()),
+        ),
+        (["React", "Ref", "t"] | ["React", "ref"], [param]) => with_type(
+            param,
+            crate::gentype::emit_type::type_react_ref(param.type_.clone()),
+        ),
         (["ReactDOM", "domRef"] | ["ReactDOM", "Ref", "t"], []) => {
             tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref())
         }
         (["ReactDOM", "Ref", "currentDomRef"], []) => tr(crate::gentype::emit_type::type_any()),
-        (["ReactDOMRe", "domRef"], []) => tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref()),
+        (["ReactDOMRe", "domRef"], []) => {
+            tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref())
+        }
         (["ReactDOMRe", "Ref", "currentDomRef"], []) => tr(crate::gentype::emit_type::type_any()),
-        (["ReactEvent", "Mouse", "t"], []) => tr(crate::gentype::emit_type::type_react_event_mouse_t()),
+        (["ReactEvent", "Mouse", "t"], []) => {
+            tr(crate::gentype::emit_type::type_react_event_mouse_t())
+        }
         (
-            ["React", "element"] | ["ReasonReact", "reactElement"] | ["Pervasives", "Jsx", "element"]
+            ["React", "element"]
+            | ["ReasonReact", "reactElement"]
+            | ["Pervasives", "Jsx", "element"]
             | ["Jsx", "element"],
             [],
         ) => tr(crate::gentype::emit_type::type_react_element()),
         (["option"], [param]) => with_type(param, Type::Option(Box::new(param.type_.clone()))),
-        (["Stdlib", "undefined"], [param]) => with_type(param, Type::Option(Box::new(param.type_.clone()))),
+        (["Stdlib", "undefined"], [param]) => {
+            with_type(param, Type::Option(Box::new(param.type_.clone())))
+        }
         (["Stdlib", "Null", "t"] | ["Stdlib", "null"], [param]) => {
             with_type(param, Type::Null(Box::new(param.type_.clone())))
         }
@@ -232,7 +258,9 @@ pub fn translate_constr(
         (["promise"] | ["Stdlib", "Promise", "t"], [param]) => {
             with_type(param, Type::Promise(Box::new(param.type_.clone())))
         }
-        (["dict"] | ["Stdlib", "Dict", "t"], [param]) => with_type(param, Type::Dict(Box::new(param.type_.clone()))),
+        (["dict"] | ["Stdlib", "Dict", "t"], [param]) => {
+            with_type(param, Type::Dict(Box::new(param.type_.clone())))
+        }
         (["Stdlib", "JSON", "t"], []) => tr(unknown()),
         // A tagged-template tag is a variadic function usable with backtick
         // syntax: (strings: TemplateStringsArray, ...values: 'param[]) =>
@@ -640,21 +668,6 @@ fn function_translation(from_t: &Translation, to_t: &Translation) -> Translation
     }
 }
 
-fn wrap_builtin_nullable(name: &str, param: &Translation) -> Translation {
-    let type_ = match name {
-        "Undefined" | "undefined" => Type::Option(Box::new(param.type_.clone())),
-        "Null" | "null" => Type::Null(Box::new(param.type_.clone())),
-        "Nullable" | "nullable" => Type::Nullable(Box::new(param.type_.clone())),
-        "Promise" | "promise" => Type::Promise(Box::new(param.type_.clone())),
-        "Dict" | "dict" => Type::Dict(Box::new(param.type_.clone())),
-        _ => param.type_.clone(),
-    };
-    Translation {
-        dependencies: param.dependencies.clone(),
-        type_,
-    }
-}
-
 fn label_name(label: &ArgLabel) -> String {
     match label {
         ArgLabel::Nolabel => String::new(),
@@ -676,27 +689,44 @@ fn get_field_types(
     type_env: &crate::gentype::type_env::T,
     type_expr: &TypeExprRef,
 ) -> (ClosedFlag, Vec<(String, Mutable, Translation)>) {
-    match type_expr_desc(ctx, type_expr) {
-        TypeDesc::Tfield {
-            name,
-            mutability,
-            typ,
-            rest,
-        } => {
-            let (closed_flag, mut fields) =
-                get_field_types(ctx, config, type_vars_gen, type_env, &rest);
-            let mutable_ = match ctx.mutability_repr(mutability) {
-                crate::types::asttypes::MutableFlag::Mutable => Mutable::Mutable,
-                crate::types::asttypes::MutableFlag::Immutable => Mutable::Immutable,
-            };
-            let translation = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
-            fields.insert(0, (name, mutable_, translation));
-            (closed_flag, fields)
+    // Mirrors compiler/gentype/translate_type_expr_from_types.ml:502-517:
+    // each field's rest is translated before the field itself. Fields are
+    // pushed innermost-first, so the list is reversed once at the end.
+    fn go(
+        ctx: &TypeContext,
+        config: &crate::gentype::config::T,
+        type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
+        type_env: &crate::gentype::type_env::T,
+        type_expr: &TypeExprRef,
+        fields: &mut Vec<(String, Mutable, Translation)>,
+    ) -> ClosedFlag {
+        match type_expr_desc(ctx, type_expr) {
+            TypeDesc::Tfield {
+                name,
+                mutability,
+                typ,
+                rest,
+            } => {
+                let closed_flag = go(ctx, config, type_vars_gen, type_env, &rest, fields);
+                let mutable_ = match ctx.mutability_repr(mutability) {
+                    crate::types::asttypes::MutableFlag::Mutable => Mutable::Mutable,
+                    crate::types::asttypes::MutableFlag::Immutable => Mutable::Immutable,
+                };
+                let translation =
+                    translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
+                fields.push((name, mutable_, translation));
+                closed_flag
+            }
+            TypeDesc::Tlink(te) => go(ctx, config, type_vars_gen, type_env, &te, fields),
+            TypeDesc::Tvar(None) => ClosedFlag::Open,
+            _ => ClosedFlag::Closed,
         }
-        TypeDesc::Tlink(te) => get_field_types(ctx, config, type_vars_gen, type_env, &te),
-        TypeDesc::Tvar(None) => (ClosedFlag::Open, vec![]),
-        _ => (ClosedFlag::Closed, vec![]),
     }
+
+    let mut fields = Vec::new();
+    let closed_flag = go(ctx, config, type_vars_gen, type_env, type_expr, &mut fields);
+    fields.reverse();
+    (closed_flag, fields)
 }
 
 fn translate_variant(

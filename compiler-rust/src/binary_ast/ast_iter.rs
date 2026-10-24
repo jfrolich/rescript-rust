@@ -176,7 +176,11 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
     }
 }
 
-pub fn walk_type_declaration<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, td: &TypeDeclaration) {
+pub fn walk_type_declaration<V: AstIter + ?Sized>(
+    v: &mut V,
+    arena: &ParseArena,
+    td: &TypeDeclaration,
+) {
     for (t, _) in &td.ptype_params {
         v.typ(arena, *t);
     }
@@ -234,7 +238,11 @@ pub fn walk_constructor_declaration<V: AstIter + ?Sized>(
     v.attributes(arena, cd.pcd_attributes.as_slice());
 }
 
-pub fn walk_label_declaration<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, ld: &LabelDeclaration) {
+pub fn walk_label_declaration<V: AstIter + ?Sized>(
+    v: &mut V,
+    arena: &ParseArena,
+    ld: &LabelDeclaration,
+) {
     v.typ(arena, ld.pld_type);
     v.attributes(arena, ld.pld_attributes.as_slice());
 }
@@ -296,7 +304,11 @@ pub fn walk_module_type<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx:
     }
 }
 
-pub fn walk_signature_item<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, item: &SignatureItem) {
+pub fn walk_signature_item<V: AstIter + ?Sized>(
+    v: &mut V,
+    arena: &ParseArena,
+    item: &SignatureItem,
+) {
     match &*item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => v.value_description(arena, vd),
         SignatureItemDesc::Psig_type(inner) => {
@@ -353,7 +365,11 @@ pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx:
     }
 }
 
-pub fn walk_structure_item<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, item: &StructureItem) {
+pub fn walk_structure_item<V: AstIter + ?Sized>(
+    v: &mut V,
+    arena: &ParseArena,
+    item: &StructureItem,
+) {
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_eval(inner) => {
             let (e, attrs) = &**inner;

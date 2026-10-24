@@ -10,8 +10,8 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::{ApInfo, FunctionAttribute, Lambda};
 use crate::location::Location;
-use crate::lambda::{ApInfo, FunctionAttribute, Lambda, PrimInfo};
 
 /// Direct port of `Lam_eta_conversion.transform_under_supply`
 /// (lam_eta_conversion.ml:37-75).
@@ -29,7 +29,7 @@ pub fn transform_under_supply(
     // OCaml uses the shared Ident.create counter here
     // (compiler/core/lam_eta_conversion.ml:37-39).
     let extra_args: Vec<Ident> = (0..n).map(|_| id_gen.create("param")).collect();
-    let extra_lambdas: Vec<Lambda> = extra_args.iter().cloned().map(Lambda::var).collect();
+    let extra_lambdas: Vec<Lambda> = extra_args.iter().copied().map(Lambda::var).collect();
 
     // lam_eta_conversion.ml:40-53 — fold over (fn :: args), accumulating a
     // prefix of "safe" lambdas (`acc`) and a binding list (`bind`) for
@@ -49,7 +49,7 @@ pub fn transform_under_supply(
             // OCaml allocates this with the same global counter as source
             // identifiers (compiler/core/lam_eta_conversion.ml:41-53).
             let v = id_gen.create("partial_arg");
-            let var = Lambda::var(v.clone());
+            let var = Lambda::var(v);
             bindings.push((v, lam));
             acc.push(var);
         }
@@ -62,27 +62,20 @@ pub fn transform_under_supply(
         .expect("transform_under_supply requires at least fn");
     let args: Vec<Lambda> = iter.collect();
 
-    // lam_eta_conversion.ml:54-66 — `fn :: args, []` pure path: build the
-    // outer function directly.
-    if bindings.is_empty() {
-        let mut all_args = args;
-        all_args.extend(extra_lambdas);
-        return Lambda::function_(
-            n,
-            extra_args,
-            Lambda::apply(fn_, all_args, ap_info.clone(), false),
-            FunctionAttribute::default(),
-            // lam_eta_conversion.ml:65 (before its removal): `~loc:Location.none`.
-            Location::none(),
-        );
-    }
-
-    // lam_eta_conversion.ml:67-74 — `fn :: args, bindings`: build the outer
-    // function then wrap with `let Strict id = x` for each captured binding.
+    // lam_eta_conversion.ml:54-74 — build the outer function, then wrap it
+    // with `let Strict id = x` for each captured binding. The pure
+    // `fn :: args, []` case (lines 54-66) is the same with no bindings.
     let mut all_args = args;
     all_args.extend(extra_lambdas);
     let body = Lambda::apply(fn_, all_args, ap_info.clone(), false);
-    let rest = Lambda::function_(n, extra_args, body, FunctionAttribute::default(), Location::none());
+    let rest = Lambda::function_(
+        n,
+        extra_args,
+        body,
+        FunctionAttribute::default(),
+        // lam_eta_conversion.ml:65 (before its removal): `~loc:Location.none`.
+        Location::none(),
+    );
 
     // OCaml's fold_left applies bindings in order, wrapping innermost first.
     // We collected `bindings` in the same forward order; reversing matches
@@ -112,24 +105,10 @@ fn is_safe_to_share(lam: &Lambda) -> bool {
                 | Constant::JsFalse
                 | Constant::JsUndefined { .. }
         ),
-        Lambda::Lprim(__prim0)
-            if matches!(
-                __prim0.as_ref(),
-                PrimInfo {
-                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-                    ..
-                }
-            ) =>
-        {
-            let PrimInfo {
-                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-                ..
-            } = __prim0.as_ref()
-            else {
-                unreachable!()
-            };
-            true
-        }
+        Lambda::Lprim(prim) => matches!(
+            prim.primitive,
+            Primitive::Pfield(_, FieldDbgInfo::Module { .. })
+        ),
         _ => false,
     }
 }

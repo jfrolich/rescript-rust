@@ -3,7 +3,7 @@
 //! This module provides helper functions for analyzing and inspecting the AST.
 //! It's a port of OCaml's `res_parsetree_viewer.ml`.
 
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ParseArena, PatIdx};
+use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 
@@ -31,9 +31,14 @@ pub fn is_braced_expr(expr: &Expression) -> bool {
 
 /// res_parsetree_viewer.ml `process_braces`: the braces location and the
 /// enclosed expression of an explicit braces node.
-pub fn process_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> (Option<LocIdx>, &'a Expression) {
+pub fn process_braces<'a>(
+    arena: &'a ParseArena,
+    expr: &'a Expression,
+) -> (Option<LocIdx>, &'a Expression) {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_braces(braces) => (Some(braces.braces_loc), arena.get_expr(braces.expr)),
+        ExpressionDesc::Pexp_braces(braces) => {
+            (Some(braces.braces_loc), arena.get_expr(braces.expr))
+        }
         _ => (None, expr),
     }
 }
@@ -45,16 +50,6 @@ pub fn unwrap_braces<'a>(arena: &'a ParseArena, expr: &'a Expression) -> &'a Exp
         expr = arena.get_expr(braces.expr);
     }
     expr
-}
-
-/// OCaml `is_template_literal`.
-pub fn is_template_literal(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_template(_))
-}
-
-/// OCaml `is_tagged_template_literal`.
-pub fn is_tagged_template_literal(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_tagged_template(_))
 }
 
 /// Check if an expression is a ternary expression.
@@ -71,15 +66,10 @@ pub fn collect_ternary_parts<'a>(
     let mut parts = Vec::new();
     let mut current = expr;
 
-    loop {
-        match &*current.pexp_desc {
-            ExpressionDesc::Pexp_ternary(inner) => {
-                let (condition, consequent, alternate) = **inner;
-                parts.push((arena.get_expr(condition), arena.get_expr(consequent)));
-                current = arena.get_expr(alternate);
-            }
-            _ => break,
-        }
+    while let ExpressionDesc::Pexp_ternary(inner) = &*current.pexp_desc {
+        let (condition, consequent, alternate) = **inner;
+        parts.push((arena.get_expr(condition), arena.get_expr(consequent)));
+        current = arena.get_expr(alternate);
     }
 
     (parts, current)
@@ -186,11 +176,6 @@ pub fn collect_if_expressions<'a>(
     }
 }
 
-/// Check if an expression is a simple "single expression" (not a block).
-pub fn is_single_expression(arena: &ParseArena, expr: &Expression) -> bool {
-    !is_block_expr(arena, expr)
-}
-
 /// Check if expression is a binary expression.
 pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &*expr.pexp_desc {
@@ -200,7 +185,11 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 2
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -217,39 +206,6 @@ pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expre
             }
         }
         _ => false,
-    }
-}
-
-/// Get the operator from a binary expression, if it is one.
-pub fn get_binary_operator(
-    arena: &crate::parse_arena::ParseArena,
-    expr: &Expression,
-) -> Option<String> {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
-            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
-                return None;
-            }
-            let funct_expr = arena.get_expr(*funct);
-            match &*funct_expr.pexp_desc {
-                ExpressionDesc::Pexp_ident(ident) => {
-                    if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
-                        let op = arena.get_string(*op_idx);
-                        if not_ghost_operator(op, arena.loc_ghost(ident.loc)) {
-                            return Some(op.to_string());
-                        }
-                    }
-                    None
-                }
-                _ => None,
-            }
-        }
-        _ => None,
     }
 }
 
@@ -427,7 +383,11 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) => true,
+        ExpressionDesc::Pexp_constant(c)
+            if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) =>
+        {
+            true
+        }
         ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -466,59 +426,15 @@ fn is_multiline_text(txt: &str) -> bool {
 }
 
 /// Check if an expression is "huggable" as a RHS (simpler than is_huggable_expression).
-pub fn is_huggable_rhs(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+pub fn is_huggable_rhs(expr: &Expression) -> bool {
+    matches!(
+        &*expr.pexp_desc,
         ExpressionDesc::Pexp_array(_)
-        | ExpressionDesc::Pexp_tuple(_)
-        | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
-        _ => false,
-    }
-}
-
-/// Check if a longident represents a binary operator.
-pub fn is_binary_operator(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> bool {
-    match lid {
-        Longident::Lident(op_idx) => {
-            let op = arena.get_string(*op_idx);
-            matches!(
-                op,
-                "+" | "+."
-                    | "-"
-                    | "-."
-                    | "*"
-                    | "*."
-                    | "/"
-                    | "/."
-                    | "**"
-                    | "=="
-                    | "==="
-                    | "!="
-                    | "!=="
-                    | "<"
-                    | "<="
-                    | ">"
-                    | ">="
-                    | "|>"
-                    | "||"
-                    | "&&"
-                    | "="
-                    | ":="
-                    | "++"
-                    | "^"
-                    | "|"
-                    | "&"
-                    | "mod"
-                    | "land"
-                    | "lor"
-                    | "lxor"
-                    | "lsl"
-                    | "lsr"
-                    | "asr"
-            )
-        }
-        _ => false,
-    }
+            | ExpressionDesc::Pexp_tuple(_)
+            | ExpressionDesc::Pexp_record(_)
+            | ExpressionDesc::Pexp_object_literal(_)
+            | ExpressionDesc::Pexp_braces(_)
+    )
 }
 
 /// Check if an expression is a unary expression.
@@ -530,7 +446,11 @@ pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expres
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 1 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 1
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -554,17 +474,6 @@ pub fn is_unary_operator_idx(
         matches!(op, "~+" | "~+." | "~-" | "~-." | "~~~" | "!" | "not")
     } else {
         false
-    }
-}
-
-/// Check if a longident represents a unary operator.
-pub fn is_unary_operator(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> bool {
-    match lid {
-        Longident::Lident(op_idx) => {
-            let op = arena.get_string(*op_idx);
-            matches!(op, "~+" | "~+." | "~-" | "~-." | "~~~" | "!" | "not")
-        }
-        _ => false,
     }
 }
 
@@ -751,7 +660,9 @@ pub fn collect_list_expressions<'a>(
                 let pair = match args.txt.as_slice() {
                     [head, tail] => Some((*head, *tail)),
                     [arg] => match &*arena.get_expr(*arg).pexp_desc {
-                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => Some((exprs[0], exprs[1])),
+                        ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => {
+                            Some((exprs[0], exprs[1]))
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -1071,18 +982,27 @@ pub fn filter_parsing_attrs_slice<'a>(
 ) -> Vec<&'a Attribute> {
     attrs
         .iter()
-        .filter(|attr| {
-            !matches!(
-                arena.get_string(attr.0.txt),
-                "res.iflet"
-                    | "res.ternary"
-                    | "res.await"
-                    | "res.patVariantSpread"
-                    | "res.dictPattern"
-                    | "res.dictSpread"
-            )
-        })
+        .filter(|attr| !is_parsing_attr(arena, attr))
         .collect()
+}
+
+/// Whether `attr` is one of the parser-internal markers that
+/// `filter_parsing_attrs` drops.
+pub fn is_parsing_attr(arena: &ParseArena, attr: &Attribute) -> bool {
+    matches!(
+        arena.get_string(attr.0.txt),
+        "res.iflet"
+            | "res.ternary"
+            | "res.await"
+            | "res.patVariantSpread"
+            | "res.dictPattern"
+            | "res.dictSpread"
+    )
+}
+
+/// `filter_parsing_attrs attrs <> []`, without building the filtered list.
+pub fn has_non_parsing_attrs(arena: &ParseArena, attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| !is_parsing_attr(arena, attr))
 }
 
 /// Check if an attribute is printable (not an internal parsing attribute).
@@ -1096,35 +1016,6 @@ pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
 /// Check if attributes contain any printable attributes.
 pub fn has_printable_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs.iter().any(|a| is_printable_attribute(arena, a))
-}
-
-/// Filter to only printable attributes.
-pub fn filter_printable_attributes<'a>(
-    arena: &ParseArena,
-    attrs: &'a Attributes,
-) -> Vec<&'a Attribute> {
-    attrs
-        .iter()
-        .filter(|a| is_printable_attribute(arena, a))
-        .collect()
-}
-
-/// Partition attributes into printable and internal (non-printable).
-/// Returns (printable_attrs, internal_attrs).
-pub fn partition_printable_attributes<'a>(
-    arena: &ParseArena,
-    attrs: &'a Attributes,
-) -> (Vec<&'a Attribute>, Vec<&'a Attribute>) {
-    let mut printable = Vec::new();
-    let mut internal = Vec::new();
-    for attr in attrs.iter() {
-        if is_printable_attribute(arena, attr) {
-            printable.push(attr);
-        } else {
-            internal.push(attr);
-        }
-    }
-    (printable, internal)
 }
 
 /// Check if expression has any attributes (excluding internal parsing ones).
@@ -1165,11 +1056,6 @@ fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bo
 // JSX Analysis
 // ============================================================================
 
-/// Check if an expression is a JSX expression.
-pub fn is_jsx_expression(expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_jsx_element(_))
-}
-
 // ============================================================================
 // Operator Precedence
 // ============================================================================
@@ -1193,11 +1079,6 @@ pub fn operator_precedence(op: &str) -> i32 {
         "#" | "##" | "->" => 12,
         _ => 0,
     }
-}
-
-/// Check if operator is right-associative.
-pub fn is_right_associative(op: &str) -> bool {
-    matches!(op, "**" | ":=" | "=")
 }
 
 /// Check if operator is an equality operator.
@@ -1275,9 +1156,7 @@ fn same_precedence_sub_expression(
     match &*sub_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2 => {
             let PexpApply {
-                ref funct,
-                ref args,
-                ..
+                ref funct, args: _, ..
             } = **apply_inner;
             let funct_expr = arena.get_expr(*funct);
             if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
@@ -1332,11 +1211,6 @@ pub fn is_binary_operator_str(op: &str) -> bool {
     )
 }
 
-/// Check if string is a unary operator.
-pub fn is_unary_operator_str(op: &str) -> bool {
-    matches!(op, "~+" | "~+." | "~-" | "~-." | "~~~" | "not")
-}
-
 /// Check if operator is not a ghost operator.
 /// Ghost operators are internal and shouldn't be printed as binary ops.
 pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
@@ -1346,41 +1220,6 @@ pub fn not_ghost_operator(op: &str, is_ghost: bool) -> bool {
 // ============================================================================
 // Expression Rewriting
 // ============================================================================
-
-/// Check if an expression is the underscore apply sugar pattern: `(__x) => f(a, __x, c)`.
-/// Returns a reference to the inner apply expression if it matches.
-pub fn get_underscore_apply_inner<'a>(
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> Option<&'a Expression> {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ..
-            } = **inner;
-            if *arg_label != ArgLabel::Nolabel || default.is_some() {
-                return None;
-            }
-            // Check if pattern is `__x`
-            let lhs_pat = arena.get_pat(*lhs);
-            if let PatternDesc::Ppat_var(name) = &*lhs_pat.ppat_desc {
-                if arena.get_string(name.txt) == "__x" {
-                    // Check if rhs is an apply
-                    let rhs_expr: &Expression = arena.get_expr(*rhs);
-                    if matches!(&*rhs_expr.pexp_desc, ExpressionDesc::Pexp_apply(_)) {
-                        return Some(rhs_expr);
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
 
 /// Check if an expression is a `__x` identifier that should be printed as `_`.
 /// Used when printing inside underscore apply sugar.
@@ -1404,13 +1243,6 @@ pub struct TypeParameter<'a> {
     pub lbl: &'a ArgLabel,
     /// Parameter type.
     pub typ: &'a CoreType,
-}
-
-/// Check if attributes contain the "@as" attribute.
-fn has_as_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "as")
 }
 
 /// `Res_parsetree_viewer.arrow_type` (res_parsetree_viewer.ml:3-7): an arrow
@@ -1537,7 +1369,11 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 2 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 2
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1565,7 +1401,11 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
                 ref args,
                 ..
             } = **inner;
-            if args.len() != 3 || args.iter().any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel)) {
+            if args.len() != 3
+                || args
+                    .iter()
+                    .any(|(lbl, _)| !matches!(lbl, ArgLabel::Nolabel))
+            {
                 return false;
             }
             let funct_expr = arena.get_expr(*funct);
@@ -1575,34 +1415,6 @@ pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -
                         let module = arena.get_string(*module_idx);
                         let method = arena.get_string(*method_idx);
                         return module == "Array" && method == "set";
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Check if an expression is `String.get(str, idx)`.
-pub fn is_string_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
-            if args.len() != 2 {
-                return false;
-            }
-            let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(lid) = &*funct_expr.pexp_desc {
-                if let Longident::Ldot(base, method_idx) = arena.get_longident(lid.txt) {
-                    if let Longident::Lident(module_idx) = base.as_ref() {
-                        let module = arena.get_string(*module_idx);
-                        let method = arena.get_string(*method_idx);
-                        return module == "String" && method == "get";
                     }
                 }
             }
@@ -1693,32 +1505,6 @@ pub fn collect_or_pattern_chain<'a>(arena: &'a ParseArena, pat: &'a Pattern) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_binary_operator() {
-        let mut arena = ParseArena::new();
-        let plus = Longident::Lident(arena.intern_string("+"));
-        let eq = Longident::Lident(arena.intern_string("=="));
-        let pipe = Longident::Lident(arena.intern_string("|>"));
-        let foo = Longident::Lident(arena.intern_string("foo"));
-        assert!(is_binary_operator(&arena, &plus));
-        assert!(is_binary_operator(&arena, &eq));
-        assert!(is_binary_operator(&arena, &pipe));
-        assert!(!is_binary_operator(&arena, &foo));
-    }
-
-    #[test]
-    fn test_is_unary_operator() {
-        let mut arena = ParseArena::new();
-        let bang = Longident::Lident(arena.intern_string("!"));
-        let not = Longident::Lident(arena.intern_string("not"));
-        let neg = Longident::Lident(arena.intern_string("~-"));
-        let plus = Longident::Lident(arena.intern_string("+"));
-        assert!(is_unary_operator(&arena, &bang));
-        assert!(is_unary_operator(&arena, &not));
-        assert!(is_unary_operator(&arena, &neg));
-        assert!(!is_unary_operator(&arena, &plus));
-    }
 
     #[test]
     fn test_operator_precedence() {

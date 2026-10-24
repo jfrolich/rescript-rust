@@ -105,7 +105,7 @@ fn replace_source_fields(
                 if matches!(&target.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(source))
                     && field_indices.contains_key(label)
                 {
-                    used.insert(label.clone(), declaration.ident.clone());
+                    used.insert(label.clone(), declaration.ident);
                     continue;
                 }
             }
@@ -114,10 +114,9 @@ fn replace_source_fields(
             if let ExpressionDesc::StaticIndex(target, label, _) = &expr.desc {
                 if matches!(&target.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(source)) {
                     if let Some(index) = field_indices.get(label) {
-                        let ident = used
-                            .entry(label.clone())
-                            .or_insert_with(|| Ident::create_local(field_ident_name(*index, label)))
-                            .clone();
+                        let ident = *used.entry(label.clone()).or_insert_with(|| {
+                            Ident::create_local(field_ident_name(*index, label))
+                        });
                         return Expression::var(ident);
                     }
                 }
@@ -169,7 +168,7 @@ fn rewrite_block(block: Block) -> Block {
                 let rest = Ident::create_local("rest");
                 let source = rewrite_expression(*source);
                 let return_statement = Statement {
-                    desc: StatementDesc::Return(Expression::var(rest.clone())),
+                    desc: StatementDesc::Return(Expression::var(rest)),
                     comment: statement.comment.clone(),
                     source_loc: statement.source_loc.clone(),
                 };
@@ -222,12 +221,18 @@ fn rewrite_statement(mut statement: Statement) -> Statement {
             dir,
             rewrite_block(body),
         ),
-        StatementDesc::ForOf(label, ident, expr, body) => {
-            StatementDesc::ForOf(label, ident, Box::new(rewrite_expression(*expr)), rewrite_block(body))
-        }
-        StatementDesc::ForAwaitOf(label, ident, expr, body) => {
-            StatementDesc::ForAwaitOf(label, ident, Box::new(rewrite_expression(*expr)), rewrite_block(body))
-        }
+        StatementDesc::ForOf(label, ident, expr, body) => StatementDesc::ForOf(
+            label,
+            ident,
+            Box::new(rewrite_expression(*expr)),
+            rewrite_block(body),
+        ),
+        StatementDesc::ForAwaitOf(label, ident, expr, body) => StatementDesc::ForAwaitOf(
+            label,
+            ident,
+            Box::new(rewrite_expression(*expr)),
+            rewrite_block(body),
+        ),
         StatementDesc::IntSwitch(expr, clauses, default) => StatementDesc::IntSwitch(
             rewrite_expression(expr),
             clauses
@@ -341,10 +346,12 @@ fn rewrite_expression(mut expression: Expression) -> Expression {
             strings,
             values.into_iter().map(rewrite_expression).collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values.into_iter().map(rewrite_expression).collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values.into_iter().map(rewrite_expression).collect(),
+            }
+        }
         ExpressionDesc::Array(items, mutable) => {
             ExpressionDesc::Array(items.into_iter().map(rewrite_expression).collect(), mutable)
         }

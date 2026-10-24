@@ -21,16 +21,14 @@ use crate::lambda::lam_analysis::{
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::{
-    BoxedNullable, Element, ExternalArityFieldTable, ExternalArityInfo, ExternalArityTable, IdKind,
-    LamStats, RecFlag,
+    BoxedNullable, Element, ExternalArityInfo, ExternalArityTable, IdKind, LamStats, RecFlag,
 };
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{InlineAttribute, LFunction, Lambda, PrimInfo};
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` for
 /// `Lam_arity_analysis.get_arity` (compiler/core/lam_arity_analysis.ml:43-71).
-pub type ExternalArityResolver<'a> =
-    dyn FnMut(&Ident, &str) -> Option<ExternalArityInfo> + 'a;
+pub type ExternalArityResolver<'a> = dyn FnMut(&Ident, &str) -> Option<ExternalArityInfo> + 'a;
 
 /// Direct port of `Lam_util.element_of_lambda` (lam_util.ml:188-196).
 ///
@@ -52,7 +50,7 @@ pub(crate) fn element_of_lambda(lam: &Lambda) -> Element {
         {
             let PrimInfo {
                 primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
-                args,
+                args: _,
                 ..
             } = __prim7.as_ref()
             else {
@@ -109,8 +107,7 @@ fn lookup_cached_external_arity<'a>(
     module_id: &Ident,
     field_name: &str,
 ) -> Option<&'a ExternalArityInfo> {
-    lookup_external_arity_entry(external_arities, module_id, field_name)
-        .and_then(Option::as_ref)
+    lookup_external_arity_entry(external_arities, module_id, field_name).and_then(Option::as_ref)
 }
 
 fn resolve_external_arity(
@@ -455,8 +452,7 @@ fn collect_bind_with_external(
     match lam {
         // lam_pass_collect.ml:60
         Lambda::Lconst(v) => {
-            meta.ident_tbl
-                .insert(ident.clone(), IdKind::Constant(v.clone()));
+            meta.ident_tbl.insert(*ident, IdKind::Constant(v.clone()));
         }
         // lam_pass_collect.ml:61-63 — Pmakeblock immutable: ImmutableBlock + recurse.
         Lambda::Lprim(__prim3)
@@ -478,8 +474,7 @@ fn collect_bind_with_external(
                 unreachable!()
             };
 
-            meta.ident_tbl
-                .insert(ident.clone(), kind_of_lambda_block(args));
+            meta.ident_tbl.insert(*ident, kind_of_lambda_block(args));
             for arg in args {
                 collect_with_external(meta, arg, resolver);
             }
@@ -502,7 +497,7 @@ fn collect_bind_with_external(
             };
 
             meta.ident_tbl
-                .insert(ident.clone(), IdKind::NormalOptional(args[0].clone()));
+                .insert(*ident, IdKind::NormalOptional(args[0].clone()));
             collect_with_external(meta, &args[0], resolver);
         }
         // lam_pass_collect.ml:67-68 — Pnull_to_opt with [Lvar]: OptionalBlock(_, Null).
@@ -523,7 +518,7 @@ fn collect_bind_with_external(
             };
 
             meta.ident_tbl.insert(
-                ident.clone(),
+                *ident,
                 IdKind::OptionalBlock(args[0].clone(), BoxedNullable::Null),
             );
         }
@@ -545,22 +540,22 @@ fn collect_bind_with_external(
             };
 
             meta.ident_tbl.insert(
-                ident.clone(),
+                *ident,
                 IdKind::OptionalBlock(args[0].clone(), BoxedNullable::NullUndefined),
             );
         }
         // lam_pass_collect.ml:72-73 — Lglobal_module: alias to Module.
         Lambda::LglobalModule(v) => {
-            alias_ident_or_global(meta, ident.clone(), v, IdKind::Module(v.clone()));
+            alias_ident_or_global(meta, *ident, v, IdKind::Module(*v));
         }
         // lam_pass_collect.ml:74-77 — Lvar: alias with NA propagation.
         Lambda::Lvar(v) => {
-            alias_ident_or_global(meta, ident.clone(), v, IdKind::Na);
+            alias_ident_or_global(meta, *ident, v, IdKind::Na);
         }
         // lam_pass_collect.ml:79-89 — Lfunction: register params and FunctionId.
         Lambda::Lfunction(func) => {
             for p in &func.params {
-                meta.ident_tbl.insert(p.clone(), IdKind::Parameter);
+                meta.ident_tbl.insert(*p, IdKind::Parameter);
             }
             let arity = match resolver.as_deref_mut() {
                 Some(resolver) => get_arity_with_external_arity(meta, lam, resolver),
@@ -568,7 +563,7 @@ fn collect_bind_with_external(
             };
             let payload = (meta.collect_function_payloads && function_payload_needed(func))
                 .then(|| lam.clone());
-            annotate(meta, rec_flag, ident.clone(), arity, payload);
+            annotate(meta, rec_flag, *ident, arity, payload);
             collect_with_external(meta, &func.body, resolver);
         }
         // lam_pass_collect.ml:90-93 — fallback: collect, annotate exports.
@@ -583,7 +578,7 @@ fn collect_bind_with_external(
                 // only reader of the payload, remove-alias inlining, wants an
                 // `Lfunction` (lam_pass_remove_alias.ml:185-197) and `x` is not
                 // one; skip the deep copy.
-                annotate(meta, rec_flag, ident.clone(), arity, None);
+                annotate(meta, rec_flag, *ident, arity, None);
             }
         }
     }
@@ -608,7 +603,7 @@ fn collect_with_external(
         // lam_pass_collect.ml:101-104
         Lambda::Lfunction(func) => {
             for p in &func.params {
-                meta.ident_tbl.insert(p.clone(), IdKind::Parameter);
+                meta.ident_tbl.insert(*p, IdKind::Parameter);
             }
             collect_with_external(meta, &func.body, resolver);
         }

@@ -479,10 +479,6 @@ impl BuildCommandState {
         self.interface_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Register a compiled module's interface in the in-memory registry.
-    /// Only bumps the generation counter if the interface fingerprint actually
-    /// changed (or if this is the first registration). Returns the generation
-    /// number assigned (which may be the same as before if unchanged).
     /// Record units a compile of `module_name` read. An interface compile
     /// records first, then its implementation adds to it.
     pub fn record_loaded_units(&self, module_name: &str, units: Vec<String>, reads: PendingReads) {
@@ -500,14 +496,18 @@ impl BuildCommandState {
         entry.module_level.extend(reads.module_level);
     }
 
+    /// Register a compiled module's interface in the in-memory registry.
+    /// Only bumps the generation counter if the interface fingerprint actually
+    /// changed (or if this is the first registration). Returns the generation
+    /// number assigned (which may be the same as before if unchanged).
     pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
         // Check if the existing interface has the same fingerprint
-        if let Some(existing) = interfaces.get(&module_name) {
-            if existing.fingerprint == fingerprint {
-                // Interface unchanged — keep the same generation number
-                return existing.generation;
-            }
+        if let Some(existing) = interfaces.get(&module_name)
+            && existing.fingerprint == fingerprint
+        {
+            // Interface unchanged — keep the same generation number
+            return existing.generation;
         }
         // Interface changed (or first registration) — bump generation
         let generation = self.next_interface_generation();

@@ -2,6 +2,7 @@
 //! into its recursive clusters at Lambda production, demoting bindings that
 //! are not recursive.
 
+use crate::fast_hash::AHashMap;
 use crate::ident::Ident;
 use crate::lambda::LetKind;
 use crate::raw_lambda::RawLambda;
@@ -39,7 +40,10 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
             exists_var(p, arg)
                 || sw.sw_consts.iter().any(|(_, lam)| exists_var(p, lam))
                 || sw.sw_blocks.iter().any(|(_, lam)| exists_var(p, lam))
-                || sw.sw_failaction.as_deref().is_some_and(|lam| exists_var(p, lam))
+                || sw
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|lam| exists_var(p, lam))
         }
         RawLambda::LstringSwitch(arg, cases, default) => {
             exists_var(p, arg)
@@ -56,6 +60,11 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
 /// bucket order.
 fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
     let mask_order = ocaml_ident_mask_iteration_order(groups);
+    // First position of each member, as a linear `position` scan would find.
+    let mut member_index = AHashMap::with_capacity(groups.len());
+    for (index, (member, _)) in groups.iter().enumerate() {
+        member_index.entry(*member).or_insert(index);
+    }
     groups
         .iter()
         .map(|(_, lam)| {
@@ -63,7 +72,7 @@ fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
             let mut remaining = groups.len();
             exists_var(
                 &mut |id: &Ident| {
-                    if let Some(index) = groups.iter().position(|(member, _)| member.same(id))
+                    if let Some(&index) = member_index.get(id)
                         && !hit[index]
                     {
                         hit[index] = true;
@@ -73,7 +82,11 @@ fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
                 },
                 lam,
             );
-            mask_order.iter().copied().filter(|index| hit[*index]).collect()
+            mask_order
+                .iter()
+                .copied()
+                .filter(|index| hit[*index])
+                .collect()
         })
         .collect()
 }
@@ -90,7 +103,7 @@ fn graph(e: &[Vec<usize>]) -> Vec<Vec<usize>> {
         index_array: Vec<Option<usize>>,
         lowlink: Vec<usize>,
     }
-    fn scc(st: &mut State, v: usize) {
+    fn scc(st: &mut State<'_>, v: usize) {
         st.index += 1;
         let new_index = st.index;
         st.s.push(v);
@@ -239,14 +252,19 @@ fn ocaml_hash_final_mix(mut h: u32) -> u32 {
     h
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lambda::FunctionAttribute;
 
     fn function(param: &str, body: RawLambda) -> RawLambda {
-        RawLambda::function_(1, vec![Ident::create_local(param)], body, FunctionAttribute::default(), crate::location::Location::none())
+        RawLambda::function_(
+            1,
+            vec![Ident::create_local(param)],
+            body,
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
+        )
     }
 
     #[test]
@@ -256,15 +274,15 @@ mod tests {
         let lam = bind_rec(
             vec![
                 (
-                    find_end.clone(),
+                    find_end,
                     function(
                         "n",
-                        RawLambda::seq(RawLambda::var(find_end.clone()), RawLambda::var(find_beg.clone())),
+                        RawLambda::seq(RawLambda::var(find_end), RawLambda::var(find_beg)),
                     ),
                 ),
-                (find_beg.clone(), function("p", RawLambda::var(find_beg.clone()))),
+                (find_beg, function("p", RawLambda::var(find_beg))),
             ],
-            RawLambda::var(find_end.clone()),
+            RawLambda::var(find_end),
         );
         let RawLambda::Lletrec(outer, inner) = lam else {
             panic!("expected letrec")
@@ -280,7 +298,10 @@ mod tests {
     #[test]
     fn demotes_a_non_recursive_binding() {
         let f = Ident::create_local("f");
-        let lam = bind_rec(vec![(f.clone(), function("x", RawLambda::unit()))], RawLambda::var(f));
+        let lam = bind_rec(
+            vec![(f, function("x", RawLambda::unit()))],
+            RawLambda::var(f),
+        );
         assert!(matches!(lam, RawLambda::Llet(LetKind::Strict, _, _, _)));
     }
 }

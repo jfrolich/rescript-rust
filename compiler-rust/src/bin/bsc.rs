@@ -1,12 +1,14 @@
-//! Minimal Rust bsc replacement.
+//! The Rust `bsc` command line.
 //!
-//! This is a lightweight CLI that supports:
-//! - `-bs-ast` parsing (produces a simple .ast file)
-//! - compiling a .res/.resi (or .ast) file to JS using the Rust pipeline
-//! - `-bs-package-output` for determining output directories
-//! - `-bs-ns` for namespace suffix in module names
+//! It mirrors the OCaml `bsc` driver (rescript_compiler_main.ml):
+//! - `-bs-ast` runs the frontend and writes the binary `.ast` file
+//! - otherwise it compiles a .res/.resi (or .ast) file through the Rust
+//!   pipeline, writing JS (`-o` or `-bs-package-output`) and any requested
+//!   `-d*` dumps
+//! - `-bs-ns`, `-bs-package-name`, include paths, warnings, PPX and genType
+//!   flags configure that pipeline
 //!
-//! All other flags are accepted and ignored.
+//! Unrecognized flags are ignored.
 
 use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
@@ -16,8 +18,8 @@ use rescript_compiler::binary_ast::{
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
     CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
-    error_extension_to_anyhow,
-    run_implementation_frontend, run_interface_frontend, typecheck_interface_file,
+    error_extension_to_anyhow, run_implementation_frontend, run_interface_frontend,
+    typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::js_ir::source_map::SourceMapMode;
@@ -180,11 +182,9 @@ fn main() {
 fn format_file(input: &str, output: Option<&Path>, ignore_parse_errors: bool) -> Result<()> {
     let is_res = input.ends_with(".res") || input.ends_with(".resi");
     if !is_res {
-        return Err(UserDiagnostic::new(
-            format!("bsc: don't know what to do with {input}\n"),
-            2,
-        )
-        .into());
+        return Err(
+            UserDiagnostic::new(format!("bsc: don't know what to do with {input}\n"), 2).into(),
+        );
     }
     let source = fs::read(input).with_context(|| input.to_string())?;
     let (report, formatted) =
@@ -267,6 +267,8 @@ fn run() -> Result<()> {
                     }
                 }
                 "-bs-ns" => {
+                    // js_packages_state.ml:38-42: OCaml's `-bs-ns` also sets
+                    // `dont_record_crc_unit`.
                     if let Some(val) = args.next() {
                         opts.namespace = Some(val);
                     }
@@ -289,12 +291,6 @@ fn run() -> Result<()> {
                 "-runtime-path" => {
                     if let Some(val) = args.next() {
                         opts.runtime_path = Some(PathBuf::from(val));
-                    }
-                }
-                // Mirrors compiler/bsc/rescript_compiler_main.ml:266-270.
-                "-bs-project-root" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.project_root = val;
                     }
                 }
                 "-bs-package-name" => {
@@ -341,70 +337,9 @@ fn run() -> Result<()> {
                 // when a project selects the Spice PPX (used for profiling).
                 "-bs-builtin-spice-ppx" => opts.builtin_spice_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
-                // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343.
-                "-bs-gentype-module" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.module_flag =
-                            rescript_compiler::gentype::config::module_of_string(&val);
-                    }
-                }
-                "-bs-gentype-module-resolution" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.module_resolution_flag =
-                            rescript_compiler::gentype::config::module_resolution_of_string(&val);
-                    }
-                }
-                "-bs-gentype-export-interfaces" => {
-                    opts.gentype_flags.export_interfaces_flag = true;
-                }
-                "-bs-gentype-generated-extension" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.generated_file_extension_flag = Some(val);
-                    }
-                }
-                "-bs-gentype-suffix" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.suffix_flag = Some(val);
-                    }
-                }
-                "-bs-gentype-shim" => {
-                    if let Some(val) = args.next()
-                        && let Some((from_module, to_module)) = val.split_once('=')
-                    {
-                        opts.gentype_flags
-                            .shims
-                            .insert(0, (from_module.to_string(), to_module.to_string()));
-                    }
-                }
-                "-bs-gentype-debug" => {
-                    if let Some(val) = args.next() {
-                        rescript_compiler::gentype::debug::set_item(&val);
-                    }
-                }
-                "-bs-gentype-dep" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.bs_dependencies_flag.insert(0, val);
-                    }
-                }
-                "-bs-gentype-source-dir" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.source_dirs_flag.insert(0, val);
-                    }
-                }
-                "-bs-gentype-dep-path" => {
-                    if let Some(val) = args.next()
-                        && let Some((name, path)) = val.split_once('=')
-                    {
-                        opts.gentype_flags
-                            .dep_paths_flag
-                            .insert(0, (name.to_string(), path.to_string()));
-                    }
-                }
-                "-bs-gentype-bsb-project-root" => {
-                    if let Some(val) = args.next() {
-                        opts.gentype_flags.bsb_project_root = val;
-                    }
-                }
+                // -bs-project-root and the -bs-gentype-* flags, mirroring
+                // compiler/bsc/rescript_compiler_main.ml:266-270 and :300-343.
+                flag if opts.gentype_flags.apply(flag, || args.next()) => {}
                 "-w" => {
                     if let Some(val) = args.next() {
                         opts.warning_specs.push(val);
@@ -444,16 +379,18 @@ fn run() -> Result<()> {
                 // rescript_compiler_main.ml:440-450
                 "-ignore-parse-errors" | "-editor-mode" => opts.ignore_parse_errors = true,
                 "-format" => {
-                    let file = args.next().ok_or_else(|| anyhow!("-format requires a file"))?;
+                    let file = args
+                        .next()
+                        .ok_or_else(|| anyhow!("-format requires a file"))?;
                     code_frame::set_color_mode(opts.color_mode);
                     format_file(&file, opts.output.as_deref(), opts.ignore_parse_errors)?;
                     opts.formatted = true;
                 }
                 "-make-runtime" => opts.make_runtime = true,
                 "-nopervasives" => opts.nopervasives = true,
-                _ => {
-                    // Unknown flag: ignore, but if it looks like a value flag, try to skip.
-                }
+                // Unknown flags are ignored; a value that follows one is
+                // taken as the input file.
+                _ => {}
             }
         } else {
             opts.input = Some(PathBuf::from(arg));
@@ -491,6 +428,7 @@ fn run() -> Result<()> {
                 experimental_let_unwrap: opts.experimental_let_unwrap,
                 jsx_preserve: opts.jsx_preserve,
                 no_builtin_ppx: opts.no_builtin_ppx,
+                spice_ppx: opts.builtin_spice_ppx,
                 external_ppxs: opts.external_ppxs.clone(),
                 ..CompilerOptions::default()
             },
@@ -559,7 +497,6 @@ fn run() -> Result<()> {
         external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
-        // js_packages_state.ml:38-42: `-bs-ns` sets `dont_record_crc_unit`.
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
@@ -802,7 +739,12 @@ fn write_outputs(
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((format, dir, suffix)) = parse_package_output(spec) {
-                let out_path = package_output_path(&opts.gentype_flags.project_root, source_path, &dir, &suffix);
+                let out_path = package_output_path(
+                    &opts.gentype_flags.project_root,
+                    source_path,
+                    &dir,
+                    &suffix,
+                );
                 let mut output_opts = compiler_opts.clone();
                 output_opts.output_path = Some(out_path.clone());
                 output_opts.output_module_format = Some(format);
@@ -944,7 +886,12 @@ fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Re
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((_format, dir, suffix)) = parse_package_output(spec) {
-                let out_path = package_output_path(&opts.gentype_flags.project_root, source_path, &dir, &suffix);
+                let out_path = package_output_path(
+                    &opts.gentype_flags.project_root,
+                    source_path,
+                    &dir,
+                    &suffix,
+                );
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -997,9 +944,6 @@ fn parse_module_format(module_system: &str) -> Option<ModuleFormat> {
     }
 }
 
-// compiler/core/lam_compile_main.ml:484-492 uses the output-prefix basename,
-// not the capitalized module identity. Ext_namespace.change_ext_ns_suffix
-// (compiler/ext/ext_namespace.ml:33-35) strips only the last namespace suffix.
 /// ext_path.ml:91-106 `absolute_cwd_path`: join with the working directory and
 /// drop `.`/`..` components lexically.
 fn absolute_cwd_path(path: &Path) -> PathBuf {
@@ -1021,6 +965,10 @@ fn absolute_cwd_path(path: &Path) -> PathBuf {
 /// `Ext_path.package_dir () // path // basename`, where `package_dir` is the
 /// `-bs-project-root` directory. Without a project root (which OCaml rejects)
 /// the directory stays relative to the working directory.
+///
+/// lam_compile_main.ml:484-492 uses the output-prefix basename, not the
+/// capitalized module identity. `Ext_namespace.change_ext_ns_suffix`
+/// (ext_namespace.ml:33-35) strips only the last namespace suffix.
 fn package_output_path(
     project_root: &str,
     source_path: &Path,

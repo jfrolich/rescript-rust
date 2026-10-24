@@ -1741,7 +1741,6 @@ dependencies = [
  "boa_engine",
  "clap",
  "criterion",
- "dashmap",
  "elsa",
  "env_logger",
  "hashbrown 0.15.5",

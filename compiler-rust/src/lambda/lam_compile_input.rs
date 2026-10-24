@@ -8,8 +8,8 @@ use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{
-    ApInfo, ApplyStatus, Constant, DirectionFlag, FunctionAttribute, Lambda, LambdaSwitch,
-    Primitive, SwitchDispatch, SwitchKey,
+    ApInfo, ApplyStatus, Constant, DirectionFlag, FunctionAttribute, Lambda, Primitive,
+    SwitchDispatch, SwitchKey,
 };
 use crate::location::Location;
 

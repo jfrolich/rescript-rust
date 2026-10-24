@@ -138,7 +138,11 @@ impl ModulePathResolver {
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             output_dir: output_path
                 .or(source_filename.map(FsPath::new))
-                .and_then(|path| normalize_absolute_path(path).parent().map(FsPath::to_path_buf)),
+                .and_then(|path| {
+                    normalize_absolute_path(path)
+                        .parent()
+                        .map(FsPath::to_path_buf)
+                }),
             current_package_name: package_name.map(ToOwned::to_owned),
             current_package_has_output: package_name.is_some() && output_module_format.is_some(),
             runtime_path: runtime_path.map(normalize_absolute_path),
@@ -462,7 +466,9 @@ impl ModulePathResolver {
     /// dependency of a script unit is imported from the `.js` file found on
     /// the load path, relative to the output directory.
     fn script_module_path(&self, module_name: &str) -> Option<String> {
-        if self.is_in_process_mode() || !matches!(self.current_package_query(), PackageInfoQuery::Script) {
+        if self.is_in_process_mode()
+            || !matches!(self.current_package_query(), PackageInfoQuery::Script)
+        {
             return None;
         }
         let env = self.persistent_env.as_ref()?;
@@ -481,7 +487,10 @@ impl ModulePathResolver {
                 .iter()
                 .find(|info| module_system_compatible(info.module_system, self.format))?;
             let js_file = js_name_of_module_name(module_name, import_info.file_case, &info.suffix);
-            return Some(filename_concat(&filename_concat(package_name, &info.path), &js_file));
+            return Some(filename_concat(
+                &filename_concat(package_name, &info.path),
+                &js_file,
+            ));
         }
         let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
         let found = normalize_absolute_path(FsPath::new(&env.find_in_load_path_uncap(&js_file)?));
@@ -537,7 +546,9 @@ impl ModulePathResolver {
                 if spec.in_source {
                     output
                 } else {
-                    PathBuf::from("lib").join(&spec.out_of_source_dir).join(output)
+                    PathBuf::from("lib")
+                        .join(&spec.out_of_source_dir)
+                        .join(output)
                 }
             }
             None => {
@@ -575,8 +586,7 @@ impl ModulePathResolver {
         if package_spec
             .module_systems
             .iter()
-            .find(|info| module_system_compatible(info.module_system, self.format))
-            .is_some()
+            .any(|info| module_system_compatible(info.module_system, self.format))
         {
             PackageInfoQuery::Found
         } else {
@@ -592,27 +602,16 @@ impl ModulePathResolver {
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
-        let mut candidate_stems = vec![module_name.to_string()];
-        if let Some(first) = module_name.chars().next() {
-            if first.is_ascii_uppercase() {
-                candidate_stems.push(format!(
-                    "{}{}",
-                    first.to_ascii_lowercase(),
-                    &module_name[first.len_utf8()..]
-                ));
-            }
-        }
-
-        for stem in candidate_stems {
-            for ext in ["res", "ml"] {
-                let candidate_name = format!("{stem}.{ext}");
-                if let Some(path) = entries.iter().find(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case(&candidate_name))
-                }) {
-                    return Some(path.clone());
-                }
+        // File names are matched case-insensitively, which also covers the
+        // lowercase-first-letter spelling of the module name.
+        for ext in ["res", "ml"] {
+            let candidate_name = format!("{module_name}.{ext}");
+            if let Some(path) = entries.iter().find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&candidate_name))
+            }) {
+                return Some(path.clone());
             }
         }
 
@@ -670,8 +669,12 @@ fn uncapitalize_ascii(name: &str) -> String {
 /// The suffix of the output file: what follows the source file's stem in its
 /// name (`Foo.res` -> `Foo.res.js` is `.res.js`), else guessed from the name.
 fn output_suffix_from_paths(source_path: Option<&FsPath>, output_path: Option<&FsPath>) -> String {
-    let stem = source_path.and_then(|path| path.file_stem()).and_then(|stem| stem.to_str());
-    let name = output_path.and_then(|path| path.file_name()).and_then(|name| name.to_str());
+    let stem = source_path
+        .and_then(|path| path.file_stem())
+        .and_then(|stem| stem.to_str());
+    let name = output_path
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str());
     if let (Some(stem), Some(name)) = (stem, name)
         && let Some(suffix) = name.strip_prefix(stem)
         && suffix.starts_with('.')
@@ -705,7 +708,7 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
         path.to_path_buf()
     } else {
         crate::process_cwd::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
+            .unwrap_or_else(|_| FsPath::new("."))
             .join(path)
     };
     normalize_lexical_path(base)
@@ -868,12 +871,12 @@ pub struct CallInfo {
     pub comment: Option<String>,
 }
 
-/// Function environment (for closures)
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct FunEnv {
-    /// Captured variables
-    pub captured: Vec<Ident>,
-}
+/// Function environment placeholder for OCaml's `Js_fun_env.t`.
+///
+/// The printer recomputes captured identifiers from the body, so nothing is
+/// stored here; it is zero-sized to keep `Fun` nodes allocation-free.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct FunEnv;
 
 /// Raw JavaScript code info
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -956,7 +959,7 @@ pub enum ExpressionDesc {
         is_method: bool,
         params: Vec<Ident>,
         body: Block,
-        env: Box<FunEnv>,
+        env: FunEnv,
         return_unit: bool,
         async_: bool,
         directive: Option<Box<String>>,
@@ -1061,7 +1064,10 @@ impl Expression {
 
     /// Create a qualified variable expression
     pub fn qualified(module: impl Into<Box<ModuleId>>, member: Option<String>) -> Self {
-        Self::new(ExpressionDesc::Var(VIdent::Qualified(module.into(), member)))
+        Self::new(ExpressionDesc::Var(VIdent::Qualified(
+            module.into(),
+            member,
+        )))
     }
 
     /// Create a string expression (`Js_exp_make.str`).
@@ -1082,10 +1088,13 @@ impl Expression {
     /// Create a string append expression, mirroring OCaml's
     /// `Js_exp_make.string_append` folding behavior.
     pub fn string_append(left: Expression, right: Expression) -> Self {
+        /// A string literal `a ^ b` keeping `base`'s comment and source loc.
         fn concat(base: &Expression, a: &str, b: &str) -> Expression {
-            let mut merged = base.clone();
-            merged.desc = ExpressionDesc::Str(format!("{a}{b}"));
-            merged
+            Expression {
+                desc: ExpressionDesc::Str(format!("{a}{b}")),
+                comment: base.comment.clone(),
+                source_loc: base.source_loc.clone(),
+            }
         }
         fn append(left: Expression, right: Expression) -> Expression {
             Expression {
@@ -1094,8 +1103,18 @@ impl Expression {
                 source_loc: None,
             }
         }
+        fn is_literal(expr: &Expression) -> bool {
+            expr.string_literal_semantic().is_some()
+        }
+        fn literal(expr: &Expression) -> &str {
+            expr.string_literal_semantic()
+                .expect("checked by is_literal")
+        }
 
-        match (left.string_literal_semantic(), right.string_literal_semantic()) {
+        match (
+            left.string_literal_semantic(),
+            right.string_literal_semantic(),
+        ) {
             (Some(""), _) => return right,
             (_, Some("")) => return left,
             (Some(a), Some(b)) => {
@@ -1106,29 +1125,67 @@ impl Expression {
             }
             _ => {}
         }
-        match (&left.desc, &right.desc) {
-            (ExpressionDesc::StringAppend(a, b_expr), ExpressionDesc::StringAppend(c_expr, d)) => {
-                match (b_expr.string_literal_semantic(), c_expr.string_literal_semantic()) {
-                    (Some(b), Some(c)) => Self::string_append(
-                        Self::string_append(a.as_ref().clone(), concat(b_expr, b, c)),
-                        d.as_ref().clone(),
-                    ),
-                    _ => append(left, right),
-                }
+
+        enum Fold {
+            /// `(a ^ "b") ^ ("c" ^ d)` -> `(a ^ "bc") ^ d`
+            Inner,
+            /// `"a" ^ ("b" ^ c)` -> `"ab" ^ c`
+            Right,
+            /// `(c ^ "b") ^ "a"` -> `c ^ "ba"`
+            Left,
+        }
+        let fold = match (&left.desc, &right.desc) {
+            (ExpressionDesc::StringAppend(_, b), ExpressionDesc::StringAppend(c, _)) => {
+                (is_literal(b) && is_literal(c)).then_some(Fold::Inner)
             }
-            (_, ExpressionDesc::StringAppend(b, c)) => {
-                match (left.string_literal_semantic(), b.string_literal_semantic()) {
-                    (Some(a), Some(b)) => Self::string_append(concat(&left, a, b), c.as_ref().clone()),
-                    _ => append(left, right),
-                }
+            (_, ExpressionDesc::StringAppend(b, _)) => {
+                (is_literal(&left) && is_literal(b)).then_some(Fold::Right)
             }
-            (ExpressionDesc::StringAppend(c, b_expr), _) => {
-                match (b_expr.string_literal_semantic(), right.string_literal_semantic()) {
-                    (Some(b), Some(a)) => Self::string_append(c.as_ref().clone(), concat(b_expr, b, a)),
-                    _ => append(left, right),
-                }
+            (ExpressionDesc::StringAppend(_, b), _) => {
+                (is_literal(b) && is_literal(&right)).then_some(Fold::Left)
             }
-            _ => append(left, right),
+            _ => None,
+        };
+
+        // The folds move the untouched subtrees instead of cloning them.
+        match (fold, left.desc, right.desc) {
+            (
+                Some(Fold::Inner),
+                ExpressionDesc::StringAppend(a, b_expr),
+                ExpressionDesc::StringAppend(c_expr, d),
+            ) => {
+                let merged = concat(&b_expr, literal(&b_expr), literal(&c_expr));
+                Self::string_append(Self::string_append(*a, merged), *d)
+            }
+            (Some(Fold::Right), left_desc, ExpressionDesc::StringAppend(b, c)) => {
+                let left = Expression {
+                    desc: left_desc,
+                    comment: left.comment,
+                    source_loc: left.source_loc,
+                };
+                Self::string_append(concat(&left, literal(&left), literal(&b)), *c)
+            }
+            (Some(Fold::Left), ExpressionDesc::StringAppend(c, b_expr), right_desc) => {
+                let right = Expression {
+                    desc: right_desc,
+                    comment: right.comment,
+                    source_loc: right.source_loc,
+                };
+                Self::string_append(*c, concat(&b_expr, literal(&b_expr), literal(&right)))
+            }
+            (None, left_desc, right_desc) => append(
+                Expression {
+                    desc: left_desc,
+                    comment: left.comment,
+                    source_loc: left.source_loc,
+                },
+                Expression {
+                    desc: right_desc,
+                    comment: right.comment,
+                    source_loc: right.source_loc,
+                },
+            ),
+            _ => unreachable!("fold kind was chosen from these shapes"),
         }
     }
 
@@ -1166,7 +1223,8 @@ impl Expression {
             (ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_), LengthObject::String) => {
                 let semantic = target.string_literal_semantic().expect("a string literal");
                 Expression::number(Number::int(
-                    crate::string_literal::utf16_length(semantic).expect("String_literal.utf16_length: Invalid_utf8")
+                    crate::string_literal::utf16_length(semantic)
+                        .expect("String_literal.utf16_length: Invalid_utf8")
                         as i32,
                 ))
             }
@@ -1490,7 +1548,10 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
     }
 
     // js_exp_make.ml `string_comp`: literal strings compare by semantic value.
-    if let (Some(left), Some(right)) = (left.string_literal_semantic(), right.string_literal_semantic()) {
+    if let (Some(left), Some(right)) = (
+        left.string_literal_semantic(),
+        right.string_literal_semantic(),
+    ) {
         return Some(left == right);
     }
 
@@ -1573,7 +1634,9 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::JsonLiteral(_)
         | ExpressionDesc::Str(_)
         | ExpressionDesc::TemplateLiteral(_) => true,
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(expression_has_no_side_effects),
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().all(expression_has_no_side_effects)
+        }
         ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
         ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
@@ -1609,9 +1672,6 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
             expression_has_no_side_effects(tag) && values.iter().all(expression_has_no_side_effects)
-        }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values.iter().all(expression_has_no_side_effects)
         }
         ExpressionDesc::Call(func, args, _)
             if is_array_is_array_callee(func) && args.len() == 1 =>
@@ -1908,7 +1968,12 @@ impl Statement {
         iterable: Expression,
         body: Block,
     ) -> Self {
-        Self::new(StatementDesc::ForAwaitOf(label, ident, Box::new(iterable), body))
+        Self::new(StatementDesc::ForAwaitOf(
+            label,
+            ident,
+            Box::new(iterable),
+            body,
+        ))
     }
 
     /// Create a return statement
@@ -2091,9 +2156,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if !nested_then.is_empty()
-            && ocaml_eq_block(nested_then, &else_)
-        {
+        if !nested_then.is_empty() && ocaml_eq_block(nested_then, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, Expression::not(nested_cond.clone())),
                 nested_else.clone(),
@@ -2383,8 +2446,10 @@ fn simplify_and_expression_with_depth(
                 let simplified_left_b =
                     simplify_and_expression_with_depth(left_b, right, depth + 1, true);
                 return match (simplified_left_a, simplified_left_b) {
-                    (None, None) => simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
-                        .and_then(|expr| simplify_and_force(&expr, right, depth + 1)),
+                    (None, None) => {
+                        simplify_and_expression_with_depth(left_a, left_b, depth + 1, true)
+                            .and_then(|expr| simplify_and_force(&expr, right, depth + 1))
+                    }
                     (Some(left_a), None) => simplify_and_force(&left_a, left_b, depth + 1),
                     (None, Some(left_b)) => simplify_and_force(left_a, &left_b, depth + 1),
                     (Some(left_a), Some(left_b)) => simplify_and_force(&left_a, &left_b, depth + 1),
@@ -2649,7 +2714,8 @@ fn strict_var_literal_comparison(expr: &Expression) -> Option<(BinOp, &VIdent, &
 }
 
 fn is_array_is_array_callee(expr: &Expression) -> bool {
-    match &expr.desc {
+    matches!(
+        &expr.desc,
         ExpressionDesc::StaticIndex(target, field, _)
             if field == "isArray"
                 && matches!(
@@ -2658,12 +2724,8 @@ fn is_array_is_array_callee(expr: &Expression) -> bool {
                         desc: ExpressionDesc::Var(VIdent::Id(array_ident)),
                         ..
                     } if array_ident.name() == "Array"
-                ) =>
-        {
-            true
-        }
-        _ => false,
-    }
+                )
+    )
 }
 
 fn array_is_array_var(expr: &Expression) -> Option<&VIdent> {
@@ -2810,7 +2872,9 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
                 && ocaml_eq_expression(left_rhs, right_rhs)
         }
         (ExpressionDesc::Str(left_txt), ExpressionDesc::Str(right_txt)) => left_txt == right_txt,
-        (ExpressionDesc::TemplateLiteral(left), ExpressionDesc::TemplateLiteral(right)) => left == right,
+        (ExpressionDesc::TemplateLiteral(left), ExpressionDesc::TemplateLiteral(right)) => {
+            left == right
+        }
         (
             ExpressionDesc::StaticIndex(left_obj, left_field, left_pos),
             ExpressionDesc::StaticIndex(right_obj, right_field, right_pos),
@@ -3018,7 +3082,7 @@ fn push_optional_expression_vec(
 
 fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeItem>) {
     let CaseClause {
-        source_loc,
+        source_loc: _,
         body,
         should_break: _,
         comment: _,
@@ -3028,7 +3092,7 @@ fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeI
 
 fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeItem>) {
     let Statement {
-        source_loc,
+        source_loc: _,
         desc,
         comment: _,
     } = statement;
@@ -3098,7 +3162,7 @@ fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeI
 
 fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<DisposeItem>) {
     let Expression {
-        source_loc,
+        source_loc: _,
         desc,
         comment: _,
     } = expression;
@@ -3135,7 +3199,8 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             stack.push(DisposeItem::Expression(*func));
             push_expression_vec(args, stack);
         }
-        ExpressionDesc::TaggedTemplate(_tag, _quasi, expressions) => {
+        ExpressionDesc::TaggedTemplate(tag, _quasi, expressions) => {
+            stack.push(DisposeItem::Expression(*tag));
             push_expression_vec(expressions, stack);
         }
         ExpressionDesc::InterpolatedTemplate { values, .. } => push_expression_vec(values, stack),
@@ -3195,7 +3260,7 @@ mod tests {
     #[test]
     fn test_variable_expression() {
         let id = Ident::create_local("x");
-        let expr = Expression::var(id.clone());
+        let expr = Expression::var(id);
         match &expr.desc {
             ExpressionDesc::Var(VIdent::Id(i)) => {
                 assert_eq!(i.name(), "x");
@@ -3543,9 +3608,7 @@ mod tests {
     fn test_cond_negated_test_swaps_non_empty_branches() {
         let value = Ident::create_local("value");
         let expr = Expression::cond(
-            Expression::new(ExpressionDesc::JsNot(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::JsNot(Box::new(Expression::var(value)))),
             Expression::number(Number::int(1)),
             Expression::number(Number::int(2)),
         );
@@ -3682,7 +3745,10 @@ mod tests {
         );
     }
 
-    fn sibling_resolver(output_name: &str, specs: &[JsPackageSpec]) -> (tempfile::TempDir, ModulePathResolver) {
+    fn sibling_resolver(
+        output_name: &str,
+        specs: &[JsPackageSpec],
+    ) -> (tempfile::TempDir, ModulePathResolver) {
         let project = tempdir().expect("failed to create tempdir");
         let source_dir = project.path().join("src");
         std::fs::create_dir_all(&source_dir).expect("failed to create source dir");
@@ -3706,7 +3772,9 @@ mod tests {
     fn sibling_import_keeps_a_multi_part_suffix() {
         let (_project, resolver) = sibling_resolver("Current.res.js", &[]);
         assert_eq!(
-            resolver.resolve_local_module_fallback_path("Sibling").as_deref(),
+            resolver
+                .resolve_local_module_fallback_path("Sibling")
+                .as_deref(),
             Some("./Sibling.res.js")
         );
     }
@@ -3724,7 +3792,9 @@ mod tests {
         let (_project, resolver) =
             sibling_resolver("Current.mjs", &[spec(true, ".mjs"), spec(false, ".res.js")]);
         assert_eq!(
-            resolver.resolve_local_module_fallback_path("Sibling").as_deref(),
+            resolver
+                .resolve_local_module_fallback_path("Sibling")
+                .as_deref(),
             Some("./Sibling.res.js")
         );
     }
@@ -3796,12 +3866,12 @@ mod tests {
             Expression::var(Ident::create_local("cond")),
             vec![Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(target.clone()),
+                Expression::var(target),
                 Expression::number(Number::int(1)),
             ))],
             vec![Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(target.clone()),
+                Expression::var(target),
                 Expression::number(Number::int(2)),
             ))],
         );
@@ -3901,9 +3971,9 @@ mod tests {
             CallInfo::default(),
         );
         let stmt = Statement::if_(
-            Expression::var(outer.clone()),
+            Expression::var(outer),
             vec![Statement::new(StatementDesc::If(
-                Expression::var(inner.clone()),
+                Expression::var(inner),
                 vec![Statement::exp(truthy.clone())],
                 vec![Statement::exp(falsy.clone())],
             ))],
@@ -3953,14 +4023,12 @@ mod tests {
         let value = Ident::create_local("value");
         let outer_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("string"),
         );
         let inner_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::string("My name is"),
         );
         let success = Expression::call(
@@ -4019,7 +4087,9 @@ mod tests {
         let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
         // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
         let mut expected = vec![Statement::new(StatementDesc::If(
-            Expression::not(cond), else_block, vec![],
+            Expression::not(cond),
+            else_block,
+            vec![],
         ))];
         expected.extend(then_block);
         assert_eq!(
@@ -4083,18 +4153,14 @@ mod tests {
             BinOp::Or,
             Expression::bin(
                 BinOp::EqEqEq,
-                Expression::var(key.clone()),
+                Expression::var(key),
                 Expression::string("space"),
             ),
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string("a"),
-            ),
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a")),
         );
         let inner_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(key.clone()),
+            Expression::var(key),
             Expression::string("space"),
         );
         let then_block = vec![Statement::new(StatementDesc::If(
@@ -4118,7 +4184,9 @@ mod tests {
         let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
         // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
         let mut expected = vec![Statement::new(StatementDesc::If(
-            Expression::not(dispatch), else_block, vec![],
+            Expression::not(dispatch),
+            else_block,
+            vec![],
         ))];
         expected.extend(then_block);
         assert_eq!(
@@ -4135,18 +4203,14 @@ mod tests {
             BinOp::Or,
             Expression::bin(
                 BinOp::EqEqEq,
-                Expression::var(key.clone()),
+                Expression::var(key),
                 Expression::string("space"),
             ),
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string("a"),
-            ),
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a")),
         );
         let inner_cond = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(key.clone()),
+            Expression::var(key),
             Expression::string("space"),
         );
         let active_guard = Statement::new(StatementDesc::If(
@@ -4175,7 +4239,9 @@ mod tests {
         let stmt = Statement::if_(dispatch.clone(), then_block.clone(), else_block.clone());
         // js_stmt_make.ml:262-269: a single Return else becomes an early guard.
         let mut expected = vec![Statement::new(StatementDesc::If(
-            Expression::not(dispatch), else_block, vec![],
+            Expression::not(dispatch),
+            else_block,
+            vec![],
         ))];
         expected.extend(then_block);
         assert_eq!(
@@ -4187,15 +4253,11 @@ mod tests {
     #[test]
     fn test_if_statement_keeps_positive_strict_null_success_return_branch() {
         let elem = Ident::create_local("elem");
-        let cond = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(elem.clone()),
-            Expression::null(),
-        );
+        let cond = Expression::bin(BinOp::NotEqEq, Expression::var(elem), Expression::null());
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(elem.clone())],
+                vec![Expression::var(elem)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::number(Number::int(2))),
@@ -4250,12 +4312,12 @@ mod tests {
     #[test]
     fn test_if_statement_rewrites_loose_nullish_else_to_fallthrough() {
         let elem = Ident::create_local("elem");
-        let cond = Expression::is_null_or_undefined(Expression::var(elem.clone()));
+        let cond = Expression::is_null_or_undefined(Expression::var(elem));
         let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
         let else_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(elem.clone())],
+                vec![Expression::var(elem)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::number(Number::int(2))),
@@ -4275,11 +4337,11 @@ mod tests {
     fn test_if_statement_rewrites_loose_nullish_conditional_unit_success_tail_like_ocaml() {
         let value = Ident::create_local("value");
         let flag = Ident::create_local("flag");
-        let cond = Expression::is_null_or_undefined(Expression::var(value.clone()));
+        let cond = Expression::is_null_or_undefined(Expression::var(value));
         let unit_effect = Expression::new(ExpressionDesc::Seq(
             Box::new(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Box::new(Expression::undefined(true)),
@@ -4345,13 +4407,13 @@ mod tests {
         let value = Ident::create_local("value");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(true),
         );
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::undefined(true)),
@@ -4406,15 +4468,11 @@ mod tests {
     #[test]
     fn test_if_statement_rewrites_strict_null_unit_success_tail_like_ocaml() {
         let value = Ident::create_local("value");
-        let cond = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
+        let cond = Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null());
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::undefined(true)),
@@ -4471,18 +4529,18 @@ mod tests {
         let value = Ident::create_local("value");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
             Statement::return_(Expression::number(Number::int(2))),
         ];
-        let else_block = vec![Statement::return_(Expression::var(value.clone()))];
+        let else_block = vec![Statement::return_(Expression::var(value))];
 
         let stmt = Statement::if_(cond.clone(), then_block, else_block);
 
@@ -4535,22 +4593,18 @@ mod tests {
         let tmp = Ident::create_local("tmp");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(match_id.clone()),
+            Expression::var(match_id),
             Expression::undefined(false),
         );
         let then_block = vec![
             Statement::variable(VariableDeclaration {
-                ident: tmp.clone(),
-                value: Some(Expression::var(match_id.clone())),
+                ident: tmp,
+                value: Some(Expression::var(match_id)),
                 property: crate::lambda::LetKind::Strict,
                 ident_info: IdentInfo::default(),
             }),
             Statement::if_(
-                Expression::bin(
-                    BinOp::EqEqEq,
-                    Expression::var(tmp.clone()),
-                    Expression::null(),
-                ),
+                Expression::bin(BinOp::EqEqEq, Expression::var(tmp), Expression::null()),
                 vec![Statement::return_(Expression::string("yes"))],
                 vec![],
             ),
@@ -4615,14 +4669,14 @@ mod tests {
         let next_value = Ident::create_local("nextValue");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let then_block = vec![
             Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(next_value.clone()),
-                Expression::var(value.clone()),
+                Expression::var(next_value),
+                Expression::var(value),
             )),
             Statement::continue_(),
         ];
@@ -4686,13 +4740,13 @@ mod tests {
         let next_value = Ident::create_local("nextValue");
         let cond = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let then_block = vec![Statement::block(vec![
             Statement::exp(Expression::bin(
                 BinOp::Eq,
-                Expression::var(next_value.clone()),
+                Expression::var(next_value),
                 Expression::var(value),
             )),
             Statement::continue_(),
@@ -4735,10 +4789,10 @@ mod tests {
             CallInfo::default(),
         );
         let stmt = Statement::if_(
-            Expression::var(outer.clone()),
+            Expression::var(outer),
             vec![Statement::exp(truthy.clone())],
             vec![Statement::new(StatementDesc::If(
-                Expression::var(inner.clone()),
+                Expression::var(inner),
                 vec![Statement::exp(truthy)],
                 vec![Statement::exp(falsy.clone())],
             ))],
@@ -4789,14 +4843,10 @@ mod tests {
             BinOp::Or,
             Expression::bin(
                 BinOp::EqEqEq,
-                Expression::var(key.clone()),
+                Expression::var(key),
                 Expression::string("space"),
             ),
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string("a"),
-            ),
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a")),
         );
 
         let stmt = Statement::if_(
@@ -4804,7 +4854,7 @@ mod tests {
             vec![Statement::if_(
                 Expression::bin(
                     BinOp::EqEqEq,
-                    Expression::var(key.clone()),
+                    Expression::var(key),
                     Expression::string("space"),
                 ),
                 vec![Statement::return_(Expression::number(Number::int(1)))],
@@ -4888,13 +4938,13 @@ mod tests {
         let then_block = vec![Statement::return_(Expression::number(Number::int(1)))];
         let else_block = vec![Statement::new(StatementDesc::Block(vec![Statement::new(
             StatementDesc::If(
-                Expression::var(inner.clone()),
+                Expression::var(inner),
                 then_block.clone(),
                 vec![Statement::return_(Expression::number(Number::int(0)))],
             ),
         )]))];
 
-        let stmt = Statement::if_(Expression::var(outer.clone()), then_block, else_block);
+        let stmt = Statement::if_(Expression::var(outer), then_block, else_block);
 
         let StatementDesc::Block(block) = &stmt.desc else {
             panic!("expected the wrapped else-if to stay as a block, got {stmt:?}");
@@ -4961,30 +5011,22 @@ mod tests {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("boolean"),
         );
 
-        let equals_null = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
-        let not_equals_null = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
+        let equals_null =
+            Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null());
+        let not_equals_null =
+            Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null());
         let equals_undefined = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let not_equals_undefined = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
 
@@ -5015,27 +5057,21 @@ mod tests {
                 "isArray".to_string(),
                 None,
             )),
-            vec![Expression::var(value.clone())],
+            vec![Expression::var(value)],
             CallInfo::default(),
         );
-        let equals_null = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
-        let not_equals_null = Expression::bin(
-            BinOp::NotEqEq,
-            Expression::var(value.clone()),
-            Expression::null(),
-        );
+        let equals_null =
+            Expression::bin(BinOp::EqEqEq, Expression::var(value), Expression::null());
+        let not_equals_null =
+            Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null());
         let equals_undefined = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
         let not_equals_undefined = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
 
@@ -5108,16 +5144,10 @@ mod tests {
                 BinOp::And,
                 Expression::bin(
                     BinOp::EqEqEq,
-                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                        value.clone(),
-                    )))),
+                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
                     Expression::string("object"),
                 ),
-                Expression::bin(
-                    BinOp::NotEqEq,
-                    Expression::var(value.clone()),
-                    Expression::null(),
-                ),
+                Expression::bin(BinOp::NotEqEq, Expression::var(value), Expression::null()),
             ),
             Expression::not(Expression::call(
                 Expression::new(ExpressionDesc::StaticIndex(
@@ -5125,13 +5155,13 @@ mod tests {
                     "isArray".to_string(),
                     None,
                 )),
-                vec![Expression::var(value.clone())],
+                vec![Expression::var(value)],
                 CallInfo::default(),
             )),
         );
         let not_equals_undefined = Expression::bin(
             BinOp::NotEqEq,
-            Expression::var(value.clone()),
+            Expression::var(value),
             Expression::undefined(false),
         );
 
@@ -5154,14 +5184,11 @@ mod tests {
         let key = Ident::create_local("key");
         let space = Expression::bin(
             BinOp::EqEqEq,
-            Expression::var(key.clone()),
+            Expression::var(key),
             Expression::string("space"),
         );
-        let letter_a = Expression::bin(
-            BinOp::EqEqEq,
-            Expression::var(key.clone()),
-            Expression::string("a"),
-        );
+        let letter_a =
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string("a"));
 
         let simplified = js_and_expression(
             Expression::bin(BinOp::Or, space.clone(), letter_a),
@@ -5191,11 +5218,7 @@ mod tests {
     fn test_js_or_absorbs_large_conjunction_membership_against_same_literal_like_ocaml() {
         let key = Ident::create_local("key");
         let literal = |txt: &str| {
-            Expression::bin(
-                BinOp::EqEqEq,
-                Expression::var(key.clone()),
-                Expression::string(txt),
-            )
+            Expression::bin(BinOp::EqEqEq, Expression::var(key), Expression::string(txt))
         };
         let space = literal("space");
         let rest = [
@@ -5236,9 +5259,7 @@ mod tests {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("boolean"),
         );
         let nested = Expression::cond(
@@ -5259,9 +5280,7 @@ mod tests {
         let value = Ident::create_local("value");
         let typeof_boolean = Expression::bin(
             BinOp::EqEqEq,
-            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                value.clone(),
-            )))),
+            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(value)))),
             Expression::string("boolean"),
         );
         let nested = Expression::cond(

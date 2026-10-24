@@ -14,9 +14,8 @@ use crate::js_ir::{
 use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
-    TailMoveInitializerKind, flatten_toplevel_block_owned, flatten_toplevel_block_refs,
-    resolve_tail_move_initializer_kind, resolve_tail_move_replacement_expression,
-    statement_mentions_ident_anywhere,
+    TailMoveInitializerKind, flatten_toplevel_block_refs, resolve_tail_move_initializer_kind,
+    resolve_tail_move_replacement_expression,
 };
 use crate::lambda::lam_compat::LetKind;
 
@@ -71,13 +70,8 @@ pub(crate) fn resolve_declared_same_name_self_alias_target(
     block: &Block,
     export: &Ident,
 ) -> Option<Ident> {
-    match resolve_tail_move_replacement_expression(
-        block,
-        &Expression::var(export.clone()),
-        export,
-        false,
-    )
-    .desc
+    match resolve_tail_move_replacement_expression(block, &Expression::var(*export), export, false)
+        .desc
     {
         ExpressionDesc::Var(VIdent::Id(target))
             if !target.same(export) && block_declares_ident(block, &target) =>
@@ -108,7 +102,7 @@ pub(crate) fn collect_declared_idents(block: &Block, declared: &mut HashSet<Iden
     for stmt in block {
         match &stmt.desc {
             StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
-                declared.insert(ident.clone());
+                declared.insert(*ident);
             }
             StatementDesc::Block(inner) => collect_declared_idents(inner, declared),
             StatementDesc::If(_, then_block, else_block) => {
@@ -150,7 +144,7 @@ pub(crate) fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident,
                     }),
                 ..
             }) => {
-                aliases.insert(ident.clone(), target.clone());
+                aliases.insert(*ident, *target);
             }
             StatementDesc::Block(inner) => collect_export_aliases(inner, aliases),
             StatementDesc::If(_, then_block, else_block) => {
@@ -161,10 +155,6 @@ pub(crate) fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident,
         }
     }
 }
-
-
-
-
 
 pub(crate) fn max_ident_stamp_in_block(block: &Block) -> i32 {
     block.iter().fold(0, |max_stamp, stmt| {
@@ -276,9 +266,11 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
             }
             max_stamp
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => values
-            .iter()
-            .fold(0, |max_stamp, value| max_stamp.max(max_ident_stamp_in_expression(value))),
+        ExpressionDesc::InterpolatedTemplate { values, .. } => {
+            values.iter().fold(0, |max_stamp, value| {
+                max_stamp.max(max_ident_stamp_in_expression(value))
+            })
+        }
         ExpressionDesc::StaticIndex(target, _, _) => max_ident_stamp_in_expression(target),
         ExpressionDesc::New(target, args) => {
             let mut max_stamp = max_ident_stamp_in_expression(target);
@@ -326,17 +318,14 @@ pub(crate) fn resolve_export_alias(
     aliases: &HashMap<Ident, Ident>,
     declared: &HashSet<Ident>,
 ) -> Ident {
-    let mut current = export.clone();
+    let mut current = *export;
     let mut seen = HashSet::new();
 
     while let Some(target) = aliases.get(&current) {
-        if target.name() != export.name()
-            || !declared.contains(target)
-            || !seen.insert(current.clone())
-        {
+        if target.name() != export.name() || !declared.contains(target) || !seen.insert(current) {
             break;
         }
-        current = target.clone();
+        current = *target;
     }
 
     current
@@ -346,6 +335,20 @@ pub(crate) fn resolve_export_alias(
 pub(crate) struct ExtractedExports {
     pub(crate) exports: Vec<Ident>,
     pub(crate) values: Vec<Expression>,
+}
+
+/// Whether `extract_toplevel_exports` succeeds on `expr`: the right spine of
+/// `Seq`s ends in a module-export block.
+fn ends_in_module_export(mut expr: &Expression) -> bool {
+    loop {
+        match &expr.desc {
+            ExpressionDesc::CamlBlock(_, _, tag) => {
+                return matches!(**tag, TagInfo::ModuleExport(_));
+            }
+            ExpressionDesc::Seq(_, right) => expr = right,
+            _ => return false,
+        }
+    }
 }
 
 pub(crate) fn extract_toplevel_exports(
@@ -371,11 +374,9 @@ pub(crate) fn extract_toplevel_exports(
         }
         ExpressionDesc::Undefined { .. } => None,
         ExpressionDesc::Seq(left, right) => {
-            let mut right_block = Vec::new();
-            if let Some(exports) = extract_toplevel_exports((*right).clone(), &mut right_block) {
+            if ends_in_module_export(&right) {
                 push_effect_expression(block, *left);
-                block.extend(right_block);
-                Some(exports)
+                extract_toplevel_exports(*right, block)
             } else {
                 push_effect_expression(
                     block,
@@ -415,7 +416,7 @@ pub(crate) fn can_reuse_existing_undefined_export_binding(block: &Block, export:
 
     flattened[export_index + 1..]
         .iter()
-        .all(|stmt| statement_allows_undefined_export_reuse(*stmt))
+        .all(|stmt| statement_allows_undefined_export_reuse(stmt))
 }
 
 pub(crate) fn insert_rebound_export_before_equivalent_later_binding(
@@ -464,13 +465,13 @@ pub(crate) fn insert_rebound_export_before_equivalent_later_binding(
     block.insert(
         insert_index,
         Statement::variable(VariableDeclaration {
-            ident: export.clone(),
+            ident: *export,
             value: Some(value.clone()),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
     );
-    Some(export.clone())
+    Some(*export)
 }
 
 pub(crate) fn reusable_same_name_export_binding(
@@ -496,9 +497,9 @@ fn reusable_same_name_export_binding_ref(
         }) if ident.name() == export.name()
             && !ident.same(export)
             && !matches!(property, LetKind::Variable)
-            && same_reusable_export_value(&initializer, value) =>
+            && same_reusable_export_value(initializer, value) =>
         {
-            Some(ident.clone())
+            Some(*ident)
         }
         _ => None,
     })
@@ -585,7 +586,10 @@ fn effect_value_without_unit(expr: Expression) -> Expression {
             comment,
         } if matches!(right.desc, ExpressionDesc::Undefined { is_unit: false })
             && left.source_loc.is_none()
-            && matches!(left.desc, ExpressionDesc::Bin(crate::js_ir::BinOp::Eq, _, _)) =>
+            && matches!(
+                left.desc,
+                ExpressionDesc::Bin(crate::js_ir::BinOp::Eq, _, _)
+            ) =>
         {
             let mut left = *left;
             left.source_loc = Some(loc);

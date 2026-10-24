@@ -88,6 +88,11 @@ pub fn read(build_state: &mut BuildCommandState) -> anyhow::Result<CompileAssets
         .collect::<Vec<(PathBuf, SystemTime, String, String, packages::Namespace)>>();
 
     let root_config = build_state.get_root_config();
+    // The output suffix only depends on the root config's first package spec.
+    let suffix = root_config
+        .get_package_specs()
+        .first()
+        .map(|spec| root_config.get_suffix(spec));
 
     compile_assets.iter().for_each(
         |(path, last_modified, extension, package_name, package_namespace)| {
@@ -103,8 +108,7 @@ pub fn read(build_state: &mut BuildCommandState) -> anyhow::Result<CompileAssets
                                 package_name: package_name.to_owned(),
                                 last_modified: last_modified.to_owned(),
                                 ast_file_path: path.to_path_buf(),
-                                suffix: root_config
-                                    .get_suffix(root_config.get_package_specs().first().unwrap()),
+                                suffix: suffix.clone().unwrap(),
                             },
                         );
                         let _ = ast_rescript_file_locations.insert(res_file_path_buf);

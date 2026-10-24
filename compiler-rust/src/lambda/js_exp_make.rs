@@ -3,15 +3,14 @@
 //! Port of `js_exp_make.ml` — expression-level helpers used during
 //! Lambda-to-JS compilation.
 
-use crate::ident::Ident;
-use crate::js_ir::op::{Kind, LengthObject, Number};
+use crate::js_ir::op::{Kind, Number};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, ModuleId, Statement,
-    StatementDesc, StringClause, VIdent, expression_has_no_side_effects,
+    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
+    StringClause, VIdent, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{Lambda, SwitchCaseTag, TagInfo};
+use crate::lambda::{SwitchCaseTag, TagInfo};
 
 pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
     match &expr.desc {
@@ -60,7 +59,11 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
             // cannot throw is taken as pure.
             let safe_literal = match &right.desc {
                 ExpressionDesc::Number(Number::BigInt(lit)) => {
-                    if *op == BinOp::Pow { lit.positive } else { lit.value != "0" }
+                    if *op == BinOp::Pow {
+                        lit.positive
+                    } else {
+                        lit.value != "0"
+                    }
                 }
                 ExpressionDesc::Number(Number::Int { i, .. }) => *op == BinOp::Pow || *i != 0,
                 ExpressionDesc::Number(Number::Float(_)) => true,
@@ -72,8 +75,7 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
             js_expr_no_side_effects(left) && js_expr_no_side_effects(right)
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
-            js_expr_no_side_effects(tag)
-                && values.iter().all(js_expr_no_side_effects)
+            js_expr_no_side_effects(tag) && values.iter().all(js_expr_no_side_effects)
         }
         ExpressionDesc::InterpolatedTemplate { values, .. } => {
             values.iter().all(js_expr_no_side_effects)
@@ -136,8 +138,20 @@ pub(crate) fn remove_pure_subexpression(expr: Expression) -> Option<Expression> 
     }
 }
 
+/// Borrowed form of `remove_pure_subexpression(expr).is_none()`.
 pub(crate) fn is_pure_subexpression(expr: &Expression) -> bool {
-    remove_pure_subexpression(expr.clone()).is_none()
+    match &expr.desc {
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Str(_)
+        | ExpressionDesc::TemplateLiteral(_)
+        | ExpressionDesc::JsonLiteral(_)
+        | ExpressionDesc::Number(_) => true,
+        ExpressionDesc::ArrayIndex(left, right) | ExpressionDesc::Seq(left, right) => {
+            is_pure_subexpression(left) && is_pure_subexpression(right)
+        }
+        ExpressionDesc::Array(items, _) => items.iter().all(is_pure_subexpression),
+        _ => false,
+    }
 }
 
 pub(crate) fn comparison_to_binop(cmp: Comparison) -> BinOp {
@@ -191,14 +205,6 @@ pub(crate) fn runtime_member_for_eta_wrapped_primitive(
         Primitive::Pstringmax => Some(("Primitive_string", "max")),
         _ => None,
     }
-}
-
-pub(crate) fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
-    params.len() == args.len()
-        && params
-            .iter()
-            .zip(args)
-            .all(|(param, arg)| matches!(arg, Lambda::Lvar(id) if id.same(param)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -274,20 +280,9 @@ pub(crate) fn compare_bool_literals(cmp: Comparison, left: bool, right: bool) ->
     match cmp {
         Comparison::Eq => left == right,
         Comparison::Neq => left != right,
-        Comparison::Lt => left < right,
+        Comparison::Lt => !left & right,
         Comparison::Le => left <= right,
-        Comparison::Gt => left > right,
-        Comparison::Ge => left >= right,
-    }
-}
-
-pub(crate) fn compare_int_literals(cmp: Comparison, left: i32, right: i32) -> bool {
-    match cmp {
-        Comparison::Eq => left == right,
-        Comparison::Neq => left != right,
-        Comparison::Lt => left < right,
-        Comparison::Le => left <= right,
-        Comparison::Gt => left > right,
+        Comparison::Gt => left & !right,
         Comparison::Ge => left >= right,
     }
 }
@@ -334,20 +329,22 @@ pub(crate) fn runtime_compare_call_args(expr: &Expression) -> Option<(&Expressio
 /// js_exp_make.ml `string_comp`: literal operands fold by comparing their
 /// semantic values.
 pub(crate) fn compare_string_literals(left: &Expression, right: &Expression) -> Option<bool> {
-    match (left.string_literal_semantic(), right.string_literal_semantic()) {
+    match (
+        left.string_literal_semantic(),
+        right.string_literal_semantic(),
+    ) {
         (Some(left), Some(right)) => Some(left == right),
         _ => None,
     }
 }
 
-pub(crate) fn normalize_bigint_literal_digits(digits: &str) -> String {
-    let trimmed: String = digits.chars().filter(|c| *c != '_').collect();
-    let trimmed = trimmed.trim_start_matches('0');
-    if trimmed.is_empty() {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
-    }
+/// BigInt literal digits without `_` separators and leading zeros; all-zero
+/// literals yield an empty sequence, so equal values compare equal.
+fn significant_bigint_digits(digits: &str) -> impl Iterator<Item = char> + '_ {
+    digits
+        .chars()
+        .filter(|c| *c != '_')
+        .skip_while(|c| *c == '0')
 }
 
 pub(crate) fn compare_bigint_literals(left: &Expression, right: &Expression) -> Option<bool> {
@@ -357,8 +354,8 @@ pub(crate) fn compare_bigint_literals(left: &Expression, right: &Expression) -> 
             ExpressionDesc::Number(Number::BigInt(right_bigint)),
         ) => Some(
             left_bigint.positive == right_bigint.positive
-                && normalize_bigint_literal_digits(&left_bigint.value)
-                    == normalize_bigint_literal_digits(&right_bigint.value),
+                && significant_bigint_digits(&left_bigint.value)
+                    .eq(significant_bigint_digits(&right_bigint.value)),
         ),
         _ => None,
     }
@@ -368,48 +365,55 @@ pub(crate) fn is_optional_block(expr: &Expression) -> bool {
     matches!(expr.desc, ExpressionDesc::OptionalBlock(_, _))
 }
 
+fn is_number_or_undefined(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
+    )
+}
+
 pub(crate) fn js_seq(left: Expression, right: Expression) -> Expression {
-    match (&left.desc, &right.desc) {
-        (ExpressionDesc::Seq(first, second), _)
-            if matches!(
-                second.as_ref().desc,
-                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
-            ) =>
-        {
-            return js_seq(first.as_ref().clone(), right);
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = left;
+    let left = match desc {
+        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&second) => {
+            return js_seq(*first, right);
         }
-        (ExpressionDesc::Seq(first, second), _)
-            if matches!(
-                first.as_ref().desc,
-                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
-            ) =>
-        {
-            return js_seq(second.as_ref().clone(), right);
+        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&first) => {
+            return js_seq(*second, right);
         }
-        (_, ExpressionDesc::Seq(first, second))
-            if matches!(
-                first.as_ref().desc,
-                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
-            ) =>
-        {
-            return js_seq(left, second.as_ref().clone());
+        desc => Expression {
+            source_loc,
+            desc,
+            comment,
+        },
+    };
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = right;
+    let right = match desc {
+        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&first) => {
+            return js_seq(left, *second);
         }
-        (_, ExpressionDesc::Seq(first, second))
-            if matches!(
-                second.as_ref().desc,
-                ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }
-            ) =>
-        {
-            return js_seq(
-                js_seq(left, first.as_ref().clone()),
-                second.as_ref().clone(),
-            );
+        ExpressionDesc::Seq(first, second) if is_number_or_undefined(&second) => {
+            return js_seq(js_seq(left, *first), *second);
         }
-        (
-            ExpressionDesc::Number(_) | ExpressionDesc::Var(_) | ExpressionDesc::Undefined { .. },
-            _,
-        ) => return right,
-        _ => (),
+        desc => Expression {
+            source_loc,
+            desc,
+            comment,
+        },
+    };
+    if matches!(
+        left.desc,
+        ExpressionDesc::Number(_) | ExpressionDesc::Var(_) | ExpressionDesc::Undefined { .. }
+    ) {
+        return right;
     }
 
     Expression::new(ExpressionDesc::Seq(Box::new(left), Box::new(right)))
@@ -441,8 +445,13 @@ pub(crate) fn both_bigint_literals(left: &Expression, right: &Expression) -> boo
 }
 
 pub(crate) fn both_string_literals(left: &Expression, right: &Expression) -> bool {
-    matches!(left.desc, ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_))
-        && matches!(right.desc, ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_))
+    matches!(
+        left.desc,
+        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_)
+    ) && matches!(
+        right.desc,
+        ExpressionDesc::Str(_) | ExpressionDesc::TemplateLiteral(_)
+    )
 }
 
 pub(crate) fn int_expr(value: i32) -> Expression {
@@ -532,17 +541,26 @@ pub(crate) fn int32_lsl(left: Expression, right: Expression) -> Expression {
     }
 }
 
+/// Moves the left operand out of a `Bin` expression the caller has already
+/// matched.
+fn into_bin_left(expr: Expression) -> Expression {
+    match expr.desc {
+        ExpressionDesc::Bin(_, inner, _) => *inner,
+        _ => unreachable!("into_bin_left expects a Bin expression"),
+    }
+}
+
 pub(crate) fn int32_bor(left: Expression, right: Expression) -> Expression {
     match (&left.desc, &right.desc) {
         (
             ExpressionDesc::Number(Number::Int { i: lhs, .. }),
             ExpressionDesc::Number(Number::Int { i: rhs, .. }),
         ) => int_expr(*lhs | *rhs),
-        (_, ExpressionDesc::Bin(BinOp::Lsr, inner, shift)) if is_zero_int(shift.as_ref()) => {
-            int32_bor(left, inner.as_ref().clone())
+        (_, ExpressionDesc::Bin(BinOp::Lsr, _, shift)) if is_zero_int(shift.as_ref()) => {
+            int32_bor(left, into_bin_left(right))
         }
-        (ExpressionDesc::Bin(BinOp::Lsr, inner, shift), _) if is_zero_int(shift.as_ref()) => {
-            int32_bor(inner.as_ref().clone(), right)
+        (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _) if is_zero_int(shift.as_ref()) => {
+            int32_bor(into_bin_left(left), right)
         }
         (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _)
             if is_zero_int(&right)
@@ -550,10 +568,10 @@ pub(crate) fn int32_bor(left: Expression, right: Expression) -> Expression {
         {
             left
         }
-        (ExpressionDesc::Bin(BinOp::Bor, inner, truncation), _)
+        (ExpressionDesc::Bin(BinOp::Bor, _, truncation), _)
             if is_zero_int(&right) && is_zero_int(truncation.as_ref()) =>
         {
-            int32_bor(inner.as_ref().clone(), right)
+            int32_bor(into_bin_left(left), right)
         }
         _ => Expression::bin(BinOp::Bor, left, right),
     }
@@ -566,10 +584,10 @@ pub(crate) fn int32_lsr(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Int { i: rhs, .. }),
         ) => int_expr(((*lhs as u32) >> (*rhs as u32)) as i32),
         (ExpressionDesc::Bin(BinOp::Lsr, _, _), _) if is_zero_int(&right) => left,
-        (ExpressionDesc::Bin(BinOp::Bor, inner, truncation), _)
+        (ExpressionDesc::Bin(BinOp::Bor, _, truncation), _)
             if is_zero_int(&right) && is_zero_int(truncation.as_ref()) =>
         {
-            int32_lsr(inner.as_ref().clone(), right)
+            int32_lsr(into_bin_left(left), right)
         }
         // OCaml returns the raw logical shift here rather than applying
         // `to_int32` (`compiler/core/js_exp_make.ml:1447-1456`).
@@ -583,11 +601,11 @@ pub(crate) fn int32_bxor(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Int { i: lhs, .. }),
             ExpressionDesc::Number(Number::Int { i: rhs, .. }),
         ) => int_expr(*lhs ^ *rhs),
-        (_, ExpressionDesc::Bin(BinOp::Lsr, inner, shift)) if is_zero_int(shift.as_ref()) => {
-            int32_bxor(left, inner.as_ref().clone())
+        (_, ExpressionDesc::Bin(BinOp::Lsr, _, shift)) if is_zero_int(shift.as_ref()) => {
+            int32_bxor(left, into_bin_left(right))
         }
-        (ExpressionDesc::Bin(BinOp::Lsr, inner, shift), _) if is_zero_int(shift.as_ref()) => {
-            int32_bxor(inner.as_ref().clone(), right)
+        (ExpressionDesc::Bin(BinOp::Lsr, _, shift), _) if is_zero_int(shift.as_ref()) => {
+            int32_bxor(into_bin_left(left), right)
         }
         _ => Expression::bin(BinOp::Bxor, left, right),
     }
@@ -595,24 +613,16 @@ pub(crate) fn int32_bxor(left: Expression, right: Expression) -> Expression {
 
 pub(crate) fn int32_band(left: Expression, right: Expression) -> Expression {
     match &left.desc {
-        ExpressionDesc::Bin(BinOp::Bor, inner, zero) if is_zero_int(zero.as_ref()) => {
-            int32_band(inner.as_ref().clone(), right)
+        ExpressionDesc::Bin(BinOp::Bor, _, zero) if is_zero_int(zero.as_ref()) => {
+            int32_band(into_bin_left(left), right)
         }
         _ => Expression::bin(BinOp::Band, left, right),
     }
 }
 
-pub(crate) fn int32_offset(expr: Expression, offset: i32) -> Expression {
-    if offset == 0 {
-        expr
-    } else {
-        int32_add(expr, int_expr(offset))
-    }
-}
-
 pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
     let Expression {
-        source_loc,
+        source_loc: _,
         desc,
         comment,
     } = expr;
@@ -851,9 +861,17 @@ pub(crate) fn interpolated_template(
             _ => None,
         }
     }
-    assert_eq!(segments.len(), values.len() + 1, "a template has one more segment than value");
+    assert_eq!(
+        segments.len(),
+        values.len() + 1,
+        "a template has one more segment than value"
+    );
     let mut segments = segments.into_iter();
-    let mut parts = vec![segments.next().expect("a template has at least one segment")];
+    let mut parts = vec![
+        segments
+            .next()
+            .expect("a template has at least one segment"),
+    ];
     let mut merged_segments = Vec::new();
     let mut merged_values = Vec::new();
     for (next_segment, value) in segments.zip(values) {
@@ -871,7 +889,9 @@ pub(crate) fn interpolated_template(
     }
     merged_segments.push(concat_template(&parts));
     if merged_segments.len() == 1 && merged_values.is_empty() {
-        Expression::new(ExpressionDesc::TemplateLiteral(merged_segments.pop().expect("one segment")))
+        Expression::new(ExpressionDesc::TemplateLiteral(
+            merged_segments.pop().expect("one segment"),
+        ))
     } else {
         Expression::new(ExpressionDesc::InterpolatedTemplate {
             segments: merged_segments,

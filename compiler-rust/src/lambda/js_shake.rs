@@ -39,13 +39,10 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
     // `compiler/core/lam_compile_main.ml:220-254`). Keep the Rust-only JS IR
     // scans borrowed until we know we must rewrite, so the read-only path has
     // the same semantics without cloning the full block.
-    let (mut flattened, index, replacement, property) = {
+    let (index, replacement, property) = {
         let flattened_refs = flatten_toplevel_block_refs(block);
-        let Some((index, initializer, property)) =
-            same_name_export_alias_binding_ref(&flattened_refs, target)
-        else {
-            return None;
-        };
+        let (index, initializer, property) =
+            same_name_export_alias_binding_ref(&flattened_refs, target)?;
         let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, initializer);
         // OCaml only substitutes Strict/Alias/StrictOpt simple bindings in
         // `compiler/core/lam_pass_lets_dce.ml:21-23` and
@@ -93,8 +90,6 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
         let has_later_function_binding = has_later_toplevel_function_binding_ref(remaining);
         let later_function_mentions_target =
             later_toplevel_function_mentions_ident_ref(remaining, target);
-        let later_initializer_mentions_target =
-            later_toplevel_initializer_mentions_ident_ref(remaining, target);
         // A Literal+Alias binding existing in the block means
         // `compiler/core/lam_pass_lets_dce.ml:121-133` entered the Strict arm
         // and `compiler/core/lam_util.ml:118-124` downgraded to Alias without
@@ -166,14 +161,10 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
             return None;
         }
 
-        (
-            clone_flattened_block_refs(&flattened_refs),
-            index,
-            replacement,
-            property,
-        )
+        (index, replacement, property)
     };
 
+    let mut flattened = flatten_toplevel_block_owned(std::mem::take(block));
     for stmt in &mut flattened[index + 1..] {
         substitute_export_alias_use_in_statement(stmt, target, &replacement);
     }
@@ -189,15 +180,12 @@ pub(crate) fn move_reused_same_name_export_binding_to_export_tail(
 ) -> Option<(Expression, LetKind)> {
     // Same OCaml contract as `move_same_name_export_alias_to_export_tail`:
     // export identity decisions come from `compiler/core/lam_coercion.ml:82-121`;
-    // this Rust JS-IR pass only preserves the final output shape and clones
-    // after the borrowed checks choose a mutation.
-    let (mut flattened, index, reused, replacement, property) = {
+    // this Rust JS-IR pass only preserves the final output shape and takes
+    // ownership of the block after the borrowed checks choose a mutation.
+    let (index, reused, replacement, property) = {
         let flattened_refs = flatten_toplevel_block_refs(block);
-        let Some((index, reused, _initializer, property)) =
-            direct_reused_same_name_export_alias_binding_ref(&flattened_refs, export, value)
-        else {
-            return None;
-        };
+        let (index, reused, _initializer, property) =
+            direct_reused_same_name_export_alias_binding_ref(&flattened_refs, export, value)?;
         let replacement =
             resolve_tail_move_replacement_expression_ref(&flattened_refs, value, reused, false);
         let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, &replacement);
@@ -232,15 +220,10 @@ pub(crate) fn move_reused_same_name_export_binding_to_export_tail(
             return None;
         }
 
-        (
-            clone_flattened_block_refs(&flattened_refs),
-            index,
-            reused.clone(),
-            replacement,
-            property,
-        )
+        (index, *reused, replacement, property)
     };
 
+    let mut flattened = flatten_toplevel_block_owned(std::mem::take(block));
     for stmt in &mut flattened[index + 1..] {
         substitute_export_alias_use_in_statement(stmt, &reused, &replacement);
     }
@@ -304,11 +287,11 @@ pub(crate) fn resolve_tail_move_replacement_expression(
         return initializer.clone();
     };
 
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return initializer.clone();
         }
 
@@ -351,7 +334,7 @@ pub(crate) fn resolve_tail_move_replacement_expression(
                 };
             }
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
+                current = *next;
             }
             ExpressionDesc::Number(_)
             | ExpressionDesc::Str(_)
@@ -382,11 +365,11 @@ fn resolve_tail_move_replacement_expression_ref(
         return initializer.clone();
     };
 
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return initializer.clone();
         }
 
@@ -425,7 +408,7 @@ fn resolve_tail_move_replacement_expression_ref(
                 };
             }
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
+                current = *next;
             }
             ExpressionDesc::Number(_)
             | ExpressionDesc::Str(_)
@@ -451,11 +434,11 @@ fn tail_move_materialized_root_ident_ref(
         return None;
     };
 
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return None;
         }
 
@@ -475,7 +458,7 @@ fn tail_move_materialized_root_ident_ref(
 
         match &value.desc {
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next.clone();
+                current = *next;
             }
             _ => return Some(current),
         }
@@ -486,11 +469,11 @@ pub(crate) fn resolve_tail_move_initializer_kind(
     block: &Block,
     start: &Ident,
 ) -> Option<TailMoveInitializerKind> {
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return None;
         }
 
@@ -518,7 +501,7 @@ pub(crate) fn resolve_tail_move_initializer_kind(
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
-            ExpressionDesc::Var(VIdent::Id(next)) => current = next.clone(),
+            ExpressionDesc::Var(VIdent::Id(next)) => current = *next,
             _ => return None,
         }
     }
@@ -528,11 +511,11 @@ fn resolve_tail_move_initializer_kind_ref(
     block: &[&Statement],
     start: &Ident,
 ) -> Option<TailMoveInitializerKind> {
-    let mut current = start.clone();
+    let mut current = *start;
     let mut seen = HashSet::new();
 
     loop {
-        if !seen.insert(current.clone()) {
+        if !seen.insert(current) {
             return None;
         }
 
@@ -560,7 +543,7 @@ fn resolve_tail_move_initializer_kind_ref(
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
             | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
-            ExpressionDesc::Var(VIdent::Id(next)) => current = next.clone(),
+            ExpressionDesc::Var(VIdent::Id(next)) => current = *next,
             _ => return None,
         }
     }
@@ -870,15 +853,13 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 )
             })
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values.iter().all(|expr| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    expr,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values.iter().all(|expr| {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                expr,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }),
         ExpressionDesc::New(func, args) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 func,
@@ -1065,11 +1046,9 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
                     .iter()
                     .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values
-                    .iter()
-                    .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values
+            .iter()
+            .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target)),
         ExpressionDesc::New(func, Some(args)) => {
             expression_mentions_ident_outside_nested_functions(func, target)
                 || args
@@ -1436,11 +1415,9 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
                     .iter()
                     .any(|expr| expression_mentions_ident_anywhere(expr, target))
         }
-        ExpressionDesc::InterpolatedTemplate { values, .. } => {
-            values
-                    .iter()
-                    .any(|expr| expression_mentions_ident_anywhere(expr, target))
-        }
+        ExpressionDesc::InterpolatedTemplate { values, .. } => values
+            .iter()
+            .any(|expr| expression_mentions_ident_anywhere(expr, target)),
         ExpressionDesc::New(func, Some(args)) => {
             expression_mentions_ident_anywhere(func, target)
                 || args
@@ -1576,15 +1553,45 @@ fn flatten_toplevel_block_refs_into<'a>(block: &'a Block, flattened: &mut Vec<&'
     }
 }
 
-fn clone_flattened_block_refs(block: &[&Statement]) -> Block {
-    block.iter().map(|stmt| (*stmt).clone()).collect()
+/// Per-statement facts used by the required-ident fixed point. They do not
+/// depend on the required set, so they are computed once instead of on every
+/// iteration.
+enum RequiredIdentsEntry {
+    Variable {
+        ident: Ident,
+        /// `(has_side_effects, free_variables)` of the initializer.
+        value: Option<(bool, HashSet<Ident>)>,
+    },
+    /// Free variables of a non-declaration statement with side effects.
+    Effect(Option<HashSet<Ident>>),
 }
 
 fn fixed_point_required_idents(block: &Block, export_set: &HashSet<Ident>) -> HashSet<Ident> {
-    let mut required = required_idents(block, export_set, true);
+    let entries: Vec<RequiredIdentsEntry> = block
+        .iter()
+        .map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+                RequiredIdentsEntry::Variable {
+                    ident: *ident,
+                    value: value.as_ref().map(|value| {
+                        (
+                            !js_expr_no_side_effects(value),
+                            free_variables_of_expression(value),
+                        )
+                    }),
+                }
+            }
+            _ => RequiredIdentsEntry::Effect(
+                (!js_statement_no_side_effects(stmt)).then(|| free_variables_of_statement(stmt)),
+            ),
+        })
+        .collect();
+    let mut required = required_idents(&entries, export_set, true);
     loop {
-        let next = required_idents(block, &required, false);
-        if next.len() == required.len() && next.is_subset(&required) {
+        // `required_idents` only adds to its input, so equal sizes mean the
+        // set is unchanged.
+        let next = required_idents(&entries, &required, false);
+        if next.len() == required.len() {
             return required;
         }
         required = next;
@@ -1592,29 +1599,27 @@ fn fixed_point_required_idents(block: &Block, export_set: &HashSet<Ident>) -> Ha
 }
 
 fn required_idents(
-    block: &Block,
+    entries: &[RequiredIdentsEntry],
     initial: &HashSet<Ident>,
     count_effect_statements: bool,
 ) -> HashSet<Ident> {
     let mut required = initial.clone();
 
-    for stmt in block {
-        match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+    for entry in entries {
+        match entry {
+            RequiredIdentsEntry::Variable { ident, value } => {
                 if required.contains(ident) {
-                    if let Some(value) = value {
-                        required.extend(free_variables_of_expression(value));
+                    if let Some((_, free)) = value {
+                        required.extend(free.iter().copied());
                     }
-                } else if let Some(value) = value {
-                    if !js_expr_no_side_effects(value) {
-                        required.insert(ident.clone());
-                        required.extend(free_variables_of_expression(value));
-                    }
+                } else if let Some((true, free)) = value {
+                    required.insert(*ident);
+                    required.extend(free.iter().copied());
                 }
             }
-            _ => {
-                if count_effect_statements && !js_statement_no_side_effects(stmt) {
-                    required.extend(free_variables_of_statement(stmt));
+            RequiredIdentsEntry::Effect(free) => {
+                if count_effect_statements && let Some(free) = free {
+                    required.extend(free.iter().copied());
                 }
             }
         }
@@ -1642,12 +1647,12 @@ impl JsIdentStats {
 
     fn add_used_ident(&mut self, ident: &Ident) {
         if !self.defined_idents.contains(ident) {
-            self.used_idents.insert(ident.clone());
+            self.used_idents.insert(*ident);
         }
     }
 
     fn add_defined_ident(&mut self, ident: &Ident) {
-        self.defined_idents.insert(ident.clone());
+        self.defined_idents.insert(*ident);
     }
 
     fn extend_free_idents(&mut self, other: HashSet<Ident>) {
@@ -1716,7 +1721,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(finish, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::ForOf(_, loop_ident, iterable, body)
@@ -1724,7 +1729,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(iterable, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
@@ -1750,7 +1755,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             if let Some((catch_ident, catch_block)) = catch {
                 stats.extend_free_idents(free_variables_of_block_with_defined(
                     catch_block,
-                    std::iter::once(catch_ident.clone()),
+                    std::iter::once(*catch_ident),
                 ));
             }
             if let Some(finally) = finally {

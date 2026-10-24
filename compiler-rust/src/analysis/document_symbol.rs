@@ -35,7 +35,10 @@ impl Symbol {
         let range = self.range.to_json();
         let mut fields = Vec::new();
         if let Some(children) = &self.children {
-            fields.push(("children".to_string(), Json::List(children.iter().rev().map(Symbol::to_json).collect())));
+            fields.push((
+                "children".to_string(),
+                Json::List(children.iter().rev().map(Symbol::to_json).collect()),
+            ));
         }
         fields.push(("kind".to_string(), Json::Int(self.kind as i64)));
         fields.push(("name".to_string(), Json::str(&self.name)));
@@ -69,16 +72,31 @@ impl Collector {
     }
 
     fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
-        self.add(arena, arena.get_string(td.ptype_name.txt), td.ptype_loc, SymbolKind::TypeParameter);
+        self.add(
+            arena,
+            arena.get_string(td.ptype_name.txt),
+            td.ptype_loc,
+            SymbolKind::TypeParameter,
+        );
         match &td.ptype_kind {
             TypeKind::Ptype_variant(constructors) => {
                 for cd in constructors {
-                    self.add(arena, arena.get_string(cd.pcd_name.txt), cd.pcd_loc, SymbolKind::EnumMember);
+                    self.add(
+                        arena,
+                        arena.get_string(cd.pcd_name.txt),
+                        cd.pcd_loc,
+                        SymbolKind::EnumMember,
+                    );
                 }
             }
             TypeKind::Ptype_record(labels) => {
                 for ld in labels {
-                    self.add(arena, arena.get_string(ld.pld_name.txt), ld.pld_loc, SymbolKind::Property);
+                    self.add(
+                        arena,
+                        arena.get_string(ld.pld_name.txt),
+                        ld.pld_loc,
+                        SymbolKind::Property,
+                    );
                 }
             }
             _ => {}
@@ -86,7 +104,12 @@ impl Collector {
     }
 
     fn extension_constructor(&mut self, arena: &ParseArena, ec: &ExtensionConstructor) {
-        self.add(arena, arena.get_string(ec.pext_name.txt), ec.pext_loc, SymbolKind::Constructor);
+        self.add(
+            arena,
+            arena.get_string(ec.pext_name.txt),
+            ec.pext_loc,
+            SymbolKind::Constructor,
+        );
     }
 }
 
@@ -116,7 +139,12 @@ impl AstIter for Collector {
             _ => None,
         };
         if let Some(name) = name {
-            self.add(arena, arena.get_string(name), vb.pvb_loc, expr_kind(arena, vb.pvb_expr));
+            self.add(
+                arena,
+                arena.get_string(name),
+                vb.pvb_loc,
+                expr_kind(arena, vb.pvb_expr),
+            );
         }
         ast_iter::walk_value_binding(self, arena, vb);
     }
@@ -128,11 +156,17 @@ impl AstIter for Collector {
                 let (name, mod_expr, _) = &**letmodule;
                 // `{e.pexp_loc with loc_end = mod_expr.pmod_loc.loc_end}`.
                 let location = arena.get_location(e.pexp_loc);
-                let mod_end = arena.get_location(arena.get_mod_expr(*mod_expr).pmod_loc).loc_end;
+                let mod_end = arena
+                    .get_location(arena.get_mod_expr(*mod_expr).pmod_loc)
+                    .loc_end;
                 let start = arena.get_position(location.loc_start);
                 let end = arena.get_position(mod_end);
                 if !location.loc_ghost && start.cnum >= 0 && end.cnum >= 0 {
-                    self.add_range(arena.get_string(name.txt), Range::of_positions(start, end), SymbolKind::Module);
+                    self.add_range(
+                        arena.get_string(name.txt),
+                        Range::of_positions(start, end),
+                        SymbolKind::Module,
+                    );
                 }
             }
             ExpressionDesc::Pexp_letexception(letexception) => {
@@ -145,20 +179,31 @@ impl AstIter for Collector {
 
     fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
         match &*item.pstr_desc {
-            StructureItemDesc::Pstr_primitive(vd) => {
-                self.add(arena, arena.get_string(vd.pval_name.txt), vd.pval_loc, SymbolKind::Variable)
-            }
+            StructureItemDesc::Pstr_primitive(vd) => self.add(
+                arena,
+                arena.get_string(vd.pval_name.txt),
+                vd.pval_loc,
+                SymbolKind::Variable,
+            ),
             StructureItemDesc::Pstr_type(types) => {
                 for td in &types.1 {
                     self.type_declaration(arena, td);
                 }
             }
-            StructureItemDesc::Pstr_module(mb) => {
-                self.add(arena, arena.get_string(mb.pmb_name.txt), mb.pmb_loc, SymbolKind::Module)
-            }
+            StructureItemDesc::Pstr_module(mb) => self.add(
+                arena,
+                arena.get_string(mb.pmb_name.txt),
+                mb.pmb_loc,
+                SymbolKind::Module,
+            ),
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 for mb in mbs.iter() {
-                    self.add(arena, arena.get_string(mb.pmb_name.txt), mb.pmb_loc, SymbolKind::Module);
+                    self.add(
+                        arena,
+                        arena.get_string(mb.pmb_name.txt),
+                        mb.pmb_loc,
+                        SymbolKind::Module,
+                    );
                 }
             }
             StructureItemDesc::Pstr_exception(ec) => self.extension_constructor(arena, ec),
@@ -169,20 +214,31 @@ impl AstIter for Collector {
 
     fn signature_item(&mut self, arena: &ParseArena, item: &SignatureItem) {
         match &*item.psig_desc {
-            SignatureItemDesc::Psig_value(vd) => {
-                self.add(arena, arena.get_string(vd.pval_name.txt), vd.pval_loc, SymbolKind::Variable)
-            }
+            SignatureItemDesc::Psig_value(vd) => self.add(
+                arena,
+                arena.get_string(vd.pval_name.txt),
+                vd.pval_loc,
+                SymbolKind::Variable,
+            ),
             SignatureItemDesc::Psig_type(types) => {
                 for td in &types.1 {
                     self.type_declaration(arena, td);
                 }
             }
-            SignatureItemDesc::Psig_module(md) => {
-                self.add(arena, arena.get_string(md.pmd_name.txt), md.pmd_loc, SymbolKind::Module)
-            }
+            SignatureItemDesc::Psig_module(md) => self.add(
+                arena,
+                arena.get_string(md.pmd_name.txt),
+                md.pmd_loc,
+                SymbolKind::Module,
+            ),
             SignatureItemDesc::Psig_recmodule(mds) => {
                 for md in mds.iter() {
-                    self.add(arena, arena.get_string(md.pmd_name.txt), md.pmd_loc, SymbolKind::Module);
+                    self.add(
+                        arena,
+                        arena.get_string(md.pmd_name.txt),
+                        md.pmd_loc,
+                        SymbolKind::Module,
+                    );
                 }
             }
             SignatureItemDesc::Psig_exception(ec) => self.extension_constructor(arena, ec),
@@ -194,7 +250,9 @@ impl AstIter for Collector {
     fn module_expr(&mut self, arena: &ParseArena, idx: ModExprIdx) {
         match &*arena.get_mod_expr(idx).pmod_desc {
             // Don't double-list items in implementation and interface.
-            ModuleExprDesc::Pmod_constraint(mod_expr, _) => ast_iter::walk_module_expr(self, arena, *mod_expr),
+            ModuleExprDesc::Pmod_constraint(mod_expr, _) => {
+                ast_iter::walk_module_expr(self, arena, *mod_expr)
+            }
             _ => ast_iter::walk_module_expr(self, arena, idx),
         }
     }
@@ -202,7 +260,9 @@ impl AstIter for Collector {
 
 /// `Document_symbol.get_symbols`, as JSON.
 pub fn get_symbols(source: &str, kind: FileKind) -> Json {
-    let mut collector = Collector { symbols: Vec::new() };
+    let mut collector = Collector {
+        symbols: Vec::new(),
+    };
     let mut parser = Parser::new("", source);
     match kind {
         FileKind::Res => {

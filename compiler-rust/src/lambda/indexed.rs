@@ -374,8 +374,8 @@ impl IndexedLambda {
 
     pub(crate) fn materialize_node(&self, id: NodeId) -> Lambda {
         match self.view(id) {
-            NodeView::Var(id) => Lambda::Lvar(id.clone()),
-            NodeView::GlobalModule(id) => Lambda::LglobalModule(id.clone()),
+            NodeView::Var(id) => Lambda::Lvar(*id),
+            NodeView::GlobalModule(id) => Lambda::LglobalModule(*id),
             NodeView::Const(c) => Lambda::Lconst(c.clone()),
             NodeView::Apply(func, args, info, jsx) => Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(self.materialize_node(func)),
@@ -394,21 +394,21 @@ impl IndexedLambda {
             }
             NodeView::Let(kind, ident, value, body) => Lambda::Llet(
                 kind,
-                ident.clone(),
+                *ident,
                 Box::new(self.materialize_node(value)),
                 Box::new(self.materialize_node(body)),
             ),
             NodeView::LetRec(bindings, body) => Lambda::Lletrec(
                 bindings
                     .iter()
-                    .map(|(ident, value)| (ident.clone(), self.materialize_node(*value)))
+                    .map(|(ident, value)| (*ident, self.materialize_node(*value)))
                     .collect(),
                 Box::new(self.materialize_node(body)),
             ),
             NodeView::Prim(primitive, args, loc) => Lambda::Lprim(Box::new(PrimInfo {
                 primitive: primitive.clone(),
                 args: args.iter().map(|x| self.materialize_node(*x)).collect(),
-                loc: loc.clone(),
+                loc: *loc,
             })),
             NodeView::Switch {
                 scrutinee,
@@ -454,7 +454,7 @@ impl IndexedLambda {
             ),
             NodeView::TryWith(body, ident, handler) => Lambda::LtryWith(
                 Box::new(self.materialize_node(body)),
-                ident.clone(),
+                *ident,
                 Box::new(self.materialize_node(handler)),
             ),
             NodeView::IfThenElse(a, b, c) => Lambda::LifThenElse(
@@ -473,32 +473,32 @@ impl IndexedLambda {
                 Box::new(self.materialize_node(b)),
             ),
             NodeView::For(ident, start, end, direction, body) => Lambda::Lfor(
-                ident.clone(),
+                *ident,
                 Box::new(self.materialize_node(start)),
                 Box::new(self.materialize_node(end)),
                 direction,
                 Box::new(self.materialize_node(body)),
             ),
             NodeView::ForOf(ident, iterable, body) => Lambda::Lfor_of(
-                ident.clone(),
+                *ident,
                 Box::new(self.materialize_node(iterable)),
                 Box::new(self.materialize_node(body)),
             ),
             NodeView::ForAwaitOf(ident, iterable, body) => Lambda::Lfor_await_of(
-                ident.clone(),
+                *ident,
                 Box::new(self.materialize_node(iterable)),
                 Box::new(self.materialize_node(body)),
             ),
             NodeView::Assign(ident, value) => {
-                Lambda::Lassign(ident.clone(), Box::new(self.materialize_node(value)))
+                Lambda::Lassign(*ident, Box::new(self.materialize_node(value)))
             }
         }
     }
 
     pub(crate) fn snapshot(&self, id: NodeId) -> NodeSnapshot {
         match self.view(id) {
-            NodeView::Var(id) => NodeSnapshot::Var(id.clone()),
-            NodeView::GlobalModule(id) => NodeSnapshot::GlobalModule(id.clone()),
+            NodeView::Var(id) => NodeSnapshot::Var(*id),
+            NodeView::GlobalModule(id) => NodeSnapshot::GlobalModule(*id),
             NodeView::Const(value) => NodeSnapshot::Const(value.clone()),
             NodeView::Apply(function, args, info, jsx) => {
                 NodeSnapshot::Apply(function, args.to_vec(), info.clone(), jsx)
@@ -506,12 +506,10 @@ impl IndexedLambda {
             NodeView::Function(arity, params, body, attr, loc) => {
                 NodeSnapshot::Function(arity, params.to_vec(), body, attr.clone(), loc)
             }
-            NodeView::Let(kind, id, value, body) => {
-                NodeSnapshot::Let(kind, id.clone(), value, body)
-            }
+            NodeView::Let(kind, id, value, body) => NodeSnapshot::Let(kind, *id, value, body),
             NodeView::LetRec(bindings, body) => NodeSnapshot::LetRec(bindings.to_vec(), body),
             NodeView::Prim(primitive, args, loc) => {
-                NodeSnapshot::Prim(primitive.clone(), args.to_vec(), loc.clone())
+                NodeSnapshot::Prim(primitive.clone(), args.to_vec(), *loc)
             }
             NodeView::Switch {
                 scrutinee,
@@ -537,22 +535,20 @@ impl IndexedLambda {
             NodeView::StaticCatch(body, exit, params, handler) => {
                 NodeSnapshot::StaticCatch(body, exit, params.to_vec(), handler)
             }
-            NodeView::TryWith(body, id, handler) => {
-                NodeSnapshot::TryWith(body, id.clone(), handler)
-            }
+            NodeView::TryWith(body, id, handler) => NodeSnapshot::TryWith(body, *id, handler),
             NodeView::IfThenElse(a, b, c) => NodeSnapshot::IfThenElse(a, b, c),
             NodeView::Sequence(a, b) => NodeSnapshot::Sequence(a, b),
             NodeView::Break => NodeSnapshot::Break,
             NodeView::Continue => NodeSnapshot::Continue,
             NodeView::While(a, b) => NodeSnapshot::While(a, b),
             NodeView::For(id, start, end, direction, body) => {
-                NodeSnapshot::For(id.clone(), start, end, direction, body)
+                NodeSnapshot::For(*id, start, end, direction, body)
             }
-            NodeView::ForOf(id, iterable, body) => NodeSnapshot::ForOf(id.clone(), iterable, body),
+            NodeView::ForOf(id, iterable, body) => NodeSnapshot::ForOf(*id, iterable, body),
             NodeView::ForAwaitOf(id, iterable, body) => {
-                NodeSnapshot::ForAwaitOf(id.clone(), iterable, body)
+                NodeSnapshot::ForAwaitOf(*id, iterable, body)
             }
-            NodeView::Assign(id, value) => NodeSnapshot::Assign(id.clone(), value),
+            NodeView::Assign(id, value) => NodeSnapshot::Assign(*id, value),
         }
     }
 
@@ -1142,12 +1138,7 @@ impl IndexedLambdaContext {
         &self.metadata
     }
 
-    #[cfg(test)]
     pub(crate) fn metadata_mut(&mut self) -> &mut IndexedLamStats {
-        &mut self.metadata
-    }
-
-    pub(crate) fn metadata_mut_for_backend(&mut self) -> &mut IndexedLamStats {
         &mut self.metadata
     }
 
@@ -1376,33 +1367,15 @@ impl IndexedLambdaContext {
             .append_compat_lambda(Lambda::Lfunction(Box::new(function)))
     }
 
-    /// Splits the owner-held state needed by consumer-side indexed beta.
-    /// This deliberately reuses the optimizer's metadata and native hash
-    /// capacity after grouping has consumed `optimizer_root`.
-    pub(crate) fn backend_beta_parts_mut(
-        &mut self,
-    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
+    /// Splits the owner-held store, metadata, and native `Hash_ident` bucket
+    /// count. Optimizer passes and consumer-side indexed beta (after grouping
+    /// has consumed `optimizer_root`) share the same state.
+    pub(crate) fn parts_mut(&mut self) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
         (
             &mut self.store,
             &mut self.metadata,
             &mut self.beta_hash_bucket_count,
         )
-    }
-
-    pub(crate) fn optimizer_parts_mut(
-        &mut self,
-    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
-        (
-            &mut self.store,
-            &mut self.metadata,
-            &mut self.beta_hash_bucket_count,
-        )
-    }
-
-    pub(crate) fn alias_parts_mut(
-        &mut self,
-    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
-        self.optimizer_parts_mut()
     }
 
     #[cfg(test)]
@@ -1491,11 +1464,11 @@ mod tests {
         let x = id("x", 1);
         let y = id("y", 2);
         let loc = Location::none();
-        let var = || Lambda::Lvar(x.clone());
+        let var = || Lambda::Lvar(x);
         let int = || Lambda::Lconst(Constant::int(1));
         for leaf in [
             var(),
-            Lambda::LglobalModule(y.clone()),
+            Lambda::LglobalModule(y),
             int(),
             Lambda::Lbreak,
             Lambda::Lcontinue,
@@ -1503,35 +1476,33 @@ mod tests {
             assert_round_trip(leaf);
         }
         let info = ApInfo {
-            loc: loc.clone(),
+            loc,
             inlined: InlineAttribute::Always,
             status: ApplyStatus::InferFull,
         };
         let samples = vec![
             Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(var()),
-                ap_args: vec![int(), Lambda::Lvar(y.clone())],
+                ap_args: vec![int(), Lambda::Lvar(y)],
                 ap_info: info,
                 ap_transformed_jsx: true,
             })),
-            Lambda::Lfunction(Box::new(LFunction { loc: crate::location::Location::none(),
+            Lambda::Lfunction(Box::new(LFunction {
+                loc: crate::location::Location::none(),
                 arity: 2,
-                params: vec![x.clone(), y.clone()],
+                params: vec![x, y],
                 body: Box::new(var()),
                 attr: FunctionAttribute {
                     async_: true,
                     ..FunctionAttribute::default()
                 },
             })),
-            Lambda::Llet(LetKind::Strict, x.clone(), Box::new(int()), Box::new(var())),
-            Lambda::Lletrec(
-                vec![(x.clone(), int()), (y.clone(), var())],
-                Box::new(var()),
-            ),
+            Lambda::Llet(LetKind::Strict, x, Box::new(int()), Box::new(var())),
+            Lambda::Lletrec(vec![(x, int()), (y, var())], Box::new(var())),
             Lambda::Lprim(Box::new(PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![int(), var()],
-                loc: loc.clone(),
+                loc,
             })),
             Lambda::Lswitch(
                 Box::new(var()),
@@ -1550,28 +1521,20 @@ mod tests {
                 Some(Box::new(int())),
             ),
             Lambda::LstaticRaise(3, vec![int(), var()]),
-            Lambda::LstaticCatch(
-                Box::new(var()),
-                (3, vec![x.clone(), y.clone()]),
-                Box::new(int()),
-            ),
-            Lambda::LtryWith(Box::new(var()), y.clone(), Box::new(int())),
-            Lambda::LifThenElse(
-                Box::new(var()),
-                Box::new(int()),
-                Box::new(Lambda::Lvar(y.clone())),
-            ),
+            Lambda::LstaticCatch(Box::new(var()), (3, vec![x, y]), Box::new(int())),
+            Lambda::LtryWith(Box::new(var()), y, Box::new(int())),
+            Lambda::LifThenElse(Box::new(var()), Box::new(int()), Box::new(Lambda::Lvar(y))),
             Lambda::Lsequence(Box::new(var()), Box::new(int())),
             Lambda::Lwhile(Box::new(var()), Box::new(int())),
             Lambda::Lfor(
-                x.clone(),
+                x,
                 Box::new(int()),
                 Box::new(Lambda::Lconst(Constant::int(9))),
                 DirectionFlag::Downto,
                 Box::new(var()),
             ),
-            Lambda::Lfor_of(x.clone(), Box::new(var()), Box::new(int())),
-            Lambda::Lfor_await_of(x.clone(), Box::new(var()), Box::new(int())),
+            Lambda::Lfor_of(x, Box::new(var()), Box::new(int())),
+            Lambda::Lfor_await_of(x, Box::new(var()), Box::new(int())),
             Lambda::Lassign(x, Box::new(int())),
         ];
         for sample in samples {

@@ -23,8 +23,12 @@ pub enum Cst {
 /// `External_arg_spec.attr`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Attr {
-    PolyVarString { descr: Vec<(String, String)> },
-    PolyVar { descr: Option<Vec<(String, String)>> },
+    PolyVarString {
+        descr: Vec<(String, String)>,
+    },
+    PolyVar {
+        descr: Option<Vec<(String, String)>>,
+    },
     Int(Vec<(String, i64)>),
     ArgCst(Cst),
     ExternUnit,
@@ -45,8 +49,13 @@ pub enum LabelNoname {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Label {
     ObjEmpty,
-    ObjLabel { name: String },
-    ObjOptional { name: String, for_sure_no_nested_option: bool },
+    ObjLabel {
+        name: String,
+    },
+    ObjOptional {
+        name: String,
+        for_sure_no_nested_option: bool,
+    },
 }
 
 /// `External_arg_spec.obj_param`.
@@ -144,7 +153,10 @@ pub enum InlineConst {
     ConstString(String),
     ConstBool(bool),
     ConstInt(i32),
-    ConstBigint { negative: bool, digits: String },
+    ConstBigint {
+        negative: bool,
+        digits: String,
+    },
     ConstFloat(String),
 }
 
@@ -155,9 +167,6 @@ pub enum ExternalFfi {
     FfiObjCreate(Vec<ObjParam>),
 }
 
-/// `External_ffi_types.inclusion_compatible impl intf`: can an
-/// implementation's spec satisfy an interface's spec during signature
-/// inclusion? Object-creation specs compare optional fields by name only.
 #[cfg(test)]
 impl ExternalDecl {
     /// A plain global `@val` call, for tests that need some FFI call.
@@ -174,6 +183,9 @@ impl ExternalDecl {
     }
 }
 
+/// `External_ffi_types.inclusion_compatible impl intf`: can an
+/// implementation's spec satisfy an interface's spec during signature
+/// inclusion? Object-creation specs compare optional fields by name only.
 pub fn inclusion_compatible(impl_: &ExternalFfi, intf: &ExternalFfi) -> bool {
     match (impl_, intf) {
         (ExternalFfi::FfiObjCreate(params1), ExternalFfi::FfiObjCreate(params2)) => {
@@ -336,13 +348,21 @@ pub mod debug {
         match s {
             ExternalFfi::FfiBs(params, ret, d) => format!(
                 "Ffi_bs({},{},{})",
-                list(params, |p| format!("{}:{}", attr(&p.arg_type), label_noname(p.arg_label))),
+                list(params, |p| format!(
+                    "{}:{}",
+                    attr(&p.arg_type),
+                    label_noname(p.arg_label)
+                )),
                 return_wrapper(*ret),
                 decl(d)
             ),
             ExternalFfi::FfiObjCreate(params) => format!(
                 "Ffi_obj_create{}",
-                list(params, |p| format!("{}:{}", attr(&p.obj_arg_type), label(&p.obj_arg_label)))
+                list(params, |p| format!(
+                    "{}:{}",
+                    attr(&p.obj_arg_type),
+                    label(&p.obj_arg_label)
+                ))
             ),
         }
     }

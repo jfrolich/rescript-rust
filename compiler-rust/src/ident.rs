@@ -28,8 +28,8 @@
 //! assert!(!id1.same(&id2));  // Different identifiers
 //! ```
 
-use serde::{Deserialize, Serialize};
 use crate::name::Name;
+use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -207,14 +207,6 @@ impl Ident {
         self.flags
     }
 
-    /// Create a unique name by combining name and stamp.
-    ///
-    /// Format: `name_stamp`
-    #[inline]
-    pub fn unique_name(&self) -> String {
-        format!("{}_{}", self.name, self.stamp)
-    }
-
     /// Create a unique toplevel name.
     ///
     /// Format: `name/stamp`
@@ -302,12 +294,8 @@ impl Ident {
         }
     }
 
-    /// Rename this identifier with a new stamp from the generator.
-    ///
-    /// This creates a new identifier with the same name and flags
-    /// but a fresh stamp.
-    #[inline]
     /// Copy this identifier with a stamp reserved earlier from the generator.
+    #[inline]
     pub(crate) fn with_stamp(&self, stamp: i32) -> Self {
         Self {
             name: self.name,
@@ -316,6 +304,11 @@ impl Ident {
         }
     }
 
+    /// Rename this identifier with a new stamp from the generator.
+    ///
+    /// This creates a new identifier with the same name and flags
+    /// but a fresh stamp.
+    #[inline]
     pub fn rename(&self, id_gen: &super::context::IdGenerator) -> Self {
         let stamp = id_gen.next_stamp();
         Self {
@@ -358,13 +351,13 @@ impl PartialEq for Ident {
 impl Eq for Ident {}
 
 impl Hash for Ident {
+    /// Consistent with `Eq` (`same`): a stamped ident is identified by its
+    /// stamp alone, an unstamped one by its name. Flags never take part.
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash based on first character and stamp for efficiency
-        // This matches the OCaml implementation
-        if let Some(c) = self.name.chars().next() {
-            (c as u32 ^ self.stamp as u32).hash(state);
-        } else {
+        if self.stamp != 0 {
             self.stamp.hash(state);
+        } else {
+            self.name.hash(state);
         }
     }
 }
@@ -492,10 +485,8 @@ mod tests {
         let id_gen = IdGenerator::new();
         let id = id_gen.create("foo");
 
-        let unique = id.unique_name();
         let toplevel = id.unique_toplevel_name();
 
-        assert!(unique.starts_with("foo_"));
         assert!(toplevel.starts_with("foo/"));
     }
 
@@ -539,5 +530,34 @@ mod tests {
         // All stamps should be unique
         let stamps: std::collections::HashSet<i32> = all_ids.iter().map(|id| id.stamp()).collect();
         assert_eq!(stamps.len(), all_ids.len());
+    }
+}
+
+#[cfg(test)]
+mod hash_contract_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    fn hash_of(id: &Ident) -> u64 {
+        let mut h = DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn idents_equal_under_same_hash_alike() {
+        for (a, b) in [
+            (
+                Ident::new("nonzero", 7, IdentFlags::GLOBAL),
+                Ident::new("different", 7, IdentFlags::NONE),
+            ),
+            (
+                Ident::new("stampzero", 0, IdentFlags::PREDEF_EXN),
+                Ident::new("stampzero", 0, IdentFlags::NONE),
+            ),
+        ] {
+            assert_eq!(a, b);
+            assert_eq!(hash_of(&a), hash_of(&b));
+        }
     }
 }

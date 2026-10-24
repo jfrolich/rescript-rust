@@ -131,7 +131,7 @@ fn flatten_and_mark_dead_statement(
                                     &tag_info,
                                     index,
                                 ));
-                                rewritten_items.push(Expression::var(temp.clone()));
+                                rewritten_items.push(Expression::var(temp));
                                 bindings.push(Statement::variable(VariableDeclaration {
                                     ident: temp,
                                     value: Some(rewritten),
@@ -150,7 +150,7 @@ fn flatten_and_mark_dead_statement(
                             ),
                             comment: value_comment,
                         };
-                        substitution.insert(decl.ident.clone(), rewritten_value.clone());
+                        substitution.insert(decl.ident, rewritten_value.clone());
 
                         let original = Statement {
                             source_loc: source_loc.clone(),
@@ -281,9 +281,19 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForRange(
                 label,
                 start.map(|expr| {
-                    Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution, jsx_preserve))
+                    Box::new(flatten_and_mark_dead_expression(
+                        *expr,
+                        id_gen,
+                        substitution,
+                        jsx_preserve,
+                    ))
                 }),
-                Box::new(flatten_and_mark_dead_expression(*finish, id_gen, substitution, jsx_preserve)),
+                Box::new(flatten_and_mark_dead_expression(
+                    *finish,
+                    id_gen,
+                    substitution,
+                    jsx_preserve,
+                )),
                 ident,
                 direction,
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
@@ -295,7 +305,12 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
+                Box::new(flatten_and_mark_dead_expression(
+                    *iterable,
+                    id_gen,
+                    substitution,
+                    jsx_preserve,
+                )),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -305,7 +320,12 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
+                Box::new(flatten_and_mark_dead_expression(
+                    *iterable,
+                    id_gen,
+                    substitution,
+                    jsx_preserve,
+                )),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -416,7 +436,8 @@ fn flatten_and_mark_dead_expression(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Expression {
-    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve) {
+    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve)
+    {
         return rewritten;
     }
 
@@ -547,7 +568,9 @@ fn flatten_and_mark_dead_expression(
                 jsx_preserve,
             )),
             args.into_iter()
-                .map(|arg| flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve))
+                .map(|arg| {
+                    flatten_and_mark_dead_expression(arg, id_gen, substitution, jsx_preserve)
+                })
                 .collect(),
             info,
         ),
@@ -591,15 +614,17 @@ fn flatten_and_mark_dead_expression(
                 })
                 .collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values
-                .into_iter()
-                .map(|value| {
-                    flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
-                })
-                .collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values
+                    .into_iter()
+                    .map(|value| {
+                        flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                    })
+                    .collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(target, field, pos) => {
             let target =
                 flatten_and_mark_dead_expression(*target, id_gen, substitution, jsx_preserve);
@@ -838,15 +863,15 @@ fn is_simple_block_binding_item(expr: &Expression) -> bool {
     // `Self::compile_constant`) so it intentionally does NOT match
     // `Caml_block(Immutable, ...)` patterns elsewhere — and therefore does
     // NOT count as simple here either.
-    match &expr.desc {
+    matches!(
+        &expr.desc,
         ExpressionDesc::Var(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Undefined { .. } => true,
-        _ => false,
-    }
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Str(_)
+            | ExpressionDesc::TemplateLiteral(_)
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+    )
 }
 
 fn is_simple_substituted_index_value(expr: &Expression) -> bool {
@@ -1005,7 +1030,7 @@ fn collect_mark_dead_states_variable(
     match states.get(&decl.ident).copied() {
         Some(MarkDeadInfo::Recursive) => {
             states.insert(
-                decl.ident.clone(),
+                decl.ident,
                 MarkDeadInfo::Info {
                     pure,
                     used: true,
@@ -1016,7 +1041,7 @@ fn collect_mark_dead_states_variable(
         Some(MarkDeadInfo::Info { .. }) => {}
         None => {
             states.insert(
-                decl.ident.clone(),
+                decl.ident,
                 MarkDeadInfo::Info {
                     pure,
                     used: false,
@@ -1126,7 +1151,7 @@ fn collect_mark_dead_states_expression(
 fn mark_dead_ident_use(id: &Ident, states: &mut HashMap<Ident, MarkDeadInfo>) {
     match states.get_mut(id) {
         None => {
-            states.insert(id.clone(), MarkDeadInfo::Recursive);
+            states.insert(*id, MarkDeadInfo::Recursive);
         }
         Some(MarkDeadInfo::Recursive) => {}
         Some(MarkDeadInfo::Info { used, .. }) => {
@@ -1680,10 +1705,12 @@ fn flatten_expression(expr: Expression) -> Expression {
             strings,
             values.into_iter().map(flatten_expression).collect(),
         ),
-        ExpressionDesc::InterpolatedTemplate { segments, values } => ExpressionDesc::InterpolatedTemplate {
-            segments,
-            values: values.into_iter().map(flatten_expression).collect(),
-        },
+        ExpressionDesc::InterpolatedTemplate { segments, values } => {
+            ExpressionDesc::InterpolatedTemplate {
+                segments,
+                values: values.into_iter().map(flatten_expression).collect(),
+            }
+        }
         ExpressionDesc::StaticIndex(target, field, pos) => {
             ExpressionDesc::StaticIndex(Box::new(flatten_expression(*target)), field, pos)
         }

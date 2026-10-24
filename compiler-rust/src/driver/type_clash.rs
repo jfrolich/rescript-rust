@@ -6,14 +6,12 @@
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::types::asttypes::ArgLabel;
-use crate::types::printtyp::{
-    Printtyp, TAG_ERROR, TAG_INFO, TAG_RESET, TracePair, expand_trace,
-};
-use crate::types::type_expr::{TypeDesc, TypeExprRef};
-use crate::types::{Env, TypeClashContext, TypeContext};
-use crate::types::typecore::JsxPropKind;
 use crate::types::path::Path;
 use crate::types::predef;
+use crate::types::printtyp::{Printtyp, TAG_ERROR, TAG_INFO, TAG_RESET, TracePair, expand_trace};
+use crate::types::type_expr::{TypeDesc, TypeExprRef};
+use crate::types::typecore::JsxPropKind;
+use crate::types::{Env, TypeClashContext, TypeContext};
 
 type Ppf<'b> = Formatter<&'b mut Vec<u8>>;
 
@@ -98,7 +96,11 @@ fn collect_missing_arguments(
     Some(all)
 }
 
-fn print_arguments(ppf: &mut Ppf<'_>, printer: &mut Printtyp<'_>, args: &[(ArgLabel, TypeExprRef)]) {
+fn print_arguments(
+    ppf: &mut Ppf<'_>,
+    printer: &mut Printtyp<'_>,
+    args: &[(ArgLabel, TypeExprRef)],
+) {
     for (i, (label, argtype)) in args.iter().enumerate() {
         if i > 0 {
             ppf.str(",");
@@ -191,9 +193,7 @@ fn error_expected_type_text(ppf: &mut Ppf<'_>, context: &Option<TypeClashContext
             tagged(ppf, TAG_INFO, "if");
             ppf.str(" statement is expected to return:");
         }
-        Some(TypeClashContext::TernaryReturn) => {
-            ppf.str("But this ternary is expected to return:")
-        }
+        Some(TypeClashContext::TernaryReturn) => ppf.str("But this ternary is expected to return:"),
         Some(TypeClashContext::ArrayLiteral) => {
             ppf.str("But this array is expected to have items of type:")
         }
@@ -207,9 +207,7 @@ fn error_expected_type_text(ppf: &mut Ppf<'_>, context: &Option<TypeClashContext
             field_name,
             jsx: Some(JsxPropKind::Fragment),
             ..
-        }) if field_name == "children" => {
-            ppf.str("But children of JSX fragments must be of type:")
-        }
+        }) if field_name == "children" => ppf.str("But children of JSX fragments must be of type:"),
         Some(TypeClashContext::RecordField {
             field_name,
             jsx: Some(JsxPropKind::CustomComponent),
@@ -251,7 +249,9 @@ fn error_expected_type_text(ppf: &mut Ppf<'_>, context: &Option<TypeClashContext
 fn extract_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> String {
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
-    crate::source_text::latin1_slice(source, start, end).unwrap_or("").to_string()
+    crate::source_text::latin1_slice(source, start, end)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// `!Parser.parse_source` then `!Parser.reprint_source`, applied to the
@@ -261,7 +261,10 @@ fn reprint_expr_at_loc(
     arena: &ParseArena,
     source: &str,
     loc: LocIdx,
-    mapper: impl FnOnce(&mut ParseArena, crate::parser::ast::Expression) -> Option<crate::parser::ast::Expression>,
+    mapper: impl FnOnce(
+        &mut ParseArena,
+        crate::parser::ast::Expression,
+    ) -> Option<crate::parser::ast::Expression>,
 ) -> Option<String> {
     let text = extract_text_at_loc(arena, source, loc);
     let mut parser = crate::parser::Parser::new("<none>", &text);
@@ -279,10 +282,9 @@ fn reprint_expr_at_loc(
     let exp = mapper(&mut sub_arena, exp)?;
     let exp_idx = sub_arena.push_expr(exp);
     let wrapped = crate::parser::ast::StructureItem {
-        pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new((
-            exp_idx,
-            crate::parser::ast::Attributes::new(),
-        )))),
+        pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new(
+            (exp_idx, crate::parser::ast::Attributes::new()),
+        ))),
         pstr_loc: LocIdx::none(),
     };
     let printed =
@@ -431,17 +433,30 @@ fn print_extra_type_clash_help(
             };
             let string_path = predef::path_string();
             match (operator.as_str(), &bottom_paths) {
-                ("+", Some((Some(p1), Some(p2)))) if string_path.same(p1) || string_path.same(p2) => {
-                    raw(ppf, "\n\n  Are you looking to concatenate strings? Use the operator ");
+                ("+", Some((Some(p1), Some(p2))))
+                    if string_path.same(p1) || string_path.same(p2) =>
+                {
+                    raw(
+                        ppf,
+                        "\n\n  Are you looking to concatenate strings? Use the operator ",
+                    );
                     tagged(ppf, TAG_INFO, "++");
-                    raw(ppf, ", which concatenates strings.\n\n  Possible solutions:\n  - Change the ");
+                    raw(
+                        ppf,
+                        ", which concatenates strings.\n\n  Possible solutions:\n  - Change the ",
+                    );
                     tagged(ppf, TAG_INFO, "+");
                     raw(ppf, " operator to ");
                     tagged(ppf, TAG_INFO, "++");
                     raw(ppf, " to concatenate strings instead.");
                 }
                 _ => {
-                    raw(ppf, &format!("\n\n  Floats and ints have their own mathematical operators. This means you cannot {operator_text} a float and an int without converting between the two.\n\n  Possible solutions:\n  - Ensure all values in this calculation have the type "));
+                    raw(
+                        ppf,
+                        &format!(
+                            "\n\n  Floats and ints have their own mathematical operators. This means you cannot {operator_text} a float and an int without converting between the two.\n\n  Possible solutions:\n  - Ensure all values in this calculation have the type "
+                        ),
+                    );
                     tagged(ppf, TAG_INFO, if *for_float { "float" } else { "int" });
                     raw(ppf, ". You can convert between floats and ints via ");
                     tagged(ppf, TAG_INFO, "Float.toInt");
@@ -467,15 +482,17 @@ fn print_extra_type_clash_help(
                         raw(ppf, " by removing the dot or explicitly converting to int");
                     }
                 }
-                (None, Some((Some(p1), Some(p2)))) => match (p1.name().as_str(), p2.name().as_str()) {
-                    ("float", "int") | ("int", "float") => {
-                        raw(ppf, "\n  - Change the operator to ");
-                        tagged(ppf, TAG_INFO, operator_for_other_type);
-                        raw(ppf, ", which works on ");
-                        tagged(ppf, TAG_INFO, if *for_float { "int" } else { "float" });
+                (None, Some((Some(p1), Some(p2)))) => {
+                    match (p1.name().as_str(), p2.name().as_str()) {
+                        ("float", "int") | ("int", "float") => {
+                            raw(ppf, "\n  - Change the operator to ");
+                            tagged(ppf, TAG_INFO, operator_for_other_type);
+                            raw(ppf, ", which works on ");
+                            tagged(ppf, TAG_INFO, if *for_float { "int" } else { "float" });
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -484,7 +501,10 @@ fn print_extra_type_clash_help(
             tagged(ppf, TAG_INFO, "switch");
             raw(ppf, " must return the same type.");
             ppf.cut();
-            raw(ppf, "To fix this, change your branch to return the expected type.");
+            raw(
+                ppf,
+                "To fix this, change your branch to return the expected type.",
+            );
         }
         Some(TypeClashContext::LetUnwrapReturn) => {
             let option = predef::path_option();
@@ -506,32 +526,56 @@ fn print_extra_type_clash_help(
             tagged(ppf, TAG_INFO, "catch");
             raw(ppf, " block must return the same type.");
             ppf.cut();
-            raw(ppf, "To fix this, change your try/catch blocks to return the expected type.");
+            raw(
+                ppf,
+                "To fix this, change your try/catch blocks to return the expected type.",
+            );
         }
         Some(TypeClashContext::IfCondition) => {
-            raw(ppf, "\n\n  To fix this, change the highlighted code so it evaluates to a ");
+            raw(
+                ppf,
+                "\n\n  To fix this, change the highlighted code so it evaluates to a ",
+            );
             tagged(ppf, TAG_INFO, "bool");
             raw(ppf, ".");
         }
         Some(TypeClashContext::Await) => {
-            raw(ppf, "\n\n  You're trying to await something that is not a promise.\n\nPossible solutions:\n  - Remove the ");
+            raw(
+                ppf,
+                "\n\n  You're trying to await something that is not a promise.\n\nPossible solutions:\n  - Remove the ",
+            );
             tagged(ppf, TAG_INFO, "await");
-            raw(ppf, " if this is not expected to be a promise\n  - Wrap the expression in ");
+            raw(
+                ppf,
+                " if this is not expected to be a promise\n  - Wrap the expression in ",
+            );
             tagged(ppf, TAG_INFO, "Promise.resolve");
             raw(ppf, " to convert the expression to a promise");
         }
         Some(TypeClashContext::JsxComponent) => {
-            raw(ppf, "\n\n  JSX tags must be React components, not plain functions.\n\n  Possible solutions:\n  - If this function takes labeled props, annotate it with ");
+            raw(
+                ppf,
+                "\n\n  JSX tags must be React components, not plain functions.\n\n  Possible solutions:\n  - If this function takes labeled props, annotate it with ",
+            );
             tagged(ppf, TAG_INFO, "@react.component");
-            raw(ppf, "\n  - If this function takes a single props record, annotate it with ");
+            raw(
+                ppf,
+                "\n  - If this function takes a single props record, annotate it with ",
+            );
             tagged(ppf, TAG_INFO, "@react.componentWithProps");
-            raw(ppf, "\n  - If this is already a valid component-like value, wrap it with ");
+            raw(
+                ppf,
+                "\n  - If this is already a valid component-like value, wrap it with ",
+            );
             tagged(ppf, TAG_INFO, "React.component(...)");
         }
         Some(TypeClashContext::IfReturn) => {
             raw(ppf, "\n\n  ");
             tagged(ppf, TAG_INFO, "if");
-            raw(ppf, " expressions must return the same type in all branches (");
+            raw(
+                ppf,
+                " expressions must return the same type in all branches (",
+            );
             tagged(ppf, TAG_INFO, "if");
             raw(ppf, ", ");
             tagged(ppf, TAG_INFO, "else if");
@@ -561,7 +605,10 @@ fn print_extra_type_clash_help(
             print_object_vs_record_hint(ppf, ctx, arena, source, loc);
         }
         Some(TypeClashContext::ArrayLiteral) => {
-            raw(ppf, "\n\n  Arrays can only contain items of the same type.\n\n  Possible solutions:\n  - Convert all values in the array to the same type.\n  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, \"hello\", 15.5, true)");
+            raw(
+                ppf,
+                "\n\n  Arrays can only contain items of the same type.\n\n  Possible solutions:\n  - Convert all values in the array to the same type.\n  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, \"hello\", 15.5, true)",
+            );
         }
         _ => print_extra_type_clash_help_by_types(
             ppf, printer, ctx, env, arena, source, loc, bottom, trace, context, &desc,
@@ -576,11 +623,17 @@ fn print_let_unwrap_help(ppf: &mut Ppf<'_>, kind: u8) {
             tagged(ppf, TAG_INFO, "let?");
             raw(ppf, " unwraps an ");
             tagged(ppf, TAG_INFO, "option");
-            raw(ppf, "; use it where the enclosing function or let binding returns an ");
+            raw(
+                ppf,
+                "; use it where the enclosing function or let binding returns an ",
+            );
             tagged(ppf, TAG_INFO, "option");
             raw(ppf, " so ");
             tagged(ppf, TAG_INFO, "None");
-            raw(ppf, " can propagate.\n\n  Possible solutions:\n  - Change the enclosing function or let binding to return ");
+            raw(
+                ppf,
+                " can propagate.\n\n  Possible solutions:\n  - Change the enclosing function or let binding to return ",
+            );
             tagged(ppf, TAG_INFO, "option<'t>");
             raw(ppf, " and use ");
             tagged(ppf, TAG_INFO, "Some");
@@ -594,7 +647,10 @@ fn print_let_unwrap_help(ppf: &mut Ppf<'_>, kind: u8) {
             tagged(ppf, TAG_INFO, "switch");
             raw(ppf, " and handle the ");
             tagged(ppf, TAG_INFO, "None");
-            raw(ppf, " case explicitly.\n  - If you want a default value instead of early return, unwrap using ");
+            raw(
+                ppf,
+                " case explicitly.\n  - If you want a default value instead of early return, unwrap using ",
+            );
             tagged(ppf, TAG_INFO, "Option.getOr(default)");
             raw(ppf, ".");
         }
@@ -603,11 +659,17 @@ fn print_let_unwrap_help(ppf: &mut Ppf<'_>, kind: u8) {
             tagged(ppf, TAG_INFO, "let?");
             raw(ppf, " unwraps a ");
             tagged(ppf, TAG_INFO, "result");
-            raw(ppf, "; use it where the enclosing function or let binding returns a ");
+            raw(
+                ppf,
+                "; use it where the enclosing function or let binding returns a ",
+            );
             tagged(ppf, TAG_INFO, "result");
             raw(ppf, " so ");
             tagged(ppf, TAG_INFO, "Error");
-            raw(ppf, " can propagate.\n\n  Possible solutions:\n  - Change the enclosing function or let binding to return ");
+            raw(
+                ppf,
+                " can propagate.\n\n  Possible solutions:\n  - Change the enclosing function or let binding to return ",
+            );
             tagged(ppf, TAG_INFO, "result<'ok, 'error>");
             raw(ppf, "; use ");
             tagged(ppf, TAG_INFO, "Ok");
@@ -621,7 +683,10 @@ fn print_let_unwrap_help(ppf: &mut Ppf<'_>, kind: u8) {
             tagged(ppf, TAG_INFO, "switch");
             raw(ppf, " and handle the ");
             tagged(ppf, TAG_INFO, "Error");
-            raw(ppf, " case explicitly.\n  - If you want a default value instead of early return, unwrap using ");
+            raw(
+                ppf,
+                " case explicitly.\n  - If you want a default value instead of early return, unwrap using ",
+            );
             tagged(ppf, TAG_INFO, "Result.getOr(default)");
             raw(ppf, ".");
         }
@@ -632,7 +697,10 @@ fn print_let_unwrap_help(ppf: &mut Ppf<'_>, kind: u8) {
             tagged(ppf, TAG_INFO, "option");
             raw(ppf, " or ");
             tagged(ppf, TAG_INFO, "result");
-            raw(ppf, ".\n\n  Possible solutions:\n  - Change the enclosing function or let binding to return an ");
+            raw(
+                ppf,
+                ".\n\n  Possible solutions:\n  - Change the enclosing function or let binding to return an ",
+            );
             tagged(ppf, TAG_INFO, "option<'t>");
             raw(ppf, " or ");
             tagged(ppf, TAG_INFO, "result<'ok, 'error>");
@@ -644,7 +712,10 @@ fn print_let_unwrap_help(ppf: &mut Ppf<'_>, kind: u8) {
             tagged(ppf, TAG_INFO, "switch");
             raw(ppf, " and handle the ");
             tagged(ppf, TAG_INFO, "None/Error");
-            raw(ppf, " case explicitly.\n  - If you want a default value instead of early return, unwrap using ");
+            raw(
+                ppf,
+                " case explicitly.\n  - If you want a default value instead of early return, unwrap using ",
+            );
             tagged(ppf, TAG_INFO, "Option.getOr(default)");
             raw(ppf, " or ");
             tagged(ppf, TAG_INFO, "Result.getOr(default)");
@@ -674,7 +745,8 @@ fn print_object_vs_record_hint(
     tagged(ppf, TAG_INFO, "record");
     ppf.str(" is expected. Objects are written with quoted keys, and records with unquoted keys.");
     let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
-        let crate::parser::ast::ExpressionDesc::Pexp_object_literal(fields) = &*exp.pexp_desc else {
+        let crate::parser::ast::ExpressionDesc::Pexp_object_literal(fields) = &*exp.pexp_desc
+        else {
             return None;
         };
         let rows = fields
@@ -683,14 +755,19 @@ fn print_object_vs_record_hint(
                 let name_idx = a.intern(&name.txt);
                 let lid = a.push_longident(crate::parser::longident::Longident::Lident(name_idx));
                 crate::parser::ast::ExpressionRecordField {
-                    lid: crate::parser::ast::Loc { txt: lid, loc: name.loc },
+                    lid: crate::parser::ast::Loc {
+                        txt: lid,
+                        loc: name.loc,
+                    },
                     expr: *e,
                     opt: false,
                 }
             })
             .collect();
         Some(crate::parser::ast::Expression {
-            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((rows, None)))),
+            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((
+                rows, None,
+            )))),
             pexp_loc: exp.pexp_loc,
             pexp_attributes: crate::parser::ast::Attributes::new(),
         })
@@ -739,11 +816,17 @@ fn print_extra_type_clash_help_by_types(
 
     // | _, Some ({desc = Tarrow _}, expected) when is_jsx_component_type ~env expected
     if matches!(d1, TypeDesc::Tarrow { .. }) && expands_to_jsx(ctx, env, b2, "component") {
-        raw(ppf, "\n\n  A React component is expected here, but this expression is a plain function.\n\n  Possible solutions:\n  - Extract it to a component annotated with ");
+        raw(
+            ppf,
+            "\n\n  A React component is expected here, but this expression is a plain function.\n\n  Possible solutions:\n  - Extract it to a component annotated with ",
+        );
         tagged(ppf, TAG_INFO, "@react.component");
         raw(ppf, " or ");
         tagged(ppf, TAG_INFO, "@react.componentWithProps");
-        raw(ppf, "\n  - If this is already a valid component-like value, wrap it with ");
+        raw(
+            ppf,
+            "\n  - If this is already a valid component-like value, wrap it with ",
+        );
         tagged(ppf, TAG_INFO, "React.component(...)");
         return;
     }
@@ -760,11 +843,20 @@ fn print_extra_type_clash_help_by_types(
     if p1.is_some() && is(&p2, predef::path_unit()) {
         raw(ppf, "\n\n");
         if expands_to_jsx(ctx, env, b1, "element") {
-            raw(ppf, "  - Did you forget to wrap this + adjacent JSX in a JSX fragment (");
+            raw(
+                ppf,
+                "  - Did you forget to wrap this + adjacent JSX in a JSX fragment (",
+            );
             tagged(ppf, TAG_INFO, "<></>");
-            raw(ppf, ")?\n  - Did you mean to assign this to a variable?\n\n");
+            raw(
+                ppf,
+                ")?\n  - Did you mean to assign this to a variable?\n\n",
+            );
         } else {
-            raw(ppf, "  - Did you mean to assign this to a variable?\n  - If you don't care about the result of this expression, you can assign it to ");
+            raw(
+                ppf,
+                "  - Did you mean to assign this to a variable?\n  - If you don't care about the result of this expression, you can assign it to ",
+            );
             tagged(ppf, TAG_INFO, "_");
             raw(ppf, " via ");
             tagged(ppf, TAG_INFO, "let _ = ...");
@@ -783,7 +875,10 @@ fn print_extra_type_clash_help_by_types(
     }
     // | _, Some ({desc = Tconstr (p1, _, _)}, _) when p1 = promise
     if is(&p1, predef::path_promise()) {
-        raw(ppf, "\n\n  - Did you mean to await this promise before using it?\n");
+        raw(
+            ppf,
+            "\n\n  - Did you mean to await this promise before using it?\n",
+        );
         return;
     }
     // | _, Some ({desc = Tconstr (p1, _, _)}, {desc = Ttuple _}) when p1 = array
@@ -798,7 +893,10 @@ fn print_extra_type_clash_help_by_types(
                 ..exp
             })
         });
-        raw(ppf, "\n\n  - Fix this by passing a tuple instead of an array");
+        raw(
+            ppf,
+            "\n\n  - Fix this by passing a tuple instead of an array",
+        );
         if suggested.is_some() {
             raw(ppf, ", like: ");
         }
@@ -807,7 +905,12 @@ fn print_extra_type_clash_help_by_types(
         return;
     }
     // | _, Some ({desc = Tconstr (p, type_params, _)}, {desc = Tconstr (Jsx.element)})
-    if let (Some(p), TypeDesc::Tconstr { args: type_params, .. }) = (&p1, &d1)
+    if let (
+        Some(p),
+        TypeDesc::Tconstr {
+            args: type_params, ..
+        },
+    ) = (&p1, &d1)
         && p2.as_ref().is_some_and(|p2| is_jsx_path(p2, "element"))
     {
         let print_jsx_msg = |ppf: &mut Ppf<'_>, name: &str, target_fn: &str, extra: &str| {
@@ -849,7 +952,9 @@ fn print_extra_type_clash_help_by_types(
         } else if type_params.len() == 1 && p.same(&predef::path_array()) {
             ppf.cut();
             ppf.cut();
-            ppf.str("You need to convert each item in this array to a JSX element first, then use ");
+            ppf.str(
+                "You need to convert each item in this array to a JSX element first, then use ",
+            );
             tagged(ppf, TAG_INFO, &with_configured_jsx_module("array"));
             ppf.str(" to convert the array of JSX elements into a single JSX element.");
             ppf.cut();
@@ -975,17 +1080,22 @@ fn print_extra_type_clash_help_by_types(
                 };
                 let s = payload.semantic().to_string();
                 Some(crate::parser::ast::Expression {
-                    pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
-                        std::borrow::Cow::Owned(s),
-                        crate::parse_arena::Located::new(Vec::new(), exp.pexp_loc),
-                    )))),
+                    pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_variant(
+                        Box::new((
+                            std::borrow::Cow::Owned(s),
+                            crate::parse_arena::Located::new(Vec::new(), exp.pexp_loc),
+                        )),
+                    )),
                     ..exp
                 })
             });
             if let Some(reprinted) = reprinted
                 && variant_constructors.contains(&string_value)
             {
-                raw(ppf, "\n\n  Possible solutions:\n  - The constant passed matches one of the expected polymorphic variant constructors. Did you mean to pass this as a polymorphic variant? If so, rewrite ");
+                raw(
+                    ppf,
+                    "\n\n  Possible solutions:\n  - The constant passed matches one of the expected polymorphic variant constructors. Did you mean to pass this as a polymorphic variant? If so, rewrite ",
+                );
                 tagged(ppf, TAG_INFO, &format!("\"{string_value}\""));
                 raw(ppf, " to ");
                 tagged(ppf, TAG_INFO, &reprinted);
@@ -1030,7 +1140,10 @@ fn print_extra_type_clash_help_by_types(
                     })
                 });
                 if let Some(reprinted) = reprinted {
-                    raw(ppf, "\n\n  Possible solutions:\n  - The constant passed matches the runtime representation of one of the expected variant constructors. Did you mean to pass this as a variant constructor? If so, rewrite ");
+                    raw(
+                        ppf,
+                        "\n\n  Possible solutions:\n  - The constant passed matches the runtime representation of one of the expected variant constructors. Did you mean to pass this as a variant constructor? If so, rewrite ",
+                    );
                     tagged(ppf, TAG_INFO, &format!("\"{string_value}\""));
                     raw(ppf, " to ");
                     tagged(ppf, TAG_INFO, &reprinted);
@@ -1046,7 +1159,9 @@ fn print_extra_type_clash_help_by_types(
     };
     let can_show_coercion_message = match top_level_types {
         Some((t1, t2)) => {
-            if matches!(desc(t1), TypeDesc::Tvariant(_)) && matches!(desc(t2), TypeDesc::Tvariant(_)) {
+            if matches!(desc(t1), TypeDesc::Tvariant(_))
+                && matches!(desc(t2), TypeDesc::Tvariant(_))
+            {
                 false
             } else {
                 crate::types::ctype::subtype_now(ctx, env, t1, t2).is_ok()
@@ -1059,8 +1174,10 @@ fn print_extra_type_clash_help_by_types(
         printer.type_expr(b2)
     };
     let target_expr_text = extract_text_at_loc(arena, source, loc);
-    let suggested_rewrite =
-        parse_and_reprint(ctx, &format!("({target_expr_text} :> {target_type_string})"));
+    let suggested_rewrite = parse_and_reprint(
+        ctx,
+        &format!("({target_expr_text} :> {target_type_string})"),
+    );
     let is_constant = text_is_constant(ctx, &target_expr_text);
     if can_show_coercion_message && !is_constant {
         ppf.cut();
@@ -1090,9 +1207,7 @@ fn constructor_tag(
 ) -> Option<crate::types::variant_runtime::LiteralTag> {
     match layout.constructors.get(position)? {
         crate::types::variant_runtime::ConstructorCase::Constant(tag) => tag.literal.clone(),
-        crate::types::variant_runtime::ConstructorCase::Block(block) => {
-            block.tag().literal.clone()
-        }
+        crate::types::variant_runtime::ConstructorCase::Block(block) => block.tag().literal.clone(),
     }
 }
 
@@ -1169,11 +1284,7 @@ pub(super) fn print_expr_type_clash(
     context: &Option<TypeClashContext>,
 ) {
     let tr = expand_trace(ctx, raw_trace);
-    let mut printer = Printtyp::new(ctx);
-    let lookup_env = env.clone();
-    printer.set_printing_env(Box::new(move |name| {
-        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
-    }));
+    let mut printer = printer_with_env(ctx, env);
     ppf.open_box(BoxKind::V, 0);
     let bottom = bottom_aliases(&tr);
     let missing_arguments = bottom.and_then(|(a, e)| collect_missing_arguments(ctx, env, a, e));
@@ -1263,7 +1374,16 @@ pub(super) fn print_expr_type_clash(
                 None,
             );
             print_extra_type_clash_help(
-                ppf, &mut printer, ctx, env, arena, source, loc, bottom, &tr, context,
+                ppf,
+                &mut printer,
+                ctx,
+                env,
+                arena,
+                source,
+                loc,
+                bottom,
+                &tr,
+                context,
             );
             show_extra_help(ctx, ppf, &tr);
         }
@@ -1305,17 +1425,18 @@ pub(super) fn print_not_subtype(
 ) {
     let tr1 = expand_trace(ctx, raw_trace1);
     let tr2 = expand_trace(ctx, raw_trace2);
-    let mut printer = Printtyp::new(ctx);
-    let lookup_env = env.clone();
-    printer.set_printing_env(Box::new(move |name| {
-        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
-    }));
+    let mut printer = printer_with_env(ctx, env);
     printer.report_subtyping_error(ppf, &tr1, "is not a subtype of", &tr2, context);
 }
 
 /// `Typetexp.report_error`'s `Constructor_mismatch (ty, ty')`
 /// (typetexp.ml:804-809).
-pub(super) fn print_constructor_mismatch(ppf: &mut Ppf<'_>, ctx: &TypeContext, ty: TypeExprRef, ty2: TypeExprRef) {
+pub(super) fn print_constructor_mismatch(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    ty2: TypeExprRef,
+) {
     let mut printer = Printtyp::new(ctx);
     printer.reset_and_mark_loops_list(&[ty, ty2]);
     ppf.open_box(BoxKind::HOV, 0);
@@ -1373,7 +1494,12 @@ pub(super) fn print_method_mismatch(
 /// `Error_message_utils.print_contextual_unification_error`
 /// (error_message_utils.ml:859-882), the `print_extra_info` of pattern type
 /// clashes.
-fn print_contextual_unification_error(ppf: &mut Ppf<'_>, ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
+fn print_contextual_unification_error(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) {
     let option = predef::path_option();
     let path_of = |t: TypeExprRef| match &*ctx.borrow_desc(t) {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
@@ -1534,7 +1660,9 @@ pub(super) fn print_apply_non_function(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ
             close_tag(ppf);
             ppf.close_box();
             ppf.cut();
-            ppf.str("It can't be called like a function. Use it with backtick syntax instead, e.g. ");
+            ppf.str(
+                "It can't be called like a function. Use it with backtick syntax instead, e.g. ",
+            );
             tagged(ppf, TAG_INFO, "tag`SELECT ${id}`");
             ppf.str(".");
             ppf.close_box();
@@ -1554,7 +1682,12 @@ pub(super) fn print_apply_non_function(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ
 
 /// `Typecore.report_error`'s `Apply_wrong_label (l, ty)` (typecore.ml:4924-4932);
 /// `label` is `None` for `Nolabel`, else the prefixed label name.
-pub(super) fn print_apply_wrong_label(ppf: &mut Ppf<'_>, ctx: &TypeContext, label: Option<&str>, ty: TypeExprRef) {
+pub(super) fn print_apply_wrong_label(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    label: Option<&str>,
+    ty: TypeExprRef,
+) {
     let mut printer = Printtyp::new(ctx);
     ppf.open_box(BoxKind::V, 0);
     ppf.open_box(BoxKind::Box, 2);
@@ -1574,7 +1707,12 @@ pub(super) fn print_apply_wrong_label(ppf: &mut Ppf<'_>, ctx: &TypeContext, labe
 }
 
 /// `Typecore.report_error`'s `Abstract_wrong_label (l, ty)` (typecore.ml:4996-5003).
-pub(super) fn print_abstract_wrong_label(ppf: &mut Ppf<'_>, ctx: &TypeContext, label_mark: &str, ty: TypeExprRef) {
+pub(super) fn print_abstract_wrong_label(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    label_mark: &str,
+    ty: TypeExprRef,
+) {
     let mut printer = Printtyp::new(ctx);
     ppf.open_box(BoxKind::V, 0);
     ppf.open_box(BoxKind::Box, 2);
@@ -1588,7 +1726,12 @@ pub(super) fn print_abstract_wrong_label(ppf: &mut Ppf<'_>, ctx: &TypeContext, l
 }
 
 /// `Typecore.report_error`'s `Field_not_optional (name, typ)` (typecore.ml:5222-5224).
-pub(super) fn print_field_not_optional(ppf: &mut Ppf<'_>, ctx: &TypeContext, name: &str, typ: TypeExprRef) {
+pub(super) fn print_field_not_optional(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    name: &str,
+    typ: TypeExprRef,
+) {
     let mut printer = Printtyp::new(ctx);
     ppf.str("Field ");
     tagged(ppf, TAG_INFO, name);
@@ -1598,7 +1741,11 @@ pub(super) fn print_field_not_optional(ppf: &mut Ppf<'_>, ctx: &TypeContext, nam
 }
 
 /// `Typecore.report_error`'s `Tagged_template_non_tag typ` (typecore.ml:5237-5250).
-pub(super) fn print_tagged_template_non_tag(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
+pub(super) fn print_tagged_template_non_tag(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    typ: TypeExprRef,
+) {
     let mut printer = Printtyp::new(ctx);
     ppf.open_box(BoxKind::V, 0);
     ppf.str("This value is used with tagged template (backtick) syntax, but it has type");
@@ -1659,7 +1806,11 @@ pub(super) fn print_name_type_mismatch(
         Some(env) => printer_with_env(ctx, env),
         None => Printtyp::new(ctx),
     };
-    let name = if kind == "record" { "field" } else { "constructor" };
+    let name = if kind == "record" {
+        "field"
+    } else {
+        "constructor"
+    };
     printer.report_ambiguous_type_error(
         ppf,
         tp,
@@ -1674,7 +1825,11 @@ pub(super) fn print_name_type_mismatch(
             ppf.space();
             ppf.str(&format!("belongs to one of the following {kind} types:"));
         },
-        &mut |ppf| ppf.str(&format!("but a {name} was expected belonging to the {kind} type")),
+        &mut |ppf| {
+            ppf.str(&format!(
+                "but a {name} was expected belonging to the {kind} type"
+            ))
+        },
     );
 }
 
@@ -1720,14 +1875,22 @@ pub(super) fn print_unbound_label(
             ppf.str("- Use ");
             tagged(ppf, TAG_INFO, "Option.map");
             ppf.str(" to transform the option: ");
-            tagged(ppf, TAG_INFO, &format!("xx->Option.map(field => field.{lid})"));
+            tagged(
+                ppf,
+                TAG_INFO,
+                &format!("xx->Option.map(field => field.{lid})"),
+            );
             ppf.close_box();
             ppf.cut();
             ppf.open_box(BoxKind::Box, 0);
             ppf.str("- Or use ");
             tagged(ppf, TAG_INFO, "Option.getOr");
             ppf.str(" with a default: ");
-            tagged(ppf, TAG_INFO, &format!("xx->Option.getOr(defaultRecord).{lid}"));
+            tagged(
+                ppf,
+                TAG_INFO,
+                &format!("xx->Option.getOr(defaultRecord).{lid}"),
+            );
             ppf.close_box();
             ppf.close_box();
         }
@@ -1780,7 +1943,11 @@ pub(super) fn print_unbound_label(
             ppf.open_box(BoxKind::Box, 0);
             ppf.str("- Or specifying the record type explicitly:");
             ppf.space();
-            tagged(ppf, TAG_INFO, &format!("let theValue: TheModule.theType = {{{lid}: VALUE}}"));
+            tagged(
+                ppf,
+                TAG_INFO,
+                &format!("let theValue: TheModule.theType = {{{lid}: VALUE}}"),
+            );
             ppf.close_box();
             ppf.close_box();
         }
@@ -1792,7 +1959,11 @@ pub(super) fn print_unbound_label(
 /// followed by its `spellcheck` hint.
 pub(super) fn print_unbound_constructor(ppf: &mut Ppf<'_>, lid: &str, hint: Option<&str>) {
     ppf.open_box(BoxKind::V, 0);
-    tagged(ppf, TAG_INFO, &format!("The variant constructor {lid} can't be found."));
+    tagged(
+        ppf,
+        TAG_INFO,
+        &format!("The variant constructor {lid} can't be found."),
+    );
     ppf.cut();
     ppf.cut();
     ppf.open_box(BoxKind::V, 2);
@@ -1807,7 +1978,11 @@ pub(super) fn print_unbound_constructor(ppf: &mut Ppf<'_>, lid: &str, hint: Opti
     ppf.open_box(BoxKind::Box, 0);
     ppf.str("- Or specifying its type:");
     ppf.space();
-    tagged(ppf, TAG_INFO, &format!("let theValue: TheModule.theType = {lid}"));
+    tagged(
+        ppf,
+        TAG_INFO,
+        &format!("let theValue: TheModule.theType = {lid}"),
+    );
     ppf.close_box();
     ppf.close_box();
     ppf.cut();

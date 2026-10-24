@@ -47,7 +47,7 @@ impl fmt::Display for Location {
 ///
 /// This corresponds to `Lexing.position` in OCaml.
 /// File name is stored as StrIdx for efficient sharing in marshal output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct Position {
     /// File name (interned string index).
     pub file_name: StrIdx,
@@ -59,17 +59,6 @@ pub struct Position {
     pub cnum: i32,
 }
 
-impl Default for Position {
-    fn default() -> Self {
-        Self {
-            file_name: StrIdx::default(),
-            line: 0,
-            bol: 0,
-            cnum: 0,
-        }
-    }
-}
-
 impl Position {
     /// Create a new position with an interned file name.
     pub fn new(file_name: StrIdx, line: i32, bol: i32, cnum: i32) -> Self {
@@ -78,16 +67,6 @@ impl Position {
             line,
             bol,
             cnum,
-        }
-    }
-
-    /// Create a position at the start of a file.
-    pub fn at_file_start(file_name: StrIdx) -> Self {
-        Self {
-            file_name,
-            line: 1,
-            bol: 0,
-            cnum: 0,
         }
     }
 
@@ -157,8 +136,8 @@ impl Location {
     }
 
     /// Create a location for error reporting contexts where we don't have an arena.
-    /// Uses StrIdx(0) as a placeholder - the file name won't be resolved correctly
-    /// but this is only used for error display, not marshalling.
+    /// The file name argument is ignored: the location uses `StrIdx(0)` as a
+    /// placeholder, so it only carries the offsets and is never marshalled.
     pub fn new_for_error(_file_name: &str, start_offset: usize, end_offset: usize) -> Self {
         Self::new(StrIdx::default(), start_offset, end_offset)
     }

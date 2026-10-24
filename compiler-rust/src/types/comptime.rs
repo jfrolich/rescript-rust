@@ -64,10 +64,12 @@ pub const DEFAULT_FUEL: usize = 100_000;
 /// pair during specialization emits a self-reference instead of
 /// expanding again.
 pub struct MonomorphCache {
-    /// Completed specializations: (func_name, type_key) → generated name.
-    completed: HashMap<(String, TypeInfo), String>,
-    /// In-progress specializations (for recursion detection).
-    in_progress: HashSet<(String, TypeInfo)>,
+    /// Completed specializations: func_name → type_key → generated name.
+    /// Keyed by function first so lookups borrow instead of building an
+    /// owned `(String, TypeInfo)` probe.
+    completed: HashMap<String, HashMap<TypeInfo, String>>,
+    /// In-progress specializations (for recursion detection), by function.
+    in_progress: HashMap<String, HashSet<TypeInfo>>,
     /// Generated function bodies to emit as structure items.
     pub generated: Vec<GeneratedFunction>,
 }
@@ -92,11 +94,17 @@ pub struct GeneratedFunction {
     pub recursive: bool,
 }
 
+impl Default for MonomorphCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MonomorphCache {
     pub fn new() -> Self {
         Self {
             completed: HashMap::new(),
-            in_progress: HashSet::new(),
+            in_progress: HashMap::new(),
             generated: Vec::new(),
         }
     }
@@ -105,21 +113,25 @@ impl MonomorphCache {
     /// Returns the generated function name if so.
     pub fn lookup(&self, func_name: &str, type_key: &TypeInfo) -> Option<&str> {
         self.completed
-            .get(&(func_name.to_string(), type_key.clone()))
-            .map(|s| s.as_str())
+            .get(func_name)?
+            .get(type_key)
+            .map(String::as_str)
     }
 
     /// Check if a specialization is currently in progress (recursion).
     pub fn is_in_progress(&self, func_name: &str, type_key: &TypeInfo) -> bool {
         self.in_progress
-            .contains(&(func_name.to_string(), type_key.clone()))
+            .get(func_name)
+            .is_some_and(|types| types.contains(type_key))
     }
 
     /// Mark a specialization as in-progress. Returns the generated name.
     pub fn begin(&mut self, func_name: &str, type_key: &TypeInfo) -> String {
         let generated_name = make_monomorph_name(func_name, type_key);
         self.in_progress
-            .insert((func_name.to_string(), type_key.clone()));
+            .entry(func_name.to_string())
+            .or_default()
+            .insert(type_key.clone());
         generated_name
     }
 
@@ -131,10 +143,13 @@ impl MonomorphCache {
         generated_name: String,
         func: GeneratedFunction,
     ) {
-        self.in_progress
-            .remove(&(func_name.to_string(), type_key.clone()));
+        if let Some(types) = self.in_progress.get_mut(func_name) {
+            types.remove(type_key);
+        }
         self.completed
-            .insert((func_name.to_string(), type_key.clone()), generated_name);
+            .entry(func_name.to_string())
+            .or_default()
+            .insert(type_key.clone(), generated_name);
         self.generated.push(func);
     }
 }
@@ -283,15 +298,11 @@ pub struct ConstructorInfo {
     pub attributes: Vec<(std::string::String, std::string::String)>,
 }
 
-// ── build_type_info ─────────────────────────────────────────────────────────
+// ── TypeInfo ↔ TypeExpr ─────────────────────────────────────────────────────
 
 /// Convert a TypeInfo back to a TypeExprRef.
 /// Looks up user-defined types by name in the environment.
-pub fn type_info_to_type_expr<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ti: &TypeInfo,
-) -> Option<TypeExprRef> {
+pub fn type_info_to_type_expr(ctx: &TypeContext, env: &Env, ti: &TypeInfo) -> Option<TypeExprRef> {
     match ti {
         TypeInfo::Int => Some(ctx.new_constr(predef::path_int(), vec![])),
         TypeInfo::Float => Some(ctx.new_constr(predef::path_float(), vec![])),
@@ -310,13 +321,13 @@ pub fn type_info_to_type_expr<'a>(
         }
         TypeInfo::Record { name, .. } | TypeInfo::Variant { name, .. } => {
             match env.find_type_with_id(name) {
-                Ok((id, _)) => Some(ctx.new_constr(Path::Pident(id.clone()), vec![])),
+                Ok((id, _)) => Some(ctx.new_constr(Path::Pident(*id), vec![])),
                 Err(_) => None,
             }
         }
         TypeInfo::External { name } | TypeInfo::Opaque { name } => {
             match env.find_type_with_id(name) {
-                Ok((id, _)) => Some(ctx.new_constr(Path::Pident(id.clone()), vec![])),
+                Ok((id, _)) => Some(ctx.new_constr(Path::Pident(*id), vec![])),
                 Err(_) => None,
             }
         }
@@ -328,8 +339,8 @@ pub fn type_info_to_type_expr<'a>(
 ///
 /// Resolves aliases, identifies primitives, and inspects user-defined types
 /// (records, variants) through their declarations in the type context.
-pub fn build_type_info<'a>(
-    ctx: &'a TypeContext,
+pub fn build_type_info(
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     visited: &mut Vec<TypeExprRef>,
@@ -416,8 +427,8 @@ pub fn build_type_info<'a>(
 }
 
 /// Build TypeInfo from a Tconstr (type constructor application).
-fn build_type_info_from_constr<'a>(
-    ctx: &'a TypeContext,
+fn build_type_info_from_constr(
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
     args: &[TypeExprRef],
@@ -540,9 +551,9 @@ fn build_type_info_from_constr<'a>(
 }
 // ── TypeInfo → Typed Tree Expression ─────────────────────────────────────────
 
-fn type_info_constructor_description<'a>(
+fn type_info_constructor_description(
     ctor_name: &str,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     env: &Env,
 ) -> Option<ConstructorDescription> {
     // `typeInfo` is a Rust-only compiler-internal predef. It is intentionally
@@ -597,9 +608,9 @@ fn type_info_constructor_description<'a>(
 
 /// Construct a typed tree Expression representing a `typeInfo` literal value.
 /// This is called when `@typeInfo(expr)` is encountered during type checking.
-pub fn type_info_to_typed_expr<'a>(
+pub fn type_info_to_typed_expr(
     info: &TypeInfo,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> Option<typedtree::Expression> {
@@ -714,9 +725,9 @@ pub fn type_info_to_typed_expr<'a>(
 }
 
 /// Build a typed expression for a fieldInfo record value.
-fn build_field_info_expr<'a>(
+fn build_field_info_expr(
     field: &FieldInfo,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -743,9 +754,9 @@ fn build_field_info_expr<'a>(
 }
 
 /// Make a typed string constant expression.
-pub fn make_string_expr<'a>(
+pub fn make_string_expr(
     s: &str,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -759,9 +770,9 @@ pub fn make_string_expr<'a>(
 }
 
 /// Make a typed boolean expression.
-pub fn make_bool_expr<'a>(
+pub fn make_bool_expr(
     b: bool,
-    ctx: &'a TypeContext,
+    ctx: &TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -823,12 +834,6 @@ pub enum ComptimeValue {
     /// A variant constructor.
     Variant(std::string::String, Option<Box<ComptimeValue>>),
 }
-
-// ── build_type_info ─────────────────────────────────────────────────────────
-
-/// Build a TypeInfo from a compiler type expression.
-///
-/// Resolves aliases, identifies primitives, and inspects user-defined types
 
 // ── Comptime Pattern Matching ───────────────────────────────────────────────
 
@@ -979,7 +984,7 @@ pub fn specialize_expression(
                     Some(constant) => typedtree::ExpressionDesc::Texp_constant(constant),
                     None => {
                         // Can't convert to constant — leave as is
-                        typedtree::ExpressionDesc::Texp_ident(path.clone(), lid.clone(), vd.clone())
+                        typedtree::ExpressionDesc::Texp_ident(path.clone(), *lid, vd.clone())
                     }
                 }
             } else {
@@ -1133,13 +1138,13 @@ pub fn specialize_expression(
                         typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
                             match specialize_expression(field_expr, env, ctx, type_env) {
                                 Ok(spec) => {
-                                    typedtree::RecordLabelDefinition::Overridden(lid2.clone(), spec)
+                                    typedtree::RecordLabelDefinition::Overridden(*lid2, spec)
                                 }
                                 Err(_) => def.clone(),
                             }
                         }
                     };
-                    (lid.clone(), desc.clone(), spec_def, *opt)
+                    (*lid, desc.clone(), spec_def, *opt)
                 })
                 .collect();
             let spec_ext = extended_expression
@@ -1174,13 +1179,13 @@ pub fn specialize_expression(
                         typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
                             match specialize_expression(field_expr, env, ctx, type_env) {
                                 Ok(spec) => {
-                                    typedtree::RecordLabelDefinition::Overridden(lid2.clone(), spec)
+                                    typedtree::RecordLabelDefinition::Overridden(*lid2, spec)
                                 }
                                 Err(_) => def.clone(),
                             }
                         }
                     };
-                    (lid.clone(), desc.clone(), spec_def, *opt)
+                    (*lid, desc.clone(), spec_def, *opt)
                 })
                 .collect();
             let spec_ext = extended_expression
@@ -1198,7 +1203,7 @@ pub fn specialize_expression(
         // Field access — pass through (with specialized base)
         typedtree::ExpressionDesc::Texp_field(base, lid, desc) => {
             let spec_base = specialize_expression(base, env, ctx, type_env)?;
-            typedtree::ExpressionDesc::Texp_field(Box::new(spec_base), lid.clone(), desc.clone())
+            typedtree::ExpressionDesc::Texp_field(Box::new(spec_base), *lid, desc.clone())
         }
 
         // Constructor — specialize arguments
@@ -1207,7 +1212,7 @@ pub fn specialize_expression(
                 .iter()
                 .map(|e| specialize_expression(e, env, ctx, type_env))
                 .collect::<Result<_, _>>()?;
-            typedtree::ExpressionDesc::Texp_construct(lid.clone(), desc.clone(), spec_args)
+            typedtree::ExpressionDesc::Texp_construct(*lid, desc.clone(), spec_args)
         }
 
         // Everything else — clone as is
@@ -1219,7 +1224,7 @@ pub fn specialize_expression(
         exp_loc: expr.exp_loc,
         exp_extra: expr.exp_extra.clone(),
         exp_type: expr.exp_type,
-        exp_env: expr.exp_env.clone(),
+        exp_env: expr.exp_env,
         exp_attributes: expr.exp_attributes.clone(),
     })
 }

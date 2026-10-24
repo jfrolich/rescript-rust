@@ -121,28 +121,34 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
         .read_with_header(&mut cursor)
         .map_err(|_| CmiError::Corrupted(filename.to_string()))?;
 
-    // The first value is a tuple: (string, signature_item list)
-    let (tag, fields) = name_and_sign.as_block();
-    if tag != 0 || fields.len() != 2 {
-        return Err(CmiError::Corrupted(filename.to_string()));
-    }
+    let corrupted = || CmiError::Corrupted(filename.to_string());
 
-    let cmi_name = fields[0].as_string().to_string();
-    let cmi_sign = fields[1].as_list().into_iter().cloned().collect();
+    // The first value is a tuple: (string, signature_item list)
+    let (cmi_name, cmi_sign) = match name_and_sign.as_block_opt() {
+        Some((0, [name, sign])) => (
+            name.as_string_opt().ok_or_else(corrupted)?.to_string(),
+            sign.try_list()
+                .ok_or_else(corrupted)?
+                .into_iter()
+                .cloned()
+                .collect(),
+        ),
+        _ => return Err(corrupted()),
+    };
 
     // Read second marshal'd value: crcs
     let mut reader2 = MarshalReader::new();
     let crcs_value = reader2
         .read_with_header(&mut cursor)
         .map_err(|_| CmiError::Corrupted(filename.to_string()))?;
-    let cmi_crcs = read_crcs(&crcs_value);
+    let cmi_crcs = read_crcs(&crcs_value).ok_or_else(corrupted)?;
 
     // Read third marshal'd value: flags
     let mut reader3 = MarshalReader::new();
     let flags_value = reader3
         .read_with_header(&mut cursor)
         .map_err(|_| CmiError::Corrupted(filename.to_string()))?;
-    let cmi_flags = read_flags(&flags_value);
+    let cmi_flags = read_flags(&flags_value).ok_or_else(corrupted)?;
 
     Ok(CmiInfos {
         cmi_name,
@@ -171,45 +177,53 @@ pub fn read_cmi_crcs(filename: &str) -> Option<Vec<(String, Option<[u8; 16]>)>> 
     let mut reader = MarshalReader::new();
     let crcs_value = reader.read_with_header(&mut cursor).ok()?;
     Some(
-        read_crcs(&crcs_value)
+        read_crcs(&crcs_value)?
             .into_iter()
             .map(|(name, crc)| (name, crc.and_then(|crc| <[u8; 16]>::try_from(crc).ok())))
             .collect(),
     )
 }
 
-/// Parse CRC list from generic OCaml value.
-fn read_crcs(value: &OcamlValue) -> Vec<(String, Option<Vec<u8>>)> {
-    let items = value.as_list();
-    items
+/// Parse CRC list from generic OCaml value, `None` when malformed.
+fn read_crcs(value: &OcamlValue) -> Option<Vec<(String, Option<Vec<u8>>)>> {
+    value
+        .try_list()?
         .into_iter()
         .map(|item| {
-            let (tag, fields) = item.as_block();
-            assert_eq!(tag, 0); // tuple
-            assert_eq!(fields.len(), 2);
-            let name = fields[0].as_string().to_string();
-            let digest = fields[1].as_option().map(|d| {
+            // (string * Digest.t option) tuple
+            let Some((0, [name, digest])) = item.as_block_opt() else {
+                return None;
+            };
+            let name = name.as_string_opt()?.to_string();
+            let digest = match digest {
+                OcamlValue::Int(0) => None,
                 // Digest is a 16-byte string (MD5); marshalled strings are
                 // decoded one char per byte.
-                d.as_string().chars().map(|c| c as u8).collect::<Vec<u8>>()
-            });
-            (name, digest)
+                OcamlValue::Block(0, fields) if fields.len() == 1 => Some(
+                    fields[0]
+                        .as_string_opt()?
+                        .chars()
+                        .map(|c| c as u8)
+                        .collect::<Vec<u8>>(),
+                ),
+                _ => return None,
+            };
+            Some((name, digest))
         })
         .collect()
 }
 
-/// Parse flags from generic OCaml value.
-fn read_flags(value: &OcamlValue) -> Vec<PersFlags> {
-    let items = value.as_list();
-    items
+/// Parse flags from generic OCaml value, `None` when malformed.
+fn read_flags(value: &OcamlValue) -> Option<Vec<PersFlags>> {
+    value
+        .try_list()?
         .into_iter()
-        .map(|item| {
+        .map(|item| match item.as_block_opt() {
             // pers_flags = Deprecated of string (tag 0, 1 field)
-            let (tag, fields) = item.as_block();
-            match tag {
-                0 => PersFlags::Deprecated(fields[0].as_string().to_string()),
-                _ => PersFlags::Deprecated(format!("unknown flag tag {}", tag)),
+            Some((0, [message])) => {
+                Some(PersFlags::Deprecated(message.as_string_opt()?.to_string()))
             }
+            _ => None,
         })
         .collect()
 }
@@ -224,6 +238,29 @@ mod tests {
         let result = read_cmi_from_bytes(data, "test.cmi");
         // Should fail due to missing marshal data, but magic is valid
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_crcs_and_flags_are_rejected() {
+        let s = |v: &str| OcamlValue::String(v.to_string());
+        let block = |tag, fields: Vec<OcamlValue>| OcamlValue::Block(tag, fields.into());
+        let cons = |head, tail| block(0, vec![head, tail]);
+        let nil = OcamlValue::Int(0);
+
+        let crc = cons(block(0, vec![s("M"), nil.clone()]), nil.clone());
+        let crcs = read_crcs(&crc).unwrap();
+        assert_eq!(crcs.len(), 1);
+        assert_eq!(crcs[0].0, "M");
+        assert!(crcs[0].1.is_none());
+        assert!(read_crcs(&cons(OcamlValue::Int(3), nil.clone())).is_none());
+        assert!(read_crcs(&s("not a list")).is_none());
+
+        let flag = cons(block(0, vec![s("old")]), nil.clone());
+        assert!(matches!(
+            read_flags(&flag).unwrap().as_slice(),
+            [PersFlags::Deprecated(message)] if message == "old"
+        ));
+        assert!(read_flags(&cons(block(1, vec![s("x")]), nil)).is_none());
     }
 
     #[test]

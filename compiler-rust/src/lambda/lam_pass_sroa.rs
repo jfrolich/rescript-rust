@@ -39,7 +39,9 @@ fn access_of<'a>(block: &Ident, lam: &'a Lambda) -> Option<Access<'a>> {
         return None;
     };
     match (&prim.primitive, prim.args.as_slice()) {
-        (Primitive::Pfield(index, _), [Lambda::Lvar(id)]) if id == block => Some(Access::Read(*index)),
+        (Primitive::Pfield(index, _), [Lambda::Lvar(id)]) if id == block => {
+            Some(Access::Read(*index))
+        }
         (Primitive::Psetfield(index, _), [Lambda::Lvar(id), value]) if id == block => {
             Some(Access::Write(*index, value))
         }
@@ -87,7 +89,7 @@ fn discard_value(value: Lambda, body: Lambda) -> Lambda {
 
 fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> Mapped {
     match access_of(block, &lam) {
-        Some(Access::Read(index)) => (Lambda::var(fields[index as usize].clone()), true),
+        Some(Access::Read(index)) => (Lambda::var(fields[index as usize]), true),
         Some(Access::Write(index, _)) => {
             let Lambda::Lprim(prim) = lam else {
                 unreachable!()
@@ -99,7 +101,7 @@ fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> M
             if !uses[index].read {
                 (discard_value(value, Lambda::unit()), true)
             } else {
-                (Lambda::assign(fields[index].clone(), value), true)
+                (Lambda::assign(fields[index], value), true)
             }
         }
         None => match &lam {
@@ -111,20 +113,38 @@ fn rewrite(block: &Ident, fields: &[Ident], uses: &[FieldUse], lam: Lambda) -> M
     }
 }
 
-fn fields_for_block(id_gen: &IdGenerator, block: &Ident, info: &TagInfo, field_count: usize) -> Vec<Ident> {
+fn fields_for_block(
+    id_gen: &IdGenerator,
+    block: &Ident,
+    info: &TagInfo,
+    field_count: usize,
+) -> Vec<Ident> {
     let fallback = || {
         (0..field_count)
-            .map(|index| if index == 0 { block.clone() } else { block.rename(id_gen) })
+            .map(|index| {
+                if index == 0 {
+                    *block
+                } else {
+                    block.rename(id_gen)
+                }
+            })
             .collect::<Vec<_>>()
     };
     if field_count == 1 {
-        return vec![block.clone()];
+        return vec![*block];
     }
-    let names: Option<Vec<String>> = match info {
+    let named = |name: &str| id_gen.create(&format!("{}_{}", block.name(), name));
+    match info {
         TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
-            (fields.len() == field_count).then(|| fields.iter().map(|(name, _)| name.clone()).collect())
+            if fields.len() == field_count {
+                return fields.iter().map(|(name, _)| named(name)).collect();
+            }
         }
-        TagInfo::RecordExt { fields, .. } => (fields.len() == field_count).then(|| fields.clone()),
+        TagInfo::RecordExt { fields, .. } => {
+            if fields.len() == field_count {
+                return fields.iter().map(|name| named(name)).collect();
+            }
+        }
         TagInfo::Tuple
         | TagInfo::Constructor { .. }
         | TagInfo::PolyVar(_)
@@ -132,15 +152,9 @@ fn fields_for_block(id_gen: &IdGenerator, block: &Ident, info: &TagInfo, field_c
         | TagInfo::ModuleExport(_)
         | TagInfo::Extension
         | TagInfo::Some
-        | TagInfo::SomeNotNested => None,
-    };
-    match names {
-        None => fallback(),
-        Some(names) => names
-            .iter()
-            .map(|name| id_gen.create(&format!("{}_{}", block.name(), name)))
-            .collect(),
+        | TagInfo::SomeNotNested => {}
     }
+    fallback()
 }
 
 /// `Lam_pass_sroa.replace`: replace a non-escaping local block with
@@ -174,9 +188,9 @@ fn replace(
         body = if !use_.read {
             discard_value(init, body)
         } else if !use_.written {
-            refine_let(LetKind::Strict, fields[index].clone(), init, body)
+            refine_let(LetKind::Strict, fields[index], init, body)
         } else {
-            Lambda::let_(LetKind::Variable, fields[index].clone(), init, body)
+            Lambda::let_(LetKind::Variable, fields[index], init, body)
         };
     }
     Ok(body)
@@ -195,7 +209,11 @@ fn simplify_inner(id_gen: &IdGenerator, lam: Lambda) -> Mapped {
                 let Lambda::Lprim(prim) = init else {
                     unreachable!()
                 };
-                let PrimInfo { primitive, args, loc } = *prim;
+                let PrimInfo {
+                    primitive,
+                    args,
+                    loc,
+                } = *prim;
                 let Primitive::Pmakeblock(info, mutable) = primitive else {
                     unreachable!()
                 };

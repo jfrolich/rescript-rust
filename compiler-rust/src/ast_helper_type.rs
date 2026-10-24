@@ -12,7 +12,6 @@ use crate::parser::ast::{
     Expression, ExpressionDesc, LabelDeclaration, MutableFlag, Payload, StructureItem,
     StructureItemDesc,
 };
-use crate::string_literal::StringLiteral;
 
 /// OCaml raises from inside `Type.field`/`Type.constructor` when a backquoted
 /// payload holds an invalid escape; the error surfaces with the next ppx
@@ -104,7 +103,10 @@ pub fn field(
 ) -> LabelDeclaration {
     let (pld_runtime_name, pld_attributes) = match runtime_name {
         Some(txt) => (
-            Some(Located::new(crate::string_literal::string_from_semantic(txt), name.loc)),
+            Some(Located::new(
+                crate::string_literal::string_from_semantic(txt),
+                name.loc,
+            )),
             attrs,
         ),
         None => take_as(arena, attrs, false, ast_payload::string_literal_of_payload),
@@ -128,8 +130,6 @@ fn constant_expression(loc: LocIdx, constant: Constant) -> Expression {
     }
 }
 
-/// `(Location.mkloc "as" loc, PStr [Str.eval ~loc expression])`, put back
-/// among `attrs` after every attribute written no later than it.
 /// Where the rebuilt `@as` payload expression is stored: printers only hold
 /// a shared arena, while attributes that become part of the AST go into the
 /// ordinary expression storage.
@@ -154,6 +154,8 @@ impl PayloadArena<'_> {
     }
 }
 
+/// `(Location.mkloc "as" loc, PStr [Str.eval ~loc expression])`, put back
+/// among `attrs` after every attribute written no later than it.
 fn put_back_as(
     mut target: PayloadArena<'_>,
     attrs: &Attributes,
@@ -163,15 +165,22 @@ fn put_back_as(
     let expression = target.push_expr(expression);
     let arena = target.arena();
     let item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((expression, Attributes::new())))),
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            expression,
+            Attributes::new(),
+        )))),
         pstr_loc: loc,
     };
     let name = arena.as_attribute_name();
     let attr: Attribute = (Located::new(name, loc), Payload::PStr(Box::new(vec![item])));
-    let cnum = |arena: &ParseArena, loc: LocIdx| arena.get_position(arena.get_location(loc).loc_start).cnum;
+    let cnum = |arena: &ParseArena, loc: LocIdx| {
+        arena.get_position(arena.get_location(loc).loc_start).cnum
+    };
     let pos = cnum(arena, loc);
-    let (mut earlier, later): (Vec<Attribute>, Vec<Attribute>) =
-        attrs.iter().cloned().partition(|other| cnum(arena, other.0.loc) <= pos);
+    let (mut earlier, later): (Vec<Attribute>, Vec<Attribute>) = attrs
+        .iter()
+        .cloned()
+        .partition(|other| cnum(arena, other.0.loc) <= pos);
     earlier.push(attr);
     earlier.extend(later);
     Attributes::from_vec(earlier)
@@ -184,7 +193,10 @@ pub fn constructor_attributes(arena: &ParseArena, cd: &ConstructorDeclaration) -
 }
 
 /// [`constructor_attributes`] for attributes that become part of the AST.
-pub fn constructor_attributes_owned(arena: &mut ParseArena, cd: &ConstructorDeclaration) -> Attributes {
+pub fn constructor_attributes_owned(
+    arena: &mut ParseArena,
+    cd: &ConstructorDeclaration,
+) -> Attributes {
     constructor_attributes_in(PayloadArena::Owned(arena), cd)
 }
 
@@ -250,10 +262,4 @@ fn field_attributes_in(target: PayloadArena<'_>, ld: &LabelDeclaration) -> Attri
     let loc = name.loc;
     let expression = constant_expression(loc, Constant::String(name.txt.clone()));
     put_back_as(target, &ld.pld_attributes, loc, expression)
-}
-
-/// The semantic value of a field's runtime name
-/// (`String_literal.string_semantic`).
-pub fn runtime_name_semantic(name: &Located<StringLiteral>) -> &str {
-    name.txt.semantic()
 }

@@ -78,9 +78,17 @@ pub struct ProjectSession<'p> {
 impl<'p> ProjectSession<'p> {
     pub fn new(project: &'p dyn Project) -> Self {
         let names = project.module_names();
-        let ids = names.iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
+        let ids = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
         let slots = (0..names.len() * 2).map(|_| OnceCell::new()).collect();
-        ProjectSession { project, ids, slots }
+        ProjectSession {
+            project,
+            ids,
+            slots,
+        }
     }
 
     pub fn project(&self) -> &'p dyn Project {
@@ -148,7 +156,9 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Loaded {
         types: &source.typed.type_ctx,
     };
     let annots = match &source.typed.typed {
-        ToolingTyped::Implementation(structure) => Some(Annots::Implementation(&structure.str_items)),
+        ToolingTyped::Implementation(structure) => {
+            Some(Annots::Implementation(&structure.str_items))
+        }
         ToolingTyped::Interface(signature) => Some(Annots::Interface(&signature.sig_items)),
         ToolingTyped::Failed(_) => None,
     };
@@ -160,7 +170,11 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Loaded {
         }
         None => (File::create(module_name, uri, id), Extra::default()),
     };
-    Loaded { source, file, extra }
+    Loaded {
+        source,
+        file,
+        extra,
+    }
 }
 
 impl Session for ProjectSession<'_> {
@@ -169,7 +183,7 @@ impl Session for ProjectSession<'_> {
     }
 
     fn file_for_module(&self, module_name: &str) -> Option<&File> {
-        let paths = self.project.paths_for_module(module_name)?;
-        self.load(module_name, paths.interface.is_some()).map(|loaded| &loaded.file)
+        self.full_from_module(module_name)
+            .map(|loaded| &loaded.file)
     }
 }

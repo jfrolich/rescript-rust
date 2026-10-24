@@ -19,8 +19,11 @@ pub fn parsetree_runtime_name(label: &LabelDeclaration) -> Option<String> {
 
 /// OCaml `Record_runtime.check_duplicated_labels`: the first field that
 /// collides with an earlier one, by declared or by runtime name.
-pub fn check_duplicated_labels(arena: &ParseArena, labels: &[LabelDeclaration]) -> Option<(String, LocIdx)> {
-    let mut coll: std::collections::HashSet<String> = std::collections::HashSet::new();
+pub fn check_duplicated_labels(
+    arena: &ParseArena,
+    labels: &[LabelDeclaration],
+) -> Option<(String, LocIdx)> {
+    let mut coll: crate::fast_hash::AHashSet<&str> = crate::fast_hash::AHashSet::default();
     for label in labels {
         let txt = arena.get_string(label.pld_name.txt);
         if coll.contains(txt) && txt != "..." {
@@ -30,14 +33,15 @@ pub fn check_duplicated_labels(arena: &ParseArena, labels: &[LabelDeclaration]) 
         // `@as("x") x` renames a field to the name it already has.
         let clash = label.pld_runtime_name.as_ref().and_then(|name| {
             let semantic = name.txt.semantic();
-            coll.contains(semantic).then(|| (semantic.to_string(), name.loc))
+            coll.contains(semantic)
+                .then(|| (semantic.to_string(), name.loc))
         });
-        coll.insert(txt.to_string());
+        coll.insert(txt);
         if clash.is_some() {
             return clash;
         }
         if let Some(name) = &label.pld_runtime_name {
-            coll.insert(name.txt.semantic().to_string());
+            coll.insert(name.txt.semantic());
         }
     }
     None
@@ -45,7 +49,10 @@ pub fn check_duplicated_labels(arena: &ParseArena, labels: &[LabelDeclaration]) 
 
 /// OCaml `Record_runtime.extra_as_attribute`: the location of a second `@as`
 /// naming the field, which is one too many.
-pub fn extra_as_attribute(arena: &ParseArena, label: &LabelDeclaration) -> Result<Option<LocIdx>, PayloadError> {
+pub fn extra_as_attribute(
+    arena: &ParseArena,
+    label: &LabelDeclaration,
+) -> Result<Option<LocIdx>, PayloadError> {
     for attr in label.pld_attributes.iter() {
         if arena.get_string(attr.0.txt) == "as"
             && crate::ast_payload::string_literal_of_payload(arena, &attr.1)?.is_some()

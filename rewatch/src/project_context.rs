@@ -89,10 +89,7 @@ impl fmt::Debug for ProjectContext {
         }
     }
 }
-fn read_local_packages(
-    folder_path: &Path,
-    dependencies_from_config: &Vec<String>,
-) -> Result<AHashSet<String>> {
+fn read_local_packages(folder_path: &Path, dependencies_from_config: &[String]) -> Result<AHashSet<String>> {
     let mut local_dependencies = AHashSet::<String>::new();
 
     for dep in dependencies_from_config {
@@ -134,37 +131,37 @@ fn monorepo_or_single_project(path: &Path, current_config: Config) -> Result<Pro
         read_local_packages(path, &dev_dep_names)?
     };
     if local_dependencies.is_empty() && local_dev_dependencies.is_empty() {
-        Ok(ProjectContext {
-            current_config,
-            monorepo_context: None,
-            node_modules_exist_cache: RwLock::new(AHashMap::new()),
-            packages_cache: RwLock::new(AHashMap::new()),
-        })
+        Ok(ProjectContext::with_empty_caches(current_config, None))
     } else {
-        Ok(ProjectContext {
+        Ok(ProjectContext::with_empty_caches(
             current_config,
-            monorepo_context: Some(MonoRepoContext::MonorepoRoot {
+            Some(MonoRepoContext::MonorepoRoot {
                 local_dependencies,
                 local_dev_dependencies,
             }),
-            node_modules_exist_cache: RwLock::new(AHashMap::new()),
-            packages_cache: RwLock::new(AHashMap::new()),
-        })
+        ))
     }
 }
 
 fn is_config_listed_in_workspace(current_config: &Config, workspace_config: &Config) -> bool {
-    workspace_config
-        .get_dependency_names()
-        .iter()
-        .any(|dep| dep == &current_config.name)
-        || workspace_config
-            .get_dev_dependency_names()
-            .iter()
-            .any(|dep| dep == &current_config.name)
+    [&workspace_config.dependencies, &workspace_config.dev_dependencies]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|dep| dep.name() == current_config.name)
 }
 
 impl ProjectContext {
+    /// Builds a context with empty lookup caches.
+    pub fn with_empty_caches(current_config: Config, monorepo_context: Option<MonoRepoContext>) -> Self {
+        ProjectContext {
+            current_config,
+            monorepo_context,
+            node_modules_exist_cache: RwLock::new(AHashMap::new()),
+            packages_cache: RwLock::new(AHashMap::new()),
+        }
+    }
+
     pub fn new(path: &Path) -> Result<ProjectContext> {
         let path = helpers::get_abs_path(path);
         let current_config = packages::read_config(&path)
@@ -189,14 +186,12 @@ impl ProjectContext {
                         if is_config_listed_in_workspace(&current_config, &workspace_config) =>
                     {
                         // There is a parent rescript.json, and it has a reference to the current package.
-                        Ok(ProjectContext {
+                        Ok(ProjectContext::with_empty_caches(
                             current_config,
-                            monorepo_context: Some(MonoRepoContext::MonorepoPackage {
+                            Some(MonoRepoContext::MonorepoPackage {
                                 parent_config: Box::new(workspace_config),
                             }),
-                            node_modules_exist_cache: RwLock::new(AHashMap::new()),
-                            packages_cache: RwLock::new(AHashMap::new()),
-                        })
+                        ))
                     }
                     Ok(_) => {
                         // There is a parent rescript.json, but it has no reference to the current package.
@@ -206,9 +201,9 @@ impl ProjectContext {
                 }
             }
         };
-        context.iter().for_each(|pc| {
+        if let Ok(pc) = &context {
             debug!("Created project context {:#?} for \"{}\"", pc, path.display());
-        });
+        }
         context
     }
 

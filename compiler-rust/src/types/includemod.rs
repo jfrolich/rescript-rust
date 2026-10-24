@@ -7,13 +7,14 @@
 //! The main function is `modtypes` which checks if one module type is
 //! a subtype of another.
 
-#![allow(unused_variables)]
-#![allow(dead_code)]
+use std::cell::Cell;
 
 use crate::diagnostics::Warning;
+use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
 use crate::location::Location;
 use crate::types::Path;
+use crate::types::asttypes::MutableFlag as FieldKind;
 use crate::types::ctype;
 use crate::types::decl::{
     Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
@@ -22,12 +23,10 @@ use crate::types::decl::{
     ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
-use crate::types::asttypes::MutableFlag as FieldKind;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
 use crate::{parser::code_frame, types::ArgLabel};
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 
 // ============================================================================
 // Error Types
@@ -76,8 +75,8 @@ fn deprecated_inclusion_warning(
     };
     Some(Warning::Deprecated {
         message,
-        def_loc: def_loc.clone(),
-        use_loc: use_loc.clone(),
+        def_loc: *def_loc,
+        use_loc: *use_loc,
         can_be_automigrated: false,
     })
 }
@@ -109,8 +108,8 @@ fn deprecated_mutable_inclusion_warning(
     };
     Some(Warning::Deprecated {
         message,
-        def_loc: def_loc.clone(),
-        use_loc: use_loc.clone(),
+        def_loc: *def_loc,
+        use_loc: *use_loc,
         can_be_automigrated: false,
     })
 }
@@ -316,7 +315,10 @@ fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
     if cxt.is_empty() {
         return;
     }
-    if cxt.iter().all(|step| matches!(step, IncludeContext::Module(_))) {
+    if cxt
+        .iter()
+        .all(|step| matches!(step, IncludeContext::Module(_)))
+    {
         output.push_str("  In module ");
         let names: Vec<&str> = cxt
             .iter()
@@ -377,13 +379,13 @@ fn format_include_error(
             return;
         }
         IncludeModError::InModule { name, error } => {
-            cxt.push(IncludeContext::Module(name.clone()));
+            cxt.push(IncludeContext::Module(*name));
             format_include_error(type_ctx, filename, error, cxt, output);
             cxt.pop();
             return;
         }
         IncludeModError::AtModtype { name, error } => {
-            cxt.push(IncludeContext::Modtype(name.clone()));
+            cxt.push(IncludeContext::Modtype(*name));
             format_include_error(type_ctx, filename, error, cxt, output);
             cxt.pop();
             return;
@@ -396,7 +398,7 @@ fn format_include_error(
         } => {
             // `modtypes` on the functor results (includemod.ml:388-396) runs
             // in `Body param :: cxt`.
-            cxt.push(IncludeContext::Body(param.clone()));
+            cxt.push(IncludeContext::Body(*param));
             push_include_context(cxt, output);
             push_module_types_symptom(type_ctx, actual, expected, error, output);
             if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
@@ -464,18 +466,18 @@ fn format_include_error(
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, &expected.type_loc),
-                &expected.type_loc.loc_start,
-                &expected.type_loc.loc_end,
+                    &location_filename(type_ctx, filename, &expected.type_loc),
+                    &expected.type_loc.loc_start,
+                    &expected.type_loc.loc_end,
                 ),
                 "Expected declaration",
             );
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, &actual.type_loc),
-                &actual.type_loc.loc_start,
-                &actual.type_loc.loc_end,
+                    &location_filename(type_ctx, filename, &actual.type_loc),
+                    &actual.type_loc.loc_start,
+                    &actual.type_loc.loc_end,
                 ),
                 "Actual declaration",
             );
@@ -501,18 +503,18 @@ fn format_include_error(
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, &expected.ext_loc),
-                &expected.ext_loc.loc_start,
-                &expected.ext_loc.loc_end,
+                    &location_filename(type_ctx, filename, &expected.ext_loc),
+                    &expected.ext_loc.loc_start,
+                    &expected.ext_loc.loc_end,
                 ),
                 "Expected declaration",
             );
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, &actual.ext_loc),
-                &actual.ext_loc.loc_start,
-                &actual.ext_loc.loc_end,
+                    &location_filename(type_ctx, filename, &actual.ext_loc),
+                    &actual.ext_loc.loc_start,
+                    &actual.ext_loc.loc_end,
                 ),
                 "Actual declaration",
             );
@@ -526,9 +528,9 @@ fn format_include_error(
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, loc),
-                &loc.loc_start,
-                &loc.loc_end,
+                    &location_filename(type_ctx, filename, loc),
+                    &loc.loc_start,
+                    &loc.loc_end,
                 ),
                 "Expected declaration",
             );
@@ -583,18 +585,18 @@ fn format_include_error(
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, &expected.val_loc),
-                &expected.val_loc.loc_start,
-                &expected.val_loc.loc_end,
+                    &location_filename(type_ctx, filename, &expected.val_loc),
+                    &expected.val_loc.loc_start,
+                    &expected.val_loc.loc_end,
                 ),
                 "Expected declaration",
             );
             push_show_loc(
                 output,
                 &code_frame::format_location(
-                &location_filename(type_ctx, filename, &actual.val_loc),
-                &actual.val_loc.loc_start,
-                &actual.val_loc.loc_end,
+                    &location_filename(type_ctx, filename, &actual.val_loc),
+                    &actual.val_loc.loc_start,
+                    &actual.val_loc.loc_end,
                 ),
                 "Actual declaration",
             );
@@ -777,15 +779,6 @@ fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDesc
     crate::types::printtyp::print_out_sig_item(&tree)
 }
 
-fn format_value_description_with_weak_names(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    desc: &ValueDescription,
-    _weak_names: bool,
-) -> String {
-    format_value_description(type_ctx, id, desc)
-}
-
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
     let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_type_declaration(
         id,
@@ -793,15 +786,6 @@ fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclar
         RecStatus::TrecNot,
     );
     crate::types::printtyp::print_out_sig_item(&tree)
-}
-
-fn format_type_declaration_with_weak_names(
-    type_ctx: &TypeContext,
-    id: &Ident,
-    decl: &TypeDeclaration,
-    _weak_names: bool,
-) -> String {
-    format_type_declaration(type_ctx, id, decl)
 }
 
 fn format_extension_constructor(
@@ -819,9 +803,9 @@ fn format_extension_constructor(
 
 #[derive(Clone, Default)]
 struct InclusionSubst {
-    type_paths: HashMap<Path, Path>,
-    module_paths: HashMap<Path, Path>,
-    modtype_paths: HashMap<Path, Path>,
+    type_paths: PathSubstMap,
+    module_paths: PathSubstMap,
+    modtype_paths: PathSubstMap,
 }
 
 impl InclusionSubst {
@@ -830,28 +814,84 @@ impl InclusionSubst {
     }
 }
 
-fn lookup_path_subst(map: &HashMap<Path, Path>, path: &Path) -> Option<Path> {
-    // OCaml compiler/ml/path.ml:27-35 defines `Path.compare` for PathMap and
-    // ignores the `Pdot` position hint, so substitution lookups must use
-    // `Path.same` rather than Rust's derived Eq/Hash which includes that field.
-    map.get(path).cloned().or_else(|| {
-        map.iter()
-            .find_map(|(key, value)| key.same(path).then(|| value.clone()))
-    })
+/// Path substitution table looked up with `Path.same` semantics.
+///
+/// OCaml compiler/ml/path.ml:27-35 defines `Path.compare` for PathMap and
+/// ignores the `Pdot` position hint, while Rust's derived `Eq` compares it.
+/// `Path`'s `Hash` already ignores the hint, so an exact `get` finds every key
+/// that is `==`; the remaining `same`-but-not-`==` keys can only exist when the
+/// key or the queried path carries a position hint. `any_pos_key` records
+/// whether any key has one so the common case needs no full-map scan.
+#[derive(Clone, Default)]
+struct PathSubstMap {
+    map: HashMap<Path, Path>,
+    any_pos_key: bool,
+}
+
+impl PathSubstMap {
+    fn insert(&mut self, key: Path, value: Path) {
+        self.any_pos_key |= path_has_pos_hint(&key);
+        self.map.insert(key, value);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn get(&self, path: &Path) -> Option<Path> {
+        if let Some(value) = self.map.get(path) {
+            return Some(value.clone());
+        }
+        if self.any_pos_key {
+            return self
+                .map
+                .iter()
+                .find_map(|(key, value)| key.same(path).then(|| value.clone()));
+        }
+        if !path_has_pos_hint(path) {
+            // No key and not the path carry a position hint, so `same`
+            // coincides with `==` and the exact lookup above was complete.
+            return None;
+        }
+        // Keys carry no position hints, so at most one key is `same` as
+        // `path`: the one equal to `path` with its hints cleared.
+        self.map.get(&strip_pos_hints(path)).cloned()
+    }
+}
+
+fn path_has_pos_hint(path: &Path) -> bool {
+    match path {
+        Path::Pident(_) => false,
+        Path::Pdot(parent, _, pos) => {
+            *pos != crate::types::path::NOPOS || path_has_pos_hint(parent)
+        }
+        Path::Papply(functor, argument) => {
+            path_has_pos_hint(functor) || path_has_pos_hint(argument)
+        }
+    }
+}
+
+fn strip_pos_hints(path: &Path) -> Path {
+    match path {
+        Path::Pident(_) => path.clone(),
+        Path::Pdot(parent, name, _) => Path::Pdot(
+            std::sync::Arc::new(strip_pos_hints(parent)),
+            *name,
+            crate::types::path::NOPOS,
+        ),
+        Path::Papply(functor, argument) => Path::Papply(
+            std::sync::Arc::new(strip_pos_hints(functor)),
+            std::sync::Arc::new(strip_pos_hints(argument)),
+        ),
+    }
 }
 
 // ============================================================================
 // Module Type Inclusion
 // ============================================================================
 
-/// Check if `mty_impl` is a subtype of `mty_sig` (implementation matches signature).
-///
-/// Returns a coercion that can be applied to convert the implementation
-/// to the signature type.
-use std::cell::Cell;
-
 thread_local! {
-    static MODTYPES_DEPTH: Cell<usize> = Cell::new(0);
+    static MODTYPES_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Which Env table a path names: `Mty_alias` paths are modules
@@ -885,11 +925,15 @@ fn with_local_pident_module_type<R>(
             PathNamespace::ModuleType => env.lookup_modtype(&current).ok()?.mtd_type.clone()?,
         };
         match &mty {
-            ModuleType::MtyIdent(next) if !(next.same(&current) && namespace == PathNamespace::ModuleType) => {
+            ModuleType::MtyIdent(next)
+                if !(next.same(&current) && namespace == PathNamespace::ModuleType) =>
+            {
                 current = next.clone();
                 namespace = PathNamespace::ModuleType;
             }
-            ModuleType::MtyAlias(_, next) if !(next.same(&current) && namespace == PathNamespace::Module) => {
+            ModuleType::MtyAlias(_, next)
+                if !(next.same(&current) && namespace == PathNamespace::Module) =>
+            {
                 current = next.clone();
                 namespace = PathNamespace::Module;
             }
@@ -898,8 +942,12 @@ fn with_local_pident_module_type<R>(
     }
 }
 
-pub fn modtypes<'a>(
-    type_ctx: &'a TypeContext,
+/// Check if `mty_impl` is a subtype of `mty_sig` (implementation matches signature).
+///
+/// Returns a coercion that can be applied to convert the implementation
+/// to the signature type.
+pub fn modtypes(
+    type_ctx: &TypeContext,
     env: &Env,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
@@ -908,18 +956,15 @@ pub fn modtypes<'a>(
     modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings)
 }
 
-pub fn modtypes_with_warnings<'a>(
-    type_ctx: &'a TypeContext,
+pub fn modtypes_with_warnings(
+    type_ctx: &TypeContext,
     env: &Env,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    modtypes_inner(
-        type_ctx, env, &subst, mty_impl, mty_sig, None, false, warnings,
-    )
-    .map_err(|error| {
+    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, warnings).map_err(|error| {
         if module_type_error_is_alias_unbound_module(mty_impl, mty_sig, &error) {
             error
         } else {
@@ -964,15 +1009,14 @@ fn wrap_modtypes_error(
     }
 }
 
-/// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
-fn modtypes_inner<'a>(
-    type_ctx: &'a TypeContext,
+/// Check if `mty_impl` is a subtype of `mty_sig` under `subst`.
+fn modtypes_inner(
+    type_ctx: &TypeContext,
     env: &Env,
     subst: &InclusionSubst,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
     sig_access_path: Option<&Path>,
-    aliasable: bool,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     // Guard against infinite recursion in module type expansion
@@ -1024,18 +1068,25 @@ fn modtypes_inner<'a>(
             let mty = match path {
                 Path::Pident(id) => match namespace {
                     PathNamespace::Module => {
-                        env.lookup_module(&Path::pident(id.clone())).ok()?.md_type.clone()
+                        env.lookup_module(&Path::pident(*id)).ok()?.md_type.clone()
                     }
-                    PathNamespace::ModuleType => {
-                        env.lookup_modtype(&Path::pident(id.clone())).ok()?.mtd_type.clone()?
-                    }
+                    PathNamespace::ModuleType => env
+                        .lookup_modtype(&Path::pident(*id))
+                        .ok()?
+                        .mtd_type
+                        .clone()?,
                 },
                 Path::Pdot(parent, name, _) => {
                     let parent_mty = expand_local(env, parent, PathNamespace::Module, visiting)?;
                     let parent_sig = match &parent_mty {
                         ModuleType::MtySignature(sig) => sig.clone(),
                         ModuleType::MtyIdent(parent_path) => {
-                            match expand_local(env, parent_path, PathNamespace::ModuleType, visiting)? {
+                            match expand_local(
+                                env,
+                                parent_path,
+                                PathNamespace::ModuleType,
+                                visiting,
+                            )? {
                                 ModuleType::MtySignature(sig) => sig,
                                 _ => return None,
                             }
@@ -1158,20 +1209,20 @@ fn modtypes_inner<'a>(
                         &expanded,
                         mty_sig,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                     .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))
                 }) {
                 coercion?
             } else {
-                let expanded = expand_module_type_in_env(type_ctx, env, &impl_path, PathNamespace::Module)
-                    .map(|mty| {
-                        ctype::strengthen_module_type_for_inclusion_path(
-                            type_ctx, env, &impl_path, &mty,
-                        )
-                    })
-                    .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
+                let expanded =
+                    expand_module_type_in_env(type_ctx, env, &impl_path, PathNamespace::Module)
+                        .map(|mty| {
+                            ctype::strengthen_module_type_for_inclusion_path(
+                                type_ctx, env, &impl_path, &mty,
+                            )
+                        })
+                        .unwrap_or_else(|| ModuleType::MtyAlias(*pres_impl, impl_path.clone()));
                 // includemod.ml:231: `modtypes ~loc env cxt subst mty1 mty2`.
                 modtypes_inner(
                     type_ctx,
@@ -1180,7 +1231,6 @@ fn modtypes_inner<'a>(
                     &expanded,
                     mty_sig,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
                 .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))?
@@ -1233,16 +1283,7 @@ fn modtypes_inner<'a>(
             let param_coercion = match (param_type_impl, expected_param_type.as_ref()) {
                 (Some(pt_impl), Some(pt_sig)) => {
                     // Note: parameters are contravariant, so we swap impl/sig
-                    modtypes_inner(
-                        type_ctx,
-                        env,
-                        &empty_subst,
-                        pt_sig,
-                        pt_impl,
-                        None,
-                        true,
-                        warnings,
-                    )?
+                    modtypes_inner(type_ctx, env, &empty_subst, pt_sig, pt_impl, None, warnings)?
                 }
                 (None, None) => ModuleCoercion::Tcoerce_none,
                 _ => {
@@ -1261,7 +1302,7 @@ fn modtypes_inner<'a>(
                 .or_else(|| param_type_impl.as_deref().cloned())
                 .unwrap_or_else(|| ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             result_env.add_module(
-                param_impl.clone(),
+                *param_impl,
                 ModuleDeclaration {
                     md_type: param_binding_type,
                     md_attributes: vec![],
@@ -1270,10 +1311,9 @@ fn modtypes_inner<'a>(
                 },
             );
             let mut result_subst = subst.clone();
-            result_subst.module_paths.insert(
-                Path::pident(param_sig.clone()),
-                Path::pident(param_impl.clone()),
-            );
+            result_subst
+                .module_paths
+                .insert(Path::pident(*param_sig), Path::pident(*param_impl));
             let result_coercion = modtypes_inner(
                 type_ctx,
                 &result_env,
@@ -1281,11 +1321,10 @@ fn modtypes_inner<'a>(
                 result_impl,
                 result_sig,
                 sig_access_path,
-                false,
                 warnings,
             )
             .map_err(|error| IncludeModError::InFunctorBody {
-                param: param_impl.clone(),
+                param: *param_impl,
                 actual: result_impl.clone(),
                 expected: result_sig.clone(),
                 error: Box::new(error),
@@ -1310,22 +1349,25 @@ fn modtypes_inner<'a>(
         // first (includemod.ml:237, 262-273).
 
         // Identifier implementation matches signature
-        (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
-            if let Some(result) = with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    subst,
-                    expanded,
-                    mty_sig,
-                    sig_access_path,
-                    aliasable,
-                    warnings,
-                )
-            }) {
+        (ModuleType::MtyIdent(path), ModuleType::MtySignature(_)) => {
+            if let Some(result) =
+                with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        subst,
+                        expanded,
+                        mty_sig,
+                        sig_access_path,
+                        warnings,
+                    )
+                })
+            {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path, PathNamespace::ModuleType) {
+            if let Some(expanded) =
+                expand_module_type_in_env(type_ctx, env, path, PathNamespace::ModuleType)
+            {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1333,7 +1375,6 @@ fn modtypes_inner<'a>(
                     &expanded,
                     mty_sig,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
             } else {
@@ -1349,21 +1390,24 @@ fn modtypes_inner<'a>(
         (ModuleType::MtyIdent(path), mty_sig) => {
             // compiler/ml/includemod.ml:235-236 expands an implementation-side
             // identifier only when Env says that module type path is manifest.
-            if let Some(result) = with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    subst,
-                    expanded,
-                    mty_sig,
-                    sig_access_path,
-                    aliasable,
-                    warnings,
-                )
-            }) {
+            if let Some(result) =
+                with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        subst,
+                        expanded,
+                        mty_sig,
+                        sig_access_path,
+                        warnings,
+                    )
+                })
+            {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path, PathNamespace::ModuleType) {
+            if let Some(expanded) =
+                expand_module_type_in_env(type_ctx, env, path, PathNamespace::ModuleType)
+            {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1371,7 +1415,6 @@ fn modtypes_inner<'a>(
                     &expanded,
                     mty_sig,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
             } else if let ModuleType::MtyIdent(sig_path) = mty_sig {
@@ -1384,7 +1427,9 @@ fn modtypes_inner<'a>(
                     .same(&env.normalize_path_prefix(&sig_path))
                 {
                     Ok(ModuleCoercion::Tcoerce_none)
-                } else if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &sig_path, PathNamespace::ModuleType) {
+                } else if let Some(expanded) =
+                    expand_module_type_in_env(type_ctx, env, &sig_path, PathNamespace::ModuleType)
+                {
                     let identity = InclusionSubst::default();
                     modtypes_inner(
                         type_ctx,
@@ -1393,7 +1438,6 @@ fn modtypes_inner<'a>(
                         mty_impl,
                         &expanded,
                         sig_access_path,
-                        aliasable,
                         warnings,
                     )
                 } else {
@@ -1423,21 +1467,24 @@ fn modtypes_inner<'a>(
                 return Ok(ModuleCoercion::Tcoerce_none);
             }
             let identity = InclusionSubst::default();
-            if let Some(result) = with_local_pident_module_type(env, &path, PathNamespace::ModuleType, |expanded| {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    &identity,
-                    mty_impl,
-                    expanded,
-                    sig_access_path,
-                    aliasable,
-                    warnings,
-                )
-            }) {
+            if let Some(result) =
+                with_local_pident_module_type(env, &path, PathNamespace::ModuleType, |expanded| {
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        &identity,
+                        mty_impl,
+                        expanded,
+                        sig_access_path,
+                        warnings,
+                    )
+                })
+            {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &path, PathNamespace::ModuleType) {
+            if let Some(expanded) =
+                expand_module_type_in_env(type_ctx, env, &path, PathNamespace::ModuleType)
+            {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1445,7 +1492,6 @@ fn modtypes_inner<'a>(
                     mty_impl,
                     &expanded,
                     sig_access_path,
-                    aliasable,
                     warnings,
                 )
             } else {
@@ -1615,10 +1661,10 @@ fn register_paired_signature_substitution(
             // signature type components with `Subst.add_type id2 (Pident id1)`;
             // compiler/ml/subst.ml:87-95 then rewrites exact type paths before
             // recursively rewriting module prefixes.
-            let impl_path = Path::pident(impl_id.clone());
+            let impl_path = Path::pident(*impl_id);
             subst
                 .type_paths
-                .insert(Path::pident(sig_id.clone()), impl_path.clone());
+                .insert(Path::pident(*sig_id), impl_path.clone());
             if let Some(access_path) = sig_access_path {
                 subst.type_paths.insert(
                     Path::pdot(access_path.clone(), sig_id.name()),
@@ -1636,10 +1682,10 @@ fn register_paired_signature_substitution(
             // OCaml compiler/ml/includemod.ml:360-362 adds module and
             // module-type substitutions; compiler/ml/subst.ml:69-75 applies
             // them to exact paths before dotted-prefix recursion.
-            let impl_path = Path::pident(impl_id.clone());
+            let impl_path = Path::pident(*impl_id);
             subst
                 .module_paths
-                .insert(Path::pident(sig_id.clone()), impl_path.clone());
+                .insert(Path::pident(*sig_id), impl_path.clone());
             if let Some(access_path) = sig_access_path {
                 subst.module_paths.insert(
                     Path::pdot(access_path.clone(), sig_id.name()),
@@ -1657,7 +1703,7 @@ fn register_paired_signature_substitution(
             // prefix (compiler/ml/subst.ml:77-86), not by a dotted modtype map.
             subst
                 .modtype_paths
-                .insert(Path::pident(sig_id.clone()), Path::pident(impl_id.clone()));
+                .insert(Path::pident(*sig_id), Path::pident(*impl_id));
         }
         _ => {}
     }
@@ -1679,8 +1725,8 @@ fn missing_signature_item_error(
     field_desc: &FieldDesc,
 ) -> IncludeModError {
     IncludeModError::MissingField {
-        id: id.clone(),
-        loc: loc.clone(),
+        id: *id,
+        loc: *loc,
         kind: field_desc_kind(field_desc),
     }
 }
@@ -1717,8 +1763,8 @@ fn pair_signature_items<'a>(
     (len_impl, paired, errors)
 }
 
-fn check_paired_signature_items<'a>(
-    type_ctx: &'a TypeContext,
+fn check_paired_signature_items(
+    type_ctx: &TypeContext,
     env: &Env,
     paired: &[PairedSignatureItem<'_>],
     sig_access_path: Option<&Path>,
@@ -1736,7 +1782,7 @@ fn check_paired_signature_items<'a>(
                 let coercion = value_descriptions(
                     type_ctx,
                     env,
-                    impl_id.clone(),
+                    *impl_id,
                     impl_val_desc,
                     sig_val_desc,
                     subst,
@@ -1760,7 +1806,7 @@ fn check_paired_signature_items<'a>(
                 type_declarations(
                     type_ctx,
                     env,
-                    impl_id.clone(),
+                    *impl_id,
                     impl_type_decl,
                     &expected_type_decl,
                     warnings,
@@ -1773,7 +1819,7 @@ fn check_paired_signature_items<'a>(
                 extension_constructors(
                     type_ctx,
                     env,
-                    impl_id.clone(),
+                    *impl_id,
                     impl_ext_constr,
                     sig_ext_constr,
                     subst,
@@ -1797,7 +1843,9 @@ fn check_paired_signature_items<'a>(
                 // includemod.ml:399: `Env.mark_module_used env (Ident.name
                 // id1) md1.md_loc`.
                 if !env.is_implicit_coercion() {
-                    type_ctx.usage().mark_module_used(impl_id.name(), impl_mod_decl.md_loc);
+                    type_ctx
+                        .usage()
+                        .mark_module_used(impl_id.name(), impl_mod_decl.md_loc);
                 }
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
@@ -1806,7 +1854,7 @@ fn check_paired_signature_items<'a>(
                 let impl_mty = crate::types::ctype::strengthen_module_type_for_inclusion_path(
                     type_ctx,
                     env,
-                    &Path::pident(impl_id.clone()),
+                    &Path::pident(*impl_id),
                     &impl_mod_decl.md_type,
                 );
                 let nested_sig_access_path =
@@ -1818,7 +1866,6 @@ fn check_paired_signature_items<'a>(
                     &impl_mty,
                     &sig_mod_decl.md_type,
                     nested_sig_access_path.as_ref(),
-                    false,
                     warnings,
                 )
                 .map_err(|error| {
@@ -1826,7 +1873,7 @@ fn check_paired_signature_items<'a>(
                     // 396-413): the `Module_types` entry and the errors below
                     // it share that context.
                     IncludeModError::InModule {
-                        name: impl_id.clone(),
+                        name: *impl_id,
                         error: Box::new(wrap_modtypes_error(
                             &impl_mty,
                             &sig_mod_decl.md_type,
@@ -1845,7 +1892,7 @@ fn check_paired_signature_items<'a>(
                 modtype_declarations(
                     type_ctx,
                     env,
-                    impl_id.clone(),
+                    *impl_id,
                     impl_modtype_decl,
                     &expected_modtype_decl,
                     warnings,
@@ -1866,7 +1913,7 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
     for item in sig.iter().rev() {
         match item {
             SignatureItem::SigValue(id, _) => {
-                if seen_values.insert(id.name().to_string()) {
+                if seen_values.insert(id.name()) {
                     simplified.push(item.clone());
                 }
             }
@@ -1877,8 +1924,8 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
     simplified
 }
 
-pub fn compunit<'a>(
-    type_ctx: &'a TypeContext,
+pub fn compunit(
+    type_ctx: &TypeContext,
     env: &Env,
     impl_name: &str,
     impl_sig: &Signature,
@@ -1897,8 +1944,8 @@ pub fn compunit<'a>(
     )
 }
 
-pub fn compunit_with_warnings<'a>(
-    type_ctx: &'a TypeContext,
+pub fn compunit_with_warnings(
+    type_ctx: &TypeContext,
     env: &Env,
     impl_name: &str,
     impl_sig: &Signature,
@@ -1906,27 +1953,14 @@ pub fn compunit_with_warnings<'a>(
     intf_sig: &Signature,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
-    fn module_name_from_source_filename(path: &str) -> String {
-        let basename = std::path::Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(path);
-        let name = basename.split('.').next().unwrap_or(basename);
-        let mut chars = name.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
-        }
-    }
-
     // OCaml compiler/ml/includemod.ml:468-475 starts compilation-unit
     // inclusion from `signatures`; Rust additionally carries the persisted
     // compilation-unit access path so Subst.add_* mappings can cover CMI paths
     // like `Unit.Nested.t` that no longer appear as local `Pident`s.
     let subst = InclusionSubst::default();
-    let access_path = Path::pident(Ident::create_persistent(module_name_from_source_filename(
-        impl_name,
-    )));
+    let access_path = Path::pident(Ident::create_persistent(
+        crate::misc::module_name_from_source_filename(impl_name),
+    ));
     signatures_with_subst(
         type_ctx,
         env,
@@ -1939,8 +1973,8 @@ pub fn compunit_with_warnings<'a>(
 }
 
 /// Check if signature `sig_impl` is a subtype of `sig_sig`.
-pub fn signatures<'a>(
-    type_ctx: &'a TypeContext,
+pub fn signatures(
+    type_ctx: &TypeContext,
     env: &Env,
     sig_impl: &Signature,
     sig_sig: &Signature,
@@ -1958,8 +1992,8 @@ pub fn signatures<'a>(
     )
 }
 
-fn signatures_with_subst<'a>(
-    type_ctx: &'a TypeContext,
+fn signatures_with_subst(
+    type_ctx: &TypeContext,
     env: &Env,
     incoming_subst: &InclusionSubst,
     sig_access_path: Option<&Path>,
@@ -1985,7 +2019,7 @@ fn signatures_with_subst<'a>(
         .scan(0usize, |runtime_pos, item| {
             let current = match item {
                 SignatureItem::SigModule(id, _, _) => {
-                    Some((id.clone(), *runtime_pos, ModuleCoercion::Tcoerce_none))
+                    Some((*id, *runtime_pos, ModuleCoercion::Tcoerce_none))
                 }
                 _ => None,
             };
@@ -2094,8 +2128,8 @@ fn find_arity_mismatch(
     loop_(type_ctx, env, &mut HashSet::new(), impl_ty, sig_ty)
 }
 
-fn value_descriptions<'a>(
-    type_ctx: &'a TypeContext,
+fn value_descriptions(
+    type_ctx: &TypeContext,
     env: &Env,
     id: Ident,
     impl_desc: &ValueDescription,
@@ -2107,7 +2141,9 @@ fn value_descriptions<'a>(
     type_ctx.record_value_dependency(impl_desc, sig_desc);
     // includemod.ml:58: `Env.mark_value_used env (Ident.name id) vd1`.
     if !env.is_implicit_coercion() {
-        type_ctx.usage().mark_value_used(id.name(), impl_desc.val_loc);
+        type_ctx
+            .usage()
+            .mark_value_used(id.name(), impl_desc.val_loc);
     }
     if let Some(warning) = deprecated_inclusion_warning(
         id.name(),
@@ -2156,7 +2192,7 @@ fn value_descriptions<'a>(
     // | _, _ -> Tcoerce_none
     let dont_match = || {
         Err(IncludeModError::ValueTypeMismatch {
-            name: id.clone(),
+            name: id,
             actual: impl_desc.clone(),
             expected: expected_desc.clone(),
             arity_mismatch: None,
@@ -2178,7 +2214,7 @@ fn value_descriptions<'a>(
             crate::types::typedtree::PrimitiveCoercion {
                 pc_desc: prim.clone(),
                 pc_type: sig_desc.val_type,
-                pc_loc: impl_desc.val_loc.clone(),
+                pc_loc: impl_desc.val_loc,
                 pc_id: id,
             },
         )),
@@ -2233,18 +2269,18 @@ fn primitive_coercible(
 
 pub(crate) fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
     match item {
-        SignatureItem::SigValue(id, desc) => env.add_value(id.clone(), desc.clone()),
-        SignatureItem::SigType(id, decl, _) => env.add_type(id.clone(), decl.clone()),
-        SignatureItem::SigModule(id, md, _) => env.add_module(id.clone(), md.clone()),
-        SignatureItem::SigModtype(id, mtd) => env.add_modtype(id.clone(), mtd.clone()),
+        SignatureItem::SigValue(id, desc) => env.add_value(*id, desc.clone()),
+        SignatureItem::SigType(id, decl, _) => env.add_type(*id, decl.clone()),
+        SignatureItem::SigModule(id, md, _) => env.add_module(*id, md.clone()),
+        SignatureItem::SigModtype(id, mtd) => env.add_modtype(*id, mtd.clone()),
         SignatureItem::SigTypext(_, _, _)
         | SignatureItem::SigClass
         | SignatureItem::SigClassType => {}
     }
 }
 
-fn substitute_value_description_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn substitute_value_description_paths(
+    type_ctx: &TypeContext,
     desc: &ValueDescription,
     subst: &InclusionSubst,
 ) -> ValueDescription {
@@ -2255,8 +2291,8 @@ fn substitute_value_description_paths<'a>(
     substituted
 }
 
-fn substitute_label_declaration_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn substitute_label_declaration_paths(
+    type_ctx: &TypeContext,
     label: &LabelDeclaration,
     subst: &InclusionSubst,
 ) -> LabelDeclaration {
@@ -2265,8 +2301,8 @@ fn substitute_label_declaration_paths<'a>(
     substituted
 }
 
-fn substitute_constructor_arguments_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn substitute_constructor_arguments_paths(
+    type_ctx: &TypeContext,
     args: &ConstructorArguments,
     subst: &InclusionSubst,
 ) -> ConstructorArguments {
@@ -2283,63 +2319,6 @@ fn substitute_constructor_arguments_paths<'a>(
                 .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
                 .collect(),
         ),
-    }
-}
-
-fn substitute_constructor_declaration_paths<'a>(
-    type_ctx: &'a TypeContext,
-    constructor: &ConstructorDeclaration,
-    subst: &InclusionSubst,
-) -> ConstructorDeclaration {
-    let mut substituted = constructor.clone();
-    substituted.cd_args =
-        substitute_constructor_arguments_paths(type_ctx, &constructor.cd_args, subst);
-    substituted.cd_res = constructor
-        .cd_res
-        .map(|ty| substitute_value_type_paths(type_ctx, ty, subst));
-    substituted
-}
-
-fn substitute_type_kind_paths<'a>(
-    type_ctx: &'a TypeContext,
-    kind: &TypeKind,
-    subst: &InclusionSubst,
-) -> TypeKind {
-    match kind {
-        TypeKind::TypeAbstract => TypeKind::TypeAbstract,
-        TypeKind::TypeOpen => TypeKind::TypeOpen,
-        TypeKind::TypeRecord(labels, repr) => TypeKind::TypeRecord(
-            labels
-                .iter()
-                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
-                .collect(),
-            repr.clone(),
-        ),
-        TypeKind::TypeVariant(constructors, layout) => TypeKind::TypeVariant(
-            constructors
-                .iter()
-                .map(|constructor| {
-                    substitute_constructor_declaration_paths(type_ctx, constructor, subst)
-                })
-                .collect(),
-            *layout,
-        ),
-    }
-}
-
-fn substitute_type_inlined_paths<'a>(
-    type_ctx: &'a TypeContext,
-    inlined: &TypeInlinedType,
-    subst: &InclusionSubst,
-) -> TypeInlinedType {
-    match inlined {
-        TypeInlinedType::Record { type_name, labels } => TypeInlinedType::Record {
-            type_name: type_name.clone(),
-            labels: labels
-                .iter()
-                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
-                .collect(),
-        },
     }
 }
 
@@ -2461,8 +2440,8 @@ fn substitute_type_inlined_with_copied_types(
     }
 }
 
-fn substitute_type_declaration_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn substitute_type_declaration_paths(
+    type_ctx: &TypeContext,
     decl: &TypeDeclaration,
     subst: &InclusionSubst,
 ) -> TypeDeclaration {
@@ -2506,8 +2485,8 @@ fn substitute_type_declaration_paths<'a>(
     substituted
 }
 
-pub(crate) fn substitute_type_declaration_self_path<'a>(
-    type_ctx: &'a TypeContext,
+pub(crate) fn substitute_type_declaration_self_path(
+    type_ctx: &TypeContext,
     decl: &TypeDeclaration,
     from: &Path,
     to: &Path,
@@ -2517,8 +2496,8 @@ pub(crate) fn substitute_type_declaration_self_path<'a>(
     substitute_type_declaration_paths(type_ctx, decl, &subst)
 }
 
-fn substitute_extension_constructor_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn substitute_extension_constructor_paths(
+    type_ctx: &TypeContext,
     ext: &ExtensionConstructor,
     subst: &InclusionSubst,
 ) -> ExtensionConstructor {
@@ -2540,14 +2519,14 @@ fn substitute_extension_constructor_paths<'a>(
 }
 
 fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.type_paths, path) {
+    if let Some(replacement) = subst.type_paths.get(path) {
         return replacement;
     }
     match path {
         Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
             std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            name.clone(),
+            *name,
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
@@ -2558,14 +2537,14 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
 }
 
 fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.module_paths, path) {
+    if let Some(replacement) = subst.module_paths.get(path) {
         return replacement;
     }
     match path {
         Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
             std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            name.clone(),
+            *name,
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
@@ -2575,33 +2554,15 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
     }
 }
 
-fn substitute_type_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.type_paths, path) {
-        return replacement;
-    }
-    match path {
-        Path::Pident(_) => path.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            name.clone(),
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_type_path(functor, subst)),
-            std::sync::Arc::new(substitute_module_path(arg, subst)),
-        ),
-    }
-}
-
 fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
-    if let Some(replacement) = lookup_path_subst(&subst.modtype_paths, path) {
+    if let Some(replacement) = subst.modtype_paths.get(path) {
         return replacement;
     }
     match path {
         Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
             std::sync::Arc::new(substitute_module_path(prefix, subst)),
-            name.clone(),
+            *name,
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
@@ -2643,7 +2604,7 @@ fn substitute_module_type_paths_no_freshen(
             param_type,
             result,
         } => ModuleType::MtyFunctor {
-            param: param.clone(),
+            param: *param,
             param_type: param_type.as_ref().map(|param_type| {
                 Box::new(substitute_module_type_paths_no_freshen(
                     type_ctx, param_type, subst,
@@ -2657,26 +2618,28 @@ fn substitute_module_type_paths_no_freshen(
             sig.iter()
                 .map(|item| match item {
                     SignatureItem::SigValue(id, desc) => SignatureItem::SigValue(
-                        id.clone(),
+                        *id,
                         substitute_value_description_paths(type_ctx, desc, subst),
                     ),
                     SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
-                        id.clone(),
-                        std::sync::Arc::new(substitute_type_declaration_paths(type_ctx, decl, subst)),
+                        *id,
+                        std::sync::Arc::new(substitute_type_declaration_paths(
+                            type_ctx, decl, subst,
+                        )),
                         *rec_status,
                     ),
                     SignatureItem::SigTypext(id, ext, ext_status) => SignatureItem::SigTypext(
-                        id.clone(),
+                        *id,
                         substitute_extension_constructor_paths(type_ctx, ext, subst),
                         *ext_status,
                     ),
                     SignatureItem::SigModule(id, md, rec_status) => SignatureItem::SigModule(
-                        id.clone(),
+                        *id,
                         substitute_module_declaration_paths_no_freshen(type_ctx, md, subst),
                         *rec_status,
                     ),
                     SignatureItem::SigModtype(id, mtd) => SignatureItem::SigModtype(
-                        id.clone(),
+                        *id,
                         substitute_modtype_declaration_paths_no_freshen(type_ctx, mtd, subst),
                     ),
                     _ => item.clone(),
@@ -2725,8 +2688,8 @@ fn substitute_modtype_declaration_paths_no_freshen(
     substituted
 }
 
-fn rewrite_substituted_type_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn rewrite_substituted_type_paths(
+    type_ctx: &TypeContext,
     ty: TypeExprRef,
     subst: &InclusionSubst,
     seen: &mut HashSet<TypeExprRef>,
@@ -2773,7 +2736,7 @@ fn rewrite_substituted_type_paths<'a>(
             rewrite_substituted_type_paths(type_ctx, *rest, subst, seen);
         }
         TypeDesc::Tvariant(row0) => {
-            let row = crate::types::btype::row_repr(type_ctx, &row0);
+            let row = crate::types::btype::row_repr(type_ctx, row0);
             for (_, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(arg)) => {
@@ -2818,8 +2781,8 @@ fn rewrite_substituted_type_paths<'a>(
     }
 }
 
-fn substitute_value_type_paths<'a>(
-    type_ctx: &'a TypeContext,
+fn substitute_value_type_paths(
+    type_ctx: &TypeContext,
     ty: TypeExprRef,
     subst: &InclusionSubst,
 ) -> TypeExprRef {
@@ -2833,8 +2796,8 @@ fn substitute_value_type_paths<'a>(
 }
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.
-pub(crate) fn type_declarations<'a>(
-    type_ctx: &'a TypeContext,
+pub(crate) fn type_declarations(
+    type_ctx: &TypeContext,
     env: &Env,
     id: Ident,
     impl_decl: &TypeDeclaration,
@@ -2860,7 +2823,12 @@ pub(crate) fn type_declarations<'a>(
         };
         let mut usage_tables = type_ctx.usage();
         for cstr in impl_cstrs {
-            usage_tables.mark_constructor_used(usage, id.name(), impl_decl.type_loc, cstr.cd_id.name());
+            usage_tables.mark_constructor_used(
+                usage,
+                id.name(),
+                impl_decl.type_loc,
+                cstr.cd_id.name(),
+            );
         }
     }
     if let Some(warning) = deprecated_inclusion_warning(
@@ -2963,7 +2931,7 @@ pub(crate) fn type_declarations<'a>(
     let canonical_unboxed = |decl: &TypeDeclaration| {
         decl.type_representation == crate::types::TypeRepresentation::Unboxed
             || decl.variant_layout_ref().is_some_and(|layout_ref| {
-                type_ctx.variant_layout(layout_ref).configuration().unboxed
+                type_ctx.with_variant_layout(layout_ref, |layout| layout.configuration().unboxed)
             })
     };
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
@@ -3199,8 +3167,8 @@ fn compare_record_declarations_with_param_map(
         ) {
             warnings.push(warning);
         }
-        let impl_runtime_name = label_declaration_runtime_name(impl_label);
-        let sig_runtime_name = label_declaration_runtime_name(sig_label);
+        let impl_runtime_name = impl_label.declaration_name();
+        let sig_runtime_name = sig_label.declaration_name();
         if impl_runtime_name != sig_runtime_name {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",
@@ -3283,15 +3251,10 @@ fn type_decl_mismatch(
     }
 }
 
-fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
-    decl.type_attributes
-        .iter()
-        .any(|attr| attr.attr_name.txt == name)
-}
-
 fn type_decl_tag_name(type_ctx: &TypeContext, decl: &TypeDeclaration) -> Option<String> {
-    decl.variant_layout_ref()
-        .and_then(|layout_ref| type_ctx.variant_layout(layout_ref).matching_facts.tag_name)
+    decl.variant_layout_ref().and_then(|layout_ref| {
+        type_ctx.with_variant_layout(layout_ref, |layout| layout.matching_facts.tag_name.clone())
+    })
 }
 
 fn private_flags(impl_decl: &TypeDeclaration, sig_decl: &TypeDeclaration) -> bool {
@@ -3555,10 +3518,13 @@ fn fixed_private_object_manifest_for_inclusion(
     // The signature must not grant write capability the implementation
     // lacks; an implementation's settable field may be abstracted to a
     // read-only one.
-    if !pairs.iter().all(|(_, impl_mut, _, sig_mut, _)| match sig_mut {
-        FieldKind::Mutable => *impl_mut == FieldKind::Mutable,
-        FieldKind::Immutable => true,
-    }) {
+    if !pairs
+        .iter()
+        .all(|(_, impl_mut, _, sig_mut, _)| match sig_mut {
+            FieldKind::Mutable => *impl_mut == FieldKind::Mutable,
+            FieldKind::Immutable => true,
+        })
+    {
         return false;
     }
 
@@ -3820,15 +3786,6 @@ fn compare_variant_declarations(
     }
 
     None
-}
-
-pub(crate) fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    // `Record_runtime.declaration_name`.
-    label.declaration_name()
-}
-
-fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
-    label.ld_runtime_name.clone()
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
@@ -4276,13 +4233,7 @@ fn associate_object_fields_for_inclusion(
         let (sig_name, sig_kind, sig_ty) = &sig_fields[sig_index];
         match impl_name.cmp(sig_name) {
             std::cmp::Ordering::Equal => {
-                pairs.push((
-                    impl_name.clone(),
-                    impl_kind.clone(),
-                    *impl_ty,
-                    sig_kind.clone(),
-                    *sig_ty,
-                ));
+                pairs.push((impl_name.clone(), *impl_kind, *impl_ty, *sig_kind, *sig_ty));
                 impl_index += 1;
                 sig_index += 1;
             }
@@ -4365,8 +4316,8 @@ fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {
 }
 
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.
-fn extension_constructors<'a>(
-    type_ctx: &'a TypeContext,
+fn extension_constructors(
+    type_ctx: &TypeContext,
     env: &Env,
     id: Ident,
     impl_ext: &ExtensionConstructor,
@@ -4393,7 +4344,7 @@ fn extension_constructors<'a>(
     }
     let sig_ext = substitute_extension_constructor_paths(type_ctx, sig_ext, subst);
     let mismatch = || IncludeModError::ExtensionConstructorMismatch {
-        name: id.clone(),
+        name: id,
         actual: impl_ext.clone(),
         expected: sig_ext.clone(),
     };
@@ -4507,8 +4458,8 @@ fn constructor_arguments_equal_for_inclusion(
 }
 
 /// Check if module type declaration `impl_decl` is compatible with `sig_decl`.
-fn modtype_declarations<'a>(
-    type_ctx: &'a TypeContext,
+fn modtype_declarations(
+    type_ctx: &TypeContext,
     env: &Env,
     id: Ident,
     impl_decl: &ModtypeDeclaration,
@@ -4548,10 +4499,10 @@ fn modtype_declarations<'a>(
             }
 
             let mismatch = |error| IncludeModError::ModuleTypeDeclarationMismatch {
-                name: id.clone(),
+                name: id,
                 actual: impl_decl.clone(),
                 expected: sig_decl.clone(),
-                error: Box::new(with_modtype_context(id.clone(), error)),
+                error: Box::new(with_modtype_context(id, error)),
             };
 
             // Module types must be equivalent (both directions), and OCaml
@@ -4751,17 +4702,16 @@ mod tests {
         let impl_mod_id = Ident::create_local("M");
         let sig_mod_id = Ident::create_local("M");
 
-        let impl_ty = type_ctx.new_generic_constr(Path::pident(impl_type_id.clone()), vec![]);
-        let sig_ty = type_ctx.new_generic_constr(Path::pident(sig_type_id.clone()), vec![]);
+        let impl_ty = type_ctx.new_generic_constr(Path::pident(impl_type_id), vec![]);
+        let sig_ty = type_ctx.new_generic_constr(Path::pident(sig_type_id), vec![]);
 
         let sig_impl: Signature = vec![
             SignatureItem::SigModule(
                 impl_mod_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigValue(
-                        Ident::create_local("x"),
-                        value_desc(impl_ty),
-                    )])),
+                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![
+                        SignatureItem::SigValue(Ident::create_local("x"), value_desc(impl_ty)),
+                    ])),
                     md_attributes: vec![],
                     md_loc: Location::none(),
                     md_path: None,
@@ -4769,7 +4719,7 @@ mod tests {
                 RecStatus::TrecNot,
             ),
             SignatureItem::SigType(
-                impl_type_id.clone(),
+                impl_type_id,
                 std::sync::Arc::new(abstract_type_decl(Some(Path::pident(impl_type_id)))),
                 RecStatus::TrecNot,
             ),
@@ -4778,17 +4728,20 @@ mod tests {
             SignatureItem::SigModule(
                 sig_mod_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigValue(
-                        Ident::create_local("x"),
-                        value_desc(sig_ty),
-                    )])),
+                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![
+                        SignatureItem::SigValue(Ident::create_local("x"), value_desc(sig_ty)),
+                    ])),
                     md_attributes: vec![],
                     md_loc: Location::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
             ),
-            SignatureItem::SigType(sig_type_id, std::sync::Arc::new(abstract_type_decl(None)), RecStatus::TrecNot),
+            SignatureItem::SigType(
+                sig_type_id,
+                std::sync::Arc::new(abstract_type_decl(None)),
+                RecStatus::TrecNot,
+            ),
         ];
 
         let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig);
@@ -4837,7 +4790,7 @@ mod tests {
         )];
         let modtype_id = Ident::create_local("BeltList");
         env.add_modtype(
-            modtype_id.clone(),
+            modtype_id,
             ModtypeDeclaration {
                 mtd_type: Some(ModuleType::MtySignature(std::sync::Arc::new(sig.clone()))),
                 mtd_attributes: vec![],

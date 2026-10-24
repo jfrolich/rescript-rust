@@ -1,5 +1,4 @@
 // Port of compiler/gentype/NamedArgs.ml:1-14.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{ArgType, Label, Type};
 

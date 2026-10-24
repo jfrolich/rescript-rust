@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn detects_var_use() {
         let v = ident("v", 1);
-        assert!(hit_variable(&v, &Lambda::Lvar(v.clone())));
+        assert!(hit_variable(&v, &Lambda::Lvar(v)));
     }
 
     #[test]
@@ -101,9 +101,9 @@ mod tests {
         let v = ident("v", 1);
         let lam = Lambda::let_(
             LetKind::Strict,
-            v.clone(),
+            v,
             Lambda::Lconst(Constant::int(1)),
-            Lambda::Lvar(v.clone()),
+            Lambda::Lvar(v),
         );
         assert!(hit_variable(&v, &lam));
     }

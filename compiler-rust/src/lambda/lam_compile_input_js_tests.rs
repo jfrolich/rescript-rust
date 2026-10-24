@@ -24,9 +24,9 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
     for inline in [false, true] {
         for global in [false, true] {
             let base = if global {
-                Lambda::LglobalModule(target.clone())
+                Lambda::LglobalModule(target)
             } else {
-                Lambda::var(target.clone())
+                Lambda::var(target)
             };
             // Exercise the consumer shape without the producer smart constructor
             // collapsing the inlined module wrapper first.
@@ -38,14 +38,14 @@ fn indexed_identity_module_emits_original_identifier_with_all_flags() {
                 args: vec![if inline {
                     field(base.clone())
                 } else {
-                    Lambda::var(alias.clone())
+                    Lambda::var(alias)
                 }],
                 loc: Location::none(),
             }));
             let body = if inline {
                 body
             } else {
-                Lambda::let_(LetKind::Alias, alias.clone(), field(base), body)
+                Lambda::let_(LetKind::Alias, alias, field(base), body)
             };
             let context = IndexedLambdaContext::from_lambda(body, []);
             let count = context.node_count();
@@ -83,16 +83,17 @@ fn indexed_eta_emits_runtime_js_and_honors_function_guards() {
         attr.async_ = guard == 2;
         attr.directive = (guard == 3).then(|| "use server".to_owned());
         let args = if guard == 4 {
-            vec![Lambda::var(right.clone()), Lambda::var(left.clone())]
+            vec![Lambda::var(right), Lambda::var(left)]
         } else {
-            vec![Lambda::var(left.clone()), Lambda::var(right.clone())]
+            vec![Lambda::var(left), Lambda::var(right)]
         };
         let context = IndexedLambdaContext::from_lambda(
             Lambda::function_(
                 2,
-                vec![left.clone(), right.clone()],
+                vec![left, right],
                 Lambda::prim(Primitive::Pobjorder, args, Location::none()),
-                attr, crate::location::Location::none(),
+                attr,
+                crate::location::Location::none(),
             ),
             [],
         );
@@ -131,14 +132,16 @@ fn primitive_js_boundary_preserves_prelude_and_shared_dynamic_import_allocator()
     ));
     let prelude_text = print_block(&vec![before.clone()]);
     let compiled = compiler.compile_primitive_js(
-        &Primitive::Pimport(Box::new(crate::lambda::lam_primitive::ImportSource::ImportExternal {
-            module_: crate::lambda::lam_primitive::ExternalModuleName {
-                bundle: "external-package".into(),
-                module_bind_name: crate::lambda::lam_primitive::ModuleBindName::PhintNothing,
-                import_attributes: None,
+        &Primitive::Pimport(Box::new(
+            crate::lambda::lam_primitive::ImportSource::ImportExternal {
+                module_: crate::lambda::lam_primitive::ExternalModuleName {
+                    bundle: "external-package".into(),
+                    module_bind_name: crate::lambda::lam_primitive::ModuleBindName::PhintNothing,
+                    import_attributes: None,
+                },
+                path: vec!["value".into()],
             },
-            path: vec!["value".into()],
-        })),
+        )),
         vec![],
         vec![before],
         &Location::none(),

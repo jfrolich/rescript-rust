@@ -2,9 +2,9 @@
 //! explicitly while the remaining consumer modes are moved here. A continuation
 //! receives the same owner and a NodeId, never a borrowed store or a Lambda tree.
 
+use self::context::{Continuation, MapIdent, MaybeTail, TailType};
+use self::output::{Finished, Output};
 use super::*;
-use self::context::{Continuation, TailType, MaybeTail, MapIdent};
-use self::output::{Output, Finished};
 use crate::lambda::indexed::NodeView;
 use crate::lambda::lam_compile_input::LambdaInputs;
 use crate::lambda::lam_indexed_helpers::append_rebuilt;
@@ -20,7 +20,11 @@ impl<'a> IndexedJsConsumer<'a> {
         compiler: &'a mut LambdaCompiler,
         context: &'a mut IndexedLambdaContext,
     ) -> Self {
-        Self { compiler, context, return_labels: Vec::new() }
+        Self {
+            compiler,
+            context,
+            return_labels: Vec::new(),
+        }
     }
 
     /// Thin NeedValue wrapper for callers still using Compiled.
@@ -29,11 +33,22 @@ impl<'a> IndexedJsConsumer<'a> {
         application: NodeId,
         lower: &mut impl FnMut(&mut Self, NodeId) -> Compiled,
     ) -> Compiled {
-        let output = self.application_output(application, &Continuation::NeedValue(TailType::NotTail), &mut |owner, child, _| {
-            let compiled = lower(owner, child);
-            Output { block: compiled.prelude, value: Some(compiled.expr), finished: Finished::False }
-        });
-        Compiled { prelude: output.block, expr: output.value.expect("NeedValue application") }
+        let output = self.application_output(
+            application,
+            &Continuation::NeedValue(TailType::NotTail),
+            &mut |owner, child, _| {
+                let compiled = lower(owner, child);
+                Output {
+                    block: compiled.prelude,
+                    value: Some(compiled.expr),
+                    finished: Finished::False,
+                }
+            },
+        );
+        Compiled {
+            prelude: output.block,
+            expr: output.value.expect("NeedValue application"),
+        }
     }
 
     pub(super) fn application_output(
@@ -92,10 +107,15 @@ impl<'a> IndexedJsConsumer<'a> {
                     transformed_jsx,
                     known_arity,
                 } => {
-                    let (prelude, args) = self.call_arguments(args.len(), |_, i| args[i], &mut |owner, child| {
-                        let output = lower(owner, child, &Continuation::NeedValue(TailType::NotTail));
-                        Compiled { prelude: output.block, expr: output.value.expect("call argument") }
-                    });
+                    let (prelude, args) =
+                        self.call_arguments(args.len(), |_, i| args[i], &mut |owner, child| {
+                            let output =
+                                lower(owner, child, &Continuation::NeedValue(TailType::NotTail));
+                            Compiled {
+                                prelude: output.block,
+                                expr: output.value.expect("call argument"),
+                            }
+                        });
                     let function = Expression::qualified(module, Some(field_name));
                     let mut expr = match info.status {
                         ApplyStatus::InferFull | ApplyStatus::Uncurry => Expression::call(
@@ -110,7 +130,9 @@ impl<'a> IndexedJsConsumer<'a> {
                             _ => Expression::call(function, args, CallInfo::default()),
                         },
                     };
-                    if expr.source_loc.is_none() { expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new); }
+                    if expr.source_loc.is_none() {
+                        expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new);
+                    }
                     Output::of_block_and_expression(continuation, prelude, expr)
                 }
             };
@@ -129,7 +151,10 @@ impl<'a> IndexedJsConsumer<'a> {
             },
             &mut |owner, child| {
                 let output = lower(owner, child, &Continuation::NeedValue(TailType::NotTail));
-                Compiled { prelude: output.block, expr: output.value.expect("call argument") }
+                Compiled {
+                    prelude: output.block,
+                    expr: output.value.expect("call argument"),
+                }
             },
         );
         let compiled_function = lower(self, function, &Continuation::NeedValue(TailType::NotTail));
@@ -138,44 +163,69 @@ impl<'a> IndexedJsConsumer<'a> {
         // compiler/core/lam_compile.ml:1658-1702. Tail state belongs to this
         // owner; NeedValue tail probes and EffectCall share this exact label.
         let tail_label = match continuation {
-            Continuation::NeedValue(TailType::MaybeTailIsReturn(MaybeTail::TailWithName { label, .. })) |
-            Continuation::EffectCall(TailType::MaybeTailIsReturn(MaybeTail::TailWithName { label, .. })) => *label,
+            Continuation::NeedValue(TailType::MaybeTailIsReturn(MaybeTail::TailWithName {
+                label,
+                ..
+            }))
+            | Continuation::EffectCall(TailType::MaybeTailIsReturn(MaybeTail::TailWithName {
+                label,
+                ..
+            })) => *label,
             _ => None,
         };
         if let Some(label) = tail_label {
-            if matches!(self.context.store().view(function), NodeView::Var(id) if id.same(&self.return_labels[label.0].id)) {
+            if matches!(self.context.store().view(function), NodeView::Var(id) if id.same(&self.return_labels[label.0].id))
+            {
                 let ret = &mut self.return_labels[label.0];
                 ret.triggered = true;
-                let args = if ret.params.is_empty() { Vec::new() } else { args };
+                let args = if ret.params.is_empty() {
+                    Vec::new()
+                } else {
+                    args
+                };
                 assert_eq!(ret.params.len(), args.len(), "native tail parameter arity");
                 let mut assigned = Vec::new();
                 let mut new_params = std::collections::BTreeMap::new();
                 for (i, (param, arg)) in ret.params.iter().zip(args).enumerate() {
-                    if matches!(&arg.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(param)) { continue; }
-                    let key = MapIdent(param.clone());
+                    if matches!(&arg.desc, ExpressionDesc::Var(VIdent::Id(id)) if id.same(param)) {
+                        continue;
+                    }
+                    let key = MapIdent(*param);
                     let new_param = match ret.new_params.get(&key) {
-                        Some(id) => id.clone(),
+                        Some(id) => *id,
                         None => {
                             ret.immutable_mask[i] = false;
                             let id = self.compiler.fresh_ident(&format!("_{}", param.name()));
-                            new_params.insert(key, id.clone());
+                            new_params.insert(key, id);
                             id
-                        },
+                        }
                     };
                     assigned.push((new_param, arg));
                 }
                 for (key, value) in new_params {
-                    assert!(ret.new_params.insert(key, value).is_none(), "disjoint tail parameter map");
+                    assert!(
+                        ret.new_params.insert(key, value).is_none(),
+                        "disjoint tail parameter map"
+                    );
                 }
                 for (param, arg) in assigned.into_iter().rev() {
-                    prelude.push(Statement::exp(Expression::bin(BinOp::Eq, Expression::var(param), arg)));
+                    prelude.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(param),
+                        arg,
+                    )));
                 }
                 prelude.push(Statement::continue_());
-                return Output { block: prelude, value: None, finished: Finished::True };
+                return Output {
+                    block: prelude,
+                    value: None,
+                    finished: Finished::True,
+                };
             }
         }
         let mut expr = Expression::call(
-            compiled_function.value.expect("call function"), args,
+            compiled_function.value.expect("call function"),
+            args,
             call_info_of_apply_status(jsx, info.status),
         );
         expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new);
@@ -255,7 +305,7 @@ impl<'a> IndexedJsConsumer<'a> {
         assign: &mut impl FnMut(&mut Self, &Ident, NodeId) -> Block,
     ) -> Compiled {
         let (body, exception, handler) = match self.context.store().view(node) {
-            NodeView::TryWith(body, exception, handler) => (body, exception.clone(), handler),
+            NodeView::TryWith(body, exception, handler) => (body, *exception, handler),
             _ => panic!("try_with lowering requires a try node"),
         };
         let result = self.compiler.fresh_tmp_ident();
@@ -264,7 +314,7 @@ impl<'a> IndexedJsConsumer<'a> {
         Compiled {
             prelude: vec![
                 Statement::variable(VariableDeclaration {
-                    ident: result.clone(),
+                    ident: result,
                     value: None,
                     property: LetKind::Variable,
                     ident_info: IdentInfo::default(),

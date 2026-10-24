@@ -97,11 +97,12 @@ impl Arity {
 
     /// Extract all arities as a list.
     ///
-    /// Returns an empty list for `Na`.
-    pub fn extract_arity(&self) -> Vec<i32> {
+    /// Returns an empty list for `Na`. Consumes the arity so the list is
+    /// moved rather than cloned.
+    pub fn extract_arity(self) -> Vec<i32> {
         match self {
             Arity::Na => vec![],
-            Arity::Info { arities, .. } => arities.clone(),
+            Arity::Info { arities, .. } => arities,
         }
     }
 

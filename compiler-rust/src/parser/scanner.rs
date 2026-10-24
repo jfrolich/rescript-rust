@@ -15,6 +15,7 @@
 //! - No upfront Vec<char> or Vec<usize> allocation
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 
 use crate::intern::StrIdx;
 use crate::location::Position;
@@ -297,9 +298,6 @@ impl<'src> Scanner<'src> {
         self.next();
     }
 
-    /// Peek at the next character without advancing.
-    ///
-    /// Uses byte-level access: skips past current character's bytes to find the next.
     /// OCaml `Scanner.peek_slash` (res_scanner.ml:140-151): whether the next
     /// non-whitespace source character after the current token is `/`.
     pub fn peek_slash(&self) -> bool {
@@ -313,74 +311,34 @@ impl<'src> Scanner<'src> {
         false
     }
 
+    /// Byte offset reached by skipping `n` characters from `byte_offset`
+    /// (stops at EOF).
+    fn skip_chars_from(&self, mut byte_offset: usize, n: usize) -> usize {
+        for _ in 0..n {
+            byte_offset += self.decode_at(byte_offset).1;
+        }
+        byte_offset
+    }
+
+    /// Peek at the character `n + 1` positions ahead without advancing.
+    fn peek_nth(&self, n: usize) -> char {
+        let off = self.skip_chars_from(self.offset + self.ch_len, n);
+        self.decode_at(off).0
+    }
+
+    /// Peek at the next character without advancing.
     fn peek(&self) -> char {
-        let next_offset = self.offset + self.ch_len;
-        if next_offset >= self.bytes.len() {
-            return EOF_CHAR;
-        }
-        let b = self.bytes[next_offset];
-        if b < 0x80 {
-            b as char
-        } else {
-            let (cp, _) = utf8::decode_codepoint(self.bytes, next_offset);
-            char::from_u32(cp as u32).unwrap_or(EOF_CHAR)
-        }
+        self.peek_nth(0)
     }
 
     /// Peek at the character 2 positions ahead.
     fn peek2(&self) -> char {
-        let mut off = self.offset + self.ch_len;
-        if off >= self.bytes.len() {
-            return EOF_CHAR;
-        }
-        // Skip one character
-        let b1 = self.bytes[off];
-        if b1 < 0x80 {
-            off += 1;
-        } else {
-            let (_, len) = utf8::decode_codepoint(self.bytes, off);
-            off += len;
-        }
-        // Decode the second character ahead
-        if off >= self.bytes.len() {
-            return EOF_CHAR;
-        }
-        let b2 = self.bytes[off];
-        if b2 < 0x80 {
-            b2 as char
-        } else {
-            let (cp, _) = utf8::decode_codepoint(self.bytes, off);
-            char::from_u32(cp as u32).unwrap_or(EOF_CHAR)
-        }
+        self.peek_nth(1)
     }
 
     /// Peek at the character 3 positions ahead.
     fn peek3(&self) -> char {
-        let mut off = self.offset + self.ch_len;
-        // Skip two characters
-        for _ in 0..2 {
-            if off >= self.bytes.len() {
-                return EOF_CHAR;
-            }
-            let b = self.bytes[off];
-            if b < 0x80 {
-                off += 1;
-            } else {
-                let (_, len) = utf8::decode_codepoint(self.bytes, off);
-                off += len;
-            }
-        }
-        // Decode the third character ahead
-        if off >= self.bytes.len() {
-            return EOF_CHAR;
-        }
-        let b = self.bytes[off];
-        if b < 0x80 {
-            b as char
-        } else {
-            let (cp, _) = utf8::decode_codepoint(self.bytes, off);
-            char::from_u32(cp as u32).unwrap_or(EOF_CHAR)
-        }
+        self.peek_nth(2)
     }
 
     /// Check if a character is whitespace.
@@ -595,23 +553,31 @@ impl<'src> Scanner<'src> {
         self.next(); // consume opening quote
 
         // OCaml keeps escape sequences as text, only converting decimal to hex.
-        // We use a buffer to accumulate the result, copying text verbatim except
-        // for decimal escapes which get converted to hex format.
-        let mut result = String::new();
+        // Literals without escapes borrow from the source; the buffer is only
+        // allocated at the first escape, after which text is copied verbatim
+        // except for decimal escapes which get converted to hex format.
+        let mut result: Option<String> = None;
         let mut chunk_start = self.offset;
 
         loop {
             match self.ch {
                 '"' => {
-                    // Add remaining content
-                    result.push_str(self.substring(chunk_start, self.offset));
+                    let chunk = self.substring(chunk_start, self.offset);
+                    let token = match result {
+                        None => Token::String(Cow::Borrowed(chunk)),
+                        Some(mut buf) => {
+                            buf.push_str(chunk);
+                            Token::String(Cow::Owned(buf))
+                        }
+                    };
                     self.next();
-                    break;
+                    return token;
                 }
                 '\\' => {
                     // Add content before the escape (including the backslash)
-                    result.push_str(self.substring(chunk_start, self.offset));
-                    result.push('\\');
+                    let buf = result.get_or_insert_with(String::new);
+                    buf.push_str(self.substring(chunk_start, self.offset));
+                    buf.push('\\');
                     let escape_start_pos = self.position();
                     self.next(); // consume backslash
 
@@ -622,35 +588,36 @@ impl<'src> Scanner<'src> {
 
                     // Check if it was a 3-digit decimal escape
                     let escape_text = self.substring(escape_start, escape_end);
-                    if escape_text.len() == 3 && escape_text.chars().all(|c| c.is_ascii_digit()) {
-                        // Convert decimal to hex format
-                        if let Ok(value) = escape_text.parse::<u32>() {
-                            if value <= 255 {
-                                result.push_str(&format!("x{:02x}", value));
-                            } else {
-                                // Invalid value, keep as-is
-                                result.push_str(escape_text);
-                            }
-                        } else {
-                            result.push_str(escape_text);
+                    let buf = result.as_mut().expect("buffer allocated above");
+                    match escape_text.parse::<u32>() {
+                        Ok(value)
+                            if value <= 255
+                                && escape_text.len() == 3
+                                && escape_text.chars().all(|c| c.is_ascii_digit()) =>
+                        {
+                            // Convert decimal to hex format
+                            write!(buf, "x{:02x}", value).expect("writing to a String");
                         }
-                    } else {
-                        // Keep other escapes as-is
-                        result.push_str(escape_text);
+                        // Keep other escapes (and invalid values) as-is
+                        _ => buf.push_str(escape_text),
                     }
                     chunk_start = self.offset;
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
                     self.error(start_pos, end_pos, DiagnosticCategory::unclosed_string());
-                    result.push_str(self.substring(chunk_start, self.offset));
-                    break;
+                    let chunk = self.substring(chunk_start, self.offset);
+                    return Token::String(match result {
+                        None => Cow::Borrowed(chunk),
+                        Some(mut buf) => {
+                            buf.push_str(chunk);
+                            Cow::Owned(buf)
+                        }
+                    });
                 }
                 _ => self.next(),
             }
         }
-
-        Token::String(Cow::Owned(result))
     }
 
     /// Scan past a string escape sequence, advancing the scanner position.
@@ -683,7 +650,11 @@ impl<'src> Scanner<'src> {
                     let mut has_digit = false;
                     while let Some(digit) = self.ch.to_digit(16) {
                         has_digit = true;
-                        x = if x > (max - digit) / 16 { max + 1 } else { x * 16 + digit };
+                        x = if x > (max - digit) / 16 {
+                            max + 1
+                        } else {
+                            x * 16 + digit
+                        };
                         self.next();
                     }
                     if self.ch == '}' {
@@ -734,11 +705,7 @@ impl<'src> Scanner<'src> {
                 } else {
                     "unknown escape sequence"
                 };
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::message(message),
-                );
+                self.error(*start_pos, end_pos, DiagnosticCategory::message(message));
                 return -1;
             };
             self.next();
@@ -747,7 +714,13 @@ impl<'src> Scanner<'src> {
         value
     }
 
-    fn scan_string_escape_digits_max(&mut self, start_pos: &Position, digits: usize, base: u32, max: i64) {
+    fn scan_string_escape_digits_max(
+        &mut self,
+        start_pos: &Position,
+        digits: usize,
+        base: u32,
+        max: i64,
+    ) {
         let value = self.scan_string_escape_digits(start_pos, digits, base);
         if value > max || (0xD800..0xE000).contains(&value) {
             self.invalid_unicode_code_point(start_pos);
@@ -757,7 +730,7 @@ impl<'src> Scanner<'src> {
     fn invalid_unicode_code_point(&mut self, start_pos: &Position) {
         let end_pos = self.position();
         self.error(
-            start_pos.clone(),
+            *start_pos,
             end_pos,
             DiagnosticCategory::message("escape sequence is invalid unicode code point"),
         );
@@ -799,22 +772,7 @@ impl<'src> Scanner<'src> {
         };
 
         // Compute byte offset for content start by skipping N characters from current offset
-        let content_start_off = {
-            let mut off = self.offset;
-            for _ in 0..content_char_skip {
-                if off >= self.bytes.len() {
-                    break;
-                }
-                let b = self.bytes[off];
-                if b < 0x80 {
-                    off += 1;
-                } else {
-                    let (_, len) = utf8::decode_codepoint(self.bytes, off);
-                    off += len;
-                }
-            }
-            off
-        };
+        let content_start_off = self.skip_chars_from(self.offset, content_char_skip);
 
         let start_pos = self.position();
         let mut depth = 0;
@@ -835,11 +793,7 @@ impl<'src> Scanner<'src> {
                 }
                 (c, _) if c == EOF_CHAR => {
                     let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos,
-                        DiagnosticCategory::unclosed_comment(),
-                    );
+                    self.error(start_pos, end_pos, DiagnosticCategory::unclosed_comment());
                     break;
                 }
                 _ => self.next(),
@@ -874,8 +828,8 @@ impl<'src> Scanner<'src> {
                 content
             } else {
                 self.error(
-                    loc.loc_start.clone(),
-                    loc.loc_end.clone(),
+                    loc.loc_start,
+                    loc.loc_end,
                     DiagnosticCategory::message("Invalid code point"),
                 );
                 Cow::Owned(crate::string_literal::replace_invalid_utf8(&content))
@@ -942,11 +896,7 @@ impl<'src> Scanner<'src> {
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos.clone(),
-                        DiagnosticCategory::unclosed_template(),
-                    );
+                    self.error(start_pos, end_pos, DiagnosticCategory::unclosed_template());
                     // OCaml uses (max (scanner.offset - 1 - start_off) 0) to exclude the last char
                     let end_off = if self.offset > start_off {
                         // OCaml drops the last source byte, which is the last
@@ -977,395 +927,393 @@ impl<'src> Scanner<'src> {
 
     /// Scan the next token.
     pub fn scan(&mut self) -> ScanResult<'src> {
-        self.skip_whitespace();
-        let start_pos = self.position();
+        // Start of the first unknown character skipped by this call, if any.
+        let mut recovery_start_pos: Option<Position> = None;
+        loop {
+            self.skip_whitespace();
+            let start_pos = self.position();
 
-        let token = match self.ch {
-            // Identifiers and keywords
-            'A'..='Z' | 'a'..='z' => self.scan_identifier(),
+            let token = match self.ch {
+                // Identifiers and keywords
+                'A'..='Z' | 'a'..='z' => self.scan_identifier(),
 
-            // Numbers
-            '0'..='9' => self.scan_number(),
+                // Numbers
+                '0'..='9' => self.scan_number(),
 
-            // Template literal
-            '`' => {
-                self.next();
-                Token::Backtick
-            }
-
-            // Operators and punctuation
-            '~' => {
-                if self.peek() == '~' && self.peek2() == '~' {
-                    self.next3();
-                    Token::Bnot
-                } else {
+                // Template literal
+                '`' => {
                     self.next();
-                    Token::Tilde
+                    Token::Backtick
                 }
-            }
-            '?' => {
-                self.next();
-                Token::Question
-            }
-            ';' => {
-                self.next();
-                Token::Semicolon
-            }
-            '(' => {
-                self.next();
-                Token::Lparen
-            }
-            ')' => {
-                self.next();
-                Token::Rparen
-            }
-            '[' => {
-                self.next();
-                Token::Lbracket
-            }
-            ']' => {
-                self.next();
-                Token::Rbracket
-            }
-            '{' => {
-                self.next();
-                Token::Lbrace
-            }
-            '}' => {
-                self.next();
-                Token::Rbrace
-            }
-            ',' => {
-                self.next();
-                Token::Comma
-            }
-            '"' => self.scan_string(),
 
-            '_' => {
-                if matches!(self.peek(), 'A'..='Z' | 'a'..='z' | '0'..='9' | '_') {
-                    self.scan_identifier()
-                } else {
+                // Operators and punctuation
+                '~' => {
+                    if self.peek() == '~' && self.peek2() == '~' {
+                        self.next3();
+                        Token::Bnot
+                    } else {
+                        self.next();
+                        Token::Tilde
+                    }
+                }
+                '?' => {
                     self.next();
-                    Token::Underscore
+                    Token::Question
                 }
-            }
-
-            '#' => {
-                if self.peek() == '=' {
-                    self.next2();
-                    Token::HashEqual
-                } else {
+                ';' => {
                     self.next();
-                    Token::Hash
+                    Token::Semicolon
                 }
-            }
-
-            '*' => match self.peek() {
-                '*' => {
-                    self.next2();
-                    Token::Exponentiation
-                }
-                '.' => {
-                    self.next2();
-                    Token::AsteriskDot
-                }
-                _ => {
+                '(' => {
                     self.next();
-                    Token::Asterisk
+                    Token::Lparen
                 }
-            },
-
-            '@' => {
-                if self.peek() == '@' {
-                    self.next2();
-                    Token::AtAt
-                } else {
+                ')' => {
                     self.next();
-                    Token::At
+                    Token::Rparen
                 }
-            }
-
-            '%' => {
-                if self.peek() == '%' {
-                    self.next2();
-                    Token::PercentPercent
-                } else {
+                '[' => {
                     self.next();
-                    Token::Percent
+                    Token::Lbracket
                 }
-            }
-
-            '|' => match (self.peek(), self.peek2()) {
-                ('|', '|') => {
-                    self.next3();
-                    Token::Bor
-                }
-                ('|', _) => {
-                    self.next2();
-                    Token::Lor
-                }
-                _ => {
+                ']' => {
                     self.next();
-                    Token::Bar
+                    Token::Rbracket
                 }
-            },
-
-            '&' => match (self.peek(), self.peek2()) {
-                ('&', '&') => {
-                    self.next3();
-                    Token::Band
-                }
-                ('&', _) => {
-                    self.next2();
-                    Token::Land
-                }
-                _ => {
+                '{' => {
                     self.next();
-                    Token::Ampersand
+                    Token::Lbrace
                 }
-            },
-
-            '^' => {
-                if self.peek() == '^' && self.peek2() == '^' {
-                    self.next3();
-                    Token::Bxor
-                } else {
+                '}' => {
                     self.next();
-                    Token::Caret
+                    Token::Rbrace
                 }
-            }
-
-            ':' => match self.peek() {
-                '=' => {
-                    self.next2();
-                    Token::ColonEqual
-                }
-                '>' => {
-                    self.next2();
-                    Token::ColonGreaterThan
-                }
-                _ => {
+                ',' => {
                     self.next();
-                    Token::Colon
+                    Token::Comma
                 }
-            },
+                '"' => self.scan_string(),
 
-            '/' => match self.peek() {
-                '/' => {
-                    self.next2();
-                    self.scan_single_line_comment()
+                '_' => {
+                    if matches!(self.peek(), 'A'..='Z' | 'a'..='z' | '0'..='9' | '_') {
+                        self.scan_identifier()
+                    } else {
+                        self.next();
+                        Token::Underscore
+                    }
                 }
-                '*' => self.scan_multi_line_comment(),
-                _ => {
-                    // OCaml's scanner always yields `/` or `/.`; the parser rescans
-                    // a regex literal with `next_regex_token` in expression position.
-                    if self.peek() == '.' {
+
+                '#' => {
+                    if self.peek() == '=' {
                         self.next2();
-                        Token::ForwardslashDot
+                        Token::HashEqual
                     } else {
                         self.next();
-                        Token::Forwardslash
+                        Token::Hash
                     }
                 }
-            },
 
-            '-' => match self.peek() {
-                '.' => {
-                    self.next2();
-                    Token::MinusDot
-                }
-                '>' => {
-                    self.next2();
-                    Token::MinusGreater
-                }
-                _ => {
-                    self.next();
-                    Token::Minus
-                }
-            },
-
-            '+' => match self.peek() {
-                '.' => {
-                    self.next2();
-                    Token::PlusDot
-                }
-                '+' => {
-                    self.next2();
-                    Token::PlusPlus
-                }
-                '=' => {
-                    self.next2();
-                    Token::PlusEqual
-                }
-                _ => {
-                    self.next();
-                    Token::Plus
-                }
-            },
-
-            '>' => {
-                self.next();
-                Token::GreaterThan
-            }
-
-            '<' => match self.peek() {
-                '=' => {
-                    self.next2();
-                    Token::LessEqual
-                }
-                _ => {
-                    self.next();
-                    Token::LessThan
-                }
-            },
-
-            '.' => match (self.peek(), self.peek2()) {
-                ('.', '.') => {
-                    self.next3();
-                    Token::DotDotDot
-                }
-                ('.', _) => {
-                    self.next2();
-                    Token::DotDot
-                }
-                _ => {
-                    self.next();
-                    Token::Dot
-                }
-            },
-
-            '\'' => match (self.peek(), self.peek2()) {
-                ('\\', '"') => {
-                    self.next();
-                    Token::SingleQuote
-                }
-                ('\\', _) => {
-                    self.next2();
-                    self.scan_escape()
-                }
-                (ch, '\'') => {
-                    // Save the byte offset of the character between quotes
-                    let char_byte_off = self.offset + self.ch_len; // offset of the char after '
-                    self.next3();
-                    // The character is 1 byte (ASCII) since we matched it against a char pattern
-                    let original =
-                        Cow::Borrowed(self.substring(char_byte_off, char_byte_off + ch.len_utf8()));
-                    Token::Codepoint {
-                        c: ch as i32,
-                        original,
+                '*' => match self.peek() {
+                    '*' => {
+                        self.next2();
+                        Token::Exponentiation
                     }
-                }
-                _ => {
-                    // Match OCaml res_scanner.ml: try decoding a UTF-8 codepoint literal
-                    // after the opening quote, then fall back to SingleQuote on failure.
-                    let ch = self.peek();
-                    self.next();
-                    let offset = self.offset;
-                    let offset16 = self.offset16;
-                    let char_pos = self.char_pos;
-                    let ch_len = self.ch_len;
-                    let (codepoint, length) = self.decode_codepoint_from_latin1_source(self.offset);
-
-                    for _ in 0..length {
+                    '.' => {
+                        self.next2();
+                        Token::AsteriskDot
+                    }
+                    _ => {
                         self.next();
+                        Token::Asterisk
                     }
+                },
 
-                    if self.ch == '\'' {
-                        let contents = self.substring_latin1_chars(offset, length);
+                '@' => {
+                    if self.peek() == '@' {
+                        self.next2();
+                        Token::AtAt
+                    } else {
                         self.next();
-                        Token::Codepoint {
-                            c: codepoint,
-                            original: contents.into(),
+                        Token::At
+                    }
+                }
+
+                '%' => {
+                    if self.peek() == '%' {
+                        self.next2();
+                        Token::PercentPercent
+                    } else {
+                        self.next();
+                        Token::Percent
+                    }
+                }
+
+                '|' => match (self.peek(), self.peek2()) {
+                    ('|', '|') => {
+                        self.next3();
+                        Token::Bor
+                    }
+                    ('|', _) => {
+                        self.next2();
+                        Token::Lor
+                    }
+                    _ => {
+                        self.next();
+                        Token::Bar
+                    }
+                },
+
+                '&' => match (self.peek(), self.peek2()) {
+                    ('&', '&') => {
+                        self.next3();
+                        Token::Band
+                    }
+                    ('&', _) => {
+                        self.next2();
+                        Token::Land
+                    }
+                    _ => {
+                        self.next();
+                        Token::Ampersand
+                    }
+                },
+
+                '^' => {
+                    if self.peek() == '^' && self.peek2() == '^' {
+                        self.next3();
+                        Token::Bxor
+                    } else {
+                        self.next();
+                        Token::Caret
+                    }
+                }
+
+                ':' => match self.peek() {
+                    '=' => {
+                        self.next2();
+                        Token::ColonEqual
+                    }
+                    '>' => {
+                        self.next2();
+                        Token::ColonGreaterThan
+                    }
+                    _ => {
+                        self.next();
+                        Token::Colon
+                    }
+                },
+
+                '/' => match self.peek() {
+                    '/' => {
+                        self.next2();
+                        self.scan_single_line_comment()
+                    }
+                    '*' => self.scan_multi_line_comment(),
+                    _ => {
+                        // OCaml's scanner always yields `/` or `/.`; the parser rescans
+                        // a regex literal with `next_regex_token` in expression position.
+                        if self.peek() == '.' {
+                            self.next2();
+                            Token::ForwardslashDot
+                        } else {
+                            self.next();
+                            Token::Forwardslash
                         }
-                    } else {
-                        self.ch = ch;
-                        self.offset = offset;
-                        self.offset16 = offset16;
-                        self.char_pos = char_pos;
-                        self.ch_len = ch_len;
+                    }
+                },
+
+                '-' => match self.peek() {
+                    '.' => {
+                        self.next2();
+                        Token::MinusDot
+                    }
+                    '>' => {
+                        self.next2();
+                        Token::MinusGreater
+                    }
+                    _ => {
+                        self.next();
+                        Token::Minus
+                    }
+                },
+
+                '+' => match self.peek() {
+                    '.' => {
+                        self.next2();
+                        Token::PlusDot
+                    }
+                    '+' => {
+                        self.next2();
+                        Token::PlusPlus
+                    }
+                    '=' => {
+                        self.next2();
+                        Token::PlusEqual
+                    }
+                    _ => {
+                        self.next();
+                        Token::Plus
+                    }
+                },
+
+                '>' => {
+                    self.next();
+                    Token::GreaterThan
+                }
+
+                '<' => match self.peek() {
+                    '=' => {
+                        self.next2();
+                        Token::LessEqual
+                    }
+                    _ => {
+                        self.next();
+                        Token::LessThan
+                    }
+                },
+
+                '.' => match (self.peek(), self.peek2()) {
+                    ('.', '.') => {
+                        self.next3();
+                        Token::DotDotDot
+                    }
+                    ('.', _) => {
+                        self.next2();
+                        Token::DotDot
+                    }
+                    _ => {
+                        self.next();
+                        Token::Dot
+                    }
+                },
+
+                '\'' => match (self.peek(), self.peek2()) {
+                    ('\\', '"') => {
+                        self.next();
                         Token::SingleQuote
                     }
-                }
-            },
+                    ('\\', _) => {
+                        self.next2();
+                        self.scan_escape()
+                    }
+                    (ch, '\'') => {
+                        // Save the byte offset of the character between quotes
+                        let char_byte_off = self.offset + self.ch_len; // offset of the char after '
+                        self.next3();
+                        // The character is 1 byte (ASCII) since we matched it against a char pattern
+                        let original = Cow::Borrowed(
+                            self.substring(char_byte_off, char_byte_off + ch.len_utf8()),
+                        );
+                        Token::Codepoint {
+                            c: ch as i32,
+                            original,
+                        }
+                    }
+                    _ => {
+                        // Match OCaml res_scanner.ml: try decoding a UTF-8 codepoint literal
+                        // after the opening quote, then fall back to SingleQuote on failure.
+                        let ch = self.peek();
+                        self.next();
+                        let offset = self.offset;
+                        let offset16 = self.offset16;
+                        let char_pos = self.char_pos;
+                        let ch_len = self.ch_len;
+                        let (codepoint, length) =
+                            self.decode_codepoint_from_latin1_source(self.offset);
 
-            '!' => match (self.peek(), self.peek2()) {
-                ('=', '=') => {
-                    self.next3();
-                    Token::BangEqualEqual
+                        for _ in 0..length {
+                            self.next();
+                        }
+
+                        if self.ch == '\'' {
+                            let contents = self.substring_latin1_chars(offset, length);
+                            self.next();
+                            Token::Codepoint {
+                                c: codepoint,
+                                original: contents.into(),
+                            }
+                        } else {
+                            self.ch = ch;
+                            self.offset = offset;
+                            self.offset16 = offset16;
+                            self.char_pos = char_pos;
+                            self.ch_len = ch_len;
+                            Token::SingleQuote
+                        }
+                    }
+                },
+
+                '!' => match (self.peek(), self.peek2()) {
+                    ('=', '=') => {
+                        self.next3();
+                        Token::BangEqualEqual
+                    }
+                    ('=', _) => {
+                        self.next2();
+                        Token::BangEqual
+                    }
+                    _ => {
+                        self.next();
+                        Token::Bang
+                    }
+                },
+
+                '=' => match (self.peek(), self.peek2()) {
+                    ('=', '=') => {
+                        self.next3();
+                        Token::EqualEqualEqual
+                    }
+                    ('=', _) => {
+                        self.next2();
+                        Token::EqualEqual
+                    }
+                    ('>', _) => {
+                        self.next2();
+                        Token::EqualGreater
+                    }
+                    _ => {
+                        self.next();
+                        Token::Equal
+                    }
+                },
+
+                '\\' => {
+                    let start_pos = self.position();
+                    self.scan_exotic_identifier(start_pos)
                 }
-                ('=', _) => {
-                    self.next2();
-                    Token::BangEqual
-                }
-                _ => {
+
+                c if c == EOF_CHAR => {
                     self.next();
-                    Token::Bang
+                    Token::Eof
                 }
-            },
 
-            '=' => match (self.peek(), self.peek2()) {
-                ('=', '=') => {
-                    self.next3();
-                    Token::EqualEqualEqual
-                }
-                ('=', _) => {
-                    self.next2();
-                    Token::EqualEqual
-                }
-                ('>', _) => {
-                    self.next2();
-                    Token::EqualGreater
-                }
-                _ => {
+                ch => {
+                    // Unknown character
                     self.next();
-                    Token::Equal
+                    let end_pos = self.position();
+                    self.error(start_pos, end_pos, DiagnosticCategory::unknown_uchar(ch));
+                    // OCaml: `let _, _, token = scan scanner in (start_pos, end_pos, token)`
+                    // keeps the outer start_pos. Loop instead of recursing so a long
+                    // run of unknown characters cannot overflow the stack.
+                    recovery_start_pos.get_or_insert(start_pos);
+                    continue;
                 }
-            },
+            };
 
-            '\\' => {
-                let start_pos = self.position();
-                self.scan_exotic_identifier(start_pos)
-            }
-
-            c if c == EOF_CHAR => {
-                self.next();
-                Token::Eof
-            }
-
-            ch => {
-                // Unknown character
-                self.next();
-                let end_pos = self.position();
-                self.error(
-                    start_pos.clone(),
-                    end_pos,
-                    DiagnosticCategory::unknown_uchar(ch),
-                );
-                // Continue scanning - but preserve the original start_pos
-                // OCaml: let _, _, token = scan scanner in token
-                // (start_pos, end_pos, token) - uses outer start_pos, not recursive one
-                let scan_result = self.scan();
-                return ScanResult {
-                    start_pos, // Use the outer start_pos (before the bad character)
-                    end_pos: scan_result.end_pos,
-                    token: scan_result.token,
-                };
-            }
-        };
-
-        let end_pos = self.position();
-        ScanResult {
-            start_pos,
-            end_pos,
-            token,
+            let end_pos = self.position();
+            return ScanResult {
+                start_pos: recovery_start_pos.unwrap_or(start_pos),
+                end_pos,
+                token,
+            };
         }
     }
 
     /// Scan a regex literal from the current position (after the opening `/` has been consumed).
     /// This matches OCaml's `scan_regex` which is called by the parser when it encounters a `/`
     /// token in expression position and needs to rescan it as a regex.
-    /// Unlike `try_scan_regex_literal`, this does not restore on failure - it emits an error
-    /// and returns a Regex token with empty pattern on unterminated regex.
+    /// It does not restore on failure - it emits an error and returns a Regex
+    /// token with empty pattern on unterminated regex.
     pub fn scan_regex(&mut self, opening_pos: Position, prefix_length: usize) -> ScanResult<'src> {
         let start_pos = self.position();
         // The normal token is `/` or `/.`; restart at its ASCII opening
@@ -1396,11 +1344,14 @@ impl<'src> Scanner<'src> {
                 c if c == '\n' || c == EOF_CHAR => {
                     let end_pos = self.position();
                     self.error(
-                        start_pos.clone(),
+                        start_pos,
                         end_pos,
                         DiagnosticCategory::message("unterminated regex".to_string()),
                     );
-                    break (Cow::Borrowed(self.substring(pattern_start, self.offset)), Cow::Borrowed(""));
+                    break (
+                        Cow::Borrowed(self.substring(pattern_start, self.offset)),
+                        Cow::Borrowed(""),
+                    );
                 }
                 '\\' => {
                     self.next();
@@ -1533,7 +1484,7 @@ impl<'src> Scanner<'src> {
                 '\n' | '\r' => {
                     let end_pos = self.position();
                     self.error(
-                        start_pos.clone(),
+                        start_pos,
                         end_pos,
                         DiagnosticCategory::message(
                             "A quoted identifier can't contain line breaks.",
@@ -1545,7 +1496,7 @@ impl<'src> Scanner<'src> {
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
                     self.error(
-                        start_pos.clone(),
+                        start_pos,
                         end_pos,
                         DiagnosticCategory::message("Did you forget a \" here?"),
                     );
@@ -1643,13 +1594,50 @@ mod tests {
     }
 
     #[test]
+    fn unknown_characters_keep_first_start_and_report_each() {
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let src = format!("a {}b", "\u{1}".repeat(3));
+        let mut scanner = Scanner::new(filename, &src);
+        scanner.scan();
+        let result = scanner.scan();
+        assert_eq!(result.token, Token::Lident(Cow::Borrowed("b")));
+        assert_eq!(result.start_pos.cnum, 2);
+        assert_eq!(result.end_pos.cnum, 6);
+        assert_eq!(scanner.take_diagnostics().len(), 3);
+    }
+
+    #[test]
+    fn long_runs_of_unknown_characters_do_not_recurse() {
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let src = format!("{}b", "\u{1}".repeat(200_000));
+        let mut scanner = Scanner::new(filename, &src);
+        let result = scanner.scan();
+        assert_eq!(result.token, Token::Lident(Cow::Borrowed("b")));
+        assert_eq!(result.start_pos.cnum, 0);
+    }
+
+    #[test]
+    fn string_literals_borrow_unless_escaped() {
+        let mut arena = ParseArena::new();
+        let filename = arena.intern("test.res");
+        let mut scanner = Scanner::new(filename, r#""plain" "a\065\n""#);
+        let plain = scanner.scan().token;
+        assert!(matches!(plain, Token::String(Cow::Borrowed("plain"))));
+        let escaped = scanner.scan().token;
+        assert_eq!(escaped, Token::String(Cow::Owned("a\\x41\\n".to_string())));
+    }
+
+    #[test]
     fn is_binary_op_matches_whole_source_char_indexing() {
         fn reference(src: &str, start_cnum: usize, end_cnum: usize) -> bool {
             if start_cnum == 0 {
                 return false;
             }
             let chars: Vec<char> = src.chars().collect();
-            let left_ok = start_cnum <= chars.len() && Scanner::is_whitespace(chars[start_cnum - 1]);
+            let left_ok =
+                start_cnum <= chars.len() && Scanner::is_whitespace(chars[start_cnum - 1]);
             let right_ok = end_cnum >= chars.len() || Scanner::is_whitespace(chars[end_cnum]);
             left_ok && right_ok
         }

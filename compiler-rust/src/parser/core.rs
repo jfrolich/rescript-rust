@@ -50,7 +50,7 @@ pub mod recover {
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
                 id,
-                Payload::PStr(Box::new(vec![])),
+                Payload::PStr(Box::default()),
             )))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
@@ -64,7 +64,7 @@ pub mod recover {
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((
                 id,
-                Payload::PStr(Box::new(vec![])),
+                Payload::PStr(Box::default()),
             )))),
             ptyp_loc: LocIdx::none(),
             ptyp_attributes: Attributes::new(),
@@ -78,7 +78,7 @@ pub mod recover {
         Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((
                 id,
-                Payload::PStr(Box::new(vec![])),
+                Payload::PStr(Box::default()),
             )))),
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
@@ -88,7 +88,7 @@ pub mod recover {
     /// Create a default module expression for error recovery.
     pub fn default_module_expr() -> ModuleExpr {
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
             pmod_loc: LocIdx::none(),
             pmod_attributes: Attributes::new(),
         }
@@ -97,7 +97,7 @@ pub mod recover {
     /// Create a default module type for error recovery.
     pub fn default_module_type() -> ModuleType {
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
+            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::default())),
             pmty_loc: LocIdx::none(),
             pmty_attributes: Attributes::new(),
         }
@@ -110,7 +110,7 @@ pub mod recover {
         let id = mknoloc(str_idx);
         SignatureItem {
             psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new((
-                (id, Payload::PStr(Box::new(vec![]))),
+                (id, Payload::PStr(Box::default())),
                 Attributes::new(),
             )))),
             psig_loc: LocIdx::none(),
@@ -378,7 +378,8 @@ pub mod error_messages {
     pub const STRING_INTERPOLATION_IN_PATTERN: &str =
         "String interpolation is not supported in pattern matching.";
 
-    pub const TAGGED_TEMPLATE_IN_PATTERN: &str = "Tagged template literals are not supported in patterns";
+    pub const TAGGED_TEMPLATE_IN_PATTERN: &str =
+        "Tagged template literals are not supported in patterns";
 
     /// Error message for type definition in function.
     pub const TYPE_DEFINITION_IN_FUNCTION: &str = "Type definitions are not allowed inside functions.\n  Move this `type` declaration to the top level or into a module.";
@@ -529,8 +530,7 @@ pub fn parse_lident(p: &mut Parser<'_>) -> (String, LocIdx) {
             ("_".to_string(), p.mk_loc_idx_to_prev_end(start_pos_idx))
         }
         _ => {
-            let same_line_keyword =
-                p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
+            let same_line_keyword = p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
             p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             p.next();
             if !same_line_keyword {
@@ -617,31 +617,31 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 /// Create the if-let attribute `@res.iflet`.
 pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.iflet");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
+    (mknoloc(str_idx), Payload::PStr(Box::default()))
 }
 
 /// Create the await attribute `@res.await` with location.
 pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
     let str_idx = arena.intern("res.await");
-    (with_loc(str_idx, loc), Payload::PStr(Box::new(vec![])))
+    (with_loc(str_idx, loc), Payload::PStr(Box::default()))
 }
 
 /// Create the spread attribute `@res.spread`.
 pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.spread");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
+    (mknoloc(str_idx), Payload::PStr(Box::default()))
 }
 
 /// Create the dict-spread attribute `@res.dictSpread` (upstream #8369).
 pub fn dict_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.dictSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
+    (mknoloc(str_idx), Payload::PStr(Box::default()))
 }
 
 /// Create the pattern variant spread attribute.
 pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.patVariantSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::new(vec![])))
+    (mknoloc(str_idx), Payload::PStr(Box::default()))
 }
 
 // ============================================================================
@@ -980,7 +980,10 @@ pub mod ast_helper {
                 // This matches OCaml's behavior: Location { loc_ghost: true, ..loc }
                 let nil_loc = p.arena_mut().mk_ghost_loc(loc);
                 let nil = with_loc(nil_idx, nil_loc);
-                make_pat(PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)), nil_loc)
+                make_pat(
+                    PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)),
+                    nil_loc,
+                )
             }
         };
 
@@ -990,7 +993,7 @@ pub mod ast_helper {
             let start_idx = p.loc_start_idx(item.ppat_loc);
             let end_idx = p.loc_end_idx(result.ppat_loc);
             // res_core.ml `make_list_pattern`: `{txt = [p1; pat_pl]; loc}`.
-            let cons_loc = p.mk_loc_idx_full(start_idx, end_idx);
+            let cons_loc = p.mk_loc_idx(start_idx, end_idx);
             let item_idx = p.arena_mut().push_pat(item);
             let result_idx = p.arena_mut().push_pat(result);
             let cons = with_loc(cons_idx, cons_loc);
@@ -1164,7 +1167,10 @@ pub fn make_infix_operator(
 pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
     // Every other token makes the lookahead below answer `false`, and the
     // lookahead restores all parser state, so skip it for them.
-    if !matches!(p.token, Token::Lident(_) | Token::Underscore | Token::Lparen) {
+    if !matches!(
+        p.token,
+        Token::Lident(_) | Token::Underscore | Token::Lparen
+    ) {
         return false;
     }
     p.lookahead(|state| {

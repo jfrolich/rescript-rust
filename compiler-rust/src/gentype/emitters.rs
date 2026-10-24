@@ -1,6 +1,7 @@
 // Port of compiler/gentype/Emitters.ml:1-52 and Emitters.mli:1-9.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
+/// Each emitter holds its chunks in emission order. OCaml conses onto a
+/// list and reverses in `to_string`; pushing gives the same output order.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct T {
     pub require_emitter_early: Vec<String>,
@@ -23,7 +24,7 @@ pub fn initial() -> T {
 
 pub fn string(mut emitter: Vec<String>, s: String) -> Vec<String> {
     // Mirrors compiler/gentype/Emitters.ml:18.
-    emitter.insert(0, s);
+    emitter.push(s);
     emitter
 }
 
@@ -57,17 +58,12 @@ pub fn export(mut emitters: T, s: String) -> T {
     emitters
 }
 
-fn rev(xs: &[String]) -> impl Iterator<Item = String> + '_ {
-    xs.iter().rev().cloned()
-}
-
 pub fn to_string(separator: &str, emitters: T) -> String {
     // Mirrors compiler/gentype/Emitters.ml:44-52.
-    let mut chunks = Vec::new();
-    chunks.extend(rev(&emitters.require_emitter_early));
-    chunks.extend(rev(&emitters.export_emitter_early));
-    chunks.extend(rev(&emitters.require_emitter));
-    chunks.extend(rev(&emitters.import_emitter));
-    chunks.extend(rev(&emitters.export_emitter));
+    let mut chunks = emitters.require_emitter_early;
+    chunks.extend(emitters.export_emitter_early);
+    chunks.extend(emitters.require_emitter);
+    chunks.extend(emitters.import_emitter);
+    chunks.extend(emitters.export_emitter);
     chunks.join(separator)
 }

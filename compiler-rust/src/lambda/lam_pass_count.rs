@@ -7,8 +7,6 @@
 //! Every match arm and helper here corresponds to a specific line in
 //! `lam_pass_count.ml`. Do not add Rust-only logic.
 
-use std::rc::Rc;
-
 use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
@@ -18,6 +16,7 @@ use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{LFunction, Lambda, LambdaSwitch};
 
 /// Equivalent of OCaml's `Lam_pass_count.used_info` (lam_pass_count.ml:15-23).
+/// `Default` is OCaml's `dummy_info` (lam_pass_count.ml:30).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UsedInfo {
     /// Number of references to the binding.
@@ -25,15 +24,6 @@ pub struct UsedInfo {
     /// True when at least one reference appears under a lambda or loop body
     /// (lam_pass_count.ml:17-22).
     pub captured: bool,
-}
-
-/// Mirror of OCaml's `Lam_pass_count.dummy_info` (lam_pass_count.ml:30).
-#[inline]
-pub fn dummy_info() -> UsedInfo {
-    UsedInfo {
-        times: 0,
-        captured: false,
-    }
 }
 
 /// Equivalent of OCaml's `absorb_info` (lam_pass_count.ml:33-37). Adds `y`'s
@@ -45,53 +35,70 @@ fn absorb_info(x: &mut UsedInfo, y: UsedInfo) {
     }
 }
 
-/// Occurrence table: maps idents to a shared mutable cell so that local-scope
-/// bookkeeping mirrors OCaml's `Hash_ident.t` of mutable records
-/// (lam_pass_count.ml:25, 26).
-pub type OccTbl = HashMap<Ident, Rc<std::cell::RefCell<UsedInfo>>>;
+/// Occurrence table mirroring OCaml's `Hash_ident.t` of mutable `used_info`
+/// records (lam_pass_count.ml:25-26). Each binding owns a slot in `values`;
+/// `entries` maps an ident to the slot of its most recent binding, so a
+/// rebinding gets a fresh slot while outer scopes keep pointing at theirs.
+#[derive(Default)]
+pub(crate) struct OccurrenceTable {
+    pub(super) entries: HashMap<Ident, usize>,
+    pub(super) values: Vec<UsedInfo>,
+}
 
-/// Local table tracking the bindings currently in scope. Entries point to the
-/// same mutable cells held by [`OccTbl`] so increments stay in sync, matching
+impl OccurrenceTable {
+    /// The info of the latest binding of `id`, or the default
+    /// (lam_pass_count.ml:30).
+    pub(crate) fn get(&self, id: &Ident) -> UsedInfo {
+        self.entries
+            .get(id)
+            .map(|index| self.values[*index])
+            .unwrap_or_default()
+    }
+
+    /// Allocate a fresh slot for `id` (lam_pass_count.ml:69-73).
+    pub(super) fn bind(&mut self, id: &Ident) -> usize {
+        let index = self.values.len();
+        self.values.push(UsedInfo::default());
+        self.entries.insert(*id, index);
+        index
+    }
+
+    pub(super) fn used(&self, id: &Ident) -> bool {
+        self.get(id).times > 0
+    }
+
+    /// `absorb_info` (lam_pass_count.ml:33-37) applied to a slot.
+    pub(super) fn absorb(&mut self, index: usize, other: UsedInfo) {
+        absorb_info(&mut self.values[index], other);
+    }
+}
+
+/// Local table tracking the bindings currently in scope, pointing at the
+/// same slots as [`OccurrenceTable`] so increments stay in sync, matching
 /// the OCaml `local_tbl = used_info Map_ident.t` (lam_pass_count.ml:28).
-type LocalTbl = HashMap<Ident, Rc<std::cell::RefCell<UsedInfo>>>;
+type LocalTbl = HashMap<Ident, usize>;
 
 /// Direct port of `collect_occurs` (lam_pass_count.ml:59-203).
 ///
-/// Single-pass traversal that fills an [`OccTbl`] keyed by every let-bound
+/// Single-pass traversal that fills an [`OccurrenceTable`] keyed by every let-bound
 /// identifier with a `(times, captured)` pair.
-pub fn collect_occurs(lam: &Lambda) -> OccTbl {
-    let mut occ: OccTbl = HashMap::new();
+pub(crate) fn collect_occurs(lam: &Lambda) -> OccurrenceTable {
+    let mut occ = OccurrenceTable::default();
 
-    // Equivalent of `used` helper (lam_pass_count.ml:62-66).
-    fn used(occ: &OccTbl, v: &Ident) -> bool {
-        occ.get(v)
-            .map(|cell| cell.borrow().times > 0)
-            .unwrap_or(false)
+    // Equivalent of `bind_var` (lam_pass_count.ml:69-73): create a fresh slot
+    // and add it to both `occ` and the local scope. OCaml's `Map_ident.add`
+    // returns a persistent map cheaply; Rust mutates the local table and
+    // restores the previous binding after the scoped body so we do not clone
+    // the whole map at every `Llet`.
+    fn bind_var(occ: &mut OccurrenceTable, bv: &mut LocalTbl, ident: &Ident) -> Option<usize> {
+        let index = occ.bind(ident);
+        bv.insert(*ident, index)
     }
 
-    // Equivalent of `bind_var` (lam_pass_count.ml:69-73): create a fresh cell,
-    // add it to both `occ` and the local scope. OCaml's `Map_ident.add` returns
-    // a persistent map cheaply; Rust mutates the local table and restores the
-    // previous binding after the scoped body so we do not clone the whole map at
-    // every `Llet`.
-    fn bind_var(
-        occ: &mut OccTbl,
-        bv: &mut LocalTbl,
-        ident: &Ident,
-    ) -> Option<Rc<std::cell::RefCell<UsedInfo>>> {
-        let cell = Rc::new(std::cell::RefCell::new(dummy_info()));
-        occ.insert(ident.clone(), Rc::clone(&cell));
-        bv.insert(ident.clone(), cell)
-    }
-
-    fn restore_var(
-        bv: &mut LocalTbl,
-        ident: &Ident,
-        previous: Option<Rc<std::cell::RefCell<UsedInfo>>>,
-    ) {
+    fn restore_var(bv: &mut LocalTbl, ident: &Ident, previous: Option<usize>) {
         match previous {
             Some(previous) => {
-                bv.insert(ident.clone(), previous);
+                bv.insert(*ident, previous);
             }
             None => {
                 bv.remove(ident);
@@ -100,16 +107,16 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     }
 
     // Equivalent of `add_one_use` (lam_pass_count.ml:76-89).
-    fn add_one_use(occ: &mut OccTbl, bv: &LocalTbl, ident: &Ident) {
-        if let Some(cell) = bv.get(ident) {
-            cell.borrow_mut().times += 1;
+    fn add_one_use(occ: &mut OccurrenceTable, bv: &LocalTbl, ident: &Ident) {
+        if let Some(&index) = bv.get(ident) {
+            occ.values[index].times += 1;
             return;
         }
         // Use under a lambda or loop: mark captured and bump times so single-use
         // optimizations do not apply (lam_pass_count.ml:80-87).
-        if let Some(cell) = occ.get(ident) {
-            absorb_info(
-                &mut cell.borrow_mut(),
+        if let Some(&index) = occ.entries.get(ident) {
+            occ.absorb(
+                index,
                 UsedInfo {
                     times: 1,
                     captured: true,
@@ -121,25 +128,22 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     // Equivalent of `inherit_use` (lam_pass_count.ml:91-108): used when
     // rewriting `let v = w in ...` so each later occurrence of `v` counts as a
     // use of `w` instead.
-    fn inherit_use(occ: &mut OccTbl, bv: &LocalTbl, ident: &Ident, bid: &Ident) {
-        let n = occ
-            .get(bid)
-            .map(|cell| *cell.borrow())
-            .unwrap_or_else(dummy_info);
-        if let Some(cell) = bv.get(ident) {
-            absorb_info(&mut cell.borrow_mut(), n);
+    fn inherit_use(occ: &mut OccurrenceTable, bv: &LocalTbl, ident: &Ident, bid: &Ident) {
+        let n = occ.get(bid);
+        if let Some(&index) = bv.get(ident) {
+            occ.absorb(index, n);
             return;
         }
-        if let Some(cell) = occ.get(ident) {
+        if let Some(&index) = occ.entries.get(ident) {
             let mut copy = n;
             copy.captured = true;
-            absorb_info(&mut cell.borrow_mut(), copy);
+            occ.absorb(index, copy);
         }
     }
 
     // The main traversal. The structure mirrors OCaml's `count` function
     // (lam_pass_count.ml:110-201).
-    fn count(occ: &mut OccTbl, bv: &mut LocalTbl, lam: &Lambda) {
+    fn count(occ: &mut OccurrenceTable, bv: &mut LocalTbl, lam: &Lambda) {
         match lam {
             // Lfunction: clear local scope. Closure variables can not be
             // carried over because parameters are never rebound
@@ -184,7 +188,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             // `w`'s refcount via `inherit_use` (lam_pass_count.ml:126-130).
             Lambda::Llet(_, v, value, l2) if matches!(value.as_ref(), Lambda::Lvar(_)) => {
                 let w = match value.as_ref() {
-                    Lambda::Lvar(w) => w.clone(),
+                    Lambda::Lvar(w) => *w,
                     _ => unreachable!(),
                 };
                 let previous = bind_var(occ, bv, v);
@@ -201,7 +205,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
                 let previous = bind_var(occ, bv, v);
                 count(occ, bv, l2);
                 restore_var(bv, v, previous);
-                if matches!(kind, LetKind::Strict) || used(occ, v) {
+                if matches!(kind, LetKind::Strict) || occ.used(v) {
                     count(occ, bv, l1);
                 }
             }
@@ -321,7 +325,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     // count_default (lam_pass_count.ml:189-200): the default action runs twice
     // in the native backend when neither the const nor block table is full,
     // so its inner uses are counted twice.
-    fn count_default(occ: &mut OccTbl, bv: &mut LocalTbl, sw: &LambdaSwitch) {
+    fn count_default(occ: &mut OccurrenceTable, bv: &mut LocalTbl, sw: &LambdaSwitch) {
         let Some(failaction) = sw.sw_failaction.as_deref() else {
             return;
         };
@@ -352,10 +356,8 @@ mod tests {
         Ident::new(name, stamp, IdentFlags::NONE)
     }
 
-    fn lookup(occ: &OccTbl, ident: &Ident) -> UsedInfo {
+    fn lookup(occ: &OccurrenceTable, ident: &Ident) -> UsedInfo {
         occ.get(ident)
-            .map(|cell| *cell.borrow())
-            .unwrap_or_else(dummy_info)
     }
 
     /// `let v = 1 in v + v` should record times=2, captured=false for v.
@@ -363,16 +365,8 @@ mod tests {
     #[test]
     fn counts_two_uses_in_let_body() {
         let v = ident("v", 1);
-        let body = Lambda::Lsequence(
-            Box::new(Lambda::Lvar(v.clone())),
-            Box::new(Lambda::Lvar(v.clone())),
-        );
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            v.clone(),
-            Lambda::Lconst(Constant::int(1)),
-            body,
-        );
+        let body = Lambda::Lsequence(Box::new(Lambda::Lvar(v)), Box::new(Lambda::Lvar(v)));
+        let lam = Lambda::let_(LetKind::Strict, v, Lambda::Lconst(Constant::int(1)), body);
         let occ = collect_occurs(&lam);
         let info = lookup(&occ, &v);
         assert_eq!(info.times, 2);
@@ -388,7 +382,7 @@ mod tests {
         let func = Lambda::function_(
             1,
             vec![p],
-            Lambda::Lvar(v.clone()),
+            Lambda::Lvar(v),
             crate::lambda::FunctionAttribute {
                 inline: crate::lambda::InlineAttribute::Default,
                 is_a_functor: false,
@@ -396,14 +390,10 @@ mod tests {
                 async_: false,
                 directive: None,
                 one_unit_arg: false,
-            }, crate::location::Location::none(),
+            },
+            crate::location::Location::none(),
         );
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            v.clone(),
-            Lambda::Lconst(Constant::int(1)),
-            func,
-        );
+        let lam = Lambda::let_(LetKind::Strict, v, Lambda::Lconst(Constant::int(1)), func);
         let occ = collect_occurs(&lam);
         let info = lookup(&occ, &v);
         assert!(info.captured);
@@ -417,18 +407,8 @@ mod tests {
         let w = ident("w", 4);
         let v = ident("v", 5);
         // First bind w so it has an occ entry; otherwise inherit_use does nothing.
-        let inner = Lambda::let_(
-            LetKind::Alias,
-            v.clone(),
-            Lambda::Lvar(w.clone()),
-            Lambda::Lvar(v.clone()),
-        );
-        let lam = Lambda::let_(
-            LetKind::Strict,
-            w.clone(),
-            Lambda::Lconst(Constant::int(0)),
-            inner,
-        );
+        let inner = Lambda::let_(LetKind::Alias, v, Lambda::Lvar(w), Lambda::Lvar(v));
+        let lam = Lambda::let_(LetKind::Strict, w, Lambda::Lconst(Constant::int(0)), inner);
         let occ = collect_occurs(&lam);
         let w_info = lookup(&occ, &w);
         // v has 1 use; that use inherits to w. w itself appears 0 times in body

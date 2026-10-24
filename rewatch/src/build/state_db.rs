@@ -165,17 +165,23 @@ fn decode_items(text: &str) -> Option<ItemDigests> {
         .collect()
 }
 
-fn read_data_rows(package: &Package, table: &str, modules: &[&str]) -> BTreeMap<String, String> {
+/// The `data` column of `table` for each of `modules` that has a row, in
+/// `modules` order.
+fn read_data_rows<T, C>(package: &Package, table: &str, modules: &[&str]) -> C
+where
+    T: rusqlite::types::FromSql,
+    C: FromIterator<(String, T)>,
+{
     let Some(conn) = open_existing(&path(package)) else {
-        return BTreeMap::new();
+        return std::iter::empty().collect();
     };
     let Ok(mut stmt) = conn.prepare(&format!("SELECT data FROM {table} WHERE module = ?1")) else {
-        return BTreeMap::new();
+        return std::iter::empty().collect();
     };
     modules
         .iter()
         .filter_map(|module| {
-            let data: String = stmt.query_row(params![module], |row| row.get(0)).ok()?;
+            let data: T = stmt.query_row(params![module], |row| row.get(0)).ok()?;
             Some((module.to_string(), data))
         })
         .collect()
@@ -183,7 +189,7 @@ fn read_data_rows(package: &Package, table: &str, modules: &[&str]) -> BTreeMap<
 
 /// The recorded reads of the given modules of the package.
 pub fn read_reads(package: &Package, modules: &[&str]) -> BTreeMap<String, UnitReads> {
-    read_data_rows(package, "reads", modules)
+    read_data_rows::<String, BTreeMap<_, _>>(package, "reads", modules)
         .into_iter()
         .filter_map(|(module, data)| Some((module, decode_reads(&data)?)))
         .collect()
@@ -191,24 +197,12 @@ pub fn read_reads(package: &Package, modules: &[&str]) -> BTreeMap<String, UnitR
 
 /// The stored interfaces of the given modules of the package.
 pub fn read_interfaces(package: &Package, modules: &[&str]) -> Vec<(String, Vec<u8>)> {
-    let Some(conn) = open_existing(&path(package)) else {
-        return Vec::new();
-    };
-    let Ok(mut stmt) = conn.prepare("SELECT data FROM interfaces WHERE module = ?1") else {
-        return Vec::new();
-    };
-    modules
-        .iter()
-        .filter_map(|module| {
-            let data: Vec<u8> = stmt.query_row(params![module], |row| row.get(0)).ok()?;
-            Some((module.to_string(), data))
-        })
-        .collect()
+    read_data_rows(package, "interfaces", modules)
 }
 
 /// The recorded item digests of the given modules of the package.
 pub fn read_items(package: &Package, modules: &[&str]) -> BTreeMap<String, ItemDigests> {
-    read_data_rows(package, "items", modules)
+    read_data_rows::<String, BTreeMap<_, _>>(package, "items", modules)
         .into_iter()
         .filter_map(|(module, data)| Some((module, decode_items(&data)?)))
         .collect()

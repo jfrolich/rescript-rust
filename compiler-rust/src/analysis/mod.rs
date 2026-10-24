@@ -33,7 +33,11 @@ pub enum FileKind {
 
 impl FileKind {
     pub fn of_path(path: &str) -> FileKind {
-        if path.ends_with(".resi") { FileKind::Resi } else { FileKind::Res }
+        if path.ends_with(".resi") {
+            FileKind::Resi
+        } else {
+            FileKind::Res
+        }
     }
 }
 
@@ -54,7 +58,10 @@ impl Position {
     }
 
     pub fn to_json(self) -> Json {
-        Json::assoc([("character", Json::Int(self.character.into())), ("line", Json::Int(self.line.into()))])
+        Json::assoc([
+            ("character", Json::Int(self.character.into())),
+            ("line", Json::Int(self.line.into())),
+        ])
     }
 }
 
@@ -67,7 +74,10 @@ pub struct Range {
 
 impl Range {
     /// `Utils.cmt_loc_to_range`.
-    pub fn of_positions(start: &crate::location::Position, end: &crate::location::Position) -> Range {
+    pub fn of_positions(
+        start: &crate::location::Position,
+        end: &crate::location::Position,
+    ) -> Range {
         Range {
             start: Position::of_lexing(start),
             end: Position::of_lexing(end),
@@ -174,9 +184,24 @@ impl Cli<'_> {
     }
 
     /// `Cli.hover`.
-    fn hover(&self, out: &mut Output, path: &str, pos: (i32, i32), supports_markdown_links: bool, debug: bool) {
+    fn hover(
+        &self,
+        out: &mut Output,
+        path: &str,
+        pos: (i32, i32),
+        supports_markdown_links: bool,
+        debug: bool,
+    ) {
         let full = self.full(path);
-        match commands::hover(&self.session, self.uri_style, full, pos, supports_markdown_links, debug, out) {
+        match commands::hover(
+            &self.session,
+            self.uri_style,
+            full,
+            pos,
+            supports_markdown_links,
+            debug,
+            out,
+        ) {
             None => print_json(out, &Json::Null),
             Some(hover) => print_json(out, &hover),
         }
@@ -185,7 +210,15 @@ impl Cli<'_> {
     /// `Cli.rename`.
     fn rename(&self, out: &mut Output, path: &str, pos: (i32, i32), new_name: &str, debug: bool) {
         let full = self.full(path);
-        match commands::rename(&self.session, self.uri_style, full, pos, new_name, debug, out) {
+        match commands::rename(
+            &self.session,
+            self.uri_style,
+            full,
+            pos,
+            new_name,
+            debug,
+            out,
+        ) {
             Some(changes) => print_json(out, &Json::List(changes)),
             None => print_json(out, &Json::Null),
         }
@@ -228,20 +261,41 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
     let args: Vec<&str> = request.args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["documentSymbol", path] => document_symbol(&mut out, &request.cwd, path),
-        ["definition", path, line, col] => cli.definition(&mut out, path, parse_pos(line, col)?, false),
-        ["typeDefinition", path, line, col] => cli.type_definition(&mut out, path, parse_pos(line, col)?, false),
-        ["hover", path, line, col, _current_file, supports_markdown_links] => cli.hover(
+        ["definition", path, line, col] => {
+            cli.definition(&mut out, path, parse_pos(line, col)?, false)
+        }
+        ["typeDefinition", path, line, col] => {
+            cli.type_definition(&mut out, path, parse_pos(line, col)?, false)
+        }
+        [
+            "hover",
+            path,
+            line,
+            col,
+            _current_file,
+            supports_markdown_links,
+        ] => cli.hover(
             &mut out,
             path,
             parse_pos(line, col)?,
             *supports_markdown_links == "true",
             false,
         ),
-        ["prepareRename", path, line, col] => cli.prepare_rename(&mut out, path, parse_pos(line, col)?, false),
-        ["rename", path, line, col, new_name] => cli.rename(&mut out, path, parse_pos(line, col)?, new_name, false),
-        ["references", path, line, col] => cli.references(&mut out, path, parse_pos(line, col)?, false),
+        ["prepareRename", path, line, col] => {
+            cli.prepare_rename(&mut out, path, parse_pos(line, col)?, false)
+        }
+        ["rename", path, line, col, new_name] => {
+            cli.rename(&mut out, path, parse_pos(line, col)?, new_name, false)
+        }
+        ["references", path, line, col] => {
+            cli.references(&mut out, path, parse_pos(line, col)?, false)
+        }
         ["test", path] => test(&mut out, &mut cli, path)?,
-        [command, ..] => return Err(format!("`{command}` is not available inside the watcher yet")),
+        [command, ..] => {
+            return Err(format!(
+                "`{command}` is not available inside the watcher yet"
+            ));
+        }
         [] => return Err("no command".to_string()),
     }
     Ok(out.into_bytes())
@@ -256,7 +310,10 @@ fn print_json(out: &mut Output, json: &Json) {
 fn document_symbol(out: &mut Output, cwd: &Path, path: &str) {
     match read_file(&resolve(cwd, path)) {
         None => print_json(out, &Json::Null),
-        Some(source) => print_json(out, &document_symbol::get_symbols(&source, FileKind::of_path(path))),
+        Some(source) => print_json(
+            out,
+            &document_symbol::get_symbols(&source, FileKind::of_path(path)),
+        ),
     }
 }
 
@@ -294,7 +351,9 @@ fn test(out: &mut Output, cli: &mut Cli<'_>, path: &str) -> Result<(), String> {
         let rest = &line[mlen..];
         let pos = (i as i32 - 1, mlen as i32 - 1);
         let position = format!("{path} {}:{}", pos.0, pos.1);
-        let command = rest.get(..3).ok_or_else(|| format!("{path}:{}: truncated test command", i + 1))?;
+        let command = rest
+            .get(..3)
+            .ok_or_else(|| format!("{path}:{}: truncated test command", i + 1))?;
         match command {
             "def" => {
                 out.print_endline(&format!("Definition {position}"));
@@ -326,7 +385,9 @@ fn test(out: &mut Output, cli: &mut Cli<'_>, path: &str) -> Result<(), String> {
                 document_symbol(out, cwd, path);
             }
             "db+" | "db-" | "dv+" | "dv-" | "in+" | "in-" | "ve+" | "ve-" => {}
-            other => out.print_endline(&format!("`{other}` is not available inside the watcher yet")),
+            other => out.print_endline(&format!(
+                "`{other}` is not available inside the watcher yet"
+            )),
         }
         out.print_newline();
     }

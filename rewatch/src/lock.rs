@@ -7,30 +7,13 @@ use std::path::Path;
 use std::process;
 use std::time::{Duration, Instant};
 
-/* This locking mechanism is meant to never be deleted. Instead, it stores the PID of the process
- * that's running, when trying to aquire a lock, it checks wether that process is still running. If
- * not, it rewrites the lockfile to have its own PID instead. */
-
-pub enum AwaitLockError {
-    Watcher(notify::Error),
-    Timeout(String),
-}
-
-impl std::fmt::Display for AwaitLockError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let msg = match self {
-            AwaitLockError::Watcher(error) => format!("Error starting file watcher {}", error),
-            AwaitLockError::Timeout(path) => format!("Timeout awaiting lockfile {}", path),
-        };
-        write!(f, "{msg}")
-    }
-}
+/* Locking uses an fs2 advisory exclusive lock on a separate `.<kind>.lock.guard` file, which
+ * is never deleted. The `<kind>.lock` file next to it only records the PID of the holder: it is
+ * informational, and the watcher removes it on shutdown as a signal. Because the kernel releases
+ * the advisory lock when the holding process exits, stale markers never block a new process. */
 
 pub enum Error {
     Locked(u32),
-    AwaitingLockFile(AwaitLockError),
-    ParsingLockfile(std::num::ParseIntError),
-    ReadingLockfile(LockKind, std::io::Error),
     WritingLockfile(std::io::Error),
     ProjectFolderMissing(std::path::PathBuf),
 }
@@ -41,23 +24,11 @@ impl std::fmt::Display for Error {
             Error::Locked(pid) => {
                 format!("A ReScript build is already running. The process ID (PID) is {pid}")
             }
-            Error::ParsingLockfile(e) => format!(
-                "Could not parse lockfile: \n {e} \n  (try removing it and running the command again)"
-            ),
-            Error::ReadingLockfile(kind, e) => {
-                format!(
-                    "Could not read lockfile: {}, \n {e} \n  (try removing it and running the command again)",
-                    kind.file_name()
-                )
-            }
             Error::WritingLockfile(e) => format!("Could not write lockfile: \n {e}"),
             Error::ProjectFolderMissing(path) => format!(
                 "Could not write lockfile because the specified project folder does not exist: {}",
                 path.to_string_lossy()
             ),
-            Error::AwaitingLockFile(await_lock_error) => {
-                format!("Error awaiting lockfile: {await_lock_error}")
-            }
         };
         write!(f, "{msg}")
     }
@@ -69,7 +40,7 @@ pub struct LockGuard {
 }
 
 pub enum Lock {
-    Aquired(LockGuard),
+    Acquired(LockGuard),
     Error(Error),
 }
 
@@ -80,11 +51,11 @@ pub enum LockKind {
 }
 
 impl LockKind {
-    pub fn file_name(&self) -> String {
-        String::from(match self {
+    pub fn file_name(&self) -> &'static str {
+        match self {
             LockKind::Watch => "watch.lock",
             LockKind::Build => "build.lock",
-        })
+        }
     }
 }
 
@@ -136,7 +107,7 @@ fn get(kind: LockKind, folder: &str) -> Lock {
                 if let Err(e) = fs::write(&location, pid.to_string()) {
                     return Lock::Error(Error::WritingLockfile(e));
                 }
-                return Lock::Aquired(LockGuard {
+                return Lock::Acquired(LockGuard {
                     pid,
                     _file: guard_file,
                 });
@@ -163,14 +134,13 @@ fn get(kind: LockKind, folder: &str) -> Lock {
     }
 }
 
-pub fn get_lock_or_exit(kind: LockKind, folder: &str) -> Lock {
+pub fn get_lock_or_exit(kind: LockKind, folder: &str) -> LockGuard {
     match get(kind, folder) {
         Lock::Error(error) => {
             eprintln!("Could not start Rescript build: {error}");
             std::process::exit(1);
         }
-
-        acquired_lock => acquired_lock,
+        Lock::Acquired(guard) => guard,
     }
 }
 
@@ -235,7 +205,7 @@ mod tests {
             LockKind::Watch,
             project_folder.to_str().expect("path should be valid"),
         ) {
-            Lock::Aquired(_) => {}
+            Lock::Acquired(_) => {}
             _ => panic!("expected lock to be acquired"),
         }
 
@@ -253,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_stale_lock_for_unrelated_process_name() {
+    fn ignores_marker_without_held_guard() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
         let lib_dir = project_folder.join("lib");
@@ -264,8 +234,8 @@ mod tests {
             LockKind::Watch,
             project_folder.to_str().expect("path should be valid"),
         ) {
-            Lock::Aquired(_) => {}
-            _ => panic!("expected stale lock from unrelated process to be ignored"),
+            Lock::Acquired(_) => {}
+            _ => panic!("expected a PID marker without a held guard to be ignored"),
         }
     }
 
@@ -281,7 +251,7 @@ mod tests {
             LockKind::Watch,
             project_folder.to_str().expect("path should be valid"),
         );
-        assert!(matches!(first, Lock::Aquired(_)));
+        assert!(matches!(first, Lock::Acquired(_)));
 
         match get(
             LockKind::Watch,
@@ -322,7 +292,7 @@ mod tests {
             LockKind::Build,
             project_folder.to_str().expect("path should be valid"),
         ) {
-            Lock::Aquired(guard) => assert_eq!(guard.pid, current_pid),
+            Lock::Acquired(guard) => assert_eq!(guard.pid, current_pid),
             _ => panic!("expected build lock to wait for removal and then be acquired"),
         }
 
@@ -357,7 +327,7 @@ mod tests {
         let acquired = contenders
             .into_iter()
             .map(|contender| contender.join().unwrap())
-            .filter(|result| matches!(result, Lock::Aquired(_)))
+            .filter(|result| matches!(result, Lock::Acquired(_)))
             .count();
         assert_eq!(acquired, 1);
     }

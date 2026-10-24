@@ -1,5 +1,4 @@
 // Port of compiler/gentype/GeneratedFiles.ml:1-52.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use std::fs;
 use std::io;
