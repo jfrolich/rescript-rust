@@ -1263,14 +1263,6 @@ pub struct TypeCheckContext<'a> {
     /// Depth inside applicative functor bodies.
     /// Mirrors typemod.ml's `funct_body` flag for rejecting fresh module types.
     pub(crate) applicative_functor_body_depth: usize,
-    /// Registry of @comptime functions for compile-time specialization.
-    pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
-    /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
-    pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
-    pub monomorph_cache: crate::types::comptime::MonomorphCache,
-    /// Nesting depth of comptime function specializations; a fallback guard
-    /// behind the monomorphization cache against runaway recursion.
-    comptime_depth: usize,
 }
 
 /// A diagnostic from type checking.
@@ -1397,10 +1389,6 @@ impl<'a> TypeCheckContext<'a> {
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             applicative_functor_body_depth: 0,
-            comptime_functions: HashMap::new(),
-            comptime_bindings: HashMap::new(),
-            monomorph_cache: crate::types::comptime::MonomorphCache::new(),
-            comptime_depth: 0,
         }
     }
 
@@ -2925,30 +2913,6 @@ fn transl_type_inner(
             let (ref lid, ref args) = **inner;
             // Type constructor: int, string, list<'a>, etc.
             let longident = tctx.arena.get_longident(lid.txt);
-
-            // If the name is a simple ident bound to a comptime Type value
-            // (e.g. `argType` from `inline for argType in c.args`), resolve
-            // the bound TypeInfo back to a concrete type. This lets users
-            // write `(expr : argType)` inside comptime-unrolled loops.
-            if longident.is_simple() && args.is_empty() {
-                let name = tctx.arena.get_string(longident.last_idx());
-                if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
-                    tctx.comptime_bindings.get(name).cloned()
-                {
-                    if let Some(ty) =
-                        crate::types::comptime::type_info_to_type_expr(tctx.type_ctx, env, &ti)
-                    {
-                        let typed = crate::types::typedtree::TypedCoreType {
-                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(None),
-                            ctyp_type: ty,
-                            ctyp_env: crate::types::typedtree::EnvRef(0),
-                            ctyp_loc: loc,
-                            ctyp_attributes: crate::parser::ast::Attributes::new(),
-                        };
-                        return Ok((typed, ty));
-                    }
-                }
-            }
 
             let (path, decl) = find_type_for_lid(tctx, env, lid.loc, longident)?;
             // typetexp.ml:104-106: `check_deprecated ~deprecated_context:Reference`.
@@ -7724,32 +7688,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
         ED::Pexp_regexp(_) => unreachable!("Lowered by the built-in frontend mapper."),
         ED::Pexp_ident(lid) => {
-            // Check for comptime-known variable (from @typeInfo destructuring etc.)
             let longident = tctx.arena.get_longident(lid.txt);
-            if longident.is_simple() {
-                let name = tctx.arena.get_string(longident.last_idx());
-                if let Some(cv) = tctx.comptime_bindings.get(name).cloned() {
-                    // Substitute with the comptime value
-                    if let Some(typed_expr) =
-                        comptime_value_to_typed_expr(&cv, tctx.type_ctx, env, loc)
-                    {
-                        let expr_ty = typed_expr.exp_type;
-                        crate::types::ctype::unify(
-                            ctx,
-                            &mut tctx.unify_state,
-                            expr_ty,
-                            expected_ty,
-                        )
-                        .map_err(|e| {
-                            super::TypeCoreError::Other(format!(
-                                "comptime binding type mismatch: {:?}",
-                                e
-                            ))
-                        })?;
-                        return Ok(typed_expr);
-                    }
-                }
-            }
 
             // Normal identifier expression. typetexp.ml `find_value`:
             // `Env.check_value_name (Longident.last lid) loc` before lookup.
@@ -8250,39 +8189,6 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Function application
             let funct_expr = tctx.arena.get_expr(*funct);
 
-            // Check for comptime function call
-            if let Some(result) =
-                try_comptime_application(tctx, env, loc, funct_expr, args, expected_ty)
-            {
-                return result;
-            }
-
-            // Check for Array.map(comptime_array, lambda) — unroll like inline for
-            if let Some((pat_idx, coll_idx, body_idx)) = as_comptime_loop(expr, tctx.arena) {
-                // Only intercept if the collection resolves to a comptime array
-                let coll_expr = tctx.arena.get_expr(coll_idx);
-                let is_comptime = matches!(&*coll_expr.pexp_desc,
-                    ED::Pexp_ident(lid) if {
-                        let longident = tctx.arena.get_longident(lid.txt);
-                        longident.is_simple() && matches!(
-                            tctx.comptime_bindings.get(tctx.arena.get_string(longident.last_idx())),
-                            Some(crate::types::comptime::ComptimeValue::Array(_))
-                        )
-                    }
-                );
-                if is_comptime {
-                    // Build an Expression that looks like Pexp_inline_for and recurse
-                    let synthetic = ParsedExpression {
-                        pexp_desc: Box::new(ED::Pexp_inline_for(Box::new((
-                            pat_idx, coll_idx, body_idx,
-                        )))),
-                        pexp_loc: expr.pexp_loc,
-                        pexp_attributes: crate::parser::ast::Attributes::new(),
-                    };
-                    return type_expect(tctx, env, &synthetic, expected_ty, context);
-                }
-            }
-
             let typed_apply = type_application(
                 tctx,
                 env,
@@ -8304,20 +8210,6 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = **inner;
             let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
-
-            // Check if the scrutinee is @typeInfo(...) — if so, resolve it
-            // and only type-check the matching branch
-            if let Some(result) = try_comptime_match(
-                tctx,
-                env,
-                loc,
-                scrutinee,
-                cases,
-                expected_ty,
-                &expr.pexp_attributes,
-            ) {
-                return result;
-            }
 
             // Normal match expression
             type_match(
@@ -8509,45 +8401,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_field(record_expr_idx, field_lid) => {
-            // Check for comptime field access: field.name where field is comptime-known
             let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*record_expr.pexp_desc
-            {
-                let longident = tctx.arena.get_longident(rec_lid.txt);
-                if longident.is_simple() {
-                    let var_name = tctx.arena.get_string(longident.last_idx());
-                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
-                        tctx.comptime_bindings.get(var_name).cloned()
-                    {
-                        let field_name = {
-                            let fl = tctx.arena.get_longident(field_lid.txt);
-                            tctx.arena.get_string(fl.last_idx()).to_string()
-                        };
-                        if let Some((_, field_val)) = entries.iter().find(|(k, _)| k == &field_name)
-                        {
-                            if let Some(typed_expr) =
-                                comptime_value_to_typed_expr(field_val, ctx, env, loc)
-                            {
-                                let expr_ty = typed_expr.exp_type;
-                                crate::types::ctype::unify(
-                                    ctx,
-                                    &mut tctx.unify_state,
-                                    expr_ty,
-                                    expected_ty,
-                                )
-                                .map_err(|e| {
-                                    super::TypeCoreError::Other(format!(
-                                        "comptime field access type mismatch: {:?}",
-                                        e
-                                    ))
-                                })?;
-                                return Ok(typed_expr);
-                            }
-                        }
-                    }
-                }
-            }
-            // Normal field access
             let typed_field = type_field(
                 tctx,
                 env,
@@ -8764,819 +8618,6 @@ fn type_expect_with_recarg_unscoped<'a>(
             // JSX element - typically transformed before type checking
             Err(TypeCoreError::JsxNotEnabled { loc })
         }
-
-        ED::Pexp_inline_for(inner) => {
-            let (ref pat_idx, ref collection_idx, ref body_idx) = **inner;
-
-            // Check if the collection is a comptime-known variable. Accepts
-            // either a bare ident (`fields`) bound to ComptimeValue::Array,
-            // or a field access (`c.args`) where `c` is a ComptimeValue::
-            // Record holding an Array at that field.
-            let collection_expr = tctx.arena.get_expr(*collection_idx);
-            let comptime_array = match &*collection_expr.pexp_desc {
-                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-                    let longident = tctx.arena.get_longident(lid.txt);
-                    if longident.is_simple() {
-                        let name = tctx.arena.get_string(longident.last_idx());
-                        match tctx.comptime_bindings.get(name) {
-                            Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
-                                Some(elements.clone())
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                }
-                crate::parser::ast::ExpressionDesc::Pexp_field(rec_idx, field_lid) => {
-                    let rec_expr = tctx.arena.get_expr(*rec_idx);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) =
-                        &*rec_expr.pexp_desc
-                    {
-                        let rec_longident = tctx.arena.get_longident(rec_lid.txt);
-                        if rec_longident.is_simple() {
-                            let rec_name = tctx.arena.get_string(rec_longident.last_idx());
-                            if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
-                                tctx.comptime_bindings.get(rec_name)
-                            {
-                                let field_name = {
-                                    let fl = tctx.arena.get_longident(field_lid.txt);
-                                    tctx.arena.get_string(fl.last_idx()).to_string()
-                                };
-                                match entries
-                                    .iter()
-                                    .find(|(k, _)| k == &field_name)
-                                    .map(|(_, v)| v)
-                                {
-                                    Some(crate::types::comptime::ComptimeValue::Array(
-                                        elements,
-                                    )) => Some(elements.clone()),
-                                    _ => None,
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-
-            match comptime_array {
-                Some(elements) if !elements.is_empty() => {
-                    // Unroll: type-check body once per element, collect results into array
-                    let pat = tctx.arena.get_pat(*pat_idx);
-                    let var_name = match &*pat.ppat_desc {
-                        crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                            tctx.arena.get_string(name_loc.txt).to_string()
-                        }
-                        _ => "__inline_for_var".to_string(),
-                    };
-
-                    let body_expr = tctx.arena.get_expr(*body_idx);
-                    let mut typed_iterations: Vec<Expression> = Vec::new();
-                    let elem_result_ty = ctx.new_var(None);
-
-                    for element in &elements {
-                        let prev_binding = tctx.comptime_bindings.get(&var_name).cloned();
-                        tctx.comptime_bindings
-                            .insert(var_name.clone(), element.clone());
-
-                        let mut iter_env = env.clone();
-                        let elem_ty = ctx.new_var(None);
-                        let id = ctx.create_ident(&var_name);
-                        let vd = crate::types::decl::ValueDescription {
-                            val_type: elem_ty,
-                            val_kind: crate::types::decl::ValueKind::ValReg,
-                            val_loc: crate::location::Location::none(),
-                            val_attributes: vec![],
-                            val_path: None,
-                        };
-                        iter_env.add_value(id, vd);
-
-                        // Type-check body with fresh type var (not unit — results are collected)
-                        match type_expect(tctx, &iter_env, body_expr, elem_result_ty, None) {
-                            Ok(typed_body) => typed_iterations.push(typed_body),
-                            Err(e) => {
-                                match prev_binding {
-                                    Some(v) => {
-                                        tctx.comptime_bindings.insert(var_name.clone(), v);
-                                    }
-                                    None => {
-                                        tctx.comptime_bindings.remove(&var_name);
-                                    }
-                                }
-                                return Err(e);
-                            }
-                        }
-
-                        match prev_binding {
-                            Some(v) => {
-                                tctx.comptime_bindings.insert(var_name.clone(), v);
-                            }
-                            None => {
-                                tctx.comptime_bindings.remove(&var_name);
-                            }
-                        }
-                    }
-
-                    // Check if we're in an array context (expected type is array<_>)
-                    // or statement context (expected type is unit/unknown).
-                    // Don't try-unify since that has side effects.
-                    let expected_repr = ctx.repr(expected_ty);
-                    let expected_desc = ctx.get_desc(expected_repr);
-                    let is_array_context = matches!(&*expected_desc,
-                        crate::types::type_expr::TypeDesc::Tconstr { path, .. }
-                        if path.same(&crate::types::predef::path_array())
-                    );
-
-                    let array_ty = if is_array_context {
-                        let arr = ctx
-                            .new_constr(crate::types::predef::path_array(), vec![elem_result_ty]);
-                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, arr, expected_ty)
-                            .map_err(|e| {
-                                super::TypeCoreError::Other(format!(
-                                    "inline for array type: {:?}",
-                                    e
-                                ))
-                            })?;
-                        arr
-                    } else {
-                        ctx.new_var(None)
-                    };
-
-                    if is_array_context {
-                        Ok(Expression::new(
-                            ExpressionDesc::Texp_array(typed_iterations),
-                            loc,
-                            array_ty,
-                            ctx.store_typed_env(env),
-                            crate::parser::ast::Attributes::new(),
-                        ))
-                    } else {
-                        // Statement context — produce a sequence
-                        if typed_iterations.len() == 1 {
-                            Ok(typed_iterations.into_iter().next().unwrap())
-                        } else if typed_iterations.is_empty() {
-                            let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
-                            let void_cstr = env
-                                .find_constructor("()")
-                                .map_err(|_| super::TypeCoreError::Other("cannot find ()".into()))?
-                                .clone();
-                            Ok(Expression::new(
-                                ExpressionDesc::Texp_construct(
-                                    crate::parse_arena::Located {
-                                        txt: crate::parse_arena::LidentIdx(0),
-                                        loc: crate::parse_arena::LocIdx::none(),
-                                    },
-                                    std::sync::Arc::new(void_cstr),
-                                    vec![],
-                                ),
-                                loc,
-                                unit_ty,
-                                ctx.store_typed_env(env),
-                                crate::parser::ast::Attributes::new(),
-                            ))
-                        } else {
-                            let mut result = typed_iterations.pop().unwrap();
-                            while let Some(prev) = typed_iterations.pop() {
-                                let result_ty = result.exp_type;
-                                result = Expression::new(
-                                    ExpressionDesc::Texp_sequence(Box::new(prev), Box::new(result)),
-                                    loc,
-                                    result_ty,
-                                    ctx.store_typed_env(env),
-                                    crate::parser::ast::Attributes::new(),
-                                );
-                            }
-                            Ok(result)
-                        }
-                    }
-                }
-                Some(_) => {
-                    // Empty iteration: either an empty array (in array
-                    // context) or unit (in statement context). Check the
-                    // expected type before committing to a shape — otherwise
-                    // an empty `inline for` used as a statement (e.g.
-                    // iterating an empty `c.args`) would clash with unit.
-                    let expected_repr = ctx.repr(expected_ty);
-                    let expected_desc = ctx.get_desc(expected_repr);
-                    let is_array_context = matches!(&*expected_desc,
-                        crate::types::type_expr::TypeDesc::Tconstr { path, .. }
-                        if path.same(&crate::types::predef::path_array())
-                    );
-                    if is_array_context {
-                        let elem_ty = ctx.new_var(None);
-                        let array_ty =
-                            ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty]);
-                        crate::types::ctype::unify(
-                            ctx,
-                            &mut tctx.unify_state,
-                            array_ty,
-                            expected_ty,
-                        )
-                        .map_err(|e| super::TypeCoreError::Other(format!("{:?}", e)))?;
-                        Ok(Expression::new(
-                            ExpressionDesc::Texp_array(vec![]),
-                            loc,
-                            array_ty,
-                            ctx.store_typed_env(env),
-                            crate::parser::ast::Attributes::new(),
-                        ))
-                    } else {
-                        let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
-                        let void_cstr = env
-                            .find_constructor("()")
-                            .map_err(|_| super::TypeCoreError::Other("cannot find ()".into()))?
-                            .clone();
-                        Ok(Expression::new(
-                            ExpressionDesc::Texp_construct(
-                                crate::parse_arena::Located {
-                                    txt: crate::parse_arena::LidentIdx(0),
-                                    loc: crate::parse_arena::LocIdx::none(),
-                                },
-                                std::sync::Arc::new(void_cstr),
-                                vec![],
-                            ),
-                            loc,
-                            unit_ty,
-                            ctx.store_typed_env(env),
-                            crate::parser::ast::Attributes::new(),
-                        ))
-                    }
-                }
-                None => Err(super::TypeCoreError::Other(
-                    "inline for requires a comptime-known array (e.g., from @typeInfo fields)"
-                        .to_string(),
-                )),
-            }
-        }
-        ED::Pexp_comptime_typeinfo(ct_idx) => {
-            // Resolve the core type to a concrete type.
-            // If the name is a variable (not a type), use its static type.
-            let core_type = tctx.arena.get_core_type(*ct_idx);
-            let ctx = tctx.type_ctx;
-
-            // First check: is the core type a simple name that's a comptime
-            // type binding (from `(type t, ...)` parameter)?
-            if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
-                let (ref lid, _) = **inner;
-                let longident = tctx.arena.get_longident(lid.txt);
-                let name = tctx.arena.get_string(longident.last_idx());
-                if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
-                    tctx.comptime_bindings.get(name).cloned()
-                {
-                    // Build the typeInfo expression directly from the comptime binding
-                    match crate::types::comptime::type_info_to_typed_expr(&ti, ctx, env, loc) {
-                        Some(typed_expr) => {
-                            let type_info_ty = typed_expr.exp_type;
-                            crate::types::ctype::unify(
-                                ctx,
-                                &mut tctx.unify_state,
-                                type_info_ty,
-                                expected_ty,
-                            )
-                            .map_err(|e| {
-                                super::TypeCoreError::Other(format!(
-                                    "typeInfo type mismatch: {:?}",
-                                    e
-                                ))
-                            })?;
-                            return Ok(typed_expr);
-                        }
-                        None => {
-                            return Err(super::TypeCoreError::Other(
-                                "Failed to construct typeInfo value for type parameter".to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Try as a type name first
-            ctx.begin_def();
-            let resolved_ty = match transl_type(tctx, env, core_type) {
-                Ok((_, ty)) => {
-                    ctx.end_def();
-                    ty
-                }
-                Err(_) => {
-                    ctx.end_def();
-                    // Type resolution failed — try as a variable name
-                    // Extract the name from the core type
-                    let var_ty = match &*core_type.ptyp_desc {
-                        crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
-                            let (ref lid, _) = **inner;
-                            let longident = tctx.arena.get_longident(lid.txt);
-                            let name = tctx.arena.get_string(longident.last_idx());
-                            // Look up as a value in the environment
-                            env.find_value(name).ok().map(|vd| vd.val_type)
-                        }
-                        _ => None,
-                    };
-                    match var_ty {
-                        Some(ty) => ty,
-                        None => {
-                            return Err(super::TypeCoreError::Other(
-                                "@typeInfo: could not resolve type or variable".to_string(),
-                            ));
-                        }
-                    }
-                }
-            };
-
-            // Also check: if the resolved type is External (unknown type name),
-            // try as a variable name
-            let mut visited_check = Vec::new();
-            let check_info =
-                crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
-            let resolved_ty = if matches!(
-                check_info,
-                crate::types::comptime::TypeInfo::External { .. }
-            ) {
-                // Might be a variable name, not a type
-                let var_ty = match &*core_type.ptyp_desc {
-                    crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
-                        let (ref lid, _) = **inner;
-                        let longident = tctx.arena.get_longident(lid.txt);
-                        let name = tctx.arena.get_string(longident.last_idx());
-                        env.find_value(name).ok().map(|vd| vd.val_type)
-                    }
-                    _ => None,
-                };
-                var_ty.unwrap_or(resolved_ty)
-            } else {
-                resolved_ty
-            };
-
-            // Check that the type is concrete (no unresolved type variables)
-            let repr_ty = ctx.repr(resolved_ty);
-            let desc = ctx.get_desc(repr_ty);
-            if matches!(&*desc, crate::types::type_expr::TypeDesc::Tvar(_)) {
-                return Err(super::TypeCoreError::Other(
-                    "@typeInfo requires a concrete type, got a type variable".to_string(),
-                ));
-            }
-
-            // Build TypeInfo from the resolved type
-            let mut visited = Vec::new();
-            let type_info =
-                crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited);
-
-            // Construct a literal typeInfo value
-            match crate::types::comptime::type_info_to_typed_expr(&type_info, ctx, env, loc) {
-                Some(typed_expr) => {
-                    // Unify the typeInfo type with expected type
-                    let type_info_ty = typed_expr.exp_type;
-                    crate::types::ctype::unify(
-                        ctx,
-                        &mut tctx.unify_state,
-                        type_info_ty,
-                        expected_ty,
-                    )
-                    .map_err(|e| {
-                        super::TypeCoreError::Other(format!("typeInfo type mismatch: {:?}", e))
-                    })?;
-                    Ok(typed_expr)
-                }
-                None => Err(super::TypeCoreError::Other(
-                    "Failed to construct typeInfo value".to_string(),
-                )),
-            }
-        }
-        ED::Pexp_comptime_field(inner) => {
-            let (ref value_idx, ref name_idx) = **inner;
-            let value_expr = tctx.arena.get_expr(*value_idx);
-            let name_expr = tctx.arena.get_expr(*name_idx);
-
-            // The name must be a comptime-known string
-            let field_name = match &*name_expr.pexp_desc {
-                // Direct string literal
-                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
-                    crate::parser::ast::Constant::String(s) => Some(s.semantic().to_string()),
-                    _ => None,
-                },
-                // Comptime-known variable (e.g., field.name from inline for)
-                crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-                    let longident = tctx.arena.get_longident(lid.txt);
-                    if longident.is_simple() {
-                        let var_name = tctx.arena.get_string(longident.last_idx());
-                        match tctx.comptime_bindings.get(var_name) {
-                            Some(crate::types::comptime::ComptimeValue::String(s)) => {
-                                Some(s.clone())
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                }
-                // Comptime field access (e.g., field.name)
-                crate::parser::ast::ExpressionDesc::Pexp_field(rec_idx, field_lid) => {
-                    let rec_expr = tctx.arena.get_expr(*rec_idx);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) =
-                        &*rec_expr.pexp_desc
-                    {
-                        let longident = tctx.arena.get_longident(rec_lid.txt);
-                        if longident.is_simple() {
-                            let var_name = tctx.arena.get_string(longident.last_idx());
-                            if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
-                                tctx.comptime_bindings.get(var_name)
-                            {
-                                let fl = tctx.arena.get_longident(field_lid.txt);
-                                let fname = tctx.arena.get_string(fl.last_idx()).to_string();
-                                entries
-                                    .iter()
-                                    .find(|(k, _)| k == &fname)
-                                    .and_then(|(_, v)| match v {
-                                        crate::types::comptime::ComptimeValue::String(s) => {
-                                            Some(s.clone())
-                                        }
-                                        _ => None,
-                                    })
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-
-            let field_name = match field_name {
-                Some(name) => name,
-                None => {
-                    return Err(super::TypeCoreError::Other(
-                        "@field requires a comptime-known string as the field name".to_string(),
-                    ));
-                }
-            };
-
-            // Type-check the value expression to get its type
-            let value_ty = ctx.new_var(None);
-            let typed_value = type_expect(tctx, env, value_expr, value_ty, None)?;
-            let _value_type = ctx.repr(typed_value.exp_type);
-
-            // Look up the field on the value's type
-            match env.find_label(&field_name) {
-                Ok(label_desc) => {
-                    let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
-                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty)
-                        .map_err(|e| {
-                        super::TypeCoreError::Other(format!("@field type mismatch: {:?}", e))
-                    })?;
-
-                    let lid_loc = crate::parse_arena::Located {
-                        txt: crate::parse_arena::LidentIdx(0),
-                        loc: crate::parse_arena::LocIdx::none(),
-                    };
-                    Ok(Expression::new(
-                        ExpressionDesc::Texp_field(
-                            Box::new(typed_value),
-                            lid_loc,
-                            std::sync::Arc::new(label_desc.clone()),
-                        ),
-                        loc,
-                        field_ty,
-                        ctx.store_typed_env(env),
-                        crate::parser::ast::Attributes::new(),
-                    ))
-                }
-                Err(_) => Err(super::TypeCoreError::Other(format!(
-                    "@field: field '{}' not found on the value's type",
-                    field_name
-                ))),
-            }
-        }
-        ED::Pexp_comptime_compile_error(msg_idx) => {
-            // Extract the error message
-            let msg_expr = tctx.arena.get_expr(*msg_idx);
-            let msg = match &*msg_expr.pexp_desc {
-                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
-                    crate::parser::ast::Constant::String(s) => s.semantic().to_string(),
-                    _ => "compile error".to_string(),
-                },
-                _ => "compile error".to_string(),
-            };
-            Err(super::TypeCoreError::Other(format!(
-                "@compileError: {}",
-                msg
-            )))
-        }
-        ED::Pexp_comptime_typename(_) => Err(super::TypeCoreError::Other(
-            "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
-        )),
-        ED::Pexp_comptime_variant(inner) => {
-            let (ref ct_idx, ref ctor_name_idx, ref payload_idx) = **inner;
-            let core_type = tctx.arena.get_core_type(*ct_idx);
-            let ctx = tctx.type_ctx;
-
-            // If the type argument is a comptime type parameter (from `(type
-            // t, ...)`), resolve it via the binding's TypeInfo — otherwise
-            // transl_type would treat `t` as an undefined type name.
-            let comptime_type: Option<crate::types::comptime::TypeInfo> =
-                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner_ct) =
-                    &*core_type.ptyp_desc
-                {
-                    let (ref lid, _) = **inner_ct;
-                    let longident = tctx.arena.get_longident(lid.txt);
-                    let name = tctx.arena.get_string(longident.last_idx());
-                    if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
-                        tctx.comptime_bindings.get(name).cloned()
-                    {
-                        Some(ti)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-            let _resolved_ty = if let Some(crate::types::comptime::TypeInfo::Variant {
-                name, ..
-            }) = &comptime_type
-            {
-                match env.find_type_with_id(name) {
-                    Ok((id, _)) => ctx.new_constr(crate::types::Path::Pident(*id), vec![]),
-                    Err(_) => {
-                        return Err(super::TypeCoreError::Other(format!(
-                            "@variant: comptime type '{}' not found in env",
-                            name
-                        )));
-                    }
-                }
-            } else {
-                match transl_type(tctx, env, core_type) {
-                    Ok((_, ty)) => ty,
-                    Err(e) => return Err(e),
-                }
-            };
-            let ctor_name_expr = tctx.arena.get_expr(*ctor_name_idx);
-            let ctor_name = evaluate_comptime_string(tctx, ctor_name_expr).map_err(|e| {
-                super::TypeCoreError::Other(format!(
-                    "@variant ctor name must resolve to a comptime-known string: {:?}",
-                    e
-                ))
-            })?;
-            let cstr_desc = env
-                .find_constructor(&ctor_name)
-                .map_err(|_| {
-                    super::TypeCoreError::Other(format!(
-                        "@variant: constructor '{}' not found",
-                        ctor_name
-                    ))
-                })?
-                .clone();
-
-            // Use the constructor's result type for the expression type.
-            // Instance it to get fresh type variables that can unify with the expected type.
-            let result_ty = crate::types::instance(ctx, cstr_desc.cstr_res);
-
-            let typed_args = if let Some(payload_expr_idx) = payload_idx {
-                let payload_expr = tctx.arena.get_expr(*payload_expr_idx);
-                // Use the constructor's argument type for the payload
-                let arg_ty = if !cstr_desc.cstr_args.is_empty() {
-                    crate::types::instance(ctx, cstr_desc.cstr_args[0])
-                } else {
-                    ctx.new_var(None)
-                };
-                vec![type_expect(tctx, env, payload_expr, arg_ty, None)?]
-            } else {
-                vec![]
-            };
-
-            // Unify the constructor's result type with expected type
-            crate::types::ctype::unify(ctx, &mut tctx.unify_state, result_ty, expected_ty)
-                .map_err(|e| {
-                    super::TypeCoreError::Other(format!("@variant type mismatch: {:?}", e))
-                })?;
-
-            let lid_loc = crate::parse_arena::Located {
-                txt: crate::parse_arena::LidentIdx(0),
-                loc: crate::parse_arena::LocIdx::none(),
-            };
-            Ok(Expression::new(
-                ExpressionDesc::Texp_construct(lid_loc, std::sync::Arc::new(cstr_desc), typed_args),
-                loc,
-                result_ty,
-                ctx.store_typed_env(env),
-                crate::parser::ast::Attributes::new(),
-            ))
-        }
-        ED::Pexp_comptime_record(inner) => {
-            let (ref ct_idx, ref fields_expr_idx) = **inner;
-
-            // Resolve the target record type
-            let core_type = tctx.arena.get_core_type(*ct_idx);
-            let ctx = tctx.type_ctx;
-
-            // First check if the type argument is a comptime type parameter
-            // (from `(type t, ...)` — `@record(t, ...)`). If so, resolve it
-            // via the type binding's TypeInfo.
-            let comptime_type: Option<crate::types::comptime::TypeInfo> =
-                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc
-                {
-                    let (ref lid, _) = **inner;
-                    let longident = tctx.arena.get_longident(lid.txt);
-                    let name = tctx.arena.get_string(longident.last_idx());
-                    if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
-                        tctx.comptime_bindings.get(name).cloned()
-                    {
-                        Some(ti)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-            ctx.begin_def();
-            let resolved_ty =
-                if let Some(crate::types::comptime::TypeInfo::Record { name, .. }) = &comptime_type
-                {
-                    // Look up the record type by name
-                    match env.find_type_with_id(name) {
-                        Ok((id, _)) => {
-                            ctx.end_def();
-                            ctx.new_constr(crate::types::Path::Pident(*id), vec![])
-                        }
-                        Err(_) => {
-                            ctx.end_def();
-                            return Err(super::TypeCoreError::Other(format!(
-                                "@record: comptime type '{}' not found in env",
-                                name
-                            )));
-                        }
-                    }
-                } else {
-                    match transl_type(tctx, env, core_type) {
-                        Ok((_, ty)) => {
-                            ctx.end_def();
-                            ty
-                        }
-                        Err(e) => {
-                            ctx.end_def();
-                            return Err(e);
-                        }
-                    }
-                };
-
-            // The fields expression must be an inline for (or Array.map)
-            // that produces record fields. @record unrolls it directly
-            // to handle heterogeneous field types.
-            let fields_expr = tctx.arena.get_expr(*fields_expr_idx);
-            let mut typed_fields = Vec::new();
-
-            if let Some((pat_idx, collection_idx, body_idx)) =
-                as_comptime_loop(fields_expr, tctx.arena)
-            {
-                let coll_expr = tctx.arena.get_expr(collection_idx);
-                let comptime_array = match &*coll_expr.pexp_desc {
-                    crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-                        let longident = tctx.arena.get_longident(lid.txt);
-                        if longident.is_simple() {
-                            let vname = tctx.arena.get_string(longident.last_idx());
-                            match tctx.comptime_bindings.get(vname) {
-                                Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
-                                    Some(elements.clone())
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-                .ok_or_else(|| {
-                    super::TypeCoreError::Other(
-                        "@record: loop collection must be comptime-known".into(),
-                    )
-                })?;
-
-                let pat = tctx.arena.get_pat(pat_idx);
-                let var_name = match &*pat.ppat_desc {
-                    crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                        tctx.arena.get_string(name_loc.txt).to_string()
-                    }
-                    _ => "__field".to_string(),
-                };
-
-                let body_expr = tctx.arena.get_expr(body_idx);
-                let saved_bindings = tctx.comptime_bindings.clone();
-
-                for element in &comptime_array {
-                    tctx.comptime_bindings
-                        .insert(var_name.clone(), element.clone());
-
-                    let mut iter_env = env.clone();
-                    let elem_ty = ctx.new_var(None);
-                    let id = ctx.create_ident(&var_name);
-                    let vd = crate::types::decl::ValueDescription {
-                        val_type: elem_ty,
-                        val_kind: crate::types::decl::ValueKind::ValReg,
-                        val_loc: crate::location::Location::none(),
-                        val_attributes: vec![],
-                        val_path: None,
-                    };
-                    iter_env.add_value(id, vd);
-
-                    // Extract field name from comptime element's "name" property
-                    let field_name =
-                        if let crate::types::comptime::ComptimeValue::Record(entries) = element {
-                            entries
-                                .iter()
-                                .find(|(k, _)| k == "name")
-                                .and_then(|(_, v)| {
-                                    if let crate::types::comptime::ComptimeValue::String(s) = v {
-                                        Some(s.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                        } else {
-                            None
-                        }
-                        .ok_or_else(|| {
-                            super::TypeCoreError::Other("@record: element must have 'name'".into())
-                        })?;
-
-                    let label_desc = env
-                        .find_label(&field_name)
-                        .map_err(|_| {
-                            super::TypeCoreError::Other(format!(
-                                "@record: field '{}' not found",
-                                field_name
-                            ))
-                        })?
-                        .clone();
-
-                    // Type-check body with the field's expected type
-                    let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
-                    let typed_value = type_expect(tctx, &iter_env, body_expr, field_ty, None)?;
-
-                    let lid_loc = crate::parse_arena::Located {
-                        txt: crate::parse_arena::LidentIdx(0),
-                        loc: crate::parse_arena::LocIdx::none(),
-                    };
-                    typed_fields.push((
-                        lid_loc,
-                        label_desc,
-                        super::typedtree::RecordLabelDefinition::Overridden(
-                            crate::parse_arena::Located {
-                                txt: crate::parse_arena::LidentIdx(0),
-                                loc: crate::parse_arena::LocIdx::none(),
-                            },
-                            typed_value,
-                        ),
-                        false,
-                    ));
-                }
-                tctx.comptime_bindings = saved_bindings;
-            } else {
-                return Err(super::TypeCoreError::Other(
-                    "@record: second argument must be inline for or Array.map".into(),
-                ));
-            }
-
-            // Unify the record type with expected type
-            crate::types::ctype::unify(ctx, &mut tctx.unify_state, resolved_ty, expected_ty)
-                .map_err(|e| {
-                    super::TypeCoreError::Other(format!("@record type mismatch: {:?}", e))
-                })?;
-
-            Ok(Expression::new(
-                ExpressionDesc::Texp_record {
-                    fields: typed_fields,
-                    empty_representation: None,
-                    extended_expression: None,
-                },
-                loc,
-                resolved_ty,
-                ctx.store_typed_env(env),
-                crate::parser::ast::Attributes::new(),
-            ))
-        }
-        ED::Pexp_comptime_build_variant(_)
-        | ED::Pexp_comptime_variant_case(_)
-        | ED::Pexp_comptime_build_record(_)
-        | ED::Pexp_comptime_record_field(_) => {
-            // Type-builder builtins — only appear inside @comptime type declarations, evaluated
-            // by evaluate_type_builder — they should not appear in normal
-            // expression context.
-            Err(super::TypeCoreError::Other(
-                "@buildVariant / @variantCase may only appear in @comptime type declarations"
-                    .into(),
-            ))
-        }
     }
 }
 
@@ -9634,7 +8675,7 @@ fn lower_args_manifest_needs_component_force(
                     .is_some()
             });
             let ctx_flat_hit = root.is_some_and(|head| {
-                let source = Path::pident(*head);
+                let source = Path::pident(head.clone());
                 !ctx.component_paths_for_alias_source(&source).is_empty()
             });
             let parent_depth = path
@@ -9745,23 +8786,24 @@ fn force_lower_args_type_lookup_paths(
                 visit_manifest(tctx, env, inner, seen);
             }
             TypeDesc::Tvariant(row) => {
-                // Collect only the child refs (row_name args, row_more, then
-                // field payloads, in that order) instead of cloning the row.
-                let mut children: Vec<TypeExprRef> = Vec::new();
+                let row = row.clone();
+                drop(desc);
                 if let Some((_, args)) = &row.row_name {
-                    children.extend(args.iter().copied());
-                }
-                children.push(row.row_more);
-                for (_, field) in row.row_fields.iter() {
-                    match field {
-                        RowField::Rpresent(Some(arg)) => children.push(*arg),
-                        RowField::Reither { types, .. } => children.extend(types.iter().copied()),
-                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    for arg in args {
+                        visit_manifest(tctx, env, *arg, seen);
                     }
                 }
-                drop(desc);
-                for child in children {
-                    visit_manifest(tctx, env, child, seen);
+                visit_manifest(tctx, env, row.row_more, seen);
+                for (_, field) in row.row_fields.iter() {
+                    match field {
+                        RowField::Rpresent(Some(arg)) => visit_manifest(tctx, env, *arg, seen),
+                        RowField::Reither { types, .. } => {
+                            for arg in types {
+                                visit_manifest(tctx, env, *arg, seen);
+                            }
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
                 }
             }
             TypeDesc::Tpoly { body, vars } => {
@@ -9954,19 +8996,30 @@ const fn unified_op_entry(
     }
 }
 
-/// OCaml `Unified_ops.index_by_path` lookup for the path `Pervasives.<op>`.
+/// Check if a path (by name) is a unified op, returning its OCaml entry.
+/// `get_unified_op_entry` for the path `Pervasives.<op>`.
 fn get_unified_op_entry_for_op(op: &str) -> Option<UnifiedOpEntry> {
+    match op {
+        "~+" | "~-" | "~~~" | "+" | "-" | "*" | "/" | "%" | "mod" | "**" | "<<" | ">>" | "|||"
+        | "^^^" | "&&&" | ">>>" => get_unified_op_entry(&format!("Pervasives.{op}")),
+        _ => None,
+    }
+}
+
+fn get_unified_op_entry(path_name: &str) -> Option<UnifiedOpEntry> {
     use UnifiedOpForm::{Binary, Unary};
 
     // OCaml compiler/ml/unified_ops.ml:40-54 defines the specialization shape,
     // and unified_ops.ml:58-262 lists these per-operator capabilities.
-    match op {
-        "~+" | "~-" => Some(unified_op_entry(Unary, true, true, false)),
-        "~~~" => Some(unified_op_entry(Unary, false, true, false)),
-        "+" => Some(unified_op_entry(Binary, true, true, true)),
-        "-" | "*" | "/" | "%" | "mod" | "**" => Some(unified_op_entry(Binary, true, true, false)),
-        "<<" | ">>" | "|||" | "^^^" | "&&&" => Some(unified_op_entry(Binary, false, true, false)),
-        ">>>" => Some(unified_op_entry(Binary, false, false, false)),
+    match path_name {
+        "Pervasives.~+" | "Pervasives.~-" => Some(unified_op_entry(Unary, true, true, false)),
+        "Pervasives.~~~" => Some(unified_op_entry(Unary, false, true, false)),
+        "Pervasives.+" => Some(unified_op_entry(Binary, true, true, true)),
+        "Pervasives.-" | "Pervasives.*" | "Pervasives./" | "Pervasives.%" | "Pervasives.mod"
+        | "Pervasives.**" => Some(unified_op_entry(Binary, true, true, false)),
+        "Pervasives.<<" | "Pervasives.>>" | "Pervasives.|||" | "Pervasives.^^^"
+        | "Pervasives.&&&" => Some(unified_op_entry(Binary, false, true, false)),
+        "Pervasives.>>>" => Some(unified_op_entry(Binary, false, false, false)),
         _ => None,
     }
 }
@@ -10039,11 +9092,23 @@ fn translate_unified_ops(
     use crate::types::typedtree::ApplyArg;
 
     // Check if the function is a unified op (`Pervasives.<op>`).
-    let entry = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(Path::Pdot(parent, op, _), _, _) if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") => {
-            get_unified_op_entry_for_op(op)?
-        }
+    let path_name = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => match path {
+            Path::Pdot(parent, op, _) if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives") =>
+            {
+                if get_unified_op_entry_for_op(op).is_none() {
+                    return None;
+                }
+                path.name()
+            }
+            _ => return None,
+        },
         _ => return None,
+    };
+
+    let entry = match get_unified_op_entry(&path_name) {
+        Some(entry) => entry,
+        None => return None,
     };
 
     let ctx = tctx.type_ctx;
@@ -12845,45 +11910,6 @@ fn collect_lident_idents_in_expression(
                 }
             }
         },
-        ED::Pexp_inline_for(inner) => {
-            let (ref _pat, ref collection, ref body) = **inner;
-            collect_lident_idents_in_expression(arena, arena.get_expr(*collection), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
-        }
-        ED::Pexp_comptime_typeinfo(_) | ED::Pexp_comptime_typename(_) => {
-            // No expression sub-terms to collect idents from
-        }
-        ED::Pexp_comptime_field(inner) => {
-            let (ref value, ref field) = **inner;
-            collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(*field), out);
-        }
-        ED::Pexp_comptime_compile_error(expr) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
-        }
-        ED::Pexp_comptime_record(inner) => {
-            let (ref _ct, ref fields_expr) = **inner;
-            collect_lident_idents_in_expression(arena, arena.get_expr(*fields_expr), out);
-        }
-        ED::Pexp_comptime_variant(inner) => {
-            let (ref _ct, ref expr, ref opt_expr) = **inner;
-            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
-            if let Some(e) = opt_expr {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
-            }
-        }
-        ED::Pexp_comptime_build_variant(e) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
-        }
-        ED::Pexp_comptime_variant_case(e) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
-        }
-        ED::Pexp_comptime_build_record(e) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
-        }
-        ED::Pexp_comptime_record_field(e) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*e), out);
-        }
     }
 }
 
@@ -26890,8 +25916,8 @@ fn lookup_constructor_by_expected_type(
     None
 }
 
-fn strengthen_type_decl_for_module_access_path(
-    ctx: &crate::types::context::TypeContext,
+pub(crate) fn strengthen_type_decl_for_module_access_path<'a>(
+    ctx: &'a crate::types::context::TypeContext,
     module_access_path: &Path,
     id: &Ident,
     decl: &crate::types::decl::TypeDeclaration,
@@ -27791,6 +26817,13 @@ fn build_module_components_from_parent_path(
     {
         let pers = pers_env.as_mut()?;
         if let Some(ps) = pers.find_pers_struct(&alias_target, ctx) {
+            // env.ml:1440-1442 `scrape_alias` reaches `find_module`, whose
+            // persistent branch (env.ml:872-875) forces `ps_sig`, freshening
+            // the unit's bound identifiers. The view below shares the
+            // unrenamed signature, so take the rename's stamps here.
+            if cache_mode.forces_alias_sig() {
+                ctx.trigger_module_sig_rename(&alias_target);
+            }
             let source_prefix = Path::pident(Ident::create_persistent(&alias_target));
             let access_path =
                 Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
@@ -29150,39 +28183,38 @@ fn build_module_signature_for_path(
         &load_paths,
         module_path,
         &mut visiting,
-    )?
-    .as_ref()
-    .clone();
+    )?;
+    let sig = std::sync::Arc::unwrap_or_clone(sig);
     crate::types::ctype::force_generalize_signature_values(ctx, &sig);
     Some((module_path.clone(), sig))
 }
 
-pub(crate) fn resolve_module_signature_for_path(
+pub(crate) fn resolve_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     resolve_module_signature_for_path_shared(module_path, env, pers_env, ctx)
         .map(|(path, sig)| (path, sig.as_ref().clone()))
 }
 
-pub(crate) fn resolve_module_signature_for_path_shared(
+pub(crate) fn resolve_module_signature_for_path_shared<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, std::sync::Arc<crate::types::decl::Signature>)> {
     with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
         (components.access_path().clone(), components.signature_arc())
     })
 }
 
-pub(crate) fn alias_target_for_module_path(
+pub(crate) fn alias_target_for_module_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
@@ -29219,11 +28251,11 @@ pub(crate) fn alias_target_for_module_path(
     }
 }
 
-pub(crate) fn module_alias_target_for_path(
+pub(crate) fn module_alias_target_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
@@ -29261,11 +28293,11 @@ pub(crate) fn module_alias_target_for_path(
     }
 }
 
-fn raw_alias_target_for_module_path(
+fn raw_alias_target_for_module_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     match module_path {
         Path::Pident(_) => alias_target_for_module_path(module_path, env, pers_env, ctx),
@@ -29294,11 +28326,11 @@ fn raw_alias_target_for_module_path(
 
 /// Look up a type declaration for a given path.
 /// Tries env first, then the global type stores.
-fn lookup_type_decl_for_path(
+fn lookup_type_decl_for_path<'a>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     lookup_type_decl_for_path_with_cache_mode(
         type_path,
@@ -29309,11 +28341,11 @@ fn lookup_type_decl_for_path(
     )
 }
 
-fn lookup_type_decl_for_path_for_probe(
+fn lookup_type_decl_for_path_for_probe<'a>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     lookup_type_decl_for_path_with_cache_mode(
         type_path,
@@ -29324,18 +28356,18 @@ fn lookup_type_decl_for_path_for_probe(
     )
 }
 
-fn lookup_type_decl_for_path_with_cache_mode(
+fn lookup_type_decl_for_path_with_cache_mode<'a>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
+    ctx: &'a crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    fn lookup_raw_type_decl_from_module_path(
+    fn lookup_raw_type_decl_from_module_path<'a>(
         module_path: &Path,
         type_name: &str,
         env: &Env,
-        ctx: &crate::types::context::TypeContext,
+        ctx: &'a crate::types::context::TypeContext,
         cache_mode: ComponentLookupApi,
     ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
         // OCaml compiler/ml/env.ml:1095-1105 and 1138-1143 resolve labels
@@ -29360,6 +28392,9 @@ fn lookup_type_decl_for_path_with_cache_mode(
         .flatten()
     }
 
+    // Only use env.lookup_type directly for simple identifiers. For qualified
+    // paths, env.lookup_type currently resolves by leaf name and can return an
+    // unrelated declaration with the same type name.
     if let Path::Pident(id) = type_path {
         // OCaml compiler/ml/env.ml:800-813 resolves Pident type paths with
         // `IdTbl.find_same`. Keep this exact here too, so a same-name local
@@ -29367,6 +28402,18 @@ fn lookup_type_decl_for_path_with_cache_mode(
         // expanded by ctype.ml:1367-1372.
         if let Some(decl) = env.find_type_arc_by_ident(id) {
             return Some(decl.clone());
+        }
+    }
+
+    // Try stamp-based lookup only for regular type identifiers. Constructor-like
+    // paths such as local exception inline-record paths (`C`) share the `Path`
+    // representation but are not type bindings, and imported CMI type stamps can
+    // collide with local constructor stamps.
+    if let Path::Pident(id) = type_path {
+        if id.stamp() != 0 {
+            if let Some(decl) = env.find_type_arc_by_ident(id) {
+                return Some(decl.clone());
+            }
         }
 
         // Try stamp-based lookup only for regular type identifiers.
@@ -29383,11 +28430,12 @@ fn lookup_type_decl_for_path_with_cache_mode(
                 return Some(decl);
             }
         }
+    }
 
-        // Only use env.lookup_type directly for simple identifiers after
-        // exact/stamp lookup. For qualified paths, env.lookup_type currently
-        // resolves by leaf name and can return an unrelated declaration with
-        // the same type name.
+    // Only use env.lookup_type directly for simple identifiers after exact/stamp
+    // lookup. For qualified paths, env.lookup_type currently resolves by leaf
+    // name and can return an unrelated declaration with the same type name.
+    if let Path::Pident(id) = type_path {
         if let Some(decl) = env.lookup_type_arc_by_ident(id) {
             return Some(decl.clone());
         }
@@ -29427,10 +28475,72 @@ fn lookup_type_decl_for_path_with_cache_mode(
             && let Some(parent_decl) =
                 lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode)
         {
-            if let Some(decl) =
-                inline_record_decl_from_variant_type(ctx, &parent_decl, type_name.as_str())
+            if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
             {
-                return Some(Arc::new(decl));
+                let num_consts = constrs
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c.cd_args,
+                            crate::types::ConstructorArguments::CstrTuple(ref args)
+                                if args.is_empty()
+                        )
+                    })
+                    .count() as i32;
+                let num_nonconsts = constrs.len() as i32 - num_consts;
+                let mut block_idx = 0i32;
+                for (position, cd) in constrs.iter().enumerate() {
+                    let is_constant = matches!(
+                        cd.cd_args,
+                        crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+                    );
+
+                    if cd.cd_id.name() == type_name.as_str() {
+                        if let crate::types::ConstructorArguments::CstrRecord(labels) = &cd.cd_args
+                        {
+                            let inline_params =
+                                inline_record_type_params(ctx, &parent_decl.type_params, labels);
+                            return Some(Arc::new(crate::types::TypeDeclaration {
+                                type_params: inline_params.clone(),
+                                type_arity: inline_params.len() as i32,
+                                type_kind: crate::types::TypeKind::TypeRecord(
+                                    crate::types::decl::SharedVec::from(labels.clone()),
+                                    if parent_decl.type_representation
+                                        == crate::types::TypeRepresentation::Unboxed
+                                    {
+                                        // compiler/ml/datarepr.ml:163-164: unboxed inline records use `Record_unboxed true`.
+                                        crate::types::RecordRepresentation::RecordUnboxed(true)
+                                    } else {
+                                        crate::types::RecordRepresentation::RecordInlined {
+                                            name: type_name.to_string(),
+                                            representation: crate::types::ConstructorReference {
+                                                variant: layout,
+                                                position,
+                                            },
+                                        }
+                                    },
+                                ),
+                                type_private: parent_decl.type_private,
+                                type_manifest: None,
+                                type_variance: inline_params
+                                    .iter()
+                                    .map(|_| crate::types::variance::Variance::full())
+                                    .collect(),
+                                type_newtype_level: None,
+                                type_loc: cd.cd_loc,
+                                type_attributes: vec![],
+                                type_immediate: false,
+                                type_representation: crate::types::TypeRepresentation::Boxed,
+                                type_inlined_types: vec![],
+                                type_path: None,
+                            }));
+                        }
+                    }
+
+                    if !is_constant {
+                        block_idx += 1;
+                    }
+                }
             }
         }
 
@@ -29569,8 +28679,8 @@ fn lookup_type_decl_for_path_with_cache_mode(
                 match &md.md_type {
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
-                        if let Some(decl) = ctx.find_type_decl_arc_by_path(&resolved_path.name()) {
-                            return Some(decl);
+                        if let Some(decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
+                            return Some(Arc::new(decl.clone()));
                         }
                         if let Some(decl) =
                             crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
@@ -29579,7 +28689,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
                         }
                     }
                     ModuleType::MtySignature(_) => {
-                        let module_path = Path::pident(*parent_id);
+                        let module_path = Path::pident(parent_id.clone());
                         let mut no_persistent_env = None;
                         if let Some(Some(decl)) =
                             with_resolved_module_components_for_path_with_cache_mode(
@@ -29623,8 +28733,8 @@ fn lookup_type_decl_for_path_with_cache_mode(
         // exposing Sig_type entries; preferring substituted signatures first avoids
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
         if cache_key.is_some() {
-            if let Some(decl) = ctx.find_type_decl_arc_by_path(&type_path.name()) {
-                return Some(decl);
+            if let Some(decl) = ctx.find_type_decl_by_path(&type_path.name()) {
+                return Some(Arc::new(decl.clone()));
             }
         }
 
@@ -29642,1656 +28752,12 @@ fn lookup_type_decl_for_path_with_cache_mode(
     // For qualified paths (Pdot), a head-name fallback is unsound and can
     // resolve to an unrelated type that happens to share the same leaf name.
     if let Path::Pident(id) = type_path {
-        if let Some(decl) = ctx.find_type_decl_arc(id.name()) {
-            return Some(decl);
+        if let Some(decl) = ctx.find_type_decl(id.name()) {
+            return Some(Arc::new(decl.clone()));
         }
     }
 
     None
-}
-
-// ── Comptime Evaluation in Type Checker ─────────────────────────────────────
-
-/// Check if a switch scrutinee is a comptime-known @typeInfo value.
-/// If so, resolve the TypeInfo, match against the case patterns, and
-/// type-check ONLY the matching branch (skipping non-matching branches).
-/// This is critical for comptime: non-matching branches may not type-check
-/// (e.g., Json.string(value) where value: user would fail).
-fn try_comptime_match(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    _loc: LocIdx,
-    scrutinee: &ParsedExpression,
-    cases: &[crate::parser::ast::Case],
-    expected_ty: TypeExprRef,
-    _attributes: &crate::parser::ast::Attributes,
-) -> Option<TypeCoreResult<Expression>> {
-    // Check if scrutinee is @typeInfo(...)
-    let ct_idx = match &*scrutinee.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_comptime_typeinfo(idx) => *idx,
-        _ => return None,
-    };
-
-    let core_type = tctx.arena.get_core_type(ct_idx);
-    let ctx = tctx.type_ctx;
-
-    // First: check if the type argument is a comptime type binding
-    // (from `(type t, ...)` parameters). If so, use it directly.
-    let type_info_from_binding: Option<crate::types::comptime::TypeInfo> =
-        if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
-            let (ref lid, _) = **inner;
-            let longident = tctx.arena.get_longident(lid.txt);
-            let name = tctx.arena.get_string(longident.last_idx());
-            if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
-                tctx.comptime_bindings.get(name).cloned()
-            {
-                Some(ti)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-    let type_info = if let Some(ti) = type_info_from_binding {
-        ti
-    } else {
-        // Resolve the type (with variable fallback)
-        ctx.begin_def();
-        let mut resolved_ty = match transl_type(tctx, env, core_type) {
-            Ok((_, ty)) => ty,
-            Err(_) => {
-                ctx.end_def();
-                return None;
-            }
-        };
-        ctx.end_def();
-
-        // If type resolves to External (unknown type name), try as variable
-        let mut visited_check = Vec::new();
-        let check_info =
-            crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
-        if matches!(
-            check_info,
-            crate::types::comptime::TypeInfo::External { .. }
-        ) {
-            if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
-                let (ref lid, _) = **inner;
-                let longident = tctx.arena.get_longident(lid.txt);
-                let name = tctx.arena.get_string(longident.last_idx());
-                if let Ok(vd) = env.find_value(name) {
-                    resolved_ty = vd.val_type;
-                }
-            }
-        }
-
-        // Build TypeInfo
-        let mut visited = Vec::new();
-        crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited)
-    };
-
-    // Determine constructor name
-    let ctor_name = match &type_info {
-        crate::types::comptime::TypeInfo::Tuple { .. }
-        | crate::types::comptime::TypeInfo::Unknown { .. } => return None,
-        ti => constructor_name_of(ti),
-    };
-
-    // Find the matching case by constructor name
-    for case in cases {
-        let pat = tctx.arena.get_pat(case.pc_lhs);
-        let matches = match &*pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
-                let longident = tctx.arena.get_longident(lid.txt);
-                let name = tctx.arena.get_string(longident.last_idx());
-                name == ctor_name
-            }
-            crate::parser::ast::PatternDesc::Ppat_any => true,
-            crate::parser::ast::PatternDesc::Ppat_var(_) => true,
-            _ => false,
-        };
-
-        if matches {
-            // Extract destructuring bindings from the pattern and extend env
-            let mut body_env = env.clone();
-            let pat = tctx.arena.get_pat(case.pc_lhs);
-            if let crate::parser::ast::PatternDesc::Ppat_construct(_, args) = &*pat.ppat_desc
-                && let [arg_pat_idx] = args.txt.as_slice()
-            {
-                let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
-                // Record({fields, name, ...}) — the arg is a record pattern
-                if let crate::parser::ast::PatternDesc::Ppat_record(inner) = &*arg_pat.ppat_desc {
-                    let (ref fields, _, _) = **inner;
-                    bind_comptime_record_fields(tctx, &mut body_env, fields, &type_info);
-                }
-            }
-
-            // Type-check ONLY this branch's body in the extended env
-            let body = tctx.arena.get_expr(case.pc_rhs);
-            match type_expect(tctx, &body_env, body, expected_ty, None) {
-                Ok(typed_body) => return Some(Ok(typed_body)),
-                Err(e) => return Some(Err(e)),
-            }
-        }
-    }
-
-    None
-}
-
-/// Convert a ComptimeValue to a typed tree Expression.
-/// Used to substitute comptime-known variables during type checking.
-fn comptime_value_to_typed_expr(
-    value: &crate::types::comptime::ComptimeValue,
-    ctx: &TypeContext,
-    env: &Env,
-    loc: LocIdx,
-) -> Option<Expression> {
-    use crate::types::comptime::ComptimeValue;
-    let env_ref = ctx.store_typed_env(env);
-
-    match value {
-        ComptimeValue::TypedExpr(expr) => Some(expr.clone()),
-        ComptimeValue::String(s) => {
-            Some(crate::types::comptime::make_string_expr(s, ctx, env, loc))
-        }
-        ComptimeValue::Int(n) => Some(Expression::new(
-            ExpressionDesc::Texp_constant(super::typedtree::Constant::Int(*n)),
-            loc,
-            ctx.new_constr(crate::types::predef::path_int(), vec![]),
-            env_ref,
-            crate::parser::ast::Attributes::new(),
-        )),
-        ComptimeValue::Bool(b) => Some(crate::types::comptime::make_bool_expr(*b, ctx, env, loc)),
-        ComptimeValue::Type(type_info) => {
-            crate::types::comptime::type_info_to_typed_expr(type_info, ctx, env, loc)
-        }
-        ComptimeValue::Array(elements) => {
-            let elem_exprs: Vec<_> = elements
-                .iter()
-                .filter_map(|e| comptime_value_to_typed_expr(e, ctx, env, loc))
-                .collect();
-            Some(Expression::new(
-                ExpressionDesc::Texp_array(elem_exprs),
-                loc,
-                ctx.new_constr(crate::types::predef::path_array(), vec![ctx.new_var(None)]),
-                env_ref,
-                crate::parser::ast::Attributes::new(),
-            ))
-        }
-        ComptimeValue::Record(entries) => {
-            // For comptime records (like fieldInfo), we produce a tuple
-            // representation for now
-            let exprs: Vec<_> = entries
-                .iter()
-                .filter_map(|(_, v)| comptime_value_to_typed_expr(v, ctx, env, loc))
-                .collect();
-            if exprs.is_empty() {
-                None
-            } else {
-                Some(Expression::new(
-                    ExpressionDesc::Texp_tuple(exprs),
-                    loc,
-                    ctx.new_var(None),
-                    env_ref,
-                    crate::parser::ast::Attributes::new(),
-                ))
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Bind destructured record fields from a comptime typeInfo match into the environment.
-/// For `Record({fields, name})`, adds `fields` and `name` as values in the env.
-fn bind_comptime_record_fields(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &mut Env,
-    record_fields: &[crate::parser::ast::PatternRecordField],
-    type_info: &crate::types::comptime::TypeInfo,
-) {
-    use crate::types::comptime::TypeInfo;
-    let ctx = tctx.type_ctx;
-
-    for field in record_fields {
-        let pat = tctx.arena.get_pat(field.pat);
-        // Only handle Ppat_var (simple variable binding)
-        let var_name = match &*pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                tctx.arena.get_string(name_loc.txt).to_string()
-            }
-            _ => continue,
-        };
-
-        // Get the field name from the record pattern
-        let field_name = {
-            let longident = tctx.arena.get_longident(field.lid.txt);
-            tctx.arena.get_string(longident.last_idx()).to_string()
-        };
-
-        // Determine the type and create the value based on the typeInfo
-        let val_ty = match (type_info, field_name.as_str()) {
-            (TypeInfo::Record { name: _, .. }, "name") => {
-                // name: string
-                ctx.new_constr(crate::types::predef::path_string(), vec![])
-            }
-            (TypeInfo::Record { fields: _, .. }, "fields") => {
-                // fields: array<fieldInfo>
-                let field_info_ty = ctx.new_constr(crate::types::predef::path_field_info(), vec![]);
-                ctx.new_constr(crate::types::predef::path_array(), vec![field_info_ty])
-            }
-            (TypeInfo::Record { .. }, "unboxed") => {
-                // unboxed: bool
-                ctx.new_constr(crate::types::predef::path_bool(), vec![])
-            }
-            (TypeInfo::Variant { .. }, "name") => {
-                // name: string
-                ctx.new_constr(crate::types::predef::path_string(), vec![])
-            }
-            (TypeInfo::Variant { .. }, "constructors") => {
-                // constructors: array<constructorInfo>, currently typed with
-                // the fieldInfo predef.
-                let field_info_ty = ctx.new_constr(crate::types::predef::path_field_info(), vec![]);
-                ctx.new_constr(crate::types::predef::path_array(), vec![field_info_ty])
-            }
-            (TypeInfo::Variant { .. }, "unboxed") => {
-                ctx.new_constr(crate::types::predef::path_bool(), vec![])
-            }
-            (TypeInfo::Array { .. }, "element") => {
-                // element: typeInfo
-                ctx.new_constr(crate::types::predef::path_type_info(), vec![])
-            }
-            (TypeInfo::Option { .. }, "inner") => {
-                // inner: typeInfo
-                ctx.new_constr(crate::types::predef::path_type_info(), vec![])
-            }
-            _ => ctx.new_var(None),
-        };
-
-        // Add the binding to the environment
-        let id = ctx.create_ident(&var_name);
-        let vd = crate::types::decl::ValueDescription {
-            val_type: val_ty,
-            val_kind: crate::types::decl::ValueKind::ValReg,
-            val_loc: crate::location::Location::none(),
-            val_attributes: vec![],
-            val_path: None,
-        };
-        env.add_value(id, vd);
-
-        // Also add the comptime value so it can be substituted during type checking
-        let comptime_val = match (type_info, field_name.as_str()) {
-            (TypeInfo::Record { name, .. }, "name") => {
-                Some(crate::types::comptime::ComptimeValue::String(name.clone()))
-            }
-            (TypeInfo::Record { fields, .. }, "fields") => {
-                let field_values: Vec<_> = fields
-                    .iter()
-                    .map(|f| {
-                        crate::types::comptime::ComptimeValue::Record(vec![
-                            (
-                                "name".to_string(),
-                                crate::types::comptime::ComptimeValue::String(f.name.clone()),
-                            ),
-                            (
-                                "type".to_string(),
-                                crate::types::comptime::ComptimeValue::Type(f.typ.clone()),
-                            ),
-                            (
-                                "typ".to_string(),
-                                crate::types::comptime::ComptimeValue::Type(f.typ.clone()),
-                            ),
-                            (
-                                "optional".to_string(),
-                                crate::types::comptime::ComptimeValue::Bool(f.optional),
-                            ),
-                            (
-                                "mutable_".to_string(),
-                                crate::types::comptime::ComptimeValue::Bool(f.mutable),
-                            ),
-                        ])
-                    })
-                    .collect();
-                Some(crate::types::comptime::ComptimeValue::Array(field_values))
-            }
-            (TypeInfo::Record { unboxed, .. }, "unboxed") => {
-                Some(crate::types::comptime::ComptimeValue::Bool(*unboxed))
-            }
-            (TypeInfo::Variant { name, .. }, "name") => {
-                Some(crate::types::comptime::ComptimeValue::String(name.clone()))
-            }
-            (TypeInfo::Variant { constructors, .. }, "constructors") => {
-                let ctor_values: Vec<_> = constructors
-                    .iter()
-                    .map(|c| {
-                        let arg_types: Vec<_> = c
-                            .args
-                            .iter()
-                            .map(|t| crate::types::comptime::ComptimeValue::Type(t.clone()))
-                            .collect();
-                        crate::types::comptime::ComptimeValue::Record(vec![
-                            (
-                                "name".to_string(),
-                                crate::types::comptime::ComptimeValue::String(c.name.clone()),
-                            ),
-                            (
-                                "args".to_string(),
-                                crate::types::comptime::ComptimeValue::Array(arg_types),
-                            ),
-                        ])
-                    })
-                    .collect();
-                Some(crate::types::comptime::ComptimeValue::Array(ctor_values))
-            }
-            (TypeInfo::Variant { unboxed, .. }, "unboxed") => {
-                Some(crate::types::comptime::ComptimeValue::Bool(*unboxed))
-            }
-            (TypeInfo::Array { element }, "element") => Some(
-                crate::types::comptime::ComptimeValue::Type(*element.clone()),
-            ),
-            (TypeInfo::Option { inner }, "inner") => {
-                Some(crate::types::comptime::ComptimeValue::Type(*inner.clone()))
-            }
-            _ => None,
-        };
-        if let Some(cv) = comptime_val {
-            tctx.comptime_bindings.insert(var_name, cv);
-        }
-    }
-}
-
-/// Check if a function application is a call to a registered @comptime function.
-/// If so, inline the function body at the call site. The body will have
-/// @typeInfo(T) expanded to literal values by the type checker, and the
-/// optimizer handles switch elimination and constant folding.
-///
-/// Monomorphization: each unique (function, type-key) pair produces one
-/// specialized function. Recursive types terminate because re-entering
-/// the same pair emits a self-reference instead of expanding again.
-fn try_comptime_application(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    _loc: LocIdx,
-    funct_expr: &ParsedExpression,
-    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
-    expected_ty: TypeExprRef,
-) -> Option<TypeCoreResult<Expression>> {
-    // Check if the function is a simple identifier
-    let func_name = match &*funct_expr.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
-            let longident = tctx.arena.get_longident(lid.txt);
-            tctx.arena.get_string(longident.last_idx()).to_string()
-        }
-        _ => return None,
-    };
-
-    // Check if it's a registered comptime function
-    let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
-
-    // Safety: depth limit as fallback (monomorph cache is the primary guard)
-    if tctx.comptime_depth > 200 {
-        return None;
-    }
-    tctx.comptime_depth += 1;
-    let result =
-        specialize_comptime_application(tctx, env, func_name, &comptime_fn, args, expected_ty);
-    tctx.comptime_depth -= 1;
-    result
-}
-
-/// Specialize a registered @comptime function for one call site. Called by
-/// `try_comptime_application`, which tracks the nesting depth around it.
-fn specialize_comptime_application(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    func_name: String,
-    comptime_fn: &crate::types::comptime::ComptimeFunction,
-    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
-    expected_ty: TypeExprRef,
-) -> Option<TypeCoreResult<Expression>> {
-    // Extract function parameters and body from parse tree
-    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
-    let (params, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
-
-    // Save comptime bindings so we can restore after specialization
-    let saved_bindings = tctx.comptime_bindings.clone();
-
-    // ── Phase 1: Type-check arguments and determine the type key ──
-
-    let ctx = tctx.type_ctx;
-    let mut typed_args: Vec<(String, Expression, bool)> = Vec::new(); // (name, typed_arg, is_type)
-    let mut explicit_type_keys: Vec<crate::types::comptime::TypeInfo> = Vec::new();
-    let mut first_value_type: Option<crate::types::comptime::TypeInfo> = None;
-    let has_type_params = params.iter().any(|p| p.is_type);
-
-    for (i, (_label, arg_idx)) in args.iter().enumerate() {
-        let param = params.get(i);
-        let is_type_param = param.is_some_and(|p| p.is_type);
-        let param_name = param.map_or(format!("__arg{i}"), |p| p.name.clone());
-
-        if is_type_param {
-            // Type parameter: resolve as a type name, not a value
-            let arg_expr = tctx.arena.get_expr(*arg_idx);
-            let type_info = resolve_comptime_type_arg(tctx, env, arg_expr);
-            if let Some(ti) = type_info {
-                explicit_type_keys.push(ti.clone());
-                // Bind as ComptimeValue::Type for @typeInfo resolution
-                tctx.comptime_bindings.insert(
-                    param_name.clone(),
-                    crate::types::comptime::ComptimeValue::Type(ti),
-                );
-                // Create a dummy typed expression for the type arg
-                // (type params are erased at runtime)
-                let dummy = Expression::new(
-                    ExpressionDesc::Texp_constant(Constant::Int(0)),
-                    LocIdx(0),
-                    ctx.new_var(None),
-                    tctx.type_ctx.store_typed_env(env),
-                    Attributes::new(),
-                );
-                typed_args.push((param_name, dummy, true));
-            } else {
-                tctx.comptime_bindings = saved_bindings;
-                return None;
-            }
-        } else {
-            // Value parameter: type-check normally
-            let arg_expr = tctx.arena.get_expr(*arg_idx);
-            let arg_ty = ctx.new_var(None);
-            match type_expect(tctx, env, arg_expr, arg_ty, None) {
-                Ok(typed_arg) => {
-                    if first_value_type.is_none() {
-                        // Use the first value's type for the implicit type key
-                        first_value_type = Some(crate::types::comptime::build_type_info(
-                            ctx,
-                            env,
-                            typed_arg.exp_type,
-                            &mut vec![],
-                        ));
-                    }
-                    typed_args.push((param_name, typed_arg, false));
-                }
-                Err(_) => {
-                    tctx.comptime_bindings = saved_bindings;
-                    return None;
-                }
-            }
-        }
-    }
-
-    // Type key: explicit type params if any, otherwise the first value's type.
-    // Decoder: decode(user, json) → key=user (explicit)
-    // Encoder: encode(alice) → key=user (implicit from alice's type)
-    let type_key = if has_type_params {
-        if explicit_type_keys.len() == 1 {
-            explicit_type_keys[0].clone()
-        } else if explicit_type_keys.is_empty() {
-            crate::types::comptime::TypeInfo::Unit
-        } else {
-            crate::types::comptime::TypeInfo::Tuple {
-                elements: explicit_type_keys,
-            }
-        }
-    } else {
-        first_value_type.unwrap_or(crate::types::comptime::TypeInfo::Unit)
-    };
-
-    let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
-
-    // Collect the runtime args (non-type args) for the call site
-    let runtime_args: Vec<_> = typed_args
-        .iter()
-        .filter(|(_, _, is_type)| !is_type)
-        .map(|(_, arg, _)| arg.clone())
-        .collect();
-
-    // ── Phase 2: Check monomorphization cache ──
-
-    // Already completed? Just emit a call.
-    if tctx.monomorph_cache.lookup(&func_name, &type_key).is_some() {
-        tctx.comptime_bindings = saved_bindings;
-        return Some(Ok(make_comptime_call(
-            tctx,
-            &gen_name,
-            &runtime_args,
-            expected_ty,
-        )));
-    }
-
-    // Recursive: in-progress for the same type? Emit forward reference.
-    if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
-        tctx.comptime_bindings = saved_bindings;
-        return Some(Ok(make_comptime_call(
-            tctx,
-            &gen_name,
-            &runtime_args,
-            expected_ty,
-        )));
-    }
-
-    // ── Phase 3: Specialize — produce a named monomorphized function ──
-
-    tctx.monomorph_cache.begin(&func_name, &type_key);
-
-    // Set up environment with argument bindings
-    let mut spec_env = env.clone();
-    let mut runtime_param_name = "value".to_string();
-    let mut runtime_param_type = ctx.new_var(None);
-    let mut runtime_param_ident: Option<crate::ident::Ident> = None;
-
-    for (name, typed_arg, is_type) in &typed_args {
-        if *is_type {
-            // Type params already bound as ComptimeValue::Type above
-        } else {
-            runtime_param_name = name.clone();
-            runtime_param_type = typed_arg.exp_type;
-            // Add parameter to env so body type-checks with the right type.
-            // Do NOT add to comptime_bindings — the parameter should remain
-            // as a variable reference in the generated function body, not be
-            // substituted with the call-site argument value.
-            let id = ctx.create_ident(name);
-            runtime_param_ident = Some(id);
-            let vd = crate::types::decl::ValueDescription {
-                val_type: typed_arg.exp_type,
-                val_kind: crate::types::decl::ValueKind::ValReg,
-                val_loc: crate::location::Location::none(),
-                val_attributes: vec![],
-                val_path: None,
-            };
-            spec_env.add_value(id, vd);
-        }
-    }
-
-    // Type-check the body (may trigger recursive calls that hit the cache)
-    let body_result = type_expect(tctx, &spec_env, &inner_body, expected_ty, None);
-
-    tctx.comptime_bindings = saved_bindings;
-
-    match body_result {
-        Ok(typed_body) => {
-            let return_type = typed_body.exp_type;
-            let recursive = contains_ident_reference(&typed_body, &gen_name);
-            let gen_ident = ctx.create_ident(&gen_name);
-
-            let param_ident =
-                runtime_param_ident.unwrap_or_else(|| ctx.create_ident(&runtime_param_name));
-            tctx.monomorph_cache.complete(
-                &func_name,
-                &type_key,
-                gen_name.clone(),
-                crate::types::comptime::GeneratedFunction {
-                    name: gen_name.clone(),
-                    ident: gen_ident,
-                    body: typed_body,
-                    param_name: runtime_param_name,
-                    param_ident,
-                    param_type: runtime_param_type,
-                    return_type,
-                    recursive,
-                },
-            );
-
-            Some(Ok(make_comptime_call(
-                tctx,
-                &gen_name,
-                &runtime_args,
-                expected_ty,
-            )))
-        }
-        Err(_) => None,
-    }
-}
-
-/// Resolve a call-site argument as a comptime type.
-/// Handles:
-///   - `decode(user, json)` — resolves `user` as a type name
-///   - `decode(t, json)` — resolves `t` as a comptime type binding
-///   - `decode(field.type, json)` — resolves a record field access on a
-///     comptime Record binding (from `inline for field in fields { ... }`)
-fn resolve_comptime_type_arg(
-    tctx: &TypeCheckContext<'_>,
-    env: &Env,
-    arg_expr: &ParsedExpression,
-) -> Option<crate::types::comptime::TypeInfo> {
-    use crate::parser::ast::ExpressionDesc;
-    use crate::types::comptime::{ComptimeValue, TypeInfo};
-
-    match &*arg_expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(lid) => {
-            let longident = tctx.arena.get_longident(lid.txt);
-            let name = tctx.arena.get_string(longident.last_idx());
-
-            // Check comptime type bindings first (for `t` where t is a comptime type param)
-            if let Some(ComptimeValue::Type(ti)) = tctx.comptime_bindings.get(name) {
-                return Some(ti.clone());
-            }
-
-            // Try as a type in the environment
-            if let Ok((id, _decl)) = env.find_type_with_id(name) {
-                let ty = tctx
-                    .type_ctx
-                    .new_constr(crate::types::Path::Pident(*id), vec![]);
-                return Some(crate::types::comptime::build_type_info(
-                    tctx.type_ctx,
-                    env,
-                    ty,
-                    &mut vec![],
-                ));
-            }
-            // Try as a primitive type name
-            match name {
-                "string" => Some(TypeInfo::String),
-                "int" => Some(TypeInfo::Int),
-                "float" => Some(TypeInfo::Float),
-                "bool" => Some(TypeInfo::Bool),
-                "unit" => Some(TypeInfo::Unit),
-                "char" => Some(TypeInfo::Char),
-                _ => None,
-            }
-        }
-        ExpressionDesc::Pexp_field(record_expr_idx, field_lid) => {
-            // field.type — look up the record in comptime_bindings, find the "type" entry
-            let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            if let ExpressionDesc::Pexp_ident(rec_lid) = &*record_expr.pexp_desc {
-                let rec_longident = tctx.arena.get_longident(rec_lid.txt);
-                if rec_longident.is_simple() {
-                    let rec_name = tctx.arena.get_string(rec_longident.last_idx());
-                    if let Some(ComptimeValue::Record(entries)) =
-                        tctx.comptime_bindings.get(rec_name)
-                    {
-                        let field_name = {
-                            let fl = tctx.arena.get_longident(field_lid.txt);
-                            tctx.arena.get_string(fl.last_idx()).to_string()
-                        };
-                        if let Some((_, ComptimeValue::Type(ti))) =
-                            entries.iter().find(|(k, _)| k == &field_name)
-                        {
-                            return Some(ti.clone());
-                        }
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Check if an expression tree contains @buildVariant (possibly nested in
-/// switch/match branches, or via a call to a @comptime function whose body
-/// contains one). Used to detect @comptime let bindings that should be
-/// emitted as type declarations rather than registered as comptime functions.
-///
-/// Can follow calls to registered @comptime functions (provided via the
-/// registry) to check their bodies.
-pub fn contains_build_variant_with_registry(
-    expr: &ParsedExpression,
-    arena: &crate::parse_arena::ParseArena,
-    registry: Option<&crate::fast_hash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
-) -> bool {
-    use crate::parser::ast::ExpressionDesc as ED;
-    // Top-level: if this is a function (has parameters), it's a TEMPLATE,
-    // not a type declaration. Return false so it registers as a function.
-    if matches!(&*expr.pexp_desc, ED::Pexp_fun(_) | ED::Pexp_newtype(_)) {
-        return false;
-    }
-    contains_build_variant_inside(expr, arena, registry)
-}
-
-/// Inner check that DOES follow through function-parameter wrappers.
-fn contains_build_variant_inside(
-    expr: &ParsedExpression,
-    arena: &crate::parse_arena::ParseArena,
-    registry: Option<&crate::fast_hash::AHashMap<String, crate::types::comptime::ComptimeFunction>>,
-) -> bool {
-    use crate::parser::ast::ExpressionDesc as ED;
-    match &*expr.pexp_desc {
-        ED::Pexp_comptime_build_variant(_) | ED::Pexp_comptime_build_record(_) => true,
-        ED::Pexp_fun(inner) => {
-            contains_build_variant_inside(arena.get_expr(inner.rhs), arena, registry)
-        }
-        ED::Pexp_newtype(inner) => {
-            let (_, ref body) = **inner;
-            contains_build_variant_inside(arena.get_expr(*body), arena, registry)
-        }
-        ED::Pexp_match(inner) => {
-            let (_, ref cases) = **inner;
-            cases
-                .iter()
-                .any(|c| contains_build_variant_inside(arena.get_expr(c.pc_rhs), arena, registry))
-        }
-        ED::Pexp_ifthenelse(inner) => {
-            let (_, then_idx, else_opt) = &**inner;
-            contains_build_variant_inside(arena.get_expr(*then_idx), arena, registry)
-                || else_opt.is_some_and(|e| {
-                    contains_build_variant_inside(arena.get_expr(e), arena, registry)
-                })
-        }
-        ED::Pexp_ternary(inner) => {
-            contains_build_variant_inside(arena.get_expr(inner.1), arena, registry)
-                || contains_build_variant_inside(arena.get_expr(inner.2), arena, registry)
-        }
-        ED::Pexp_braces(braces) => {
-            contains_build_variant_inside(arena.get_expr(braces.expr), arena, registry)
-        }
-        ED::Pexp_apply(inner) => {
-            if let Some(reg) = registry {
-                let funct_expr = arena.get_expr(inner.funct);
-                if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
-                    let longident = arena.get_longident(lid.txt);
-                    let name = arena.get_string(longident.last_idx());
-                    if let Some(cf) = reg.get(name) {
-                        let callee_body = arena.get_expr(cf.body_expr_idx);
-                        return contains_build_variant_inside(callee_body, arena, registry);
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Normalize an expression into `(pattern, collection, body)` form as if it
-/// were `inline for pat in collection { body }`. Handles:
-/// - `inline for pat in collection { body }` (direct)
-/// - `Array.map(collection, pat => body)` (syntactic sugar)
-/// - `collection->Array.map(pat => body)` (pipe form — pre-expanded by parser)
-///
-/// Returns None if the expression is neither form.
-pub fn as_comptime_loop(
-    expr: &ParsedExpression,
-    arena: &crate::parse_arena::ParseArena,
-) -> Option<(
-    crate::parse_arena::PatIdx,
-    crate::parse_arena::ExprIdx,
-    crate::parse_arena::ExprIdx,
-)> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    match &*expr.pexp_desc {
-        ED::Pexp_inline_for(inner) => {
-            let (pat_idx, coll_idx, body_idx) = **inner;
-            Some((pat_idx, coll_idx, body_idx))
-        }
-        ED::Pexp_apply(inner) => {
-            let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
-            let funct_expr = arena.get_expr(*funct);
-
-            // Check if the function is Array.map (or just map)
-            let is_array_map = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
-                let longident = arena.get_longident(lid.txt);
-                let last_name = arena.get_string(longident.last_idx());
-                if last_name != "map" {
-                    return None;
-                }
-                // Check that module prefix is "Array" (or no prefix — just `map`)
-                let parts: Vec<String> = longident
-                    .flatten_idx()
-                    .iter()
-                    .map(|idx| arena.get_string(*idx).to_string())
-                    .collect();
-                parts.len() == 1 || (parts.len() == 2 && parts[0] == "Array")
-            } else {
-                false
-            };
-
-            if !is_array_map || args.len() != 2 {
-                return None;
-            }
-
-            // First arg: collection; second arg: lambda
-            let coll_idx = args[0].1;
-            let lambda_expr = arena.get_expr(args[1].1);
-
-            if let ED::Pexp_fun(fun_inner) = &*lambda_expr.pexp_desc {
-                // Single-parameter lambda: (pat) => body
-                Some((fun_inner.lhs, coll_idx, fun_inner.rhs))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Evaluate a type-builder expression to a TypeBuilderResult.
-/// Used for @comptime type declarations — the body should produce a TypeKind.
-///
-/// Handles:
-/// - `@buildVariant(array_expr)` → TypeBuilderResult::Variant(constructor_names)
-/// - `@variantCase({name: "X"})` → single VariantCaseSpec (used inside @buildVariant)
-/// - `switch @typeInfo(t) { ... }` → pick matching branch, recurse
-/// - `inline for x in arr { ... }` → unroll, collect results
-pub fn evaluate_type_builder(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    expr: &ParsedExpression,
-) -> TypeCoreResult<crate::types::comptime::TypeBuilderResult> {
-    use crate::parser::ast::ExpressionDesc as ED;
-    use crate::types::comptime::TypeBuilderResult;
-
-    match &*expr.pexp_desc {
-        ED::Pexp_comptime_build_variant(inner_idx) => {
-            // @buildVariant(arrayOrInlineFor) — collect variant cases, build variant type
-            let inner_expr = tctx.arena.get_expr(*inner_idx);
-            let cases = evaluate_variant_cases(tctx, env, inner_expr)?;
-            let names: Vec<String> = cases.into_iter().map(|c| c.name).collect();
-            Ok(TypeBuilderResult::Variant(names))
-        }
-        ED::Pexp_comptime_build_record(inner_idx) => {
-            // @buildRecord(arrayOrInlineFor) — collect fields, build record type
-            let inner_expr = tctx.arena.get_expr(*inner_idx);
-            let fields = evaluate_record_fields(tctx, env, inner_expr)?;
-            Ok(TypeBuilderResult::Record(fields))
-        }
-        ED::Pexp_match(match_inner) => {
-            let (ref scrut_idx, ref cases) = **match_inner;
-            // switch @typeInfo(t) { ... } — pick the matching branch
-            let scrut = tctx.arena.get_expr(*scrut_idx);
-            if let ED::Pexp_comptime_typeinfo(ct_idx) = &*scrut.pexp_desc {
-                let core_type = tctx.arena.get_core_type(*ct_idx);
-                let type_info = resolve_typeinfo_in_builder(tctx, env, core_type)?;
-                let ctor_name = constructor_name_of(&type_info);
-                for case in cases {
-                    let pat = tctx.arena.get_pat(case.pc_lhs);
-                    let matches = match &*pat.ppat_desc {
-                        crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
-                            let pat_name = {
-                                let longident = tctx.arena.get_longident(lid.txt);
-                                tctx.arena.get_string(longident.last_idx()).to_string()
-                            };
-                            pat_name == ctor_name
-                        }
-                        crate::parser::ast::PatternDesc::Ppat_any => true,
-                        crate::parser::ast::PatternDesc::Ppat_var(_) => true,
-                        _ => false,
-                    };
-                    if matches {
-                        // Bind destructured fields (like Record({fields}))
-                        let saved_bindings = tctx.comptime_bindings.clone();
-                        let mut branch_env = env.clone();
-                        if let crate::parser::ast::PatternDesc::Ppat_construct(_, args) =
-                            &*pat.ppat_desc
-                            && let [arg_pat_idx] = args.txt.as_slice()
-                        {
-                            let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
-                            if let crate::parser::ast::PatternDesc::Ppat_record(rec_inner) =
-                                &*arg_pat.ppat_desc
-                            {
-                                let (ref fields, _, _) = **rec_inner;
-                                bind_comptime_record_fields(
-                                    tctx,
-                                    &mut branch_env,
-                                    fields,
-                                    &type_info,
-                                );
-                            }
-                        }
-                        let body_expr = tctx.arena.get_expr(case.pc_rhs);
-                        let result = evaluate_type_builder(tctx, &branch_env, body_expr);
-                        tctx.comptime_bindings = saved_bindings;
-                        return result;
-                    }
-                }
-                Err(super::TypeCoreError::Other(
-                    "evaluate_type_builder: no matching switch branch".into(),
-                ))
-            } else {
-                Err(super::TypeCoreError::Other(
-                    "evaluate_type_builder: switch scrutinee must be @typeInfo(...)".into(),
-                ))
-            }
-        }
-        ED::Pexp_comptime_compile_error(msg_idx) => {
-            let msg_expr = tctx.arena.get_expr(*msg_idx);
-            let msg = if let ED::Pexp_constant(c) = &*msg_expr.pexp_desc {
-                if let crate::parser::ast::Constant::String(s) = &**c {
-                    s.semantic().to_string()
-                } else {
-                    "<non-string message>".to_string()
-                }
-            } else {
-                "<dynamic message>".to_string()
-            };
-            Err(super::TypeCoreError::Other(format!("@compileError: {msg}")))
-        }
-        ED::Pexp_apply(inner) => {
-            // Comptime call: keysOf(user) where keysOf is a registered @comptime function
-            let crate::parser::ast::PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
-            let funct_expr = tctx.arena.get_expr(*funct);
-            let func_name = match &*funct_expr.pexp_desc {
-                ED::Pexp_ident(lid) => {
-                    let longident = tctx.arena.get_longident(lid.txt);
-                    tctx.arena.get_string(longident.last_idx()).to_string()
-                }
-                _ => {
-                    return Err(super::TypeCoreError::Other(
-                        "evaluate_type_builder: call target must be a simple identifier".into(),
-                    ));
-                }
-            };
-            let comptime_fn = tctx
-                .comptime_functions
-                .get(&func_name)
-                .cloned()
-                .ok_or_else(|| {
-                    super::TypeCoreError::Other(format!(
-                        "evaluate_type_builder: '{}' is not a registered @comptime function",
-                        func_name
-                    ))
-                })?;
-
-            // Extract the function's parameters and body
-            let body_expr_idx = comptime_fn.body_expr_idx;
-            let body_expr = tctx.arena.get_expr(body_expr_idx);
-            let (params, inner_body) = extract_function_params_and_body(body_expr, tctx.arena);
-
-            // Bind each argument
-            let saved_bindings = tctx.comptime_bindings.clone();
-            for (i, (_label, arg_idx)) in args.iter().enumerate() {
-                let param = params.get(i);
-                if let Some(p) = param {
-                    if p.is_type {
-                        let arg_expr = tctx.arena.get_expr(*arg_idx);
-                        let type_info =
-                            resolve_comptime_type_arg(tctx, env, arg_expr).ok_or_else(|| {
-                                super::TypeCoreError::Other(format!(
-                                    "evaluate_type_builder: could not resolve type arg for '{}'",
-                                    p.name
-                                ))
-                            })?;
-                        tctx.comptime_bindings.insert(
-                            p.name.clone(),
-                            crate::types::comptime::ComptimeValue::Type(type_info),
-                        );
-                    }
-                    // Non-type params not supported in type-builder calls yet
-                }
-            }
-
-            // Recursively evaluate the body
-            let result = evaluate_type_builder(tctx, env, &inner_body);
-            tctx.comptime_bindings = saved_bindings;
-            result
-        }
-        other => {
-            let kind = match other {
-                ED::Pexp_ident(_) => "Pexp_ident",
-                ED::Pexp_constant(_) => "Pexp_constant",
-                ED::Pexp_fun(_) => "Pexp_fun",
-                ED::Pexp_newtype(_) => "Pexp_newtype",
-                ED::Pexp_let(_) => "Pexp_let",
-                ED::Pexp_construct(_, _) => "Pexp_construct",
-                ED::Pexp_tuple(_) => "Pexp_tuple",
-                ED::Pexp_array(_) => "Pexp_array",
-                ED::Pexp_record(_) => "Pexp_record",
-                ED::Pexp_field(_, _) => "Pexp_field",
-                ED::Pexp_sequence(_, _) => "Pexp_sequence",
-                _ => "other",
-            };
-            Err(super::TypeCoreError::Other(format!(
-                "evaluate_type_builder: unsupported expression kind '{kind}'",
-            )))
-        }
-    }
-}
-
-/// Evaluate an expression that should produce a list of variant cases.
-/// Handles array literals and inline-for expressions.
-fn evaluate_variant_cases(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    expr: &ParsedExpression,
-) -> TypeCoreResult<Vec<crate::types::comptime::VariantCaseSpec>> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    // Check for inline for OR Array.map (treated equivalently)
-    if let Some((pat_idx, collection_idx, body_idx)) = as_comptime_loop(expr, tctx.arena) {
-        let coll_expr = tctx.arena.get_expr(collection_idx);
-        let comptime_array = match &*coll_expr.pexp_desc {
-            ED::Pexp_ident(lid) => {
-                let longident = tctx.arena.get_longident(lid.txt);
-                if longident.is_simple() {
-                    let vname = tctx.arena.get_string(longident.last_idx());
-                    match tctx.comptime_bindings.get(vname) {
-                        Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
-                            Some(elements.clone())
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-        .ok_or_else(|| {
-            super::TypeCoreError::Other(
-                "evaluate_variant_cases: loop collection must be comptime-known".into(),
-            )
-        })?;
-
-        let pat = tctx.arena.get_pat(pat_idx);
-        let var_name = match &*pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                tctx.arena.get_string(name_loc.txt).to_string()
-            }
-            _ => "__case".to_string(),
-        };
-        let body_expr = tctx.arena.get_expr(body_idx);
-        let saved = tctx.comptime_bindings.clone();
-        let mut cases = Vec::new();
-        for element in &comptime_array {
-            tctx.comptime_bindings
-                .insert(var_name.clone(), element.clone());
-            cases.push(evaluate_single_variant_case(tctx, env, body_expr)?);
-        }
-        tctx.comptime_bindings = saved;
-        return Ok(cases);
-    }
-
-    match &*expr.pexp_desc {
-        ED::Pexp_array(exprs) => {
-            let mut cases = Vec::new();
-            for e_idx in exprs.iter() {
-                let e = tctx.arena.get_expr(*e_idx);
-                cases.push(evaluate_single_variant_case(tctx, env, e)?);
-            }
-            Ok(cases)
-        }
-        _ => {
-            // Single case (not array) — just evaluate it
-            Ok(vec![evaluate_single_variant_case(tctx, env, expr)?])
-        }
-    }
-}
-
-/// Evaluate a single @variantCase({name: ...}) expression.
-fn evaluate_single_variant_case(
-    tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
-    expr: &ParsedExpression,
-) -> TypeCoreResult<crate::types::comptime::VariantCaseSpec> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    // Expected form: @variantCase({name: ..., ...})
-    let rec_idx = match &*expr.pexp_desc {
-        ED::Pexp_comptime_variant_case(e) => *e,
-        _ => {
-            return Err(super::TypeCoreError::Other(
-                "evaluate_variant_cases: expected @variantCase({...})".into(),
-            ));
-        }
-    };
-
-    let rec_expr = tctx.arena.get_expr(rec_idx);
-    // The record literal: {name: "Name"}
-    if let ED::Pexp_record(inner) = &*rec_expr.pexp_desc {
-        let (ref fields, _) = **inner;
-        for field in fields {
-            let fname = {
-                let longident = tctx.arena.get_longident(field.lid.txt);
-                tctx.arena.get_string(longident.last_idx()).to_string()
-            };
-            if fname == "name" {
-                // Evaluate the value — should be a comptime-known string
-                let val_expr = tctx.arena.get_expr(field.expr);
-                let name_str = evaluate_comptime_string(tctx, val_expr)?;
-                // Capitalize the first letter to make a valid constructor name
-                let capitalized = capitalize_first(&name_str);
-                return Ok(crate::types::comptime::VariantCaseSpec { name: capitalized });
-            }
-        }
-    }
-    Err(super::TypeCoreError::Other(
-        "@variantCase: expected {name: \"...\"}".into(),
-    ))
-}
-
-/// Evaluate an expression producing a list of record field descriptors.
-fn evaluate_record_fields(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    expr: &ParsedExpression,
-) -> TypeCoreResult<Vec<crate::types::comptime::RecordFieldSpec>> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    // Check for inline for OR Array.map
-    if let Some((pat_idx, collection_idx, body_idx)) = as_comptime_loop(expr, tctx.arena) {
-        let coll_expr = tctx.arena.get_expr(collection_idx);
-        let comptime_array = match &*coll_expr.pexp_desc {
-            ED::Pexp_ident(lid) => {
-                let longident = tctx.arena.get_longident(lid.txt);
-                if longident.is_simple() {
-                    let vname = tctx.arena.get_string(longident.last_idx());
-                    match tctx.comptime_bindings.get(vname) {
-                        Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
-                            Some(elements.clone())
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-        .ok_or_else(|| {
-            super::TypeCoreError::Other(
-                "evaluate_record_fields: loop collection must be comptime-known".into(),
-            )
-        })?;
-
-        let pat = tctx.arena.get_pat(pat_idx);
-        let var_name = match &*pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                tctx.arena.get_string(name_loc.txt).to_string()
-            }
-            _ => "__field".to_string(),
-        };
-        let body_expr = tctx.arena.get_expr(body_idx);
-        let saved = tctx.comptime_bindings.clone();
-        let mut out = Vec::new();
-        for element in &comptime_array {
-            tctx.comptime_bindings
-                .insert(var_name.clone(), element.clone());
-            out.push(evaluate_single_record_field(tctx, env, body_expr)?);
-        }
-        tctx.comptime_bindings = saved;
-        return Ok(out);
-    }
-
-    match &*expr.pexp_desc {
-        ED::Pexp_array(exprs) => {
-            let mut out = Vec::new();
-            for e_idx in exprs.iter() {
-                let e = tctx.arena.get_expr(*e_idx);
-                out.push(evaluate_single_record_field(tctx, env, e)?);
-            }
-            Ok(out)
-        }
-        _ => Ok(vec![evaluate_single_record_field(tctx, env, expr)?]),
-    }
-}
-
-/// Evaluate a single @recordField({name, typ, optional?, mutable_?}) expression.
-fn evaluate_single_record_field(
-    tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
-    expr: &ParsedExpression,
-) -> TypeCoreResult<crate::types::comptime::RecordFieldSpec> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    let rec_idx = match &*expr.pexp_desc {
-        ED::Pexp_comptime_record_field(e) => *e,
-        _ => {
-            return Err(super::TypeCoreError::Other(
-                "evaluate_record_fields: expected @recordField({...})".into(),
-            ));
-        }
-    };
-
-    let rec_expr = tctx.arena.get_expr(rec_idx);
-    if let ED::Pexp_record(inner) = &*rec_expr.pexp_desc {
-        let (ref fields, _) = **inner;
-        let mut name = None;
-        let mut typ = None;
-        let mut optional = false;
-        let mut mutable_ = false;
-        for field in fields {
-            let fname = {
-                let longident = tctx.arena.get_longident(field.lid.txt);
-                tctx.arena.get_string(longident.last_idx()).to_string()
-            };
-            let val_expr = tctx.arena.get_expr(field.expr);
-            match fname.as_str() {
-                "name" => name = Some(evaluate_comptime_string(tctx, val_expr)?),
-                "typ" | "type" => {
-                    // Expect an expression that resolves to a comptime Type
-                    if let Some(ti) = resolve_comptime_type_arg(tctx, _env, val_expr) {
-                        typ = Some(ti);
-                    }
-                }
-                "optional" => {
-                    if let ED::Pexp_construct(lid, _) = &*val_expr.pexp_desc {
-                        let longident = tctx.arena.get_longident(lid.txt);
-                        let n = tctx.arena.get_string(longident.last_idx());
-                        if n == "true" {
-                            optional = true;
-                        }
-                    }
-                }
-                "mutable_" => {
-                    if let ED::Pexp_construct(lid, _) = &*val_expr.pexp_desc {
-                        let longident = tctx.arena.get_longident(lid.txt);
-                        let n = tctx.arena.get_string(longident.last_idx());
-                        if n == "true" {
-                            mutable_ = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let name = name.ok_or_else(|| {
-            super::TypeCoreError::Other("@recordField: missing required 'name'".into())
-        })?;
-        let typ = typ.ok_or_else(|| {
-            super::TypeCoreError::Other("@recordField: missing required 'typ'".into())
-        })?;
-        return Ok(crate::types::comptime::RecordFieldSpec {
-            name,
-            typ,
-            optional,
-            mutable_,
-        });
-    }
-    Err(super::TypeCoreError::Other(
-        "@recordField: expected {name: \"...\", typ: ..., optional?: bool}".into(),
-    ))
-}
-
-/// Evaluate an expression that should be a comptime-known string.
-fn evaluate_comptime_string(
-    tctx: &TypeCheckContext<'_>,
-    expr: &ParsedExpression,
-) -> TypeCoreResult<String> {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    match &*expr.pexp_desc {
-        ED::Pexp_constant(c) => {
-            if let crate::parser::ast::Constant::String(s) = &**c {
-                Ok(s.semantic().to_string())
-            } else {
-                Err(super::TypeCoreError::Other(
-                    "expected string literal".into(),
-                ))
-            }
-        }
-        ED::Pexp_ident(lid) => {
-            let longident = tctx.arena.get_longident(lid.txt);
-            let name = tctx.arena.get_string(longident.last_idx());
-            if let Some(crate::types::comptime::ComptimeValue::String(s)) =
-                tctx.comptime_bindings.get(name)
-            {
-                Ok(s.clone())
-            } else {
-                Err(super::TypeCoreError::Other(format!(
-                    "expected comptime string, got variable '{}'",
-                    name
-                )))
-            }
-        }
-        ED::Pexp_field(rec_idx, field_lid) => {
-            // field.name — look up in comptime bindings
-            let rec_expr = tctx.arena.get_expr(*rec_idx);
-            if let ED::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc {
-                let rec_longident = tctx.arena.get_longident(rec_lid.txt);
-                if rec_longident.is_simple() {
-                    let rec_name = tctx.arena.get_string(rec_longident.last_idx());
-                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
-                        tctx.comptime_bindings.get(rec_name)
-                    {
-                        let field_name = {
-                            let fl = tctx.arena.get_longident(field_lid.txt);
-                            tctx.arena.get_string(fl.last_idx()).to_string()
-                        };
-                        if let Some((_, crate::types::comptime::ComptimeValue::String(s))) =
-                            entries.iter().find(|(k, _)| k == &field_name)
-                        {
-                            return Ok(s.clone());
-                        }
-                    }
-                }
-            }
-            Err(super::TypeCoreError::Other(
-                "expected comptime string from field access".into(),
-            ))
-        }
-        ED::Pexp_apply(inner) => {
-            // Call to an @comptime.inline function with comptime-known args:
-            // compile body to JS, evaluate in Boa, return the result.
-            let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
-            let funct_expr = tctx.arena.get_expr(*funct);
-            let func_name = match &*funct_expr.pexp_desc {
-                ED::Pexp_ident(lid) => {
-                    let longident = tctx.arena.get_longident(lid.txt);
-                    tctx.arena.get_string(longident.last_idx()).to_string()
-                }
-                _ => {
-                    return Err(super::TypeCoreError::Other(
-                        "expected comptime string — complex calls not supported".into(),
-                    ));
-                }
-            };
-            let comptime_fn = tctx
-                .comptime_functions
-                .get(&func_name)
-                .cloned()
-                .ok_or_else(|| {
-                    super::TypeCoreError::Other(format!(
-                        "'{}' is not registered as @comptime or @comptime.inline",
-                        func_name
-                    ))
-                })?;
-            if !comptime_fn.is_inline {
-                return Err(super::TypeCoreError::Other(format!(
-                    "'{}' is not @comptime.inline — cannot evaluate at compile time",
-                    func_name
-                )));
-            }
-
-            // Resolve each argument as a comptime-known string/int/float/bool
-            let arg_js_values: Vec<String> = args
-                .iter()
-                .map(|(_label, arg_idx)| -> TypeCoreResult<String> {
-                    let arg_expr = tctx.arena.get_expr(*arg_idx);
-                    // Try as a string first
-                    if let Ok(s) = evaluate_comptime_string(tctx, arg_expr) {
-                        return Ok(format!("{:?}", s));
-                    }
-                    // Fall back to translating as a simple JS expression
-                    crate::types::comptime_inline::translate_simple_expr_to_js(arg_expr, tctx.arena)
-                        .ok_or_else(|| {
-                            super::TypeCoreError::Other(
-                                "@comptime.inline arg could not be translated to JS".into(),
-                            )
-                        })
-                })
-                .collect::<Result<_, _>>()?;
-
-            // Compile the function body to JS
-            let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
-            let body_js =
-                crate::types::comptime_inline::translate_simple_expr_to_js(body_expr, tctx.arena)
-                    .ok_or_else(|| {
-                    super::TypeCoreError::Other(format!(
-                        "could not translate @comptime.inline body for '{}' to JS",
-                        func_name
-                    ))
-                })?;
-
-            // Build a JS program: apply the function expression to the args
-            let program = format!("({})({})", body_js, arg_js_values.join(", "));
-
-            match crate::types::comptime_inline::evaluate_js(&program) {
-                crate::types::comptime_inline::InlineEvalResult::Value(
-                    crate::types::comptime::ComptimeValue::String(s),
-                ) => Ok(s),
-                crate::types::comptime_inline::InlineEvalResult::Value(other) => {
-                    Err(super::TypeCoreError::Other(format!(
-                        "@comptime.inline '{}' returned non-string: {:?}",
-                        func_name, other
-                    )))
-                }
-                crate::types::comptime_inline::InlineEvalResult::Error(e) => {
-                    Err(super::TypeCoreError::Other(format!(
-                        "@comptime.inline '{}' evaluation failed: {}",
-                        func_name, e
-                    )))
-                }
-            }
-        }
-        _ => Err(super::TypeCoreError::Other(
-            "expected comptime-known string".into(),
-        )),
-    }
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Constructor name to match in a typeInfo switch (e.g., TypeInfo::Record → "Record").
-fn constructor_name_of(ti: &crate::types::comptime::TypeInfo) -> &'static str {
-    use crate::types::comptime::TypeInfo;
-    match ti {
-        TypeInfo::Int => "Int",
-        TypeInfo::Float => "Float",
-        TypeInfo::String => "String",
-        TypeInfo::Bool => "Bool",
-        TypeInfo::Unit => "Unit",
-        TypeInfo::Char => "Char",
-        TypeInfo::Bigint => "Bigint",
-        TypeInfo::Record { .. } => "Record",
-        TypeInfo::Variant { .. } => "Variant",
-        TypeInfo::Array { .. } => "Array",
-        TypeInfo::Option { .. } => "Option",
-        TypeInfo::Function { .. } => "Function",
-        TypeInfo::External { .. } => "External",
-        TypeInfo::Opaque { .. } => "Opaque",
-        TypeInfo::Tuple { .. } => "Tuple",
-        TypeInfo::Unknown { .. } => "Unknown",
-    }
-}
-
-/// Resolve @typeInfo(t) in a type-builder context.
-fn resolve_typeinfo_in_builder(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    core_type: &crate::parser::ast::CoreType,
-) -> TypeCoreResult<crate::types::comptime::TypeInfo> {
-    // First check if the type arg is a comptime type binding (for generic @comptime type)
-    if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
-        let (ref lid, _) = **inner;
-        let longident = tctx.arena.get_longident(lid.txt);
-        let name = tctx.arena.get_string(longident.last_idx());
-        if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
-            tctx.comptime_bindings.get(name).cloned()
-        {
-            return Ok(ti);
-        }
-    }
-
-    // Otherwise resolve as a normal type
-    let ctx = tctx.type_ctx;
-    ctx.begin_def();
-    let resolved_ty = match transl_type(tctx, env, core_type) {
-        Ok((_, ty)) => {
-            ctx.end_def();
-            ty
-        }
-        Err(e) => {
-            ctx.end_def();
-            return Err(e);
-        }
-    };
-    Ok(crate::types::comptime::build_type_info(
-        ctx,
-        env,
-        resolved_ty,
-        &mut vec![],
-    ))
-}
-
-/// Build a Texp_apply calling a generated monomorphized function.
-fn make_comptime_call(
-    tctx: &TypeCheckContext<'_>,
-    gen_name: &str,
-    runtime_args: &[Expression],
-    expected_ty: TypeExprRef,
-) -> Expression {
-    let ctx = tctx.type_ctx;
-    let func_ident = crate::ident::Ident::create_persistent(gen_name);
-    let func_path = crate::types::Path::Pident(func_ident);
-
-    // Create Texp_ident for the generated function
-    let func_type = if runtime_args.is_empty() {
-        expected_ty
-    } else {
-        let arg_ty = runtime_args
-            .first()
-            .map_or(ctx.new_var(None), |a| a.exp_type);
-        ctx.new_arrow_simple(arg_ty, expected_ty)
-    };
-
-    let func_vd = crate::types::ValueDescription {
-        val_type: func_type,
-        val_kind: crate::types::ValueKind::ValReg,
-        val_loc: crate::location::Location::none(),
-        val_attributes: vec![],
-        val_path: Some(func_path.clone()),
-    };
-
-    // Texp_ident needs a Loc<LidentIdx> — use a zero index as placeholder
-    let lid_loc = Located {
-        txt: LidentIdx(0),
-        loc: LocIdx(0),
-    };
-
-    let func_expr = Expression::new(
-        ExpressionDesc::Texp_ident(func_path, lid_loc, Arc::new(func_vd)),
-        LocIdx(0),
-        func_type,
-        EnvRef(0),
-        Attributes::new(),
-    );
-
-    if runtime_args.is_empty() {
-        func_expr
-    } else {
-        let apply_args: Vec<_> = runtime_args
-            .iter()
-            .map(|arg| crate::types::typedtree::ApplyArg {
-                label: crate::types::asttypes::ArgLabel::Nolabel,
-                expression: Some(arg.clone()),
-            })
-            .collect();
-        Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: Box::new(func_expr),
-                args: apply_args,
-                partial: false,
-                transformed_jsx: false,
-            },
-            LocIdx(0),
-            expected_ty,
-            EnvRef(0),
-            Attributes::new(),
-        )
-    }
-}
-
-/// Check if a typed expression contains a reference to a named identifier.
-fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
-    match &expr.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => {
-            matches!(path, crate::types::Path::Pident(id) if id.name() == name)
-        }
-        ExpressionDesc::Texp_apply { funct, args, .. } => {
-            contains_ident_reference(funct, name)
-                || args.iter().any(|a| {
-                    a.expression
-                        .as_ref()
-                        .is_some_and(|e| contains_ident_reference(e, name))
-                })
-        }
-        ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings
-                .iter()
-                .any(|vb| contains_ident_reference(&vb.vb_expr, name))
-                || contains_ident_reference(body, name)
-        }
-        ExpressionDesc::Texp_sequence(a, b) => {
-            contains_ident_reference(a, name) || contains_ident_reference(b, name)
-        }
-        ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-            ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
-            fields,
-            extended_expression,
-            ..
-        } => {
-            fields.iter().any(|(_, _, def, _)| {
-                if let super::typedtree::RecordLabelDefinition::Overridden(_, expr) = def {
-                    contains_ident_reference(expr, name)
-                } else {
-                    false
-                }
-            }) || extended_expression
-                .as_deref()
-                .is_some_and(|expr| contains_ident_reference(expr, name))
-        }
-        _ => false, // Conservative: may miss some cases but safe
-    }
-}
-
-/// Extract parameter info and innermost body from a function parse tree.
-/// Handles both `Pexp_fun` (value params) and `Pexp_newtype` (type params).
-fn extract_function_params_and_body<'a>(
-    expr: &'a ParsedExpression,
-    arena: &'a crate::parse_arena::ParseArena,
-) -> (Vec<crate::types::comptime::ComptimeParam>, ParsedExpression) {
-    let mut params = Vec::new();
-    let mut current = expr;
-
-    loop {
-        match &*current.pexp_desc {
-            crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
-                // Current Parsetree stores locally abstract types and the full
-                // source parameter list on the n-ary function node. This is
-                // the same binder order consumed by type_function_nary_with_newtypes.
-                for (name_loc, _) in arena.nary_fun_newtypes(inner) {
-                    params.push(crate::types::comptime::ComptimeParam {
-                        name: arena.get_string(name_loc.txt).to_string(),
-                        is_comptime: true,
-                        is_type: true,
-                    });
-                }
-                for param in arena.nary_fun_params(inner).iter() {
-                    let pat = arena.get_pat(param.p_pat);
-                    let name = match &*pat.ppat_desc {
-                        crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                            Some(arena.get_string(name_loc.txt).to_string())
-                        }
-                        crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
-                            let (inner_pat_idx, _) = &**inner_box;
-                            let inner_pat = arena.get_pat(*inner_pat_idx);
-                            if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) =
-                                &*inner_pat.ppat_desc
-                            {
-                                Some(arena.get_string(name_loc.txt).to_string())
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-                    if let Some(name) = name {
-                        params.push(crate::types::comptime::ComptimeParam {
-                            name,
-                            is_comptime: false,
-                            is_type: false,
-                        });
-                    }
-                }
-                current = arena.get_expr(arena.nary_fun_body(inner));
-            }
-            crate::parser::ast::ExpressionDesc::Pexp_newtype(inner) => {
-                // Frozen-v0 PPX trees retain nested Pexp_newtype wrappers.
-                let (ref name_loc, ref body_idx) = **inner;
-                let name = arena.get_string(name_loc.txt).to_string();
-                params.push(crate::types::comptime::ComptimeParam {
-                    name,
-                    is_comptime: true,
-                    is_type: true,
-                });
-                current = arena.get_expr(*body_idx);
-            }
-            _ => return (params, current.clone()),
-        }
-    }
 }
 
 #[cfg(test)]

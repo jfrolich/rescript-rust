@@ -119,9 +119,9 @@ generated JavaScript.
 To inspect the compiler pipeline for a small source file:
 
 ```sh
-./cli/bsc.js -dparsetree example.res
-./cli/bsc.js -dtypedtree example.res
-./cli/bsc.js -drawlambda example.res
+./packages/@rescript/<platform>/bin/bsc.exe -dparsetree example.res
+./packages/@rescript/<platform>/bin/bsc.exe -dtypedtree example.res
+./packages/@rescript/<platform>/bin/bsc.exe -drawlambda example.res
 ```
 
 Small source probes are useful evidence, but they do not by themselves test

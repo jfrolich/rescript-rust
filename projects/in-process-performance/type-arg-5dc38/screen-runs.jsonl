@@ -1,8 +1,0 @@
-{"variant": "C", "workers": 1, "repetition": 1, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "C", "workers": 1, "repetition": 2, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "D", "workers": 1, "repetition": 1, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "D", "workers": 1, "repetition": 2, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "C", "workers": 12, "repetition": 1, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "C", "workers": 12, "repetition": 2, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "D", "workers": 12, "repetition": 1, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}
-{"variant": "D", "workers": 12, "repetition": 2, "js_count": 5048, "js_sha256": "1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49", "compiled_3248": true}

@@ -35,7 +35,7 @@ static ANSI_ESCAPE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Could not create regex")
 });
 
-fn escape_colours(str: &str) -> Cow<'_, str> {
+pub(crate) fn escape_colours(str: &str) -> Cow<'_, str> {
     ANSI_ESCAPE.replace_all(str, "")
 }
 

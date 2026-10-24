@@ -10,20 +10,37 @@ module Sexp = struct
   let atom s = Atom s
   let list l = List l
 
-  (* Simple pretty printer without Res_doc dependency *)
-  let rec to_string_indent indent t =
-    let spaces = String.make (indent * 2) ' ' in
+  (* Simple pretty printer without Res_doc dependency. It writes into one
+     buffer: building the string by concatenation at every level is quadratic
+     in the nesting depth (a large character-range pattern nests thousands of
+     or-patterns). *)
+  let rec add_indent buf indent t =
     match t with
-    | Atom s -> s
-    | List [] -> "()"
-    | List [Atom s] -> "(" ^ s ^ ")"
-    | List [sexpr] -> "(" ^ to_string_indent indent sexpr ^ ")"
-    | List items ->
-      let inner = String.concat ("\n" ^ spaces ^ "  ")
-        (List.map (to_string_indent (indent + 1)) items) in
-      "(" ^ inner ^ ")"
+    | Atom s -> Buffer.add_string buf s
+    | List [] -> Buffer.add_string buf "()"
+    | List [Atom s] ->
+      Buffer.add_char buf '(';
+      Buffer.add_string buf s;
+      Buffer.add_char buf ')'
+    | List [sexpr] ->
+      Buffer.add_char buf '(';
+      add_indent buf indent sexpr;
+      Buffer.add_char buf ')'
+    | List (first :: rest) ->
+      Buffer.add_char buf '(';
+      add_indent buf (indent + 1) first;
+      List.iter
+        (fun item ->
+          Buffer.add_char buf '\n';
+          Buffer.add_string buf (String.make ((indent * 2) + 2) ' ');
+          add_indent buf (indent + 1) item)
+        rest;
+      Buffer.add_char buf ')'
 
-  let to_string sexpr = to_string_indent 0 sexpr
+  let to_string sexpr =
+    let buf = Buffer.create 4096 in
+    add_indent buf 0 sexpr;
+    Buffer.contents buf
 end
 
 (* Helper functions *)

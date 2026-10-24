@@ -14,6 +14,9 @@
 
 #### :boom: Breaking Change
 
+- Remove the standalone `bsc` command (`npx bsc`, `cli/bsc.js` and the Rust `bsc` binary). Compile through `rescript build`, which runs the compiler in-process.
+- Remove rewatch's file-backed subprocess build (`RESCRIPT_SUBPROCESS_BUILD`, `RESCRIPT_BSC_EXE`) and the `--dump-typed-sexp` and hidden `--in-process` flags of `rescript build` and `rescript watch`.
+
 #### :eyeglasses: Spec Compliance
 
 #### :rocket: New Feature

@@ -2337,53 +2337,6 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             print_jsx_element(f, arena, jsx);
         }
-        ExpressionDesc::Pexp_inline_for(inner) => {
-            let (ref pat, ref collection, ref body) = **inner;
-            f.string("(* inline for *)");
-            f.string(" for ");
-            print_pattern(f, arena, arena.get_pat(*pat));
-            f.string(" in ");
-            print_expression_inner(
-                f,
-                arena,
-                arena.get_expr(*collection),
-                false,
-                PrintCtx::reset(),
-            );
-            f.string(" { ");
-            print_expression_inner(f, arena, arena.get_expr(*body), false, PrintCtx::reset());
-            f.string(" }");
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(_) => {
-            f.string("(* @typeInfo(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_field(_) => {
-            f.string("(* @field(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_compile_error(_) => {
-            f.string("(* @compileError(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_typename(_) => {
-            f.string("(* @typeName(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_record(_) => {
-            f.string("(* @record(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_variant(_) => {
-            f.string("(* @variant(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_build_variant(_) => {
-            f.string("(* @buildVariant(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_variant_case(_) => {
-            f.string("(* @variantCase(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_build_record(_) => {
-            f.string("(* @buildRecord(...) *)");
-        }
-        ExpressionDesc::Pexp_comptime_record_field(_) => {
-            f.string("(* @recordField(...) *)");
-        }
     }
 }
 

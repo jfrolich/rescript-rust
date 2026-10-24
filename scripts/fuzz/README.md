@@ -5,7 +5,7 @@ OCaml `bsc` is the oracle; Rust `bsc` must reach the same verdict
 
 ```bash
 # prerequisites: OCaml bsc + stdlib (make lib), Rust release bsc
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --release --manifest-path rewatch/Cargo.toml
 
 python3 scripts/fuzz/fuzz.py seeds            # build seed corpus, check every seed
 python3 scripts/fuzz/fuzz.py run -m 10        # mutate seeds for 10 minutes

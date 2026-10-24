@@ -85,16 +85,16 @@ Read the relevant area guide linked from the [root instructions](../AGENTS.md#ar
 
 ```bash
 # Source code (for debugging preprocessing)
-./cli/bsc.js -dsource myfile.res
+./packages/@rescript/<platform>/bin/bsc.exe -dsource myfile.res
 
 # Parse tree (surface syntax after parsing)
-./cli/bsc.js -dparsetree myfile.res
+./packages/@rescript/<platform>/bin/bsc.exe -dparsetree myfile.res
 
 # Typed tree (after type checking)
-./cli/bsc.js -dtypedtree myfile.res
+./packages/@rescript/<platform>/bin/bsc.exe -dtypedtree myfile.res
 
 # Raw lambda (unoptimized intermediate representation)
-./cli/bsc.js -drawlambda myfile.res
+./packages/@rescript/<platform>/bin/bsc.exe -drawlambda myfile.res
 
 # Use lambda printing for debugging (add in compiler/core/lam_print.ml)
 ```

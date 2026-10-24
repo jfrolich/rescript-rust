@@ -162,6 +162,9 @@ pub struct MarshalFragment {
 /// ```
 #[derive(Debug)]
 pub struct MarshalWriter<'a> {
+    /// Debug tracing is configured once per serialization, not per AST node.
+    debug_marshal: bool,
+
     /// The output buffer containing encoded data
     buffer: Vec<u8>,
 
@@ -306,6 +309,9 @@ pub struct MarshalWriter<'a> {
     /// OCaml's `%external` rewrite reuses one `raw_exp` node in both `typeof(raw_exp)`
     /// and the `else raw_exp` branch; Rust clones that node, so we restore sharing
     /// here using the extension location as identity.
+    /// Only consulted inside one `%external` expression and cleared when it
+    /// ends, so unrelated raw expansions at the same location (jsConverter's
+    /// `_map` and `_revMap`) are never merged.
     raw_expansion_expr_table: HashMap<LocIdx, u32>,
 
     /// Shared object index for the canonical `internal.expansive` attribute tuple.
@@ -350,6 +356,7 @@ impl<'a> MarshalWriter<'a> {
     /// Create a new MarshalWriter with expected capacity
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
             buffer: Vec::with_capacity(capacity),
             str_idx_table: HashMap::new(),
             position_idx_table: HashMap::new(),
@@ -487,6 +494,11 @@ impl<'a> MarshalWriter<'a> {
     #[inline]
     pub fn exit_external_ext(&mut self) {
         self.external_ext_depth = self.external_ext_depth.saturating_sub(1);
+        if self.external_ext_depth == 0 {
+            // The shared `raw_exp` node belongs to one `%external` rewrite;
+            // other raw expansions at the same location are distinct values.
+            self.raw_expansion_expr_table.clear();
+        }
     }
 
     #[inline]
@@ -860,11 +872,20 @@ impl<'a> MarshalWriter<'a> {
         // Check if this position index was already written
         if let Some(&obj_idx) = self.position_idx_table.get(&idx) {
             let d = self.obj_counter - obj_idx;
+            // DEBUG
+            if self.debug_marshal {
+                let pos = self.get_arena().get_position(idx);
+                eprintln!(
+                    "SHARE PosIdx({}) at obj_counter={}, obj_idx={}, dist={}, pos=({},{},{})",
+                    idx.0, self.obj_counter, obj_idx, d, pos.line, pos.bol, pos.cnum
+                );
+            }
             self.write_shared_ref(d);
             return false;
         }
 
-        let pos = self.get_arena().get_position(idx);
+        // Look up the position in the arena and copy it to end the borrow
+        let pos = *self.get_arena().get_position(idx);
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
@@ -878,6 +899,13 @@ impl<'a> MarshalWriter<'a> {
         self.write_int(pos.cnum as i64);
 
         // Record for future sharing
+        // DEBUG
+        if self.debug_marshal {
+            eprintln!(
+                "WRITE PosIdx({}) at obj_idx={}, pos=({},{},{})",
+                idx.0, obj_idx, pos.line, pos.bol, pos.cnum
+            );
+        }
         self.position_idx_table.insert(idx, obj_idx);
 
         true
@@ -900,13 +928,23 @@ impl<'a> MarshalWriter<'a> {
             return;
         }
 
-        let loc = self.get_arena().get_location(idx);
+        // Look up the location in the arena and clone it to end the borrow
+        let loc = self.get_arena().get_location(idx).clone();
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
         // Write the Location block
         self.write_block_header(0, 3);
+        // DEBUG
+        if self.debug_marshal {
+            let start = self.get_arena().get_position(loc.loc_start);
+            let end = self.get_arena().get_position(loc.loc_end);
+            eprintln!(
+                "WRITE LocIdx({}) at obj_idx={}, start_pos=({},{},{}), end_pos=({},{},{})",
+                idx.0, obj_idx, start.line, start.bol, start.cnum, end.line, end.bol, end.cnum
+            );
+        }
         // Write start and end positions (with sharing by their indices)
         self.write_pos_idx(loc.loc_start);
         self.write_pos_idx(loc.loc_end);

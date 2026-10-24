@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-BSC = Path(os.environ.get("RUST_BSC", ROOT / "compiler-rust/target/release/bsc"))
+BSC = Path(os.environ.get("RUST_BSC", ROOT / "rewatch/target/release/bsc"))
 
 
 class MarshalDebugFlags(unittest.TestCase):
@@ -17,12 +17,9 @@ class MarshalDebugFlags(unittest.TestCase):
             source = root / "trace.res"
             source.write_text('let values = ("None", "Mic", "Camera")\n')
             base_env = os.environ.copy()
-            for flag in ("DEBUG_MARSHAL", "DEBUG_CONST_SHARE"):
-                base_env.pop(flag, None)
+            base_env.pop("DEBUG_MARSHAL", None)
             baseline = None
-            for index, flags in enumerate(({}, {"DEBUG_MARSHAL": ""},
-                                           {"DEBUG_CONST_SHARE": "0"},
-                                           {"DEBUG_MARSHAL": "1", "DEBUG_CONST_SHARE": "1"})):
+            for index, flags in enumerate(({}, {"DEBUG_MARSHAL": ""}, {"DEBUG_MARSHAL": "1"})):
                 with self.subTest(flags=flags):
                     output = root / f"{index}.ast"
                     result = subprocess.run(
@@ -37,7 +34,6 @@ class MarshalDebugFlags(unittest.TestCase):
                     self.assertEqual("WRITE PosIdx(" in result.stderr, "DEBUG_MARSHAL" in flags)
                     self.assertEqual("WRITE LocIdx(" in result.stderr, "DEBUG_MARSHAL" in flags)
                     self.assertEqual("SHARE PosIdx(" in result.stderr, "DEBUG_MARSHAL" in flags)
-                    self.assertEqual("CONST None " in result.stderr, "DEBUG_CONST_SHARE" in flags)
 
 
 if __name__ == "__main__":

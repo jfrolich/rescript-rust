@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Runtime/stdlib JS output parity: compile runtime .res sources with Rust bsc
-# and compare generated CommonJS/ESM output to the checked-in OCaml snapshots.
+# Runtime/stdlib JS output parity: build the runtime package in process with
+# `rescript build`, then with the OCaml bsc (`rescript build-reference`), and
+# compare the CommonJS/ESM output of each implementation module.
 #
 # Usage:
 #   ./scripts/test_stdlib_output_parity.sh [OPTIONS] [FILE|PATTERN]
@@ -41,12 +42,8 @@ done
 script_dir=$(cd "$(dirname "$0")"; pwd -P)
 PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUNTIME_DIR="$PROJECT_ROOT/packages/@rescript/runtime"
-DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
-OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/stdlib-output"
 
 RED='\033[0;31m'
@@ -57,13 +54,6 @@ RESET='\033[0m'
 
 if [[ ! -x "$OCAML_BSC" ]]; then
     echo -e "${RED}Error: OCaml bsc not found at $OCAML_BSC${RESET}"
-    exit 1
-fi
-
-if [[ ! -x "$RUST_BSC" ]]; then
-    echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
-    echo "This output parity script expects debug artifacts for iteration."
     exit 1
 fi
 
@@ -78,7 +68,8 @@ if [[ ! -f "$RUNTIME_DIR/rescript.json" ]]; then
 fi
 
 TEMP_DIR=$(mktemp -d)
-mkdir -p "$CACHE_DIR/diffs" "$CACHE_DIR/errors" "$CACHE_DIR/rust" "$TEMP_DIR/out/js" "$TEMP_DIR/out/es6"
+find "$CACHE_DIR" -type f -delete 2>/dev/null || true
+mkdir -p "$CACHE_DIR/diffs" "$CACHE_DIR/errors" "$CACHE_DIR/rust"
 
 cleanup_temp_dir() {
     if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
@@ -93,17 +84,25 @@ echo -e "${BOLD}Stdlib JS Output Parity${RESET}"
 echo "============================================"
 echo "Runtime project: $RUNTIME_DIR"
 echo "OCaml bsc:       $OCAML_BSC"
-echo "Rust bsc:        $RUST_BSC"
-echo "Rust target:     $RUST_TARGET"
-echo "Timeout:         ${TIMEOUT_SECONDS}s"
+echo "rescript:        $RESCRIPT_CLI"
 echo "Artifact cache:  $CACHE_DIR"
 echo ""
 
-echo -e "${BOLD}Step 1: Building stdlib/runtime with OCaml bsc...${RESET}"
-(
-    cd "$RUNTIME_DIR"
-    RESCRIPT_SUBPROCESS_BUILD=1 RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5
-)
+# Copy the runtime's generated JavaScript to $1/{js,es6}.
+snapshot_js() {
+    mkdir -p "$1/js" "$1/es6"
+    find "$RUNTIME_DIR/lib/js" -maxdepth 1 -name '*.cjs' -exec cp {} "$1/js/" \; 2>/dev/null || true
+    find "$RUNTIME_DIR/lib/es6" -maxdepth 1 -name '*.mjs' -exec cp {} "$1/es6/" \; 2>/dev/null || true
+}
+
+echo -e "${BOLD}Step 1: Building stdlib/runtime in process with rescript...${RESET}"
+if ! RESCRIPT_RUNTIME="$RUNTIME_DIR" "$RESCRIPT_CLI" build "$RUNTIME_DIR" > "$CACHE_DIR/errors/rust-build.err" 2>&1; then
+    echo -e "${YELLOW}Warning: the in-process build reported errors (see $CACHE_DIR/errors/rust-build.err)${RESET}"
+fi
+snapshot_js "$TEMP_DIR/rust"
+echo -e "${BOLD}Step 2: Building stdlib/runtime with OCaml bsc...${RESET}"
+RESCRIPT_RUNTIME="$RUNTIME_DIR" "$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" "$RUNTIME_DIR" 2>&1 | tail -5
+snapshot_js "$TEMP_DIR/ocaml"
 echo ""
 
 if [[ -n "$FILE_ARG" ]]; then
@@ -145,79 +144,21 @@ while IFS= read -r file; do
     rel_path="${full_file#$RUNTIME_DIR/}"
     module_name=$(basename "$rel_path" .res)
     safe_name=$(echo "$rel_path" | tr '/:' '__')
-    file_out_dir="$TEMP_DIR/out/$safe_name"
-    mkdir -p "$file_out_dir/js" "$file_out_dir/es6"
-
-    expected_cjs="$RUNTIME_DIR/lib/js/${module_name}.cjs"
-    expected_mjs="$RUNTIME_DIR/lib/es6/${module_name}.mjs"
-    actual_cjs="$file_out_dir/js/${module_name}.cjs"
-    actual_mjs="$file_out_dir/es6/${module_name}.mjs"
-    compile_output="$file_out_dir/compile.txt"
+    expected_cjs="$TEMP_DIR/ocaml/js/${module_name}.cjs"
+    expected_mjs="$TEMP_DIR/ocaml/es6/${module_name}.mjs"
+    actual_cjs="$TEMP_DIR/rust/js/${module_name}.cjs"
+    actual_mjs="$TEMP_DIR/rust/es6/${module_name}.mjs"
     diff_file="$CACHE_DIR/diffs/${safe_name}.diff"
-    err_file="$CACHE_DIR/errors/${safe_name}.err"
 
     if [[ ! -f "$expected_cjs" && ! -f "$expected_mjs" ]]; then
         skipped_count=$((skipped_count + 1))
         continue
     fi
-
-    args_json=$(cd "$RUNTIME_DIR" && "$RESCRIPT_CLI" compiler-args "$rel_path" 2>/dev/null) || args_json=""
-    if [[ -z "$args_json" ]]; then
+    if [[ ! -f "$actual_cjs" && ! -f "$actual_mjs" ]]; then
         compile_error_count=$((compile_error_count + 1))
-        printf 'compiler-args failed for %s\n' "$rel_path" > "$err_file"
-        failed_files="$failed_files$rel_path (compiler-args failed)\n"
-        continue
-    fi
-
-    compiler_args=()
-    while IFS= read -r arg; do
-        compiler_args+=("$arg")
-    done < <(
-        ARGS_JSON="$args_json" python3 - "$file_out_dir" <<'PY'
-import json
-import os
-import sys
-
-out_dir = sys.argv[1]
-args = json.loads(os.environ["ARGS_JSON"]).get("compiler_args", [])
-rewritten = []
-i = 0
-while i < len(args):
-    if args[i] == "-bs-package-output" and i + 1 < len(args):
-        spec = args[i + 1]
-        parts = spec.split(":", 2)
-        if len(parts) == 3:
-            module_kind, _old_dir, suffix = parts
-            subdir = "js" if module_kind == "commonjs" else "es6" if module_kind == "esmodule" else module_kind
-            rewritten.extend([args[i], f"{module_kind}:{out_dir}/{subdir}/:{suffix}"])
-            i += 2
-            continue
-    rewritten.append(args[i])
-    i += 1
-
-for arg in rewritten:
-    print(arg)
-PY
-    )
-
-    compile_ok=false
-    if (
-        cd "$RUNTIME_DIR/lib/bs" &&
-        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" "${compiler_args[@]}"
-    ) > "$compile_output" 2>&1; then
-        compile_ok=true
-    fi
-
-    if ! $compile_ok; then
-        compile_error_count=$((compile_error_count + 1))
-        cp "$compile_output" "$err_file" 2>/dev/null || true
-        failed_files="$failed_files$rel_path (Rust compile error)\n"
-        if [[ "$VERBOSE" == "true" ]]; then
-            echo -e "${RED}CRASH${RESET} $rel_path"
-        fi
+        failed_files="$failed_files$rel_path (no Rust output)\n"
         if [[ "$QUICK_MODE" == "true" ]]; then
-            echo -e "${RED}Quick mode: stopping on Rust compile error${RESET}"
-            head -80 "$compile_output"
+            echo -e "${RED}Quick mode: stopping on missing Rust output${RESET}"
             exit 1
         fi
         continue

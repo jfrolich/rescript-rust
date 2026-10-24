@@ -355,26 +355,6 @@ pub fn create_path(path: &Path) -> std::io::Result<()> {
     fs::DirBuilder::new().recursive(true).create(path)
 }
 
-fn get_bin_dir() -> PathBuf {
-    let current_exe_path = std::env::current_exe().expect("Could not get current executable path");
-    current_exe_path
-        .parent()
-        .expect("Could not get parent directory of current executable")
-        .to_path_buf()
-}
-
-pub fn get_bsc() -> PathBuf {
-    let bsc_path = match std::env::var("RESCRIPT_BSC_EXE") {
-        Ok(val) => PathBuf::from(val),
-        Err(_) => get_bin_dir().join("bsc.exe"),
-    };
-
-    bsc_path
-        .canonicalize()
-        .expect("Could not get bsc path, did you set environment variable RESCRIPT_BSC_EXE ?")
-        .to_stripped_verbatim_path()
-}
-
 fn path_to_ast_extension(path: &Path) -> &str {
     let extension = path.extension().unwrap().to_str().unwrap();
     if extension.ends_with("i") { ".iast" } else { ".ast" }
@@ -389,62 +369,6 @@ pub fn get_ast_path(source_file: &Path) -> PathBuf {
         .parent()
         .unwrap()
         .join(format!("{basename}{extension}"))
-}
-
-pub fn get_compiler_asset(
-    package: &packages::Package,
-    namespace: &packages::Namespace,
-    source_file: &Path,
-    extension: &str,
-) -> PathBuf {
-    let namespace = match extension {
-        "ast" | "iast" => &packages::Namespace::NoNamespace,
-        _ => namespace,
-    };
-    let basename = file_path_to_compiler_asset_basename(source_file, namespace);
-    package
-        .get_ocaml_build_path()
-        .join(format!("{basename}.{extension}"))
-}
-
-pub fn get_bs_compiler_asset(
-    package: &packages::Package,
-    namespace: &packages::Namespace,
-    source_file: &Path,
-    extension: &str,
-) -> String {
-    let namespace = match extension {
-        "ast" | "iast" => &packages::Namespace::NoNamespace,
-        _ => namespace,
-    };
-
-    let dir = source_file.parent().unwrap();
-    let basename = file_path_to_compiler_asset_basename(source_file, namespace);
-
-    package
-        .get_build_path()
-        .join(dir)
-        .join(format!("{basename}{extension}"))
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
-pub fn get_namespace_from_module_name(module_name: &str) -> Option<String> {
-    let mut split = module_name.split('-');
-    let _ = split.next();
-    split.next().map(|s| s.to_string())
-}
-
-pub fn is_interface_ast_file(file: &Path) -> bool {
-    file.extension()
-        .map(|extension| extension.eq_ignore_ascii_case("iast"))
-        .unwrap_or(false)
-}
-
-pub fn read_lines(filename: &Path) -> io::Result<io::Lines<io::BufReader<fs::File>>> {
-    let file = fs::File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
 }
 
 pub fn get_system_time() -> u128 {
@@ -469,14 +393,6 @@ pub fn is_non_exotic_module_name(module_name: &str) -> bool {
     let mut chars = module_name.chars();
     chars.next().is_some_and(|c| c.is_ascii_uppercase())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-pub fn get_extension(path: &Path) -> String {
-    path.extension()
-        .expect("Could not get extension")
-        .to_str()
-        .expect("Could not get extension 2")
-        .to_string()
 }
 
 pub fn format_namespaced_module_name(module_name: &str) -> String {

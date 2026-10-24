@@ -811,8 +811,8 @@ pub struct TypeContext {
     /// Raw signatures loaded only for persistent component lookup.
     ///
     /// OCaml keeps `ps_comps` separate from `ps_sig`; this cache gives Rust the
-    /// same one-shot component backing store without making a ps_sig rename
-    /// see modules that were only touched by descriptor lookup.
+    /// same one-shot component backing store without making the `ps_sig`
+    /// rename see modules that were only touched by descriptor lookup.
     raw_component_module_sigs:
         RefCell<crate::fast_hash::AHashMap<String, Arc<super::decl::Signature>>>,
 
@@ -4114,9 +4114,8 @@ impl TypeContext {
         // the CMI signature separately from `ps_sig`, and env.ml:781-788 returns
         // those components for exact persistent `Pident` descriptor lookup.
         // Keep this fallback separate from `raw_module_sigs`: that map drives
-        // ps_sig lazy renaming, and caching component-only loads there would
-        // let a later rename freshen modules OCaml has only looked up through
-        // ps_comps.
+        // ps_sig lazy renaming, and component-only loads must not be freshened:
+        // OCaml has only looked them up through ps_comps.
         let sig = self.load_lazy_raw_module_sig_for_rename(module_name)?;
         self.raw_component_module_sigs
             .borrow_mut()

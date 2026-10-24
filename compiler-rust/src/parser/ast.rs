@@ -790,35 +790,6 @@ pub enum ExpressionDesc {
     Pexp_tagged_template(Box<PexpTaggedTemplate>),
     /// JSX element.
     Pexp_jsx_element(Box<JsxElement>),
-    /// Inline for: `inline for pat in collection { body }` (comptime loop unrolling).
-    Pexp_inline_for(Box<(PatIdx, ExprIdx, ExprIdx)>),
-    /// Comptime type info: `@typeInfo(T)` — returns type information for T.
-    Pexp_comptime_typeinfo(CoreTypeIdx),
-    /// Comptime field access: `@field(value, "name")` — accesses a field by comptime-known name.
-    Pexp_comptime_field(Box<(ExprIdx, ExprIdx)>),
-    /// Comptime compile error: `@compileError("msg")` — compile-time error.
-    Pexp_comptime_compile_error(ExprIdx),
-    /// Comptime type name: `@typeName(T)` — returns the type name as a string.
-    Pexp_comptime_typename(CoreTypeIdx),
-    /// Comptime record builder: `@record(TypeName, arrayOfFieldSpecs)`.
-    /// The array contains @field({name: comptimeName, value: runtimeExpr}) items.
-    /// Can be a literal array or an inline for expression.
-    Pexp_comptime_record(Box<(CoreTypeIdx, ExprIdx)>),
-    /// Comptime variant builder: `@variant(TypeName, "CtorName", payload?)`.
-    /// Builds a typed variant constructor from comptime-known constructor name.
-    Pexp_comptime_variant(Box<(CoreTypeIdx, ExprIdx, Option<ExprIdx>)>),
-    /// Type-level variant builder: `@buildVariant(arrayOfCases)`.
-    /// Produces a variant TYPE declaration, not a value.
-    /// The array must contain @variantCase({...}) elements.
-    Pexp_comptime_build_variant(ExprIdx),
-    /// Type-level variant case descriptor: `@variantCase({name: "Name", as_?: "..."})`.
-    /// Evaluates to a comptime record describing one constructor.
-    Pexp_comptime_variant_case(ExprIdx),
-    /// Type-level record builder: `@buildRecord(arrayOfFields)`.
-    /// Produces a record TYPE declaration. Array contains @recordField({...}).
-    Pexp_comptime_build_record(ExprIdx),
-    /// Type-level record field descriptor: `@recordField({name, typ, optional?})`.
-    Pexp_comptime_record_field(ExprIdx),
 }
 
 /// A record field in an expression.

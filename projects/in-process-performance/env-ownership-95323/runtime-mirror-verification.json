@@ -1,7 +1,0 @@
-{
-  "res": 107,
-  "resi": 49,
-  "all_match_main_source_and_old_runtime": true,
-  "writer": "rewatch/src/build/compile.rs:3897-3928",
-  "setup": "byte copies with identical basename mapping; no CMI/CMJ loaded or built"
-}

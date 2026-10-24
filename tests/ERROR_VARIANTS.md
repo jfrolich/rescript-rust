@@ -331,7 +331,7 @@ Module-level errors. Source: `type error` in [typemod.ml](../compiler/ml/typemod
 | `Incomplete_packed_module` | ✓ | `incomplete_packed_module.res` | |
 | `Recursive_module_require_explicit_type` | ✓ | `recursive_module_require_explicit_type.res` | |
 | `Apply_generative` | ✓ | `apply_generative.res` | |
-| `Cannot_scrape_alias` | ☐ (needs build harness) | — | typemod.ml, `extract_sig`, `extract_sig_open` and the `Pmod_apply` case of `type_module_aux`. Requires `Env.scrape_alias` to return `Mty_alias` for an alias whose target `.cmi` couldn't be loaded. The `super_errors_multi` runner pre-compiles every file in the fixture, so the alias target is always present. |
+| `Cannot_scrape_alias` | ✓ | `tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res` | typemod.ml, `extract_sig`, `extract_sig_open` and the `Pmod_apply` case of `type_module_aux`. The fixture package `missing_module_pkg` (built with `-no-alias-deps`) aliases a missing module. |
 
 ---
 
@@ -362,7 +362,7 @@ Type-expression errors. Source: `type error` in [typetexp.ml](../compiler/ml/typ
 | `Unbound_modtype` | ✓ | `typetexp_unbound_modtype.res` | |
 | `Illegal_reference_to_recursive_module` | ✓ | `illegal_recursive_module_reference.res` | `module rec A: B.S = …` references another recmodule's module-type before signatures are sealed. During `approx_modtype` of A, `Env.lookup_module B` returns the `#recmod#` placeholder and raises `Env.Recmodule`. |
 | `Access_functor_as_structure` | ✓ | `access_functor_as_structure.res` | |
-| `Cannot_scrape_alias` | ☐ (needs build harness) | — | typetexp.ml, the `Ldot` case of `narrow_unbound_lid_error`. The trigger needs `Env.scrape_alias` to return `Mty_alias` — an alias whose target `.cmi` couldn't be loaded. The `super_errors_multi` harness pre-compiles every alias target. |
+| `Cannot_scrape_alias` | ✓ | `tests/error_output_parity/compiler/cases/cannot_scrape_alias_type_path.res` | typetexp.ml, the `Ldot` case of `narrow_unbound_lid_error`, through the alias to a missing module in the fixture package `missing_module_pkg`. |
 | `Opened_object` | ✓ | `object_inherit_opened.res` | |
 | `Not_an_object` | ✓ | `object_inherit_not_an_object.res` | |
 
@@ -383,7 +383,7 @@ Wrapper symptoms attached to inclusion failures. Source: `type symptom` in [incl
 | `Modtype_permutation` | ✓ | `include_modtype_permutation.res` | |
 | `Interface_mismatch` | ✓ | wrapper added to all `Iface_*` failures by `compunit`. | |
 | `Unbound_modtype_path` | ☐ (needs stale-cmi harness) | — | includemod.ml, `expand_module_path`. Re-validated during removal: not completely dead. It represents `Env.find_modtype` failing during module-type path comparison, which can happen only with a stale or inconsistent compiled interface. The source-only harness cannot produce that state because it pre-compiles every fixture, so this needs a build/binary-state harness rather than deletion. |
-| `Unbound_module_path` | ☐ (needs build harness) | — | includemod.ml, `expand_module_alias` and `try_modtypes`. Alias comparison where `Env.normalize_path` raises `Not_found`. Requires a module alias whose target `.cmi` is absent at inclusion time — multi-unit only. |
+| `Unbound_module_path` | ✓ | `tests/error_output_parity/compiler/cases/include_unbound_module_path.res` | includemod.ml, `expand_module_alias` and `try_modtypes`: the alias target of the fixture package `missing_module_pkg` is missing. |
 | `Invalid_module_alias` | ☐ (needs build harness) | — | includemod.ml, `try_modtypes`. Requires both sides `Mty_alias` with one pointing to a functor argument. Reachable only when the alias chain crosses a functor application that the `super_errors_multi` harness doesn't construct. |
 
 ---
@@ -480,11 +480,11 @@ Build / dependency errors. Mostly need the `rescript build` runtime to fire — 
 
 | Variant | Status | Fixture | Notes |
 |---|---|---|---|
-| `Cmj_not_found` | ☐ (needs build harness) | — | Missing `.cmj` from a dependent module. Reachable from `rescript build` but not from raw `bsc`. |
+| `Cmj_not_found` | ⚠ | — | Unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
 | `Js_not_found` | ✓ | implicitly — bypassed via `-bs-cmi-only` in `super_errors_multi` runner. Not a fixture, but the harness commit documents the workaround. | |
 | `Bs_duplicate_exports` | ☐ (needs build harness) | — | Same export emitted twice across compilation units. |
-| `Missing_ml_dependency` | ☐ (needs build harness) | — | Compile-time missing dependency from a `.cmj` lookup table. |
-| `Dependency_script_module_dependent_not` | ☐ (needs build harness) | — | `string_of_module_id` in `core/platform/native/js_name_of_module_id.ml`. **Reachable** when a dependent module is in script mode (`Package_script`) but the current module is in package mode (`Package_found _`). Legacy script-vs-package interaction; needs `rescript.json` harness. |
+| `Missing_ml_dependency` | ✓ | `tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res` | An ES-module compile importing a module of the fixture package `package_missing_ml_dependency_pkg`, which has CommonJS output only. |
+| `Dependency_script_module_dependent_not` | ⚠ | — | `string_of_module_id` in `core/platform/native/js_name_of_module_id.ml`: a dependency compiled in script mode. In a build every dependency is a package module; unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
 
 ---
 
@@ -494,9 +494,9 @@ Environment / `.cmi`-consistency errors. Source: `type error` in [env.ml](../com
 
 | Variant | Status | Fixture | Notes |
 |---|---|---|---|
-| `Illegal_renaming` | ☐ (needs build harness) | — | Triggered when a `.cmi` filename and the module name inside it disagree. Reachable via `rescript.json` setups that rename the produced artefact, but not from a single-process `bsc` invocation that always writes `Module.cmi` to match the source. |
-| `Inconsistent_import` | ☐ (needs build harness) | — | Triggered when two `.cmi` files transitively imported by the same unit declare different CRCs for the same type. Needs an artificially-mutated build state across multiple compile invocations. |
-| `Missing_module` | ☐ (needs build harness) | — | `.cmi` referenced but absent from `-I` paths at compile time. The `super_errors_multi` runner pre-compiles every fixture file via `-bs-read-cmi`, so it never reaches this code path. |
+| `Illegal_renaming` | ⚠ | — | A `.cmi` whose unit name differs from its file name. Unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
+| `Inconsistent_import` | ⚠ | — | Two `.cmi` files with different CRCs for the same unit. Unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
+| `Missing_module` | ✓ | `tests/error_output_parity/compiler/cases/missing_module.res` | `include` of an alias, in the fixture package `missing_module_pkg`, to a module that does not exist. |
 | `Illegal_value_name` | ✓ | `illegal_value_name.res` | Escaped identifier reaching `check_value_name` during definition (`let \"->" = 1`); the parser does not reject `\"->"`. |
 
 ---
@@ -511,9 +511,9 @@ hand-written `.res` / `.resi` sources.
 
 | Variant | Status | Fixture | Notes |
 |---|---|---|---|
-| `Not_an_interface` | ☐ (needs binary harness) | — | Pass an arbitrary file as `.cmi`. |
-| `Wrong_version_interface` | ☐ (needs binary harness) | — | Mismatched compiler versions writing/reading. |
-| `Corrupted_interface` | ☐ (needs binary harness) | — | Truncated or corrupted `.cmi`. |
+| `Not_an_interface` | ⚠ | — | An arbitrary file passed as `.cmi`. Unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
+| `Wrong_version_interface` | ⚠ | — | A `.cmi` from another compiler version. Unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
+| `Corrupted_interface` | ⚠ | — | A truncated or corrupted `.cmi`. Unreachable in the in-process compiler, which reads no compiled `.cmi`/`.cmj` files; only the OCaml file-based compile raises it, so the error-output parity suite has no case. |
 
 ---
 

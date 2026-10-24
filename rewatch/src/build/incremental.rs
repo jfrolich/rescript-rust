@@ -760,12 +760,11 @@ fn restore_unparsed_parse_warnings(build_state: &BuildCommandState) -> String {
     all
 }
 
-/// Whether incremental planning applies: a fresh in-process build that does
-/// not have to dump every module's typed tree.
+/// Whether incremental planning applies: a fresh build with a record of the
+/// previous one.
 pub fn applies(build_state: &BuildCommandState) -> bool {
-    build_state.build_mode().is_in_process()
-        && !build_state.dump_typed_sexp()
-        && build_state.previous_in_process.is_some()
+    build_state.previous_in_process.is_some()
+        && build_state.dump.is_none()
         && std::env::var_os("RESCRIPT_FULL_BUILD").is_none()
 }
 

@@ -25,8 +25,14 @@ OCAML_BSC = Path(os.environ.get("OCAML_BSC", ROOT / "_build/install/default/bin/
 RUST_BSC = Path(
     os.environ.get(
         "RUST_BSC",
-        ROOT / "compiler-rust/target" / os.environ.get("RUST_TARGET", "release") / "bsc",
+        ROOT / "rewatch/target" / os.environ.get("RUST_TARGET", "release") / "bsc",
     )
+)
+# `bsc` is a wrapper script (scripts/rust_compiler_shims.sh) that runs the
+# rescript executable's hidden `rescript bsc` command.
+subprocess.run(
+    [ROOT / "scripts/rust_compiler_shims.sh", os.environ.get("RUST_TARGET", "release")],
+    check=False,
 )
 BELT_LIB = ROOT / "packages/@rescript/belt/lib/ocaml"
 DEFAULT_FLAGS = ["-w", "+A", "-bs-jsx", "4", "-color", "never", "-I", str(BELT_LIB)]
@@ -201,7 +207,7 @@ def _compare_pipeline(
     elif ov == "ok" and rv != "ok":
         kind = "rust_rejects"
         sig = "rust: " + signature(r[-1].stderr)
-    elif not check_text or any(_RUST_ONLY_SYNTAX.search(src) for src in case.values()):
+    elif not check_text:
         kind = "same"
     elif ov != "ok":
         kind = "same" if _norm(o[-1].stderr) == _norm(r[-1].stderr) else "msg_diff"
@@ -246,11 +252,6 @@ def _accepted(s: str) -> str:
                 break
         out.append("\n".join(b))
     return "\n".join(out)
-
-
-# `inline for` is Rust-only comptime syntax (projects/comptime), so OCaml's
-# diagnostics for such sources are not a reference.
-_RUST_ONLY_SYNTAX = re.compile(r"\binline\s+for\b")
 
 
 def case_hash(case: dict[str, str]) -> str:

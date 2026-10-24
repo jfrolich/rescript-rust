@@ -7,7 +7,7 @@ cd "../fixtures/in-process-namespaced-package-module"
 bold "Test: In-process compilation resolves package module types through a namespace"
 
 rewatch clean &> /dev/null
-build_output=$(rewatch build --in-process 2>&1)
+build_output=$(rewatch build 2>&1)
 build_status=$?
 
 if [ $build_status -eq 0 ]; then

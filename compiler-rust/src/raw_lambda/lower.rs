@@ -4,9 +4,8 @@
 //! by optimized-lambda parity dumps and now also feeds the JS backend entry
 //! point in `driver.rs`.
 
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::AHashSet as HashSet;
 
-use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
@@ -18,25 +17,15 @@ use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
-struct LoweringContext<'a> {
-    alias_tbl: HashMap<Ident, Ident>,
-    exported_idents: HashSet<Ident>,
-    id_gen: &'a IdGenerator,
-}
+/// Lowers raw Lambda to Lambda. It holds no state: raw and lowered
+/// expressions share their identifiers.
+struct LoweringContext;
 
-impl<'a> LoweringContext<'a> {
-    fn with_id_gen(exported_idents: HashSet<Ident>, id_gen: &'a IdGenerator) -> Self {
-        Self {
-            alias_tbl: HashMap::new(),
-            exported_idents,
-            id_gen,
-        }
-    }
-
+impl LoweringContext {
     fn lower_lambda(&mut self, raw: RawLambda) -> Lambda {
         match raw {
             RawLambda::Lshared(inner) => self.lower_lambda(std::sync::Arc::unwrap_or_clone(inner)),
-            RawLambda::Lvar(id) => Lambda::var(self.alias_target(id)),
+            RawLambda::Lvar(id) => Lambda::var(id),
             RawLambda::LglobalModule(id) => {
                 if id.is_predef_exn() {
                     Lambda::const_(Constant::String(id.name().to_string()))
@@ -117,10 +106,6 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
-    fn alias_target(&self, id: Ident) -> Ident {
-        self.alias_tbl.get(&id).cloned().unwrap_or(id)
-    }
-
     fn lower_apply(&mut self, apply: RawApply) -> Lambda {
         let RawApply {
             ap_func,
@@ -148,18 +133,6 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_let(&mut self, kind: LetKind, id: Ident, value: RawLambda, body: RawLambda) -> Lambda {
-        if kind == LetKind::Alias {
-            if let RawLambda::Lvar(target) = value {
-                let target = self.alias_target(target);
-                self.alias_tbl.insert(id, target);
-                let lowered_body = self.lower_lambda(body);
-                if self.exported_idents.contains(&id) {
-                    return Lambda::let_(kind, id, Lambda::var(target), lowered_body);
-                }
-                return lowered_body;
-            }
-        }
-
         let lowered_value = self.lower_lambda(value);
         let lowered_body = self.lower_lambda(body);
 
@@ -303,26 +276,44 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_try_with(&mut self, body: RawLambda, id: Ident, handler: RawLambda) -> Lambda {
+        // The conversion already packed the caught value
+        // (`Translcore.pack_trywith_exn`, `RawLambdaConverter::pack_trywith_exn`).
         let lowered_body = self.lower_lambda(body);
         let lowered_handler = self.lower_lambda(handler);
-        if exception_id_destructed(&lowered_handler, &id) {
-            let raw_id = self.id_gen.create(&format!("raw_{}", id.name()));
-            let wrapped = Lambda::let_(
-                LetKind::StrictOpt,
-                id,
-                wrap_exn(Location::none(), Lambda::var(raw_id)),
-                lowered_handler,
-            );
-            Lambda::try_(lowered_body, raw_id, wrapped)
-        } else {
-            Lambda::try_(lowered_body, id, lowered_handler)
-        }
+        Lambda::try_(lowered_body, id, lowered_handler)
     }
 }
 
 /// `Translcore.wrap_exn` (compiler/ml/translcore.ml:912-920): apply
 /// `Primitive_exceptions.internalToException` to a caught value, so matching
-/// sees a ReScript exception.
+/// sees a ReScript exception. Used by the conversion's `pack_trywith_exn`.
+pub(crate) fn wrap_exn_raw(loc: Location, arg: RawLambda) -> RawLambda {
+    let internal_to_exception = RawLambda::prim(
+        Primitive::Pfield(
+            0,
+            FieldDbgInfo::Module {
+                name: "internalToException".to_string(),
+            },
+        ),
+        vec![RawLambda::global_module(Ident::create_persistent(
+            "Primitive_exceptions",
+        ))],
+        loc.clone(),
+    );
+    RawLambda::Lapply(Box::new(crate::raw_lambda::RawApply {
+        ap_func: Box::new(internal_to_exception),
+        ap_args: vec![arg],
+        ap_info: ApInfo {
+            loc,
+            inlined: crate::lambda::InlineAttribute::Default,
+            status: ApplyStatus::Uncurry,
+        },
+        ap_transformed_jsx: false,
+    }))
+}
+
+/// [`wrap_exn_raw`] in Lambda, for the backend tests.
+#[cfg(test)]
 pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
     let internal_to_exception = Lambda::prim(
         Primitive::Pfield(
@@ -932,88 +923,52 @@ fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
     }
 }
 
-fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
+/// `Translcore.exception_id_destructed` (translcore.ml:921-955): does `lam`
+/// use the caught value `exn` other than by re-raising it?
+pub(crate) fn exception_id_destructed_raw(lam: &RawLambda, exn: &Ident) -> bool {
+    let hit = |lam: &RawLambda| exception_id_destructed_raw(lam, exn);
     match lam {
-        Lambda::Lprim(info)
+        RawLambda::Lprim(info)
             if matches!(info.primitive, Primitive::Praise)
-                && matches!(info.args.as_slice(), [Lambda::Lvar(_)]) =>
+                && matches!(info.args.as_slice(), [RawLambda::Lvar(_)]) =>
         {
             false
         }
-        Lambda::Lprim(info) => info
-            .args
-            .iter()
-            .any(|arg| exception_id_destructed(arg, exn)),
-        Lambda::Lvar(id) => id.same(exn),
-        Lambda::Lassign(id, expr) => id.same(exn) || exception_id_destructed(expr, exn),
-        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
-            exception_id_destructed(body, exn) || exception_id_destructed(handler, exn)
+        RawLambda::Lprim(info) => info.args.iter().any(hit),
+        RawLambda::Lvar(id) => id.same(exn),
+        RawLambda::Lassign(id, expr) => id.same(exn) || hit(expr),
+        RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+            hit(body) || hit(handler)
         }
-        Lambda::Lfunction(func) => exception_id_destructed(&func.body, exn),
-        Lambda::Llet(_, _, arg, body) => {
-            exception_id_destructed(arg, exn) || exception_id_destructed(body, exn)
+        RawLambda::Lfunction(func) => hit(&func.body),
+        RawLambda::Llet(_, _, arg, body) => hit(arg) || hit(body),
+        RawLambda::Lletrec(bindings, body) => hit(body) || bindings.iter().any(|(_, lam)| hit(lam)),
+        RawLambda::Lfor(_, lo, hi, _, body) => hit(lo) || hit(hi) || hit(body),
+        RawLambda::Lfor_of(_, iterable, body) | RawLambda::Lfor_await_of(_, iterable, body) => {
+            hit(iterable) || hit(body)
         }
-        Lambda::Lletrec(bindings, body) => {
-            exception_id_destructed(body, exn)
-                || bindings
-                    .iter()
-                    .any(|(_, lam)| exception_id_destructed(lam, exn))
+        RawLambda::Lconst(_) | RawLambda::LglobalModule(_) => false,
+        RawLambda::Lapply(apply) => hit(&apply.ap_func) || apply.ap_args.iter().any(hit),
+        RawLambda::Lswitch(arg, switch) => {
+            hit(arg)
+                || switch.sw_consts.iter().any(|(_, lam)| hit(lam))
+                || switch.sw_blocks.iter().any(|(_, lam)| hit(lam))
+                || switch.sw_failaction.as_deref().is_some_and(hit)
         }
-        Lambda::Lfor(_, lo, hi, _, body) => {
-            exception_id_destructed(lo, exn)
-                || exception_id_destructed(hi, exn)
-                || exception_id_destructed(body, exn)
+        RawLambda::LstringSwitch(arg, cases, default) => {
+            hit(arg) || cases.iter().any(|(_, lam)| hit(lam)) || default.as_deref().is_some_and(hit)
         }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            exception_id_destructed(iterable, exn) || exception_id_destructed(body, exn)
+        RawLambda::LstaticRaise(_, args) => args.iter().any(hit),
+        RawLambda::LifThenElse(cond, then_, else_) => hit(cond) || hit(then_) || hit(else_),
+        RawLambda::Lsequence(first, second) | RawLambda::Lwhile(first, second) => {
+            hit(first) || hit(second)
         }
-        Lambda::Lconst(_) | Lambda::LglobalModule(_) => false,
-        Lambda::Lapply(apply) => {
-            exception_id_destructed(&apply.ap_func, exn)
-                || apply
-                    .ap_args
-                    .iter()
-                    .any(|arg| exception_id_destructed(arg, exn))
-        }
-        Lambda::Lswitch(arg, switch) => {
-            exception_id_destructed(arg, exn)
-                || switch
-                    .sw_consts
-                    .iter()
-                    .any(|(_, lam)| exception_id_destructed(lam, exn))
-                || switch
-                    .sw_blocks
-                    .iter()
-                    .any(|(_, lam)| exception_id_destructed(lam, exn))
-                || switch
-                    .sw_failaction
-                    .as_deref()
-                    .is_some_and(|lam| exception_id_destructed(lam, exn))
-        }
-        Lambda::LstringSwitch(arg, cases, default) => {
-            exception_id_destructed(arg, exn)
-                || cases
-                    .iter()
-                    .any(|(_, lam)| exception_id_destructed(lam, exn))
-                || default
-                    .as_deref()
-                    .is_some_and(|lam| exception_id_destructed(lam, exn))
-        }
-        Lambda::LstaticRaise(_, args) => args.iter().any(|arg| exception_id_destructed(arg, exn)),
-        Lambda::LifThenElse(cond, then_, else_) => {
-            exception_id_destructed(cond, exn)
-                || exception_id_destructed(then_, exn)
-                || exception_id_destructed(else_, exn)
-        }
-        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-            exception_id_destructed(first, exn) || exception_id_destructed(second, exn)
-        }
-        Lambda::Lbreak | Lambda::Lcontinue => false,
+        RawLambda::Lbreak | RawLambda::Lcontinue => false,
+        RawLambda::Lshared(inner) => hit(inner),
     }
 }
 
-/// The largest ident stamp in `raw`, used to start fresh lowering idents
-/// after every stamp the raw tree already uses.
+#[cfg(test)]
 fn max_ident_stamp(raw: &RawLambda) -> i32 {
     fn visit_ident(max_stamp: &mut i32, id: &Ident) {
         *max_stamp = (*max_stamp).max(id.stamp());
@@ -1139,25 +1094,21 @@ pub(crate) fn max_ident_stamp_for_test(raw: &RawLambda) -> i32 {
     max_ident_stamp(raw)
 }
 
-pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lambda {
+/// The Lambda `Translmod.transl_implementation` returns, as `-drawlambda`
+/// prints it, and the module's exported identifiers. Lowering creates no
+/// identifiers: the conversion made them where OCaml's translation does.
+pub fn lower_to_translmod_lambda(raw: RawLambda) -> (Lambda, HashSet<Ident>) {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    let id_gen = IdGenerator::with_start_stamp(start_stamp);
-    LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
+    let lambda = LoweringContext.lower_lambda(raw);
+    (lambda, exported_idents)
 }
 
-/// Lowers with the caller's id generator, which the indexed pipeline keeps
-/// through optimization and JS lowering.
-pub(crate) fn lower_to_lambda_with_id_gen(raw: RawLambda, id_gen: &IdGenerator) -> Lambda {
-    let mut exported_idents = HashSet::new();
-    collect_exported_idents(&raw, &mut exported_idents);
-    LoweringContext::with_id_gen(exported_idents, id_gen).lower_lambda(raw)
-}
-
-/// Lower raw lambda into the existing JS-facing Lambda IR.
+/// The lowered Lambda after `Lam_pass_collapse_var_aliases`, the first pass
+/// of `Lam_compile_main.compile` (lam_compile_main.ml:288-290).
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
-    let start_stamp = max_ident_stamp(&raw);
-    lower_to_lambda_with_start_stamp(raw, start_stamp)
+    let (lambda, exports) = lower_to_translmod_lambda(raw);
+    crate::lambda::lam_pass_collapse_var_aliases::collapse(lambda, &exports)
 }
 
 #[cfg(test)]
@@ -1168,30 +1119,6 @@ mod tests {
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
     use crate::lambda::lam_primitive::{JsRawInfo, Mutable};
-
-    #[test]
-    fn shared_generator_entrypoint_preserves_the_caller_owned_stamp_stream() {
-        let generator = IdGenerator::with_start_stamp(41);
-        let exception = Ident::new("caught", 7, crate::ident::IdentFlags::NONE);
-        let lowered = lower_to_lambda_with_id_gen(
-            RawLambda::LtryWith(
-                Box::new(RawLambda::unit()),
-                exception,
-                Box::new(RawLambda::var(exception)),
-            ),
-            &generator,
-        );
-        let Lambda::LtryWith(_, raw_exception, handler) = lowered else {
-            panic!("expected lowered try-with");
-        };
-        assert_eq!(raw_exception.name(), "raw_caught");
-        assert_eq!(raw_exception.stamp(), 42);
-        assert!(matches!(
-            *handler,
-            Lambda::Llet(LetKind::StrictOpt, _, _, _)
-        ));
-        assert_eq!(generator.create("after_lower").stamp(), 43);
-    }
 
     #[test]
     fn lowers_unit_constructor_pointer_to_unit_constant() {

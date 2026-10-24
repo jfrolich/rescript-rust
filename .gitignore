@@ -118,3 +118,9 @@ tests/tests/src/**/*.js
 .parity-cache/
 .claude
 .fuzz/
+
+# JS written by scripts/test_error_output_parity.sh compiler cases
+/src/
+
+# rewatch build lock guards
+.build.lock.guard

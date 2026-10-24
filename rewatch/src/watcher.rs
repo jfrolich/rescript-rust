@@ -1,5 +1,5 @@
 use crate::build;
-use crate::build::build_types::{BuildCommandState, BuildMode, SourceType};
+use crate::build::build_types::{BuildCommandState, SourceType};
 use crate::build::clean;
 use crate::cmd;
 use crate::config::{self, SourceMapCommand};
@@ -512,9 +512,7 @@ fn watch_loop(
                         // Reinitialization compares the sources and outputs on disk with the
                         // recorded build to remove what deleted sources and configuration
                         // changes left behind: record the builds this watcher made first.
-                        if build_state.build_mode().is_in_process() {
-                            clean::write_in_process_record(&build_state);
-                        }
+                        clean::write_in_process_record(&build_state);
                         let mut next_build_state = match build::initialize_build(
                             None,
                             filter,
@@ -522,8 +520,6 @@ fn watch_loop(
                             path,
                             plain_output,
                             build_state.get_warn_error_override(),
-                            build_state.build_mode(),
-                            build_state.dump_typed_sexp,
                             prod,
                             features.clone(),
                             SourceMapCommand::Watch,
@@ -555,9 +551,7 @@ fn watch_loop(
                             false,
                             plain_output,
                         );
-                        if build_state.build_mode().is_in_process() {
-                            clean::remove_obsolete_outputs_of_build(&build_state);
-                        }
+                        clean::remove_obsolete_outputs_of_build(&build_state);
                         result.map_err(|e| anyhow::anyhow!("{e}"))
                     });
                 match rebuild {
@@ -605,8 +599,6 @@ pub fn start(
     after_build: Option<String>,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: BuildMode,
-    dump_typed_sexp: bool,
     clear_screen: bool,
     prod: bool,
     features: Option<Vec<String>>,
@@ -626,15 +618,12 @@ pub fn start(
 
     // In-process builds write no typed artifacts: editor tooling asks the
     // watcher, which compiles them on demand.
-    let (tooling_server, tooling_requests) = match build_mode.is_in_process() {
-        true => match crate::tooling_server::start(path) {
-            Ok((server, requests)) => (Some(server), Some(requests)),
-            Err(err) => {
-                log::warn!("Could not start the editor tooling server: {err}");
-                (None, None)
-            }
-        },
-        false => (None, None),
+    let (tooling_server, tooling_requests) = match crate::tooling_server::start(path) {
+        Ok((server, requests)) => (Some(server), Some(requests)),
+        Err(err) => {
+            log::warn!("Could not start the editor tooling server: {err}");
+            (None, None)
+        }
     };
 
     // Initialization can clean previous build artifacts, so it has to be serialized
@@ -648,8 +637,6 @@ pub fn start(
                 path,
                 plain_output,
                 warn_error.clone(),
-                build_mode,
-                dump_typed_sexp,
                 prod,
                 features.clone(),
                 SourceMapCommand::Watch,
@@ -789,8 +776,6 @@ mod tests {
             packages,
             compiler,
             None,
-            BuildMode::ExternalBsc,
-            false,
             None,
             SourceMapCommand::Watch,
         );
@@ -838,8 +823,6 @@ mod tests {
             dependents: AHashSet::new(),
             package_name: "test-package".to_string(),
             compile_dirty: false,
-            last_compiled_cmi: None,
-            last_compiled_cmt: None,
             deps_dirty: false,
             is_type_dev: false,
         }

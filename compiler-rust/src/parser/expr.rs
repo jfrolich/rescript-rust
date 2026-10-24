@@ -519,39 +519,6 @@ pub fn parse_ternary_expr(p: &mut Parser<'_>, left_operand: Expression) -> Expre
 pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expression {
     let start_pos_idx = p.start_pos_idx();
 
-    // Check for comptime builtin expressions before parsing attributes.
-    // @typeInfo(T), @field(v, name), @compileError(msg), @typeName(T)
-    // are expressions, not attributes.
-    if p.token == Token::At {
-        let is_comptime_builtin = p.lookahead(|p| {
-            p.next(); // skip @
-            match &p.token {
-                Token::Lident(s) => matches!(
-                    s.as_ref(),
-                    "typeInfo"
-                        | "field"
-                        | "compileError"
-                        | "typeName"
-                        | "record"
-                        | "variant"
-                        | "constructor"
-                        | "variantOf"
-                        | "hasTag"
-                        | "argAt"
-                        | "buildVariant"
-                        | "variantCase"
-                        | "buildRecord"
-                        | "recordField"
-                ),
-                _ => false,
-            }
-        });
-        if is_comptime_builtin {
-            let expr = parse_comptime_builtin_expr(p);
-            return parse_primary_expr(p, expr, false);
-        }
-    }
-
     // Parse leading attributes first (e.g., @attr expr)
     let mut attrs = parse_attributes(p);
 
@@ -964,7 +931,6 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
                         expr: None,
                         pat: unit_pat,
                         start_pos_idx: lparen_pos_idx,
-                        comptime: false,
                     },
                 ));
             } else if had_dot {
@@ -1251,7 +1217,6 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 expr: default,
                 pat,
                 start_pos_idx,
-                comptime: false,
             },
         ));
     }
@@ -1328,7 +1293,6 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                     expr: default,
                     pat,
                     start_pos_idx,
-                    comptime: false,
                 },
             ));
         }
@@ -1340,7 +1304,6 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
                 expr: None,
                 pat,
                 start_pos_idx,
-                comptime: false,
             },
         ))
     }
@@ -1493,18 +1456,6 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 ))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
-            }
-        }
-        // `inline for` — comptime loop unrolling
-        Token::Lident(s) if s == "inline" => {
-            let is_inline_for = p.lookahead(|p| {
-                p.next();
-                p.token == Token::For
-            });
-            if is_inline_for {
-                parse_inline_for_expr(p)
-            } else {
-                parse_value_or_constructor(p)
             }
         }
         Token::Uident(_) | Token::Lident(_) => parse_value_or_constructor(p),
@@ -3344,7 +3295,6 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                         expr: None,
                         pat,
                         start_pos_idx,
-                        comptime: false,
                     };
                     let a = parse_es6_arrow_expression_internal(
                         p,
@@ -3646,13 +3596,7 @@ fn parse_record_expr(
 /// OCaml `parse_expr_block_item` (compiler/syntax/src/res_core.ml:3574-3658).
 fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
-    // Rust-only comptime builtins (`@typeInfo(...)` etc.) are expressions, not
-    // attributes; `parse_expr` handles them.
-    let attrs = if is_comptime_builtin_start(p) {
-        Attributes::new()
-    } else {
-        parse_attributes(p)
-    };
+    let attrs = parse_attributes(p);
     match p.token {
         Token::Break | Token::Continue => {
             let is_break = p.token == Token::Break;
@@ -3797,34 +3741,6 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
             }
         }
     }
-}
-
-/// Whether the current token starts a Rust-only comptime builtin expression.
-fn is_comptime_builtin_start(p: &mut Parser<'_>) -> bool {
-    p.token == Token::At
-        && p.lookahead(|p| {
-            p.next();
-            matches!(
-                &p.token,
-                Token::Lident(s) if matches!(
-                    s.as_ref(),
-                    "typeInfo"
-                        | "field"
-                        | "compileError"
-                        | "typeName"
-                        | "record"
-                        | "variant"
-                        | "constructor"
-                        | "variantOf"
-                        | "hasTag"
-                        | "argAt"
-                        | "buildVariant"
-                        | "variantCase"
-                        | "buildRecord"
-                        | "recordField"
-                )
-            )
-        })
 }
 
 /// OCaml `parse_expr_block` without `?first` (res_core.ml:3672-3688).
@@ -4522,360 +4438,6 @@ fn normalize_for_of_pattern(
                 ppat_attributes: super::ast::Attributes::new(),
             }
         }
-    }
-}
-
-/// Parse a comptime builtin expression: @typeInfo(T), @field(v, name), @compileError(msg), @typeName(T).
-fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
-    let start_pos_idx = p.start_pos_idx();
-    p.expect(Token::At);
-
-    let name = match &p.token {
-        Token::Lident(s) => s.to_string(),
-        _ => {
-            p.err(super::diagnostics::DiagnosticCategory::Message(
-                "Expected comptime builtin name after @".to_string(),
-            ));
-            return ast_helper::make_constant(
-                Constant::string(""),
-                p.mk_loc_idx_to_prev_end(start_pos_idx),
-            );
-        }
-    };
-    p.next(); // consume the name
-
-    p.expect(Token::Lparen);
-
-    let desc = match name.as_str() {
-        "typeInfo" | "typeName" => {
-            // @typeInfo(T) / @typeName(T) — parse a type
-            let core_type = super::typ::parse_typ_expr(p);
-            p.expect(Token::Rparen);
-            let ct_idx = p.arena_mut().push_core_type(core_type);
-            if name == "typeInfo" {
-                ExpressionDesc::Pexp_comptime_typeinfo(ct_idx)
-            } else {
-                ExpressionDesc::Pexp_comptime_typename(ct_idx)
-            }
-        }
-        "field" => {
-            // @field(value, "name") — parse two expressions
-            let value_expr = parse_expr(p);
-            p.expect(Token::Comma);
-            let name_expr = parse_expr(p);
-            p.expect(Token::Rparen);
-            let v_idx = p.arena_mut().push_expr(value_expr);
-            let n_idx = p.arena_mut().push_expr(name_expr);
-            ExpressionDesc::Pexp_comptime_field(Box::new((v_idx, n_idx)))
-        }
-        "compileError" => {
-            // @compileError("msg") — parse one expression
-            let msg_expr = parse_expr(p);
-            p.expect(Token::Rparen);
-            let m_idx = p.arena_mut().push_expr(msg_expr);
-            ExpressionDesc::Pexp_comptime_compile_error(m_idx)
-        }
-        "record" => {
-            // @record(TypeName, arrayOfFieldSpecs)
-            // The second arg is an expression: array literal, inline for, or variable
-            let core_type = super::typ::parse_typ_expr(p);
-            let ct_idx = p.arena_mut().push_core_type(core_type);
-            p.expect(Token::Comma);
-            let fields_expr = parse_expr(p);
-            let fields_idx = p.arena_mut().push_expr(fields_expr);
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, fields_idx)))
-        }
-        "variantOf" => {
-            // @variantOf(value) decomposes a variant value at runtime into
-            // (constructor_name, arguments_array). Expands to a %raw IIFE
-            // so the user doesn't have to write the JS themselves.
-            let value_expr = parse_expr(p);
-            p.expect(Token::Rparen);
-            let value_idx = p.arena_mut().push_expr(value_expr);
-
-            // The JS helper: string for no-arg variants, {TAG, _0, _1, ...}
-            // for arg-carrying variants.
-            const JS_BODY: &str = "function(v) { if (typeof v === \"string\") return [v, []]; var a = []; var i = 0; while (v[\"_\" + i] !== undefined) { a.push(v[\"_\" + i]); i++; } return [v.TAG, a]; }";
-            let loc = LocIdx::none();
-
-            let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                    Constant::RawSource(std::borrow::Cow::Owned(JS_BODY.to_string())),
-                ))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let js_str_idx = p.arena_mut().push_expr(js_str_expr);
-
-            let eval_item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    js_str_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc: loc,
-            };
-            let payload = Payload::PStr(Box::new(vec![eval_item]));
-
-            let raw_name_idx = p.arena_mut().push_string("raw");
-            let ext_name = Located {
-                txt: raw_name_idx,
-                loc,
-            };
-            let raw_ext = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                    ext_name, payload,
-                )))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let raw_ext_idx = p.arena_mut().push_expr(raw_ext);
-
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: raw_ext_idx,
-                args: vec![(ArgLabel::Nolabel, value_idx)],
-                partial: false,
-                transformed_jsx: false,
-            }))
-        }
-        "hasTag" => {
-            // @hasTag(value, "CtorName") — runtime check whether `value` is
-            // the given constructor. Works for both no-arg variants (bare
-            // strings) and arg-carrying variants ({TAG, _0, ...} objects).
-            let value_expr = parse_expr(p);
-            p.expect(Token::Comma);
-            let name_expr = parse_expr(p);
-            p.expect(Token::Rparen);
-            let value_idx = p.arena_mut().push_expr(value_expr);
-            let name_idx = p.arena_mut().push_expr(name_expr);
-
-            const JS_BODY: &str =
-                "function(v, n) { return (typeof v === \"string\" ? v : v.TAG) === n; }";
-            let loc = LocIdx::none();
-
-            let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                    Constant::RawSource(std::borrow::Cow::Owned(JS_BODY.to_string())),
-                ))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let js_str_idx = p.arena_mut().push_expr(js_str_expr);
-
-            let eval_item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    js_str_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc: loc,
-            };
-            let payload = Payload::PStr(Box::new(vec![eval_item]));
-
-            let raw_name_idx = p.arena_mut().push_string("raw");
-            let ext_name = Located {
-                txt: raw_name_idx,
-                loc,
-            };
-            let raw_ext = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                    ext_name, payload,
-                )))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let raw_ext_idx = p.arena_mut().push_expr(raw_ext);
-
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: raw_ext_idx,
-                args: vec![
-                    (ArgLabel::Nolabel, value_idx),
-                    (ArgLabel::Nolabel, name_idx),
-                ],
-                partial: false,
-                transformed_jsx: false,
-            }))
-        }
-        "argAt" => {
-            // @argAt(value, index, argType) — runtime access to the i-th
-            // constructor argument, statically typed as `argType` so the
-            // result can be passed to type-directed @comptime functions
-            // (e.g. recursively to `encode`). Emits `value["_" + i]` as
-            // the runtime expression; the type constraint forces the
-            // typechecker to unify the polymorphic %raw return with the
-            // caller-supplied argType.
-            let value_expr = parse_expr(p);
-            p.expect(Token::Comma);
-            let idx_expr = parse_expr(p);
-            p.expect(Token::Comma);
-            let arg_core_type = super::typ::parse_typ_expr(p);
-            p.expect(Token::Rparen);
-            let value_idx = p.arena_mut().push_expr(value_expr);
-            let i_idx = p.arena_mut().push_expr(idx_expr);
-            let ct_idx = p.arena_mut().push_core_type(arg_core_type);
-
-            const JS_BODY: &str = "function(v, i) { return v[\"_\" + i]; }";
-            let loc = LocIdx::none();
-
-            let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                    Constant::RawSource(std::borrow::Cow::Owned(JS_BODY.to_string())),
-                ))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let js_str_idx = p.arena_mut().push_expr(js_str_expr);
-
-            let eval_item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    js_str_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc: loc,
-            };
-            let payload = Payload::PStr(Box::new(vec![eval_item]));
-
-            let raw_name_idx = p.arena_mut().push_string("raw");
-            let ext_name = Located {
-                txt: raw_name_idx,
-                loc,
-            };
-            let raw_ext = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
-                    ext_name, payload,
-                )))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let raw_ext_idx = p.arena_mut().push_expr(raw_ext);
-
-            let apply_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                    funct: raw_ext_idx,
-                    args: vec![(ArgLabel::Nolabel, value_idx), (ArgLabel::Nolabel, i_idx)],
-                    partial: false,
-                    transformed_jsx: false,
-                }))),
-                pexp_loc: loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let apply_idx = p.arena_mut().push_expr(apply_expr);
-
-            ExpressionDesc::Pexp_constraint(Box::new((apply_idx, ct_idx)))
-        }
-        "variant" | "constructor" => {
-            // @variant / @constructor(TypeName, "CtorName", payload?) —
-            // synonyms that construct a variant value. `@constructor` is the
-            // clearer name; `@variant` is kept for back-compat.
-            let core_type = super::typ::parse_typ_expr(p);
-            let ct_idx = p.arena_mut().push_core_type(core_type);
-            p.expect(Token::Comma);
-            let ctor_name_expr = parse_expr(p);
-            let ctor_idx = p.arena_mut().push_expr(ctor_name_expr);
-            let payload = if p.token == Token::Comma {
-                p.next();
-                if p.token == Token::Rparen {
-                    None
-                } else {
-                    let payload_expr = parse_expr(p);
-                    Some(p.arena_mut().push_expr(payload_expr))
-                }
-            } else {
-                None
-            };
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_variant(Box::new((ct_idx, ctor_idx, payload)))
-        }
-        "buildVariant" => {
-            // @buildVariant(arrayOrInlineForOfVariantCases) — produces a variant TYPE
-            let cases_expr = parse_expr(p);
-            let cases_idx = p.arena_mut().push_expr(cases_expr);
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_build_variant(cases_idx)
-        }
-        "variantCase" => {
-            // @variantCase({name: "Name", as_?: "..."}) — describes one constructor
-            let rec_expr = parse_expr(p);
-            let rec_idx = p.arena_mut().push_expr(rec_expr);
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_variant_case(rec_idx)
-        }
-        "buildRecord" => {
-            // @buildRecord(arrayOrInlineForOfRecordFields) — produces a record TYPE
-            let fields_expr = parse_expr(p);
-            let fields_idx = p.arena_mut().push_expr(fields_expr);
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_build_record(fields_idx)
-        }
-        "recordField" => {
-            // @recordField({name, typ, optional?}) — describes one field
-            let rec_expr = parse_expr(p);
-            let rec_idx = p.arena_mut().push_expr(rec_expr);
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_comptime_record_field(rec_idx)
-        }
-        _ => {
-            p.err(super::diagnostics::DiagnosticCategory::Message(format!(
-                "Unknown comptime builtin @{}",
-                name
-            )));
-            p.expect(Token::Rparen);
-            ExpressionDesc::Pexp_construct(
-                with_loc(p.push_lident_static("()"), LocIdx::none()),
-                ctor_args(Vec::new(), LocIdx::none()),
-            )
-        }
-    };
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    Expression {
-        pexp_desc: Box::new(desc),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    }
-}
-
-/// Parse an inline for expression: `inline for pat in collection { body }`.
-/// Used for comptime loop unrolling.
-fn parse_inline_for_expr(p: &mut Parser<'_>) -> Expression {
-    let start_pos_idx = p.start_pos_idx();
-    // Consume `inline`
-    p.next();
-    // Consume `for`
-    p.expect(Token::For);
-
-    p.leave_breadcrumb(Grammar::ExprFor);
-    p.begin_region();
-
-    let pat = {
-        p.leave_breadcrumb(Grammar::Pattern);
-        let pat = super::pattern::parse_pattern(p);
-        p.eat_breadcrumb();
-        pat
-    };
-
-    p.expect(Token::In);
-    let collection = parse_expr_with_context(p, ExprContext::When);
-
-    p.expect(Token::Lbrace);
-    let body = parse_expr_block(p);
-    p.expect(Token::Rbrace);
-
-    p.eat_breadcrumb();
-    p.end_region();
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    Expression {
-        pexp_desc: {
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let coll_idx = p.arena_mut().push_expr(collection);
-            let body_idx = p.arena_mut().push_expr(body);
-            Box::new(ExpressionDesc::Pexp_inline_for(Box::new((
-                pat_idx, coll_idx, body_idx,
-            ))))
-        },
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
     }
 }
 

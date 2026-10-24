@@ -9,7 +9,8 @@
 # 2. sexp-locs-ppx parity - Post-PPX AST structure + locations match
 #
 # Compiler binary output parity (using bsc -bs-ast):
-# 3. bsc-ast parity - Full compiler binary AST output is byte-identical
+# 3. bsc-ast parity - Full compiler binary AST output holds the same values
+#    (marshal sharing of repeated strings may differ)
 #    (includes dependency extraction + marshalled parsetree)
 #
 # Spice PPX parity (using bsc -bs-ast):
@@ -188,11 +189,12 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 # Parser executables (for sexp output - readable diffs)
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
+RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 
 # Compiler executables (for bsc -bs-ast output - production format)
-RUST_BSC="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc"
+RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$($PROJECT_ROOT/scripts/platform.sh)/bin/bsc.exe"
 
 # Spice PPX parity configuration
@@ -225,7 +227,7 @@ fi
 
 if [[ ! -x "$RUST_PARSER" ]]; then
     echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
     echo "This parity script expects debug artifacts for iteration."
     exit 1
 fi
@@ -238,7 +240,7 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
     echo "This parity script expects debug artifacts for iteration."
     exit 1
 fi
@@ -551,9 +553,13 @@ test_single_file() {
                     rust_ast_file="$rust_iast_file"
                 fi
                 if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
-                    if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
+                    # Compare decoded values: the encoders may share repeated
+                    # strings differently, which a reader cannot observe.
+                    if ! python3 "$INSPECT_SCRIPT" same-values "$ocaml_ast_file" "$rust_ast_file" > "$file_temp/bsc-ast.values" 2>&1; then
                         bsc_ast_diff=1
                         {
+                            cat "$file_temp/bsc-ast.values"
+                            echo ""
                             echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
                             echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
                             echo ""
@@ -1053,7 +1059,7 @@ echo ""
 echo "  ${BOLD}bsc-ast Byte Parity:${RESET}"
 echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
 echo "    bsc-ast reference skips:  $((TOTAL_FILES - bsc_ast_checked_count - sexp_locs_ppx_spice_checked_count))"
-echo "    bsc-ast byte differences: $bsc_ast_byte_diff_count"
+echo "    bsc-ast value differences: $bsc_ast_byte_diff_count"
 echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
@@ -1278,7 +1284,7 @@ if [[ $sexp_locs_ppx_spice_diff_count -gt 0 ]]; then
 fi
 
 if [[ $bsc_ast_parity_diff_count -gt 0 ]]; then
-    echo -e "${RED}${BOLD}FAILED: $bsc_ast_parity_diff_count files have bsc-ast byte differences${RESET}"
+    echo -e "${RED}${BOLD}FAILED: $bsc_ast_parity_diff_count files have bsc-ast value differences${RESET}"
     all_pass=false
     exit_code=1
 fi

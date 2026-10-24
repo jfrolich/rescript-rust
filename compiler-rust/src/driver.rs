@@ -256,21 +256,7 @@ fn expression_has_string_literal(
             let (_, payload) = &**inner;
             payload_has_string_literal(payload, value, arena)
         }
-        ED::Pexp_ident(_)
-        | ED::Pexp_break
-        | ED::Pexp_continue
-        | ED::Pexp_jsx_element(_)
-        | ED::Pexp_inline_for(_)
-        | ED::Pexp_comptime_typeinfo(_)
-        | ED::Pexp_comptime_field(_)
-        | ED::Pexp_comptime_compile_error(_)
-        | ED::Pexp_comptime_typename(_)
-        | ED::Pexp_comptime_record(_)
-        | ED::Pexp_comptime_variant(_)
-        | ED::Pexp_comptime_build_variant(_)
-        | ED::Pexp_comptime_variant_case(_)
-        | ED::Pexp_comptime_build_record(_)
-        | ED::Pexp_comptime_record_field(_) => false,
+        ED::Pexp_ident(_) | ED::Pexp_break | ED::Pexp_continue | ED::Pexp_jsx_element(_) => false,
     }
 }
 
@@ -445,6 +431,61 @@ pub struct JsOutput {
     pub source_map: Option<String>,
 }
 
+/// An intermediate representation an in-process compile can capture, printed
+/// as the matching `bsc` flag prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DumpKind {
+    /// `-dtyped-sexp`
+    TypedTree,
+    /// `-dtyped-sexp-locs`
+    TypedTreeLocs,
+    /// `-drawlambda`
+    RawLambda,
+    /// `-dlambda-sexp`
+    Lambda,
+    /// `-dlambda-sexp-locs`
+    LambdaLocs,
+}
+
+impl DumpKind {
+    pub const ALL: [DumpKind; 5] = [
+        DumpKind::TypedTree,
+        DumpKind::TypedTreeLocs,
+        DumpKind::RawLambda,
+        DumpKind::Lambda,
+        DumpKind::LambdaLocs,
+    ];
+
+    /// The name used on the command line and as the dump file extension.
+    pub fn name(self) -> &'static str {
+        match self {
+            DumpKind::TypedTree => "typedtree",
+            DumpKind::TypedTreeLocs => "typedtree-locs",
+            DumpKind::RawLambda => "rawlambda",
+            DumpKind::Lambda => "lambda",
+            DumpKind::LambdaLocs => "lambda-locs",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<DumpKind> {
+        DumpKind::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    fn is_lambda(self) -> bool {
+        matches!(
+            self,
+            DumpKind::RawLambda | DumpKind::Lambda | DumpKind::LambdaLocs
+        )
+    }
+}
+
+/// The dump's bytes, one `char` per byte. Dump printers write source text
+/// byte for byte, so the bytes need not be UTF-8; writers turn each `char`
+/// back into its byte.
+fn latin1_dump(bytes: Vec<u8>) -> String {
+    bytes.into_iter().map(char::from).collect()
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -533,6 +574,12 @@ pub struct CompilerOptions {
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
+    /// Where the file compile finds the interface's `.cmi`, spelled as its
+    /// `-I` entry (`find_in_path_uncap`, typemod.ml:1742-1749), for the
+    /// interface-mismatch report: a build's is `../ocaml`, its package's
+    /// `lib/ocaml` seen from `lib/bs`. `None`: next to the source, where
+    /// `bsc` writes it.
+    pub interface_cmi_dir: Option<PathBuf>,
     /// GenType configuration derived from `-bs-gentype-*` flags.
     pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
     /// Build-scoped GenType module resolver shared by in-process compilations.
@@ -543,6 +590,9 @@ pub struct CompilerOptions {
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
+    /// Intermediate representations an in-process compile captures into its
+    /// result's `dumps`, in this order.
+    pub dumps: Vec<DumpKind>,
     /// Build typed/lambda/JS IR metadata but skip rendering JavaScript text.
     /// Used by runtime seeding, which only needs signatures, purity, and
     /// closed constants in memory.
@@ -740,10 +790,12 @@ impl Default for CompilerOptions {
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
+            interface_cmi_dir: None,
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
             capture_intermediates: false,
+            dumps: Vec::new(),
             skip_js_render: false,
             publish_in_process_signature: true,
             frontend_already_reported: false,
@@ -1839,14 +1891,7 @@ fn invalid_enabled_let_unwrap_in_expr(
             }),
         ExpressionDesc::Pexp_field(owner, _)
         | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
-            invalid_enabled_let_unwrap_in_expr(*owner, arena)
-        }
+        | ExpressionDesc::Pexp_await(owner) => invalid_enabled_let_unwrap_in_expr(*owner, arena),
         ExpressionDesc::Pexp_object_get(inner) => {
             invalid_enabled_let_unwrap_in_expr(inner.0, arena)
         }
@@ -1874,9 +1919,7 @@ fn invalid_enabled_let_unwrap_in_expr(
         ExpressionDesc::Pexp_for(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena)
             .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
             .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.4, arena)),
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => {
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
             invalid_enabled_let_unwrap_in_expr(inner.1, arena)
                 .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
         }
@@ -1896,20 +1939,6 @@ fn invalid_enabled_let_unwrap_in_expr(
             invalid_enabled_let_unwrap_in_mod_expr(*mod_expr, arena)
         }
         ExpressionDesc::Pexp_open(inner) => invalid_enabled_let_unwrap_in_expr(inner.2, arena),
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
-                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.1, arena).or_else(|| {
-                inner
-                    .2
-                    .and_then(|payload| invalid_enabled_let_unwrap_in_expr(payload, arena))
-            })
-        }
         _ => None,
     }
 }
@@ -2041,14 +2070,7 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             }),
         ExpressionDesc::Pexp_field(owner, _)
         | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
-            disabled_let_unwrap_loc_in_expr(*owner, arena)
-        }
+        | ExpressionDesc::Pexp_await(owner) => disabled_let_unwrap_loc_in_expr(*owner, arena),
         ExpressionDesc::Pexp_object_get(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_setfield(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
@@ -2070,10 +2092,10 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
         ExpressionDesc::Pexp_for(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.4, arena)),
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
+            disabled_let_unwrap_loc_in_expr(inner.1, arena)
+                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
+        }
         ExpressionDesc::Pexp_constraint(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_coerce(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
         ExpressionDesc::Pexp_letmodule(inner) => {
@@ -2086,20 +2108,6 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             disabled_let_unwrap_loc_in_mod_expr(*mod_expr, arena)
         }
         ExpressionDesc::Pexp_open(inner) => disabled_let_unwrap_loc_in_expr(inner.2, arena),
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.0, arena)
-                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
-        }
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.1, arena)
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.1, arena).or_else(|| {
-                inner
-                    .2
-                    .and_then(|payload| disabled_let_unwrap_loc_in_expr(payload, arena))
-            })
-        }
         _ => None,
     }
 }
@@ -10768,19 +10776,6 @@ fn compile_source_to_js_with_options_inner(
         || type_warnings_have_errors(&raw_warnings);
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
-    if options.dump_lambda {
-        use std::io::Write;
-        let mut stderr = std::io::stderr();
-        let mut raw_buf = Vec::new();
-        crate::raw_lambda::print::print_raw_lambda(&raw_lambda, &mut raw_buf);
-        raw_buf.push(b'\n');
-        let _ = stderr.write_all(&raw_buf);
-        if std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some() {
-            std::process::exit(0);
-        }
-        let _ = stderr.flush();
-    }
-
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.type_context_stamp = type_ctx.current_stamp();
@@ -10789,10 +10784,24 @@ fn compile_source_to_js_with_options_inner(
         trace.raw_lambda = format!("{raw_lambda:#?}");
     }
 
-    let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-        raw_lambda,
-        raw_lambda_current_stamp,
-    );
+    let (lowered_lambda, export_idents) =
+        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda);
+    // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
+    if options.dump_lambda {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        crate::lambda::printlambda::print_lambda(&lowered_lambda, &mut buf);
+        buf.push(b'\n');
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(&buf);
+        let _ = stderr.flush();
+        if std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some() {
+            std::process::exit(0);
+        }
+    }
+    // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
+    let lowered_lambda =
+        crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents);
     if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
         return Err(duplicate_export_error(filename, &name));
     }
@@ -13003,6 +13012,8 @@ pub struct InProcessCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// The intermediate representations requested by `CompilerOptions::dumps`.
+    pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
 }
@@ -13027,6 +13038,8 @@ pub struct InProcessPreJsCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// The intermediate representations requested by `CompilerOptions::dumps`.
+    pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
     /// The units whose interface type checking read.
@@ -13072,6 +13085,8 @@ pub struct InProcessInterfaceResult {
     /// contains `@@genType.ignoreInterface`, GenType must select the
     /// implementation typed artifact for generated output.
     pub gentype_ignore_interface: bool,
+    /// The typed-tree dumps requested by `CompilerOptions::dumps`.
+    pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
     pub warnings: String,
     /// The units whose interface type checking read.
@@ -13119,6 +13134,46 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
         )
     })
     .with_context(|| format!("GenType failed for {filename}"))
+}
+
+/// Type-check an interface source in process, running the frontend as the
+/// file compile does (its warnings go to stderr).
+pub fn typecheck_interface_source_in_process(
+    source: &str,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> Result<InProcessInterfaceResult> {
+    let mut parser = Parser::new(filename, source);
+    let signature = module::parse_signature(&mut parser);
+    let mut frontend_output = String::new();
+    let frontend = run_interface_frontend(
+        &mut parser,
+        signature,
+        source,
+        filename,
+        options,
+        &mut frontend_output,
+    );
+    write_stderr(&frontend_output);
+    let frontend = frontend?;
+    let mut effective_options = options.clone();
+    effective_options.experimental_let_unwrap = frontend.experimental_let_unwrap;
+    let mut arena = parser.into_arena();
+    crate::types::typecore::prepare_typecheck_arena(&mut arena);
+    let result = typecheck_preprocessed_signature_in_process(
+        &arena,
+        &frontend.signature,
+        filename,
+        module_name,
+        &effective_options,
+        registry,
+    )?;
+    if frontend.warnings_fatal {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    Ok(result)
 }
 
 pub fn compile_source_in_process(
@@ -13299,20 +13354,39 @@ fn js_backend_compiler(
     compiler
 }
 
-fn finish_js_backend(mut compiler: LambdaCompiler, program: DepsProgram) -> JsBackendOutput {
+fn finish_js_backend(
+    mut compiler: LambdaCompiler,
+    program: DepsProgram,
+    options: &CompilerOptions,
+) -> Result<JsBackendOutput> {
+    // lam_compile_main.ml reports a primitive's Location error before the
+    // fatal-warnings check, as the file compile does.
+    if let Some(diagnostic) = compiler.take_diagnostic() {
+        let filename = options.source_filename.as_deref().unwrap_or("_none_");
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                &read_in_process_source(filename),
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
     let module_path_resolver = compiler
         .take_module_path_resolver()
         .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
-    (
+    Ok((
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
-    )
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13325,7 +13399,7 @@ fn compile_js_program_for_output(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> JsBackendOutput {
+) -> Result<JsBackendOutput> {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -13346,7 +13420,7 @@ fn compile_js_program_for_output(
         lowered_lambda,
         possible_required_modules,
     );
-    finish_js_backend(compiler, program)
+    finish_js_backend(compiler, program, options)
 }
 
 /// Single-target variant that consumes the lowered lambda. The pre-JS result
@@ -13363,7 +13437,7 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> JsBackendOutput {
+) -> Result<JsBackendOutput> {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -13385,7 +13459,7 @@ fn compile_js_program_for_output_owned(
         lowered_lambda,
         possible_required_modules,
     );
-    finish_js_backend(compiler, program)
+    finish_js_backend(compiler, program, options)
 }
 
 pub fn compile_preprocessed_structure_in_process(
@@ -13800,6 +13874,33 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let post_type_warning_start = tctx.warnings.len();
+    // js_implementation.ml:148-156 prints `-dtyped-sexp` here, before the
+    // signature is saved: `register_in_memory_signature` below finalizes the
+    // current unit's type paths in place (`allOptRec` becomes
+    // `Current.allOptRec`), which must not show in the dump.
+    let mut dumps: Vec<(DumpKind, String)> = Vec::new();
+    for kind in [DumpKind::TypedTree, DumpKind::TypedTreeLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::TypedTree {
+                crate::types::sexp_typedtree::print_typed_structure(
+                    arena,
+                    &type_ctx,
+                    &typed_structure,
+                    &mut buf,
+                )
+            } else {
+                crate::types::sexp_typedtree::print_typed_structure_with_locs(
+                    arena,
+                    &type_ctx,
+                    &typed_structure,
+                    &mut buf,
+                )
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
+    }
+
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
             &type_ctx,
@@ -13853,6 +13954,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let current_raw_sig = std::sync::Arc::new(
             crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx),
         );
+        // `save_signature` saves a copy (`Subst.signature (Subst.for_saving
+        // Subst.identity) sg`, env.ml:1949-1952): finalizing the saved paths
+        // (`t` -> `Current.t`) must not reach the typed tree's type nodes,
+        // which Lambda translation reads next (Typeopt expansions).
+        let signature_for_save =
+            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx);
         // typemod.ml:1778: `Builtin_attributes.deprecated_of_str ast`.
         internal_env.register_in_memory_signature(
             module_name,
@@ -13942,7 +14049,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_lambda_current_stamp,
         hoisted_functions,
         hoisted_exports,
-    ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
+    ) = match crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
         // The interface check above already computed the coercion; report
         // its inclusion warnings where the coercion is used, as before.
@@ -13970,22 +14077,32 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 lambda_start_stamp,
                 unit_name,
             );
-        raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
+        raw_converter.set_preserve_expanded_sparse_records(
+            options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
+        );
         raw_converter.set_no_assert_false(options.no_assert_false);
         raw_converter.set_noassert(options.noassert);
         raw_converter.set_warning_config(tctx.warning_config.clone());
         if let Some(persistent_env) = tctx.persistent_env.clone() {
             raw_converter.set_persistent_env(persistent_env);
         }
-        let raw_lambda = raw_converter
-            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        // An uncaught exception in Translmod (`Misc.fatal_error`) ends the
+        // file compile after the warnings it already printed; report it with
+        // the warnings this compile buffered.
+        let raw_lambda = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            raw_converter
+                .convert_structure_with_coercion(&typed_structure, &implementation_coercion)
+        })) {
+            Ok(raw_lambda) => raw_lambda,
+            Err(payload) => return Err(payload),
+        };
         let raw_warnings = raw_converter.take_warnings();
         let raw_diagnostic = raw_converter.take_diagnostic();
         let possible_required_modules = raw_converter.take_possible_required_modules();
         let raw_lambda_current_stamp = raw_converter.current_stamp();
         let hoisted_functions = raw_converter.take_hoisted_functions();
         let hoisted_exports = raw_converter.take_hoisted_exports();
-        (
+        Ok((
             raw_lambda,
             raw_warnings,
             raw_diagnostic,
@@ -13993,8 +14110,23 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
             hoisted_functions,
             hoisted_exports,
-        )
-    });
+        ))
+    }) {
+        Ok(converted) => converted,
+        Err(payload) => {
+            let Some(report) = crate::misc::uncaught_exception_report(&*payload) else {
+                std::panic::resume_unwind(payload);
+            };
+            return Err(UserDiagnostic::new(
+                format!(
+                    "{}{report}\n",
+                    format_type_warnings_lazy(arena, &source, filename, &tctx.warnings)
+                ),
+                2,
+            )
+            .into());
+        }
+    };
     // The file compile reports the typing warnings, then Translmod's
     // (js_implementation.ml:161-167); a Translmod error escapes before
     // `Warnings.check_fatal`.
@@ -14054,10 +14186,19 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.lower_lambda").entered();
-        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-            raw_lambda,
-            raw_lambda_current_stamp,
-        )
+        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda)
+    });
+    let (lowered_lambda, export_idents) = lowered_lambda;
+    // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
+    if options.dumps.contains(&DumpKind::RawLambda) {
+        let mut buf = Vec::new();
+        crate::lambda::printlambda::print_lambda(&lowered_lambda, &mut buf);
+        buf.push(b'\n');
+        dumps.push((DumpKind::RawLambda, latin1_dump(buf)));
+    }
+    // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
+    let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
+        crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents)
     });
     if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
         return Err(duplicate_export_error(filename, &name));
@@ -14072,6 +14213,18 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // different worker thread, so carry the module-local legacy stamp explicitly
     // instead of reading that worker's unrelated thread-local counter.
     let ident_stamp_at_js_boundary = crate::ident::Ident::current_local_stamp();
+
+    for kind in [DumpKind::Lambda, DumpKind::LambdaLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::Lambda {
+                crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, &mut buf)
+            } else {
+                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut buf)
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
+    }
 
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
@@ -14098,6 +14251,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
+        dumps,
         warnings,
         unit_reads,
         loaded_units: tctx
@@ -14178,7 +14332,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
-            )
+            )?
         } else {
             compile_js_program_for_output_owned(
                 lowered_lambda
@@ -14191,7 +14345,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
-            )
+            )?
         }
     };
     if !options.skip_js_render {
@@ -14234,7 +14388,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 Some(target.module_format),
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
-            );
+            )?;
             check_module_path_resolution_errors(
                 &program,
                 &module_path_resolver,
@@ -14318,6 +14472,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
+        dumps: pre_js.dumps,
         warnings: pre_js.warnings,
     })
 }
@@ -14413,6 +14568,18 @@ pub fn typecheck_preprocessed_signature_in_process(
     let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
+    }
+    let mut dumps: Vec<(DumpKind, String)> = Vec::new();
+    for kind in [DumpKind::TypedTree, DumpKind::TypedTreeLocs] {
+        if options.dumps.contains(&kind) {
+            let mut buf = Vec::new();
+            let _ = if kind == DumpKind::TypedTree {
+                print_typed_signature(arena, &type_ctx, &typed_signature, &mut buf)
+            } else {
+                print_typed_signature_with_locs(arena, &type_ctx, &typed_signature, &mut buf)
+            };
+            dumps.push((kind, latin1_dump(buf)));
+        }
     }
     let gentype_ignore_interface = options.gentype_config.is_some()
         && crate::gentype::annotation::signature_check_annotation(
@@ -14516,6 +14683,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         pers_struct,
         new_alias_rewrites,
         gentype_ignore_interface,
+        dumps,
         warnings,
         loaded_units: internal_env.loaded_units(),
         unit_reads,

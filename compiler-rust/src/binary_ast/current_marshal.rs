@@ -1286,7 +1286,8 @@ impl Marshal for ExpressionRecordField {
 impl Marshal for Expression {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let is_raw_expansion = is_raw_expansion_expr(self, w);
-        let is_external_raw_expansion = is_raw_expansion && is_external_raw_expansion_body(self, w);
+        let is_external_raw_expansion =
+            w.in_external_ext() && is_raw_expansion && is_external_raw_expansion_body(self, w);
         let is_external_ext = is_external_ext_expr(self, w);
         if is_external_raw_expansion {
             if let Some(obj_idx) = w.raw_expansion_expr(self.pexp_loc) {
@@ -1704,19 +1705,6 @@ impl Marshal for ExpressionDesc {
                 template.tag.marshal(w);
                 template.raw_sources.marshal(w);
                 template.values.marshal(w);
-            }
-            ExpressionDesc::Pexp_inline_for(_)
-            | ExpressionDesc::Pexp_comptime_typeinfo(_)
-            | ExpressionDesc::Pexp_comptime_field(_)
-            | ExpressionDesc::Pexp_comptime_compile_error(_)
-            | ExpressionDesc::Pexp_comptime_typename(_)
-            | ExpressionDesc::Pexp_comptime_record(_)
-            | ExpressionDesc::Pexp_comptime_variant(_)
-            | ExpressionDesc::Pexp_comptime_build_variant(_)
-            | ExpressionDesc::Pexp_comptime_variant_case(_)
-            | ExpressionDesc::Pexp_comptime_build_record(_)
-            | ExpressionDesc::Pexp_comptime_record_field(_) => {
-                unreachable!("comptime builtins eliminated before serialization")
             }
         }
     }

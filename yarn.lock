@@ -2058,7 +2058,6 @@ __metadata:
     "@rescript/win32-x64":
       optional: true
   bin:
-    bsc: cli/bsc.js
     rescript: cli/rescript.js
     rescript-tools: cli/rescript-tools.js
   languageName: unknown
