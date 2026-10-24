@@ -624,37 +624,68 @@ fn scrape_direct_persistent_alias_for_gentype(
     // later TypeEnv module-equation pass from compiler/gentype/Translation.ml:173-216
     // owns alias type declarations; re-scraping those local aliases here would
     // duplicate the same exports.
-    let DeclModuleType::MtyAlias(_, crate::types::path::Path::Pident(id)) = mty else {
+    let DeclModuleType::MtyAlias(_, alias_path) = mty else {
         return None;
     };
-    if !id.is_persistent() {
-        return None;
-    }
-    let alias_path = crate::types::path::Path::pident(*id);
-    let module_type = ctx
-        .get_gentype_raw_module_sig(id.name())
-        .or_else(|| ctx.get_or_load_raw_module_sig(id.name()))
-        .map(|sig| {
-            // OCaml compiler/ml/env.ml:865-875 resolves persistent Pident
-            // aliases through `find_pers_struct` and forces the raw `ps_sig`
-            // before Env.scrape_alias strengthens the result at
-            // compiler/ml/env.ml:1441-1446. Prefer that raw persistent
-            // signature so value descriptions keep their local type paths,
-            // matching GenType's alias-signature translation.
-            DeclModuleType::MtySignature(std::sync::Arc::new((*sig).clone()))
-        })
-        .or_else(|| {
-            env.lookup_module(&alias_path)
-                .ok()
-                .map(|md| md.md_type.clone())
-        })?;
+    let module_type = persistent_alias_module_type(ctx, env, alias_path)?;
     let strengthened = crate::types::ctype::strengthen_module_type_for_inclusion_path(
         ctx,
         env,
-        &alias_path,
+        alias_path,
         &module_type,
     );
     Some(strengthened)
+}
+
+/// The module type an alias to a persistent module, or to a module nested
+/// in one, resolves to (`Env.find_module ~alias:true`, compiler/ml/env.ml:
+/// 865-882): the unit's raw signature, then for each `.Name` the module
+/// declaration in the enclosing signature, following nested aliases.
+fn persistent_alias_module_type(
+    ctx: &crate::types::context::TypeContext,
+    env: &crate::types::env::Env,
+    path: &crate::types::path::Path,
+) -> Option<DeclModuleType> {
+    use crate::types::path::Path;
+    match path {
+        Path::Pident(id) => {
+            if !id.is_persistent() {
+                return None;
+            }
+            ctx.get_gentype_raw_module_sig(id.name())
+                .or_else(|| ctx.get_or_load_raw_module_sig(id.name()))
+                .map(|sig| {
+                    // OCaml compiler/ml/env.ml:865-875 resolves persistent
+                    // Pident aliases through `find_pers_struct` and forces the
+                    // raw `ps_sig` before Env.scrape_alias strengthens the
+                    // result at compiler/ml/env.ml:1441-1446. Prefer that raw
+                    // persistent signature so value descriptions keep their
+                    // local type paths, matching GenType's alias-signature
+                    // translation.
+                    DeclModuleType::MtySignature(std::sync::Arc::new((*sig).clone()))
+                })
+                .or_else(|| env.lookup_module(path).ok().map(|md| md.md_type.clone()))
+        }
+        Path::Pdot(parent, name, _) => {
+            let DeclModuleType::MtySignature(sig) = persistent_alias_module_type(ctx, env, parent)?
+            else {
+                return None;
+            };
+            let md_type = sig.iter().find_map(|item| match item {
+                crate::types::decl::SignatureItem::SigModule(id, md, _) if id.name() == name => {
+                    Some(md.md_type.clone())
+                }
+                _ => None,
+            })?;
+            match md_type {
+                DeclModuleType::MtyAlias(_, target) => {
+                    persistent_alias_module_type(ctx, env, &target)
+                }
+                other => Some(other),
+            }
+        }
+        Path::Papply(..) => None,
+    }
 }
 
 fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
