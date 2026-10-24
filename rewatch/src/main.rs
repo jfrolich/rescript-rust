@@ -125,8 +125,20 @@ fn run_main(otel_enabled: bool) -> Result<()> {
     let show_progress = log_level_filter >= LevelFilter::Info;
 
     match cli.command {
-        cli::Command::BuildReference { folder, bsc, prod } => {
-            if !build::plan::build_reference(Path::new(&folder), Path::new(&bsc), prod)? {
+        cli::Command::BuildReference {
+            folder,
+            bsc,
+            prod,
+            ppx,
+        } => {
+            let mut ppx_overrides = Vec::new();
+            for spec in ppx {
+                let Some((name, executable)) = spec.split_once('=') else {
+                    anyhow::bail!("--ppx expects SPEC=EXECUTABLE, got {spec}");
+                };
+                ppx_overrides.push((name.to_string(), std::fs::canonicalize(executable)?));
+            }
+            if !build::plan::build_reference(Path::new(&folder), Path::new(&bsc), prod, &ppx_overrides)? {
                 std::process::exit(1);
             }
             Ok(())

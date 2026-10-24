@@ -615,6 +615,10 @@ pub enum Command {
         /// Skip dev-dependencies and dev sources
         #[arg(long, default_value_t = false)]
         prod: bool,
+        /// `SPEC=EXECUTABLE`: run EXECUTABLE for a configured PPX whose path
+        /// ends in SPEC (repeatable)
+        #[arg(long = "ppx")]
+        ppx: Vec<String>,
     },
     /// Print the compiler arguments for a ReScript source file.
     CompilerArgs {

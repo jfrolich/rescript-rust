@@ -38,10 +38,20 @@ struct Step {
 /// compiler output (colours stripped) goes to its `lib/bs/.compiler.log` as a
 /// `rescript build` writes it (compile.rs): errors as modules fail, then the
 /// warnings sorted by module name.
-pub fn build_reference(path: &Path, bsc: &Path, prod: bool) -> Result<bool> {
+///
+/// Each `(spec, executable)` of `ppx_overrides` runs `executable` for a
+/// configured PPX whose resolved path ends in `spec` (for instance
+/// `@jfrolich/ppx-spice/ppx`), so the reference can run the PPX version the
+/// compiler's builtin port follows instead of the one a project installed.
+pub fn build_reference(
+    path: &Path,
+    bsc: &Path,
+    prod: bool,
+    ppx_overrides: &[(String, PathBuf)],
+) -> Result<bool> {
     use rayon::prelude::*;
     let bsc = std::fs::canonicalize(bsc)?;
-    let steps = steps(path, prod)?;
+    let steps = steps(path, prod, ppx_overrides)?;
     let index: AHashMap<&str, usize> = steps
         .iter()
         .enumerate()
@@ -213,7 +223,7 @@ pub fn build_in_memory(path: &Path) -> Result<rescript_compiler::cmi::persistent
     Ok(build_state.snapshot_module_registry())
 }
 
-fn steps(path: &Path, prod: bool) -> Result<Vec<Step>> {
+fn steps(path: &Path, prod: bool, ppx_overrides: &[(String, PathBuf)]) -> Result<Vec<Step>> {
     let build_state = parsed_state(path, prod)?;
 
     let mut steps = Vec::new();
@@ -222,9 +232,14 @@ fn steps(path: &Path, prod: bool) -> Result<Vec<Step>> {
         let package = build_state.get_package(&module.package_name).unwrap();
         let step = match &module.source_type {
             SourceType::MlMap(_) => mlmap_step(&build_state, package, &module_name)?,
-            SourceType::SourceFile(source_file) => {
-                source_step(&build_state, package, module, &module_name, source_file)?
-            }
+            SourceType::SourceFile(source_file) => source_step(
+                &build_state,
+                package,
+                module,
+                &module_name,
+                source_file,
+                ppx_overrides,
+            )?,
         };
         steps.push(step);
     }
@@ -321,12 +336,27 @@ fn mlmap_step(build_state: &BuildCommandState, package: &packages::Package, name
     })
 }
 
+/// Replace the executable after each `-ppx` whose path ends in an override's
+/// spec.
+fn override_ppxs(args: &mut [String], ppx_overrides: &[(String, PathBuf)]) {
+    for i in 1..args.len() {
+        if args[i - 1] != "-ppx" {
+            continue;
+        }
+        let ppx = Path::new(&args[i]);
+        if let Some((_, executable)) = ppx_overrides.iter().find(|(spec, _)| ppx.ends_with(spec)) {
+            args[i] = executable.to_string_lossy().into_owned();
+        }
+    }
+}
+
 fn source_step(
     build_state: &BuildCommandState,
     package: &packages::Package,
     module: &Module,
     module_name: &str,
     source_file: &SourceFile,
+    ppx_overrides: &[(String, PathBuf)],
 ) -> Result<Step> {
     let project_context = &build_state.project_context;
     let build_path = package.get_build_path();
@@ -341,7 +371,7 @@ fn source_step(
     // Parse each source file to its `.ast`/`.iast`.
     let mut parse = |source: &PathBuf| -> Result<PathBuf> {
         let contents = helpers::read_file(&Path::new(&package.path).join(source))?;
-        let (ast_path, args) = parse::parser_args(
+        let (ast_path, mut args) = parse::parser_args(
             project_context,
             &package.config,
             source,
@@ -349,6 +379,7 @@ fn source_step(
             package.is_local_dep,
             None,
         )?;
+        override_ppxs(&mut args, ppx_overrides);
         if let Some(parent) = build_path.join(&ast_path).parent() {
             mkdirs.push(parent.to_path_buf());
         }

@@ -316,7 +316,11 @@ if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/
     "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
     "$2" build-reference --bsc "$1" "$RESCRIPT_RUNTIME"
     "$2" clean
-    "$2" build-reference --bsc "$1" .
+    # The Rust compiler expands @jfrolich/ppx-spice with its builtin port of
+    # the version this repository pins; run that version for the reference
+    # too, not the one the project installed.
+    "$2" build-reference --bsc "$1" \
+        --ppx "@jfrolich/ppx-spice/ppx=$3/node_modules/@jfrolich/ppx-spice/ppx" .
 ' "$TELLA_BUILD_DIR" "$OCAML_BSC" "$REWATCH_BIN" "$PROJECT_ROOT"; then
     cp "$TEMP_DIR/ocaml-build.log" "$CACHE_DIR/errors/ocaml-build.err" 2>/dev/null || true
     exit 2
