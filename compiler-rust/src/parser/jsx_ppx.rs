@@ -3662,6 +3662,11 @@ fn transform_structure_item_desc(
                 pincl_attributes: incl.pincl_attributes,
             }))
         }
+        StructureItemDesc::Pstr_extension(inner) => {
+            let ((name, payload), attrs) = *inner;
+            let payload = transform_payload(payload, config, arena, warnings);
+            StructureItemDesc::Pstr_extension(Box::new(((name, payload), attrs)))
+        }
         other => other,
     }
 }
@@ -3784,6 +3789,50 @@ fn transform_signature_item_desc(
                 pincl_mod: transform_module_type_idx(incl.pincl_mod, config, arena, warnings),
                 ..incl
             }))
+        }
+        SignatureItemDesc::Psig_extension(inner) => {
+            let ((name, payload), attrs) = *inner;
+            let payload = transform_payload(payload, config, arena, warnings);
+            SignatureItemDesc::Psig_extension(Box::new(((name, payload), attrs)))
+        }
+        other => other,
+    }
+}
+
+/// `default_mapper.payload` (compiler/ml/ast_mapper.ml): a structure or
+/// signature payload goes back through the JSX `structure`/`signature`
+/// mappers (compiler/syntax/src/jsx_ppx.ml:97-128), a pattern guard through
+/// `expr`.
+fn transform_payload(
+    payload: Payload,
+    config: &mut JsxConfig,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
+) -> Payload {
+    match payload {
+        Payload::PStr(items) => Payload::PStr(Box::new(transform_structure_with_config(
+            *items, config, arena, warnings,
+        ))),
+        Payload::PSig(items) => {
+            let old_has_component = config.has_component;
+            config.has_component = false;
+            let mut result = vec![];
+            for item in *items {
+                result.extend(transform_signature_item_multi(
+                    item, config, arena, warnings,
+                ));
+            }
+            config.has_component = old_has_component;
+            Payload::PSig(Box::new(result))
+        }
+        Payload::PPat(inner) => {
+            let (pat, guard) = *inner;
+            let guard = guard.map(|guard| {
+                let guard_expr = arena.get_expr(guard).clone();
+                let transformed = transform_expression(guard_expr, config, arena);
+                arena.push_expr(transformed)
+            });
+            Payload::PPat(Box::new((pat, guard)))
         }
         other => other,
     }
@@ -4219,6 +4268,12 @@ fn transform_expression(
             let inner_expr = arena.get_expr(inner_expr_idx).clone();
             let transformed = transform_expression(inner_expr, config, arena);
             ExpressionDesc::Pexp_coerce(Box::new((arena.push_expr(transformed), from_typ, to_typ)))
+        }
+        ExpressionDesc::Pexp_extension(inner) => {
+            let (name, payload) = *inner;
+            let mut ignored_warnings = vec![];
+            let payload = transform_payload(payload, config, arena, &mut ignored_warnings);
+            ExpressionDesc::Pexp_extension(Box::new((name, payload)))
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (name, module_idx, body_idx) = *inner;

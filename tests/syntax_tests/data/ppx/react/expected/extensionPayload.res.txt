@@ -1,0 +1,23 @@
+%%private(let frame = x => ReactDOM.jsx("div", {className: x}))
+
+let y = %raw(`1`)
+
+module M = {
+  %%private(
+    @res.jsxComponentProps
+    type props<'a> = {
+      a: 'a,
+    }
+
+    let make = ({a, _}: props<_>): React.element =>
+      ReactDOM.jsx("span", {children: ?ReactDOM.someElement({React.string(a)})})
+    let make = React.component({
+      let \"ExtensionPayload$M" = (props: props<_>) => make(props)
+
+      \"ExtensionPayload$M"
+    })
+  )
+  let el = ReactDOM.jsx("make", {a: "b"})
+}
+
+let wrapped = %ext(ReactDOM.jsx("div", {}))
