@@ -42,6 +42,10 @@ impl Longident {
     }
 
     /// Get the last component's StrIdx.
+    ///
+    /// OCaml `Longident.last` raises `Misc.fatal_error` on `Lapply`; Rust
+    /// returns the argument's last component instead (callers never pass
+    /// `Lapply` where OCaml would reach that error).
     pub fn last_idx(&self) -> StrIdx {
         match self {
             Longident::Lident(s) => *s,
@@ -51,6 +55,9 @@ impl Longident {
     }
 
     /// Flatten to a list of StrIdx.
+    ///
+    /// OCaml `Longident.flatten` raises `Misc.fatal_error` on `Lapply`; Rust
+    /// flattens the functor side and drops the argument instead.
     pub fn flatten_idx(&self) -> Vec<StrIdx> {
         match self {
             Longident::Lident(s) => vec![*s],

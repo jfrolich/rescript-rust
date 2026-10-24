@@ -1,5 +1,4 @@
 // Port of compiler/gentype/ExportModule.ml:1-132.
-// This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
     ClosedFlag, Field, Mutable, Optional, Type, doc_string, ident,
@@ -268,9 +267,7 @@ pub fn extend_export_module_items(
         [] => panic!("assert false"),
         [_value_name] => {}
         [module_name, rest @ ..] => {
-            let export_module_item = export_module_items
-                .entry(module_name.clone())
-                .or_insert_with(IndexMap::new);
+            let export_module_item = export_module_items.entry(module_name.clone()).or_default();
             extend_export_module_item(rest, doc_string, export_module_item, type_, value_name);
         }
     }

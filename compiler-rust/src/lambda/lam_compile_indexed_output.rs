@@ -58,14 +58,14 @@ impl Output {
             Continuation::Assign(id) => {
                 block.push(Statement::exp(Expression::bin(
                     BinOp::Eq,
-                    Expression::var(id.clone()),
+                    Expression::var(*id),
                     expr,
                 )));
                 Self::make(block)
             }
             Continuation::Declare(kind, id) => {
                 block.push(Statement::variable(VariableDeclaration {
-                    ident: id.clone(),
+                    ident: *id,
                     // Js_stmt_make.define_variable: every Undefined becomes
                     // a declaration without an initializer, unit or not.
                     value: if matches!(expr.desc, ExpressionDesc::Undefined { .. }) {

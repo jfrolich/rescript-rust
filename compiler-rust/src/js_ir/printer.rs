@@ -7,7 +7,7 @@ use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
     Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc, ForDirection,
     JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
-    VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
+    VariableDeclaration,
 };
 use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
@@ -17,7 +17,6 @@ use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
-use std::fmt::Write;
 
 #[derive(Clone, Default)]
 struct NameScope {
@@ -40,10 +39,13 @@ struct FunctionPrintContext<'a> {
     async_: bool,
     directive: Option<&'a str>,
     function_ident: Option<&'a Ident>,
+    /// `function_reserved_idents` for this function, when the caller already
+    /// computed it.
+    reserved_idents: Option<&'a [Ident]>,
 }
 
 /// JavaScript printer state
-pub struct JsPrinter {
+pub struct JsPrinter<'r> {
     /// Output buffer
     output: String,
     /// Current indentation level
@@ -55,7 +57,7 @@ pub struct JsPrinter {
     /// Assigned printable names for identifiers in the active lexical scopes.
     name_scopes: Vec<NameScope>,
     /// Module-path resolver used for printing import declarations.
-    pub(super) module_path_resolver: Option<ModulePathResolver>,
+    pub(super) module_path_resolver: Option<&'r ModulePathResolver>,
     /// Matches OCaml's `!Js_config.debug` toggle in the dumper.
     debug: bool,
     /// Matches OCaml's `!Js_config.jsx_preserve` guard in the dumper.
@@ -69,13 +71,13 @@ pub struct JsPrinter {
     generated_column: usize,
 }
 
-impl Default for JsPrinter {
+impl Default for JsPrinter<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl JsPrinter {
+impl<'r> JsPrinter<'r> {
     /// Create a new printer
     pub fn new() -> Self {
         Self {
@@ -102,13 +104,13 @@ impl JsPrinter {
     }
 
     /// Create a new printer with module import resolution context.
-    pub fn with_module_path_resolver(module_path_resolver: Option<&ModulePathResolver>) -> Self {
+    pub fn with_module_path_resolver(module_path_resolver: Option<&'r ModulePathResolver>) -> Self {
         Self::with_module_path_resolver_and_options(module_path_resolver, false, false)
     }
 
     /// Create a new printer with module import resolution context and debug mode.
     pub fn with_module_path_resolver_and_debug(
-        module_path_resolver: Option<&ModulePathResolver>,
+        module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
     ) -> Self {
         Self::with_module_path_resolver_and_options(module_path_resolver, debug, false)
@@ -116,31 +118,40 @@ impl JsPrinter {
 
     /// Create a new printer with module import resolution context and dumper options.
     pub fn with_module_path_resolver_and_options(
-        module_path_resolver: Option<&ModulePathResolver>,
+        module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
         jsx_preserve: bool,
     ) -> Self {
         let mut printer = Self::with_capacity(0);
-        printer.module_path_resolver = module_path_resolver.cloned();
+        printer.module_path_resolver = module_path_resolver;
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
         printer
     }
 
     pub(crate) fn with_module_path_resolver_options_and_capacity(
-        module_path_resolver: Option<&ModulePathResolver>,
+        module_path_resolver: Option<&'r ModulePathResolver>,
         debug: bool,
         jsx_preserve: bool,
         capacity: usize,
     ) -> Self {
         let mut printer = Self::with_capacity(capacity);
-        printer.module_path_resolver = module_path_resolver.cloned();
+        printer.module_path_resolver = module_path_resolver;
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
         printer
     }
 
     pub(crate) fn set_source_map_builder(&mut self, builder: SourceMapBuilder) {
+        // Generated positions are only tracked while a builder is installed;
+        // catch up on anything already printed.
+        if self.source_map.is_none() {
+            self.generated_line = 0;
+            self.generated_column = 0;
+            let output = std::mem::take(&mut self.output);
+            self.advance_generated_position(&output);
+            self.output = output;
+        }
         self.source_map = Some(builder);
     }
 
@@ -178,7 +189,9 @@ impl JsPrinter {
     /// Write a string
     pub(super) fn write(&mut self, s: &str) {
         self.output.push_str(s);
-        self.advance_generated_position(s);
+        if self.source_map.is_some() {
+            self.advance_generated_position(s);
+        }
         self.last_new_line = false;
     }
 
@@ -189,7 +202,7 @@ impl JsPrinter {
             last_new_line: false,
             indent_str: self.indent_str,
             name_scopes: self.name_scopes.clone(),
-            module_path_resolver: self.module_path_resolver.clone(),
+            module_path_resolver: self.module_path_resolver,
             debug: self.debug,
             jsx_preserve: self.jsx_preserve,
             suppress_member_target_call_arg_group_indent: self
@@ -236,18 +249,22 @@ impl JsPrinter {
     /// Write a character
     pub(super) fn write_char(&mut self, c: char) {
         self.output.push(c);
-        if c == '\n' {
-            self.generated_line += 1;
-            self.generated_column = 0;
-        } else {
-            self.generated_column += c.len_utf16();
+        if self.source_map.is_some() {
+            if c == '\n' {
+                self.generated_line += 1;
+                self.generated_column = 0;
+            } else {
+                self.generated_column += c.len_utf16();
+            }
         }
         self.last_new_line = false;
     }
 
     fn append_positioned(&mut self, text: &str) {
         self.output.push_str(text);
-        self.advance_generated_position(text);
+        if self.source_map.is_some() {
+            self.advance_generated_position(text);
+        }
     }
 
     /// Write a newline with current indentation
@@ -365,7 +382,7 @@ impl JsPrinter {
         *next += 1;
         self.current_name_scope_mut()
             .ident_names
-            .insert(id.clone(), printed.clone());
+            .insert(*id, printed.clone());
         printed
     }
 
@@ -435,7 +452,7 @@ impl JsPrinter {
         }
 
         // js_dump.ml:1321-1324.
-        self.mark_source_loc(stmt.source_loc.as_ref().map(|v| &**v));
+        self.mark_source_loc(stmt.source_loc.as_deref());
         self.print_statement_desc(&stmt.desc, top_level);
     }
 
@@ -892,7 +909,7 @@ impl JsPrinter {
             }
         }
 
-        if let Some(Expression {
+        let reserved_idents = if let Some(Expression {
             desc: ExpressionDesc::Fun { params, body, .. },
             ..
         }) = &decl.value
@@ -900,9 +917,12 @@ impl JsPrinter {
             // OCaml reserves the unbounded function environment plus the
             // Name_non_top binding before printing it; see
             // compiler/core/js_dump.ml:337-345 and 411-414.
-            let reserved_idents = function_reserved_idents(params, body, Some(&decl.ident));
-            self.reserve_idents_in_current_scope(&reserved_idents);
-        }
+            let reserved = function_reserved_idents(params, body, Some(&decl.ident));
+            self.reserve_idents_in_current_scope(&reserved);
+            Some(reserved)
+        } else {
+            None
+        };
 
         let var_name = self.ident_name(&decl.ident);
         self.write("let ");
@@ -921,7 +941,7 @@ impl JsPrinter {
                     ..
                 } = &value.desc
                 {
-                    self.mark_source_loc(value.source_loc.as_ref().map(|v| &**v));
+                    self.mark_source_loc(value.source_loc.as_deref());
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -937,6 +957,7 @@ impl JsPrinter {
                         async_: *async_,
                         directive: directive.as_deref().map(|x| x.as_str()),
                         function_ident: Some(&decl.ident),
+                        reserved_idents: reserved_idents.as_deref(),
                     });
                 } else {
                     self.print_expression(value, 1);
@@ -955,10 +976,19 @@ impl JsPrinter {
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let reserved_idents = function_reserved_idents(params, body, function_ident);
+        self.with_reserved_ident_scope(&reserved_idents, f)
+    }
 
+    /// Like `with_function_ident_scope`, for callers that already computed
+    /// `function_reserved_idents` for the same function.
+    fn with_reserved_ident_scope<T>(
+        &mut self,
+        reserved_idents: &[Ident],
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let mut scope = NameScope::default();
         for ident in reserved_idents {
-            let printed = self.ident_name(&ident);
+            let printed = self.ident_name(ident);
             let (base, next_suffix) = printed_name_base_and_next_suffix(&printed);
             // OCaml's Ext_pp_scope.sub_scope copies the whole stamp map for a
             // captured mangled name, not just the one captured identifier
@@ -988,7 +1018,16 @@ impl JsPrinter {
             async_,
             directive,
             function_ident,
+            reserved_idents,
         } = context;
+        let computed_reserved_idents;
+        let reserved_idents = match reserved_idents {
+            Some(reserved_idents) => reserved_idents,
+            None => {
+                computed_reserved_idents = function_reserved_idents(params, body, function_ident);
+                &computed_reserved_idents
+            }
+        };
 
         // compiler/core/js_dump.ml:342-344 - when a function expression's body is
         // `[ Return (Call (Var v, args, _)) ]` with each
@@ -998,14 +1037,14 @@ impl JsPrinter {
         // `optimize len ~p cxt f v` -> `vident` for the clean
         // `arity = Full, call_info = Call_ml | Call_builtin_runtime` case.
         if let Some(target) = eta_reduce_function_body(is_method, params, body) {
-            self.with_function_ident_scope(params, body, function_ident, |this| {
+            self.with_reserved_ident_scope(reserved_idents, |this| {
                 this.print_vident(target);
             });
             return;
         }
 
         let use_arrow = !is_method;
-        self.with_function_ident_scope(params, body, function_ident, |this| {
+        self.with_reserved_ident_scope(reserved_idents, |this| {
             let (this_binding, param_names) =
                 this.method_params_and_binding(is_method, params, body);
 
@@ -1125,7 +1164,7 @@ impl JsPrinter {
         self.write("function ");
         let fn_name = self.ident_name(ident);
         self.write(&fn_name);
-        self.with_function_ident_scope(params, body, Some(ident), |this| {
+        self.with_reserved_ident_scope(&reserved_idents, |this| {
             let (this_binding, rendered_params) =
                 this.method_params_and_binding(is_method, params, body);
             this.write_char('(');
@@ -1676,7 +1715,7 @@ impl JsPrinter {
         }
 
         if mark {
-            self.mark_source_loc(expr.source_loc.as_ref().map(|v| &**v));
+            self.mark_source_loc(expr.source_loc.as_deref());
         }
         self.print_expression_desc(&expr.desc, level);
     }
@@ -2080,6 +2119,7 @@ impl JsPrinter {
                     async_: *async_,
                     directive: directive.as_deref().map(|x| x.as_str()),
                     function_ident: None,
+                    reserved_idents: None,
                 });
             }
 
@@ -2309,11 +2349,7 @@ impl JsPrinter {
                                             .enumerate()
                                             .map(|(i, elem)| (Some(i), Some(elem))),
                                     )
-                                    .chain(
-                                        include_debug_name
-                                            .then_some((Some(usize::MAX), None))
-                                            .into_iter(),
-                                    ),
+                                    .chain(include_debug_name.then_some((Some(usize::MAX), None))),
                                     |this, prop| match prop {
                                         (None, None) => {
                                             this.print_literal_property_name(tag_name);
@@ -2569,14 +2605,6 @@ impl JsPrinter {
         if extra_group_indent {
             self.dedent();
         }
-    }
-
-    fn previous_non_space_char_on_line(&self) -> Option<char> {
-        self.output
-            .chars()
-            .rev()
-            .take_while(|c| *c != '\n')
-            .find(|c| !c.is_whitespace())
     }
 
     fn print_array_literal(&mut self, elements: &[Expression]) {
@@ -2908,15 +2936,6 @@ fn expression_statement_prints_anything(expr: &Expression) -> bool {
         classify_raw_js_expression_statement(expr),
         RawJsExpressionStatement::Omit
     )
-}
-
-fn member_target_needs_extra_group_indent(expr: &Expression) -> bool {
-    match &expr.desc {
-        ExpressionDesc::Object(_, props) => props.len() > 1,
-        ExpressionDesc::Array(elements, _) => elements.len() > 1,
-        ExpressionDesc::OptionalBlock(inner, true) => member_target_needs_extra_group_indent(inner),
-        _ => false,
-    }
 }
 
 fn call_argument_needs_extra_group_indent(
@@ -3304,12 +3323,12 @@ impl JsIdentStats {
     }
 
     fn add_defined_ident(&mut self, ident: &Ident) {
-        self.defined_idents.insert(ident.clone());
+        self.defined_idents.insert(*ident);
     }
 
     fn add_used_ident(&mut self, ident: &Ident) {
         if !self.defined_idents.contains(ident) {
-            self.used_idents.insert(ident.clone());
+            self.used_idents.insert(*ident);
         }
     }
 
@@ -3343,7 +3362,7 @@ fn function_reserved_idents(
             .into_iter()
             .collect();
     if let Some(function_ident) = function_ident {
-        reserved_idents.push(function_ident.clone());
+        reserved_idents.push(*function_ident);
     }
     reserved_idents.sort();
     reserved_idents.dedup();
@@ -3391,7 +3410,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(finish, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::ForOf(_, loop_ident, iterable, body)
@@ -3399,7 +3418,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_expression_idents(iterable, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
-                std::iter::once(loop_ident.clone()),
+                std::iter::once(*loop_ident),
             ));
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
@@ -3425,7 +3444,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             if let Some((catch_ident, catch_block)) = catch {
                 stats.extend_free_idents(free_variables_of_block_with_defined(
                     catch_block,
-                    std::iter::once(catch_ident.clone()),
+                    std::iter::once(*catch_ident),
                 ));
             }
             if let Some(finally) = finally {
@@ -3480,6 +3499,8 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
             }
         }
         ExpressionDesc::TaggedTemplate(tag, _, values) => {
+            // js_record_iter.ml:104-106 visits the tag before the values.
+            collect_expression_idents(tag, stats);
             for value in values {
                 collect_expression_idents(value, stats);
             }
@@ -3729,6 +3750,7 @@ pub fn print_expression(expr: &Expression) -> String {
     printer.into_output()
 }
 
+#[cfg(test)]
 fn print_expression_with_level(expr: &Expression, level: u8) -> String {
     let mut printer = JsPrinter::new();
     printer.print_expression(expr, level);
@@ -3759,12 +3781,9 @@ pub fn print_block(block: &Block) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::js_ir::op::{
-        IdentInfo, ImportAttributes, LengthObject, MutableFlag, PropertyName, UsedStats,
-    };
-    use crate::js_ir::{CallInfo, Expression, ModuleId, ModulePathResolver, Statement};
+    use crate::js_ir::op::{IdentInfo, LengthObject, MutableFlag, PropertyName, UsedStats};
+    use crate::js_ir::{CallInfo, Expression, ModuleId, Statement};
     use crate::lambda::TagInfo;
-    use std::path::Path;
 
     #[test]
     fn function_body_preserves_nested_guards_and_inner_returns() {
@@ -4103,7 +4122,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::Typeof(Box::new(Expression::new(
             ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![value.clone()],
+                params: vec![value],
                 body: vec![Statement::return_(Expression::var(value))],
                 env: Default::default(),
                 return_unit: false,
@@ -4478,13 +4497,13 @@ mod tests {
                     Box::new(Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(spread.clone())),
+                            Box::new(Expression::var(spread)),
                             "type".to_string(),
                             None,
                         )),
                         Expression::string("text"),
                     )),
-                    Box::new(Expression::var(spread.clone())),
+                    Box::new(Expression::var(spread)),
                 )),
                 Expression::string("barry-key"),
             ],
@@ -4628,9 +4647,7 @@ mod tests {
             Statement::new(StatementDesc::If(
                 Expression::bin(
                     BinOp::NotEqEq,
-                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                        state.clone(),
-                    )))),
+                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(state)))),
                     Expression::string("object".to_string()),
                 ),
                 vec![Statement::return_(Expression::number(Number::int(0)))],
@@ -4668,14 +4685,14 @@ mod tests {
             Statement::new(StatementDesc::If(
                 Expression::bin(
                     BinOp::EqEqEq,
-                    Expression::var(match_id.clone()),
+                    Expression::var(match_id),
                     Expression::undefined(false),
                 ),
                 vec![Statement::return_(Expression::string("no"))],
                 vec![],
             )),
             Statement::variable(VariableDeclaration {
-                ident: tmp.clone(),
+                ident: tmp,
                 value: Some(Expression::var(match_id)),
                 property: crate::lambda::LetKind::Strict,
                 ident_info: IdentInfo::default(),
@@ -4842,7 +4859,7 @@ mod tests {
             ident_info: Default::default(),
         });
         let stmt_fun = Statement::variable(VariableDeclaration {
-            ident: url.clone(),
+            ident: url,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
                 params: vec![Ident::create_local("prim")],
@@ -4883,7 +4900,7 @@ mod tests {
                 params: vec![param],
                 body: vec![
                     Statement::variable(VariableDeclaration {
-                        ident: inner.clone(),
+                        ident: inner,
                         value: Some(Expression::number(Number::int(1))),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
@@ -4920,7 +4937,7 @@ mod tests {
                 ident: foo,
                 value: Some(Expression::new(ExpressionDesc::Fun {
                     is_method: false,
-                    params: vec![param.clone()],
+                    params: vec![param],
                     body: vec![Statement::return_(Expression::var(param))],
                     env: Default::default(),
                     return_unit: false,
@@ -4945,7 +4962,7 @@ mod tests {
         let param = Ident::create_local("arg");
         let rendered = print_block(&vec![
             Statement::variable(VariableDeclaration {
-                ident: outer.clone(),
+                ident: outer,
                 value: Some(Expression::number(Number::int(1))),
                 property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
@@ -4954,7 +4971,7 @@ mod tests {
                 ident: foo,
                 value: Some(Expression::new(ExpressionDesc::Fun {
                     is_method: false,
-                    params: vec![param.clone()],
+                    params: vec![param],
                     body: vec![Statement::return_(Expression::bin(
                         BinOp::Plus,
                         Expression::var(outer),
@@ -4975,6 +4992,53 @@ mod tests {
     }
 
     #[test]
+    fn test_print_function_scope_reserves_captured_tagged_template_tag() {
+        let outer = Ident::create_local("tag");
+        let foo = Ident::create_local("foo");
+        let param = Ident::create_local("arg");
+        let inner = Ident::create_local("tag");
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: outer,
+                value: Some(Expression::number(Number::int(1))),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: foo,
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: inner,
+                            value: Some(Expression::var(param)),
+                            property: crate::lambda::lam_compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                        Statement::return_(Expression::new(ExpressionDesc::TaggedTemplate(
+                            Box::new(Expression::var(outer)),
+                            vec!["a".to_string(), "b".to_string()],
+                            vec![Expression::var(inner)],
+                        ))),
+                    ],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        // The captured outer `tag` is reserved in `foo`'s scope, so the
+        // body-local `tag` must not shadow it.
+        assert!(rendered.contains("let tag$1 = arg;"), "{rendered}");
+        assert!(rendered.contains("return tag`a${tag$1}b`;"), "{rendered}");
+    }
+
+    #[test]
     fn test_print_function_scope_copies_captured_base_suffix_map_like_ocaml() {
         let outer_start = Ident::create_local("match");
         let outer_end = Ident::create_local("match");
@@ -4984,7 +5048,7 @@ mod tests {
 
         let rendered = print_block(&vec![
             Statement::variable(VariableDeclaration {
-                ident: outer_start.clone(),
+                ident: outer_start,
                 value: Some(Expression::number(Number::int(1))),
                 property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
@@ -5002,7 +5066,7 @@ mod tests {
                     params: vec![param],
                     body: vec![
                         Statement::variable(VariableDeclaration {
-                            ident: inner_match.clone(),
+                            ident: inner_match,
                             value: Some(Expression::number(Number::int(3))),
                             property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
@@ -5037,7 +5101,7 @@ mod tests {
             ident: foo,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![param.clone()],
+                params: vec![param],
                 body: vec![Statement::return_(Expression::call(
                     Expression::qualified(
                         ModuleId {
@@ -5180,7 +5244,7 @@ mod tests {
         let value = Ident::create_local("value");
         let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
             is_method: false,
-            params: vec![value.clone()],
+            params: vec![value],
             body: vec![Statement::return_(Expression::bin(
                 BinOp::Lsl,
                 Expression::var(value),
@@ -5240,7 +5304,7 @@ mod tests {
         let q = Ident::create_local("q");
         let do_action = Ident::create_local("doAction");
         let q_length = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::var(q.clone())),
+            Box::new(Expression::var(q)),
             "length".to_string(),
             None,
         ));
@@ -5284,12 +5348,12 @@ mod tests {
             ident: handle,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![len.clone()],
+                params: vec![len],
                 body: vec![
                     Statement::new(StatementDesc::If(
                         Expression::bin(
                             BinOp::EqEqEq,
-                            Expression::var(len.clone()),
+                            Expression::var(len),
                             Expression::number(Number::int(0)),
                         ),
                         vec![Statement::return_(Expression::undefined(true))],
@@ -5331,14 +5395,12 @@ mod tests {
             ident: handle,
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: false,
-                params: vec![obj.clone()],
+                params: vec![obj],
                 body: vec![
                     Statement::new(StatementDesc::If(
                         Expression::bin(
                             BinOp::EqEqEq,
-                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
-                                obj.clone(),
-                            )))),
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(obj)))),
                             Expression::string("function"),
                         ),
                         vec![Statement::return_(Expression::undefined(true))],
@@ -5925,7 +5987,7 @@ mod tests {
 
         let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
             is_method: true,
-            params: vec![this_param.clone(), amount],
+            params: vec![this_param, amount],
             body: vec![Statement::return_(Expression::var(this_param))],
             env: Default::default(),
             return_unit: false,
@@ -5948,7 +6010,7 @@ mod tests {
             ident: Ident::create_local("methodWithThis"),
             value: Some(Expression::new(ExpressionDesc::Fun {
                 is_method: true,
-                params: vec![this_param.clone(), value.clone()],
+                params: vec![this_param, value],
                 body: vec![Statement::return_(Expression::var(this_param))],
                 env: Default::default(),
                 return_unit: false,

@@ -3,14 +3,10 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
-use crate::fast_hash::AHashSet;
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::path::Path as StdPath;
-use std::sync::{Mutex, OnceLock};
 
-use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::diagnostics::{Warning, WarningConfig};
 use crate::ident::{Ident, IdentFlags};
@@ -23,17 +19,17 @@ use crate::lambda::lam_constant::{
 use crate::lambda::lam_primitive::{ExternalModuleName, ImportSource, Mutable};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
-    Lambda, LambdaSwitch, Primitive, SetFieldDbgInfo,
+    ApInfo, ApplyStatus, FieldDbgInfo, FunctionAttribute, InlineAttribute, Lambda, Primitive,
+    SetFieldDbgInfo,
 };
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
-use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
+use crate::parser::ast::MutableFlag as ParserMutableFlag;
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
     constructor_case, constructor_has_optional_shape, constructor_payload_is_unboxed,
     is_base_type as typeopt_is_base_type, type_cannot_contain_undefined,
-    type_cannot_contain_undefined_no_env, type_is_builtin_object,
+    type_cannot_contain_undefined_no_env,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
 use crate::types::SignatureItem;
@@ -43,7 +39,7 @@ use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
-    ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
+    ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
     RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
@@ -52,17 +48,6 @@ use crate::types::typedtree::{
 // iterable, asyncIterable, and taggedTemplate predefs precede exceptions.
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 20;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 30;
-
-#[derive(Clone)]
-enum RawFunctionBinding {
-    Value(Vec<ValueBinding>),
-    Module(Ident, Located<String>, ModuleExpr),
-}
-
-enum RawFunctionBindingRef<'a> {
-    Value(&'a [ValueBinding]),
-    Module(&'a Ident, &'a ModuleExpr),
-}
 
 #[derive(Clone)]
 struct RecModuleBinding {
@@ -144,122 +129,9 @@ fn raw_optional_none() -> RawLambda {
     RawLambda::const_(raw_optional_none_constant())
 }
 
-fn lambda_optional_none() -> Lambda {
-    Lambda::const_(Constant::Pointer("0a".to_string()))
-}
-
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
-    fn collect(lam: &RawLambda, fv: &mut HashSet<Ident>) {
-        match lam {
-            RawLambda::Lshared(inner) => collect(inner, fv),
-            RawLambda::Lvar(id) => {
-                fv.insert(id.clone());
-            }
-            RawLambda::LglobalModule(_) | RawLambda::Lconst(_) => {}
-            RawLambda::Lapply(apply) => {
-                collect(&apply.ap_func, fv);
-                for arg in &apply.ap_args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::Lfunction(func) => {
-                collect(&func.body, fv);
-                for param in &func.params {
-                    fv.remove(param);
-                }
-            }
-            RawLambda::Llet(_, id, arg, body) => {
-                collect(arg, fv);
-                collect(body, fv);
-                fv.remove(id);
-            }
-            RawLambda::Lletrec(bindings, body) => {
-                collect(body, fv);
-                for (_, expr) in bindings {
-                    collect(expr, fv);
-                }
-                for (id, _) in bindings {
-                    fv.remove(id);
-                }
-            }
-            RawLambda::Lprim(info) => {
-                for arg in &info.args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::Lswitch(arg, sw) => {
-                collect(arg, fv);
-                for (_, lam) in &sw.sw_consts {
-                    collect(lam, fv);
-                }
-                for (_, lam) in &sw.sw_blocks {
-                    collect(lam, fv);
-                }
-                if let Some(fail) = &sw.sw_failaction {
-                    collect(fail, fv);
-                }
-            }
-            RawLambda::LstringSwitch(arg, cases, default) => {
-                collect(arg, fv);
-                for (_, lam) in cases {
-                    collect(lam, fv);
-                }
-                if let Some(default) = default {
-                    collect(default, fv);
-                }
-            }
-            RawLambda::LstaticRaise(_, args) => {
-                for arg in args {
-                    collect(arg, fv);
-                }
-            }
-            RawLambda::LstaticCatch(body, (_, vars), handler) => {
-                collect(body, fv);
-                collect(handler, fv);
-                for var in vars {
-                    fv.remove(var);
-                }
-            }
-            RawLambda::LtryWith(body, exn, handler) => {
-                collect(body, fv);
-                collect(handler, fv);
-                fv.remove(exn);
-            }
-            RawLambda::LifThenElse(cond, ifso, ifnot) => {
-                collect(cond, fv);
-                collect(ifso, fv);
-                collect(ifnot, fv);
-            }
-            RawLambda::Lsequence(first, second) => {
-                collect(first, fv);
-                collect(second, fv);
-            }
-            RawLambda::Lwhile(cond, body) => {
-                collect(cond, fv);
-                collect(body, fv);
-            }
-            RawLambda::Lfor(var, lo, hi, _, body) => {
-                collect(lo, fv);
-                collect(hi, fv);
-                collect(body, fv);
-                fv.remove(var);
-            }
-            RawLambda::Lfor_of(var, iterable, body)
-            | RawLambda::Lfor_await_of(var, iterable, body) => {
-                collect(iterable, fv);
-                collect(body, fv);
-                fv.remove(var);
-            }
-            RawLambda::Lassign(id, expr) => {
-                collect(expr, fv);
-                fv.insert(id.clone());
-            }
-            RawLambda::Lbreak | RawLambda::Lcontinue => {}
-        }
-    }
-
     let mut fv = HashSet::new();
-    collect(lam, &mut fv);
+    crate::raw_lambda::collect_free_variables(lam, &mut fv);
     fv
 }
 
@@ -288,13 +160,15 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
             ap_info: apply.ap_info,
             ap_transformed_jsx: apply.ap_transformed_jsx,
         })),
-        RawLambda::Lfunction(func) => RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
-            arity: func.arity,
-            params: func.params,
-            body: Box::new(raw_subst_idents_owned(subst, *func.body)),
-            attr: func.attr,
-            loc: func.loc,
-        })),
+        RawLambda::Lfunction(func) => {
+            RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
+                arity: func.arity,
+                params: func.params,
+                body: Box::new(raw_subst_idents_owned(subst, *func.body)),
+                attr: func.attr,
+                loc: func.loc,
+            }))
+        }
         RawLambda::Llet(kind, id, arg, body) => RawLambda::Llet(
             kind,
             id,
@@ -436,18 +310,18 @@ where
 fn let_bound_idents(bindings: &[ValueBinding]) -> Vec<Ident> {
     let mut ids = Vec::new();
     for binding in bindings {
-        iter_bound_pattern_idents(&binding.vb_pat, &mut |id| ids.push(id.clone()));
+        iter_bound_pattern_idents(&binding.vb_pat, &mut |id| ids.push(*id));
     }
     ids
 }
 
 fn simple_let_binding_id(binding: &ValueBinding) -> Option<Ident> {
     match &binding.vb_pat.pat_desc {
-        PatternDesc::Tpat_var(id, _) => Some(id.clone()),
+        PatternDesc::Tpat_var(id, _) => Some(*id),
         PatternDesc::Tpat_alias(inner, id, _)
             if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
         {
-            Some(id.clone())
+            Some(*id)
         }
         _ => None,
     }
@@ -469,22 +343,22 @@ fn label_runtime_name(lbl: &LabelDescription) -> String {
 fn constructor_runtime_tag(
     tag: &Option<crate::types::VariantLiteralTag>,
 ) -> Option<ConstructorRuntimeTag> {
-    tag.as_ref().and_then(|tag| match tag {
+    tag.as_ref().map(|tag| match tag {
         crate::types::VariantLiteralTag::Int(value) => {
-            Some(ConstructorRuntimeTag::Int(i64::from(*value as i32)))
+            ConstructorRuntimeTag::Int(i64::from(*value as i32))
         }
         crate::types::VariantLiteralTag::String(value) => {
-            Some(ConstructorRuntimeTag::String(value.clone()))
+            ConstructorRuntimeTag::String(value.clone())
         }
         crate::types::VariantLiteralTag::Float(value) => {
-            Some(ConstructorRuntimeTag::Float(value.clone()))
+            ConstructorRuntimeTag::Float(value.clone())
         }
         crate::types::VariantLiteralTag::BigInt(value) => {
-            Some(ConstructorRuntimeTag::BigInt(value.clone()))
+            ConstructorRuntimeTag::BigInt(value.clone())
         }
-        crate::types::VariantLiteralTag::Bool(value) => Some(ConstructorRuntimeTag::Bool(*value)),
-        crate::types::VariantLiteralTag::Null => Some(ConstructorRuntimeTag::Null),
-        crate::types::VariantLiteralTag::Undefined => Some(ConstructorRuntimeTag::Undefined),
+        crate::types::VariantLiteralTag::Bool(value) => ConstructorRuntimeTag::Bool(*value),
+        crate::types::VariantLiteralTag::Null => ConstructorRuntimeTag::Null,
+        crate::types::VariantLiteralTag::Undefined => ConstructorRuntimeTag::Undefined,
     })
 }
 
@@ -548,14 +422,6 @@ fn raw_polyvariant_const(tag: &str) -> RawLambda {
         i: crate::types::btype::hash_variant(tag),
         comment: Some(Box::new(PointerInfo::PolyVariant(tag.to_string()))),
     })
-}
-
-fn raw_polyvariant_compare(scrutinee: RawLambda, tag: &str, loc: Location) -> RawLambda {
-    RawLambda::prim(
-        Primitive::Pjscomp(Comparison::Eq),
-        vec![scrutinee, raw_polyvariant_const(tag)],
-        loc,
-    )
 }
 
 fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
@@ -633,164 +499,6 @@ fn inlined_record_representation(
         crate::types::decl::TypeKind::TypeRecord(_, repr) => Some(repr.clone()),
         _ => None,
     }
-}
-
-fn trace_raw_fallback(kind: &'static str) {
-    if !crate::debug_flags::raw_fallback_trace() {
-        return;
-    }
-
-    static SEEN: OnceLock<Mutex<BTreeSet<&'static str>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(|| Mutex::new(BTreeSet::new()));
-    let mut guard = seen.lock().expect("trace set poisoned");
-    if guard.insert(kind) {
-        eprintln!("[raw-fallback] {kind}");
-    }
-}
-
-fn trace_raw_match_fallback(loc: &Location, scrut: &Expression, cases: &[Case]) {
-    if !crate::debug_flags::raw_fallback_trace() {
-        return;
-    }
-
-    static SEEN: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(|| Mutex::new(BTreeSet::new()));
-    let mut guard = seen.lock().expect("trace set poisoned");
-    let pat = cases
-        .first()
-        .map(|case| RawLambdaConverter::pattern_desc_name(&case.c_lhs))
-        .unwrap_or("none");
-    let key = format!(
-        "match:scrut={}:pat={}:cases={}:loc={}:{}-{}:{}",
-        RawLambdaConverter::expr_desc_name(&scrut.exp_desc),
-        pat,
-        cases.len(),
-        loc.loc_start.line,
-        loc.loc_start.column_1indexed(),
-        loc.loc_end.line,
-        loc.loc_end.column_1indexed()
-    );
-    if guard.insert(key.clone()) {
-        eprintln!("[raw-fallback] {key}");
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum SimpleSwitchKey {
-    Int(i32),
-    Constructor(crate::types::VariantConstructorCase),
-}
-
-impl SimpleSwitchKey {
-    fn switch_key(&self) -> crate::lambda::SwitchKey {
-        match self {
-            Self::Int(value) => crate::lambda::SwitchKey::Int(*value),
-            Self::Constructor(case) => crate::lambda::SwitchKey::Constructor(case.clone()),
-        }
-    }
-
-    fn is_block(&self) -> bool {
-        matches!(
-            self,
-            Self::Constructor(crate::types::VariantConstructorCase::Block(_))
-        )
-    }
-}
-
-#[derive(Clone)]
-struct ExpandedTupleCase<'a> {
-    case: &'a Case,
-    items: Vec<&'a Pattern>,
-}
-
-#[derive(Clone)]
-struct TupleCaseState<'a> {
-    case: ExpandedTupleCase<'a>,
-    selected: Vec<(usize, &'a Pattern)>,
-}
-
-fn peel_aliases<'a>(mut pat: &'a Pattern) -> (&'a Pattern, Vec<Ident>) {
-    let mut aliases = Vec::new();
-    while let PatternDesc::Tpat_alias(inner, id, _) = &pat.pat_desc {
-        aliases.push(id.clone());
-        pat = inner;
-    }
-    (pat, aliases)
-}
-
-fn wrap_aliases(aliases: &[Ident], scrut: Lambda, body: Lambda) -> Lambda {
-    aliases.iter().rev().fold(body, |acc, id| {
-        Lambda::let_(LetKind::Alias, id.clone(), scrut.clone(), acc)
-    })
-}
-
-fn wrap_aliases_raw(aliases: &[Ident], scrut: RawLambda, body: RawLambda) -> RawLambda {
-    aliases.iter().rev().fold(body, |acc, id| {
-        // Skip self-bindings (e.g., `let e/1 =a e/1` when alias matches scrutinee var)
-        if let RawLambda::Lvar(scrut_id) = &scrut {
-            if scrut_id.same(id) {
-                return acc;
-            }
-        }
-        RawLambda::let_(LetKind::Alias, id.clone(), scrut.clone(), acc)
-    })
-}
-
-fn collect_string_pattern_arms(pat: &Pattern) -> Option<Vec<(String, Vec<Ident>)>> {
-    fn collect_rec(
-        pat: &Pattern,
-        aliases: Vec<Ident>,
-        out: &mut Vec<(String, Vec<Ident>)>,
-    ) -> Option<()> {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_alias(inner, id, _) => {
-                let mut aliases = aliases;
-                aliases.push(id.clone());
-                collect_rec(inner, aliases, out)
-            }
-            PatternDesc::Tpat_or(left, right, _) => {
-                collect_rec(left, aliases.clone(), out)?;
-                collect_rec(right, aliases, out)
-            }
-            PatternDesc::Tpat_constant(TConstant::String(s)) => {
-                out.push((s.clone(), aliases));
-                Some(())
-            }
-            _ => None,
-        }
-    }
-
-    let mut out = Vec::new();
-    collect_rec(pat, Vec::new(), &mut out)?;
-    Some(out)
-}
-
-fn pattern_name_hint(pat: &Pattern) -> Option<String> {
-    match &pat.pat_desc {
-        PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-            Some(id.name().to_string())
-        }
-        PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
-            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                Some(id.name().to_string())
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn case_name_hint(default: &str, cases: &[Case]) -> Option<String> {
-    cases
-        .iter()
-        .find_map(|case| pattern_name_hint(&case.c_lhs))
-        .or_else(|| {
-            if cases.is_empty() {
-                None
-            } else {
-                Some(default.to_string())
-            }
-        })
 }
 
 #[derive(Clone, Copy)]
@@ -1123,7 +831,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn note_possible_required_module(&mut self, id: &Ident) {
         self.possible_required_modules.insert(ModuleId {
-            id: id.clone(),
+            id: *id,
             kind: Kind::Ml,
             dynamic_import: false,
         });
@@ -1370,7 +1078,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn id_of_pattern(&mut self, pat: &Pattern) -> Option<Ident> {
         match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
+            PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(*id),
             PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
                 PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
                     Some(self.rename_ident(id))
@@ -1386,10 +1094,6 @@ impl<'a> RawLambdaConverter<'a> {
             .iter()
             .find_map(|case| self.id_of_pattern(&case.c_lhs))
             .unwrap_or_else(|| self.fresh_ident(default))
-    }
-
-    fn fresh_name_from_cases(&self, default: &str, cases: &[Case]) -> String {
-        case_name_hint(default, cases).unwrap_or_else(|| default.to_string())
     }
 
     /// Look up all label declarations for a record type.
@@ -1466,7 +1170,7 @@ impl<'a> RawLambdaConverter<'a> {
                         );
                     }
                 }
-                if let Some(decl) = self.type_ctx.find_type_decl(&path.last()) {
+                if let Some(decl) = self.type_ctx.find_type_decl(path.last()) {
                     if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind
                     {
                         return Some(
@@ -1569,7 +1273,7 @@ impl<'a> RawLambdaConverter<'a> {
                 SignatureItem::SigModule(id, md, _) => {
                     let module_path = md.md_path.clone().unwrap_or_else(|| {
                         prefix.map_or_else(
-                            || crate::types::Path::pident(id.clone()),
+                            || crate::types::Path::pident(*id),
                             |prefix| crate::types::Path::pdot(prefix.clone(), id.name()),
                         )
                     });
@@ -1649,11 +1353,11 @@ impl<'a> RawLambdaConverter<'a> {
             return;
         }
         let binding = match (&pat.pat_desc, lam) {
-            (PatternDesc::Tpat_var(id, _), RawLambda::Lfunction(_)) => id.clone(),
+            (PatternDesc::Tpat_var(id, _), RawLambda::Lfunction(_)) => *id,
             (PatternDesc::Tpat_alias(inner, id, _), RawLambda::Lfunction(_))
                 if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
             {
-                id.clone()
+                *id
             }
             _ => {
                 self.report_warning(
@@ -1900,390 +1604,6 @@ impl<'a> RawLambdaConverter<'a> {
         None
     }
 
-    /// OCaml's Lambda.make_key: normalize a RawLambda for structural comparison.
-    /// - Alias lets are substituted (variable replaced by its definition)
-    /// - Other let-bound variables get sequential normalized names
-    /// - Locations are ignored
-    /// This allows detecting structurally identical actions that differ only
-    /// in the stamps of locally-bound variables.
-    fn make_action_key(lam: &RawLambda) -> Option<String> {
-        use crate::raw_lambda::print::RawLambdaPrinter;
-
-        // Normalize by substituting alias lets and renaming other bound vars
-        let mut counter = 0i32;
-        let normalized = Self::normalize_for_key(lam, &HashMap::new(), &mut counter)?;
-        Some(format!("{}", RawLambdaPrinter::new(&normalized)))
-    }
-
-    /// Recursively normalize a RawLambda, substituting alias lets and
-    /// renaming other bound variables with sequential stamps.
-    fn normalize_for_key(
-        lam: &RawLambda,
-        env: &HashMap<Ident, RawLambda>,
-        counter: &mut i32,
-    ) -> Option<RawLambda> {
-        match lam {
-            RawLambda::Lshared(inner) => Self::normalize_for_key(inner, env, counter),
-            RawLambda::Lvar(id) => {
-                if let Some(replacement) = env.get(id) {
-                    Some(replacement.clone())
-                } else {
-                    Some(lam.clone())
-                }
-            }
-            RawLambda::Lconst(_) => Some(lam.clone()),
-            RawLambda::LglobalModule(_) => Some(lam.clone()),
-            RawLambda::Llet(LetKind::Alias, id, ex, body) => {
-                // Substitute alias lets: replace id with normalized ex in body
-                let ex_norm = Self::normalize_for_key(ex, env, counter)?;
-                let mut new_env = env.clone();
-                new_env.insert(id.clone(), ex_norm);
-                Self::normalize_for_key(body, &new_env, counter)
-            }
-            RawLambda::Llet(kind, id, ex, body) => {
-                let ex_norm = Self::normalize_for_key(ex, env, counter)?;
-                // Create a normalized variable name
-                let norm_id = Ident::new(id.name(), *counter, IdentFlags::NONE);
-                *counter += 1;
-                let mut new_env = env.clone();
-                new_env.insert(id.clone(), RawLambda::Lvar(norm_id.clone()));
-                let body_norm = Self::normalize_for_key(body, &new_env, counter)?;
-                Some(RawLambda::Llet(
-                    *kind,
-                    norm_id,
-                    Box::new(ex_norm),
-                    Box::new(body_norm),
-                ))
-            }
-            RawLambda::Lprim(info) => {
-                let mut args = Vec::with_capacity(info.args.len());
-                for arg in &info.args {
-                    args.push(Self::normalize_for_key(arg, env, counter)?);
-                }
-                Some(RawLambda::Lprim(Box::new(crate::raw_lambda::RawPrimInfo {
-                    primitive: info.primitive.clone(),
-                    args,
-                    loc: Location::none(),
-                })))
-            }
-            RawLambda::LifThenElse(cond, then_, else_) => Some(RawLambda::LifThenElse(
-                Box::new(Self::normalize_for_key(cond, env, counter)?),
-                Box::new(Self::normalize_for_key(then_, env, counter)?),
-                Box::new(Self::normalize_for_key(else_, env, counter)?),
-            )),
-            RawLambda::Lsequence(a, b) => Some(RawLambda::Lsequence(
-                Box::new(Self::normalize_for_key(a, env, counter)?),
-                Box::new(Self::normalize_for_key(b, env, counter)?),
-            )),
-            RawLambda::LstaticRaise(i, args) => {
-                let mut norm_args = Vec::with_capacity(args.len());
-                for arg in args {
-                    norm_args.push(Self::normalize_for_key(arg, env, counter)?);
-                }
-                Some(RawLambda::LstaticRaise(*i, norm_args))
-            }
-            RawLambda::LstaticCatch(body, (i, params), handler) => {
-                let body_norm = Self::normalize_for_key(body, env, counter)?;
-                let handler_norm = Self::normalize_for_key(handler, env, counter)?;
-                Some(RawLambda::LstaticCatch(
-                    Box::new(body_norm),
-                    (*i, params.clone()),
-                    Box::new(handler_norm),
-                ))
-            }
-            RawLambda::Lapply(ap) => {
-                let func = Self::normalize_for_key(&ap.ap_func, env, counter)?;
-                let mut args = Vec::with_capacity(ap.ap_args.len());
-                for arg in &ap.ap_args {
-                    args.push(Self::normalize_for_key(arg, env, counter)?);
-                }
-                Some(RawLambda::Lapply(Box::new(crate::raw_lambda::RawApply {
-                    ap_func: Box::new(func),
-                    ap_args: args,
-                    ap_info: crate::lambda::ApInfo {
-                        loc: Location::none(),
-                        ..ap.ap_info.clone()
-                    },
-                    ap_transformed_jsx: ap.ap_transformed_jsx,
-                })))
-            }
-            // For complex constructs (functions, letrec, loops, etc.),
-            // bail out to avoid complexity — OCaml does the same (Not_simple)
-            RawLambda::Lfunction(_)
-            | RawLambda::Lletrec(_, _)
-            | RawLambda::Lwhile(_, _)
-            | RawLambda::Lfor(_, _, _, _, _)
-            | RawLambda::Lfor_of(_, _, _)
-            | RawLambda::Lfor_await_of(_, _, _) => None,
-            RawLambda::Lswitch(scrut, sw) => {
-                let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
-                let mut consts = Vec::new();
-                for (tag, act) in &sw.sw_consts {
-                    consts.push((tag.clone(), Self::normalize_for_key(act, env, counter)?));
-                }
-                let mut blocks = Vec::new();
-                for (tag, act) in &sw.sw_blocks {
-                    blocks.push((tag.clone(), Self::normalize_for_key(act, env, counter)?));
-                }
-                let fail = match &sw.sw_failaction {
-                    Some(f) => Some(Box::new(Self::normalize_for_key(f, env, counter)?)),
-                    None => None,
-                };
-                Some(RawLambda::Lswitch(
-                    Box::new(scrut_norm),
-                    Box::new(crate::raw_lambda::RawLambdaSwitch {
-                        sw_consts_full: sw.sw_consts_full,
-                        sw_consts: consts,
-                        sw_blocks_full: sw.sw_blocks_full,
-                        sw_blocks: blocks,
-                        sw_failaction: fail,
-                        sw_dispatch: sw.sw_dispatch.clone(),
-                    }),
-                ))
-            }
-            RawLambda::LtryWith(body, id, handler) => {
-                let body_norm = Self::normalize_for_key(body, env, counter)?;
-                let handler_norm = Self::normalize_for_key(handler, env, counter)?;
-                Some(RawLambda::LtryWith(
-                    Box::new(body_norm),
-                    id.clone(),
-                    Box::new(handler_norm),
-                ))
-            }
-            RawLambda::LstringSwitch(scrut, cases, default) => {
-                let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
-                let mut norm_cases = Vec::new();
-                for (s, act) in cases {
-                    norm_cases.push((s.clone(), Self::normalize_for_key(act, env, counter)?));
-                }
-                let norm_default = match default {
-                    Some(d) => Some(Box::new(Self::normalize_for_key(d, env, counter)?)),
-                    None => None,
-                };
-                Some(RawLambda::LstringSwitch(
-                    Box::new(scrut_norm),
-                    norm_cases,
-                    norm_default,
-                ))
-            }
-            RawLambda::Lassign(id, ex) => Some(RawLambda::Lassign(
-                id.clone(),
-                Box::new(Self::normalize_for_key(ex, env, counter)?),
-            )),
-            RawLambda::Lbreak => Some(RawLambda::Lbreak),
-            RawLambda::Lcontinue => Some(RawLambda::Lcontinue),
-        }
-    }
-
-    /// OCaml's share_actions_sw: deduplicate switch actions by wrapping shared
-    /// actions in catch/exit. Only actions that appear >= 2 times are wrapped.
-    /// Singleton actions are kept inline. Returns the list of catch handlers.
-    fn share_actions_sw(
-        &mut self,
-        sw: &mut crate::raw_lambda::RawLambdaSwitch,
-    ) -> Vec<(i32, RawLambda)> {
-        use crate::raw_lambda::print::RawLambdaPrinter;
-
-        // Map from action key (string repr) to (exit_id, original_action)
-        let mut store: Vec<(String, i32, RawLambda)> = Vec::new();
-        let mut handlers: Vec<(i32, RawLambda)> = Vec::new();
-
-        // First pass: count occurrences of each action key
-        // Use make_action_key for alpha-normalized comparison (like OCaml's Lambda.make_key)
-        let mut key_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for (_, act) in sw.sw_consts.iter().chain(sw.sw_blocks.iter()) {
-            if matches!(act, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
-                continue;
-            }
-            let key = Self::make_action_key(act)
-                .unwrap_or_else(|| format!("{}", RawLambdaPrinter::new(act)));
-            *key_counts.entry(key).or_insert(0) += 1;
-        }
-
-        // Second pass: wrap shared actions in catch/exit
-        let mut exit_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
-
-        for (_tag, action) in sw.sw_consts.iter_mut() {
-            if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
-                continue;
-            }
-            let key = Self::make_action_key(action)
-                .unwrap_or_else(|| format!("{}", RawLambdaPrinter::new(action)));
-            let count = key_counts.get(&key).copied().unwrap_or(0);
-            if count >= 2 {
-                let exit_id = if let Some(&eid) = exit_map.get(&key) {
-                    eid
-                } else {
-                    let eid = self.next_raise_count();
-                    exit_map.insert(key.clone(), eid);
-                    // OCaml `share_actions_sw` stores the selected action once
-                    // and rewrites switch arms through that store
-                    // (compiler/ml/matching.ml:1761-1790). Rust owns the arm
-                    // slot here, so move the first shared action into the
-                    // handler instead of cloning the whole raw-lambda subtree.
-                    let original =
-                        std::mem::replace(action, RawLambda::LstaticRaise(eid, Vec::new()));
-                    handlers.push((eid, original));
-                    eid
-                };
-                if !matches!(action, RawLambda::LstaticRaise(i, args) if *i == exit_id && args.is_empty())
-                {
-                    *action = RawLambda::LstaticRaise(exit_id, Vec::new());
-                }
-            }
-        }
-
-        for (_tag, action) in sw.sw_blocks.iter_mut() {
-            if matches!(action, RawLambda::LstaticRaise(_, args) if args.is_empty()) {
-                continue;
-            }
-            let key = Self::make_action_key(action)
-                .unwrap_or_else(|| format!("{}", RawLambdaPrinter::new(action)));
-            let count = key_counts.get(&key).copied().unwrap_or(0);
-            if count >= 2 {
-                let exit_id = if let Some(&eid) = exit_map.get(&key) {
-                    eid
-                } else {
-                    let eid = self.next_raise_count();
-                    exit_map.insert(key.clone(), eid);
-                    // See the const-arm comment above and OCaml
-                    // `matching.ml:1761-1790`.
-                    let original =
-                        std::mem::replace(action, RawLambda::LstaticRaise(eid, Vec::new()));
-                    handlers.push((eid, original));
-                    eid
-                };
-                if !matches!(action, RawLambda::LstaticRaise(i, args) if *i == exit_id && args.is_empty())
-                {
-                    *action = RawLambda::LstaticRaise(exit_id, Vec::new());
-                }
-            }
-        }
-
-        handlers
-    }
-
-    /// OCaml's reintroduce_fail: when a switch has no failaction (switch*),
-    /// if any static exit appears >= 3 times in the cases, extract it as failaction.
-    fn reintroduce_fail(sw: &mut crate::raw_lambda::RawLambdaSwitch) {
-        if sw.sw_failaction.is_some() {
-            return;
-        }
-
-        fn as_simple_exit(lam: &RawLambda) -> Option<i32> {
-            match lam {
-                RawLambda::LstaticRaise(i, args) if args.is_empty() => Some(*i),
-                RawLambda::Llet(LetKind::Alias, _, _, body) => as_simple_exit(body),
-                _ => None,
-            }
-        }
-
-        let mut counts: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
-        for (_, lam) in sw.sw_consts.iter().chain(sw.sw_blocks.iter()) {
-            if let Some(i) = as_simple_exit(lam) {
-                *counts.entry(i).or_insert(0) += 1;
-            }
-        }
-
-        let mut best_exit = -1i32;
-        let mut best_count = -1i32;
-        for (&exit_id, &count) in &counts {
-            // Tie-break: choose the largest index (matches OCaml)
-            if count > best_count || (count == best_count && exit_id > best_exit) {
-                best_exit = exit_id;
-                best_count = count;
-            }
-        }
-
-        if best_count >= 3 {
-            sw.sw_consts
-                .retain(|(_, lam)| as_simple_exit(lam) != Some(best_exit));
-            sw.sw_blocks
-                .retain(|(_, lam)| as_simple_exit(lam) != Some(best_exit));
-            sw.sw_failaction = Some(Box::new(RawLambda::LstaticRaise(best_exit, Vec::new())));
-        }
-    }
-
-    /// Build a switch, wrapping the failaction in catch/exit to match OCaml's
-    /// matching.ml behavior where default actions are shared through static catch.
-    fn make_switch_with_catch(
-        &mut self,
-        scrut: RawLambda,
-        mut const_cases: Vec<(i32, RawLambda)>,
-        mut block_cases: Vec<(i32, RawLambda)>,
-        failaction: Option<Box<RawLambda>>,
-    ) -> RawLambda {
-        self.make_switch_with_catch_exit(
-            scrut,
-            const_cases
-                .into_iter()
-                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
-                .collect(),
-            block_cases
-                .into_iter()
-                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
-                .collect(),
-            failaction,
-            None,
-            crate::lambda::SwitchDispatch::Direct,
-        )
-    }
-
-    fn make_switch_with_catch_exit(
-        &mut self,
-        scrut: RawLambda,
-        const_cases: Vec<(crate::lambda::SwitchKey, RawLambda)>,
-        block_cases: Vec<(crate::lambda::SwitchKey, RawLambda)>,
-        failaction: Option<Box<RawLambda>>,
-        pre_exit: Option<i32>,
-        dispatch: crate::lambda::SwitchDispatch,
-    ) -> RawLambda {
-        match failaction {
-            Some(default) => {
-                let exit_id = pre_exit.unwrap_or_else(|| self.next_raise_count());
-                let switch = RawLambda::Lswitch(
-                    Box::new(scrut),
-                    Box::new(crate::raw_lambda::RawLambdaSwitch {
-                        sw_consts_full: true,
-                        sw_consts: const_cases,
-                        sw_blocks_full: true,
-                        sw_blocks: block_cases,
-                        sw_failaction: Some(Box::new(RawLambda::LstaticRaise(exit_id, Vec::new()))),
-                        sw_dispatch: dispatch.clone(),
-                    }),
-                );
-                RawLambda::LstaticCatch(Box::new(switch), (exit_id, Vec::new()), default)
-            }
-            None => {
-                let mut sw = crate::raw_lambda::RawLambdaSwitch {
-                    sw_consts_full: true,
-                    sw_consts: const_cases,
-                    sw_blocks_full: true,
-                    sw_blocks: block_cases,
-                    sw_failaction: None,
-                    sw_dispatch: dispatch,
-                };
-                // OCaml: share_actions_sw then reintroduce_fail
-                let share_handlers = self.share_actions_sw(&mut sw);
-                Self::reintroduce_fail(&mut sw);
-                let mut result = RawLambda::Lswitch(Box::new(scrut), Box::new(sw));
-                // Wrap with catch handlers from share_actions_sw.
-                // OCaml's handle_shared composes handlers as h(ohs(x)),
-                // so the first shared action is innermost. We iterate forward
-                // to match: first handler becomes innermost catch.
-                for (exit_id, handler) in share_handlers.into_iter() {
-                    result = RawLambda::LstaticCatch(
-                        Box::new(result),
-                        (exit_id, Vec::new()),
-                        Box::new(handler),
-                    );
-                }
-                result
-            }
-        }
-    }
-
     /// Apply an inline attribute to a raw function, matching OCaml's
     /// `Translattribute.add_inline_attribute`.
     fn apply_inline_attribute_raw(
@@ -2328,7 +1648,7 @@ impl<'a> RawLambdaConverter<'a> {
         param: &Ident,
     ) -> Option<crate::types::Path> {
         rootpath.as_ref().map(|path| {
-            crate::types::Path::papply(path.clone(), crate::types::Path::pident(param.clone()))
+            crate::types::Path::papply(path.clone(), crate::types::Path::pident(*param))
         })
     }
 
@@ -2365,7 +1685,7 @@ impl<'a> RawLambdaConverter<'a> {
             .fold(body, |acc, ext| {
                 RawLambda::let_(
                     LetKind::Strict,
-                    ext.ext_id.clone(),
+                    ext.ext_id,
                     self.transl_extension_constructor_raw(
                         Self::field_path(rootpath, &ext.ext_id),
                         ext,
@@ -2390,10 +1710,6 @@ impl<'a> RawLambdaConverter<'a> {
         (*self.type_ctx.get_desc(self.type_ctx.repr(ty))).clone()
     }
 
-    fn is_function_type(&self, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
-        self.is_function_type_with_env(ty, self.env)
-    }
-
     fn is_function_type_with_env(
         &self,
         ty: TypeExprRef,
@@ -2413,40 +1729,6 @@ impl<'a> RawLambdaConverter<'a> {
                     None
                 } else {
                     self.is_function_type_with_env(expanded, env)
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Like is_function_type but only matches when the argument has no label (Nolabel).
-    /// Matches OCaml's check: Tarrow ({lbl = Nolabel; typ}, ...)
-    fn is_nolabel_function_type(&self, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
-        self.is_nolabel_function_type_with_env(ty, self.env)
-    }
-
-    fn is_nolabel_function_type_with_env(
-        &self,
-        ty: TypeExprRef,
-        env: &crate::types::env::Env,
-    ) -> Option<(TypeExprRef, TypeExprRef)> {
-        let ty = self.type_ctx.repr(ty);
-        if let Some((label, arg, ret)) =
-            crate::types::ctype::split_arrow_with_label(self.type_ctx, ty)
-        {
-            return matches!(label, crate::types::asttypes::ArgLabel::Nolabel)
-                .then_some((arg, ret));
-        }
-        match &*self.type_ctx.get_desc(ty) {
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-                self.is_nolabel_function_type_with_env(*next, env)
-            }
-            TypeDesc::Tconstr { .. } => {
-                let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
-                if expanded == ty {
-                    None
-                } else {
-                    self.is_nolabel_function_type_with_env(expanded, env)
                 }
             }
             _ => None,
@@ -2492,10 +1774,6 @@ impl<'a> RawLambdaConverter<'a> {
         typeopt_is_base_type(self.type_ctx, env, ty, name)
     }
 
-    fn is_immediate_type(&self, ty: TypeExprRef) -> bool {
-        self.is_immediate_type_with_env(ty, self.env)
-    }
-
     fn is_immediate_type_with_env(&self, ty: TypeExprRef, env: &crate::types::env::Env) -> bool {
         use crate::types::btype;
         use crate::types::type_expr::TypeDesc;
@@ -2509,7 +1787,7 @@ impl<'a> RawLambdaConverter<'a> {
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) =
-                    crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, env, path)
+                    crate::raw_lambda::typeopt::find_type_decl(self.type_ctx, env, path)
                 {
                     return decl.type_immediate;
                 }
@@ -2648,121 +1926,6 @@ impl<'a> RawLambdaConverter<'a> {
             0,
             crate::lambda::lam_constant::PointerInfo::AssertFalse,
         ))
-    }
-
-    fn assert_failed_lambda(&self, loc: Location) -> Lambda {
-        self.raise_predef_exception("Assert_failure", PREDEF_ASSERT_FAILURE_STAMP, loc)
-    }
-
-    fn assert_false_lambda(&self, loc: Location) -> Lambda {
-        // Same branch as compiler/ml/translcore.ml:926-928.
-        if self.no_assert_false {
-            Lambda::const_(Constant::int_with_comment(0, PointerInfo::AssertFalse))
-        } else {
-            self.assert_failed_lambda(loc)
-        }
-    }
-
-    fn has_only_expr_attr(&self, expr: &Expression, name: &str) -> bool {
-        expr.exp_attributes.len() == 1
-            && self.arena.get_string(expr.exp_attributes[0].0.txt) == name
-    }
-
-    fn wrap_raw_function_bindings(
-        &self,
-        expr: Expression,
-        bindings: &[RawFunctionBinding],
-    ) -> Expression {
-        bindings.iter().fold(expr, |expr, binding| match binding {
-            RawFunctionBinding::Value(binds) => {
-                let mut wrapped = expr;
-                let body = wrapped.clone();
-                wrapped.exp_desc = ExpressionDesc::Texp_let(
-                    crate::parser::ast::RecFlag::Nonrecursive,
-                    binds.clone(),
-                    Box::new(body),
-                );
-                wrapped
-            }
-            RawFunctionBinding::Module(id, name, mexpr) => {
-                let mut wrapped = expr;
-                let body = wrapped.clone();
-                wrapped.exp_desc = ExpressionDesc::Texp_letmodule(
-                    id.clone(),
-                    name.clone(),
-                    Box::new(mexpr.clone()),
-                    Box::new(body),
-                );
-                wrapped
-            }
-        })
-    }
-
-    fn push_raw_function_binding_refs<'b>(
-        bindings: &mut Vec<RawFunctionBindingRef<'b>>,
-        pending: Vec<RawFunctionBindingRef<'b>>,
-    ) {
-        if pending.is_empty() {
-            return;
-        }
-        let old = std::mem::take(bindings);
-        bindings.reserve(pending.len() + old.len());
-        bindings.extend(pending);
-        bindings.extend(old);
-    }
-
-    fn strip_default_bindings_before_function<'b>(
-        &self,
-        mut rhs: &'b Expression,
-    ) -> (&'b Expression, Vec<RawFunctionBindingRef<'b>>) {
-        let mut bindings = Vec::new();
-        loop {
-            match &rhs.exp_desc {
-                ExpressionDesc::Texp_let(
-                    crate::parser::ast::RecFlag::Nonrecursive,
-                    binds,
-                    inner,
-                ) if self.has_only_expr_attr(rhs, "#default")
-                    && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
-                {
-                    bindings.push(RawFunctionBindingRef::Value(binds));
-                    rhs = inner;
-                }
-                ExpressionDesc::Texp_letmodule(_id, _name, _mexpr, inner)
-                    if self.has_only_expr_attr(rhs, "#modulepat")
-                        && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
-                {
-                    if let ExpressionDesc::Texp_letmodule(id, _name, mexpr, _) = &rhs.exp_desc {
-                        bindings.push(RawFunctionBindingRef::Module(id, mexpr));
-                    }
-                    rhs = inner;
-                }
-                _ => return (rhs, bindings),
-            }
-        }
-    }
-
-    fn wrap_raw_function_binding_refs(
-        &mut self,
-        mut body: RawLambda,
-        bindings: &[RawFunctionBindingRef<'_>],
-    ) -> RawLambda {
-        for binding in bindings {
-            body = match binding {
-                RawFunctionBindingRef::Value(binds) => self.convert_let_with_body_raw(
-                    crate::parser::ast::RecFlag::Nonrecursive,
-                    binds,
-                    body,
-                ),
-                RawFunctionBindingRef::Module(id, mexpr) => RawLambda::let_(
-                    LetKind::Strict,
-                    (*id).clone(),
-                    self.convert_module_expr_raw(mexpr, &None),
-                    body,
-                ),
-            };
-        }
-        body
     }
 
     fn translate_unified_ops_primitive(
@@ -2959,10 +2122,6 @@ impl<'a> RawLambdaConverter<'a> {
             },
             _ => return None,
         })
-    }
-
-    fn specialize_comparison(&self, table: ComparisonSpecialization, ty: TypeExprRef) -> Primitive {
-        self.specialize_comparison_in_env(table, ty, self.env)
     }
 
     fn specialize_comparison_in_env(
@@ -3368,7 +2527,7 @@ impl<'a> RawLambdaConverter<'a> {
                             transformed_jsx,
                         },
                         argl,
-                        loc.clone(),
+                        loc,
                     );
                     Self::external_result_wrap(loc, *result_type, returns_unit, call)
                 }
@@ -3479,7 +2638,7 @@ impl<'a> RawLambdaConverter<'a> {
         };
         fn segments(p: &Path, acc: Vec<String>) -> Option<(Ident, Vec<String>)> {
             match p {
-                Path::Pident(id) => id.is_persistent().then(|| (id.clone(), acc)),
+                Path::Pident(id) => id.is_persistent().then_some((*id, acc)),
                 Path::Pdot(prefix, name, _) => {
                     let mut acc = acc;
                     acc.insert(0, name.to_string());
@@ -3559,17 +2718,17 @@ impl<'a> RawLambdaConverter<'a> {
                     transformed_jsx: false,
                 },
                 send_args,
-                loc.clone(),
+                loc,
             )
         };
         let m = self.fresh_ident("m");
         let adapted_value = if prim.prim_arity == 0 {
             Self::external_result_wrap(
-                loc.clone(),
+                loc,
                 return_wrapper,
                 returns_unit,
                 send_call(
-                    RawLambda::var(m.clone()),
+                    RawLambda::var(m),
                     vec![],
                     DeclKind::DeclGet {
                         name: name.to_string(),
@@ -3581,21 +2740,27 @@ impl<'a> RawLambdaConverter<'a> {
                 .map(|i| self.fresh_ident(&format!("prim{i}")))
                 .collect();
             let body = Self::external_result_wrap(
-                loc.clone(),
+                loc,
                 return_wrapper,
                 returns_unit,
                 send_call(
-                    RawLambda::var(m.clone()),
+                    RawLambda::var(m),
                     params.iter().cloned().map(RawLambda::var).collect(),
                     DeclKind::DeclSend {
                         name: name.to_string(),
                     },
                 ),
             );
-            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default(), loc.clone())
+            RawLambda::function_(
+                prim.prim_arity,
+                params,
+                body,
+                FunctionAttribute::default(),
+                loc,
+            )
         };
         let callback =
-            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default(), loc.clone());
+            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default(), loc);
         RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "then".to_string(),
@@ -3618,7 +2783,7 @@ impl<'a> RawLambdaConverter<'a> {
                         path: vec![],
                     })),
                     vec![],
-                    loc.clone(),
+                    loc,
                 ),
                 callback,
             ],
@@ -3678,9 +2843,7 @@ impl<'a> RawLambdaConverter<'a> {
             Primitive::Pobjcomp(crate::lambda::Comparison::Eq)
             | Primitive::Pobjcomp(crate::lambda::Comparison::Neq)
                 if matches!(args, [left, right] if Self::raw_lambda_is_nullish_constant(left) || Self::raw_lambda_is_nullish_constant(right)) =>
-            {
-                return;
-            }
+                {}
             Primitive::Pobjcomp(_)
             | Primitive::Pobjorder
             | Primitive::Pobjmin
@@ -3700,7 +2863,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn raw_block_or_prim(
         &self,
-        tag: i32,
+        _tag: i32,
         tag_info: TagInfo,
         elems: Vec<RawLambda>,
         loc: Location,
@@ -3933,7 +3096,7 @@ impl<'a> RawLambdaConverter<'a> {
             // The binder is emitted only when a base exists, but its allocation
             // still orders later Translcore/Translmod identifiers.
             let init_id = self.fresh_ident("init");
-            let init_var = base_lam.as_ref().map(|_| RawLambda::var(init_id.clone()));
+            let init_var = base_lam.as_ref().map(|_| RawLambda::var(init_id));
 
             let mut elems = Vec::with_capacity(fields.len());
             let mut fields_info = Vec::with_capacity(fields.len());
@@ -4076,7 +3239,7 @@ impl<'a> RawLambdaConverter<'a> {
         };
 
         let copy_id = self.fresh_ident("newrecord");
-        let mut body = RawLambda::var(copy_id.clone());
+        let mut body = RawLambda::var(copy_id);
         // OCaml uses Array.fold_left which processes fields left-to-right.
         // Each Lsequence(upd, cont) wraps the update around the continuation,
         // so the LAST field ends up outermost in the sequence chain.
@@ -4093,7 +3256,7 @@ impl<'a> RawLambdaConverter<'a> {
             };
             let update = RawLambda::prim(
                 Primitive::Psetfield(pos, info),
-                vec![RawLambda::var(copy_id.clone()), self.convert_expr_raw(expr)],
+                vec![RawLambda::var(copy_id), self.convert_expr_raw(expr)],
                 loc,
             );
             body = RawLambda::seq(update, body);
@@ -4119,7 +3282,7 @@ impl<'a> RawLambdaConverter<'a> {
         // is an internal storage optimization, so expand it before Lambda.
         let placeholder_lid = fields
             .first()
-            .map(|(lid, _, _, _)| lid.clone())
+            .map(|(lid, _, _, _)| *lid)
             .unwrap_or_else(|| self.arena.placeholder_located(omitted_loc));
         let mut explicit_by_pos: HashMap<usize, &RecordField> =
             HashMap::with_capacity(fields.len());
@@ -4149,7 +3312,7 @@ impl<'a> RawLambdaConverter<'a> {
                     loc: omitted_loc,
                 };
                 expanded.push((
-                    label_lid.clone(),
+                    label_lid,
                     label.clone(),
                     RecordLabelDefinition::OmittedOptionalNone(label_lid, label.lbl_arg),
                     false,
@@ -4258,7 +3421,7 @@ impl<'a> RawLambdaConverter<'a> {
         ids.iter().rev().fold(body, |acc, (id, pos)| {
             RawLambda::let_(
                 LetKind::Alias,
-                id.clone(),
+                *id,
                 RawLambda::prim(
                     Primitive::Pfield(
                         *pos as i32,
@@ -4266,7 +3429,7 @@ impl<'a> RawLambdaConverter<'a> {
                             name: id.name().to_string(),
                         },
                     ),
-                    vec![RawLambda::var(mid.clone())],
+                    vec![RawLambda::var(*mid)],
                     loc,
                 ),
                 acc,
@@ -4278,7 +3441,7 @@ impl<'a> RawLambdaConverter<'a> {
         fn collect_groups(lam: &RawLambda, groups: &mut HashMap<Ident, RawLambda>) {
             match lam {
                 RawLambda::Llet(_, id, value, body) => {
-                    groups.insert(id.clone(), (**value).clone());
+                    groups.insert(*id, (**value).clone());
                     collect_groups(value, groups);
                     collect_groups(body, groups);
                 }
@@ -4330,15 +3493,15 @@ impl<'a> RawLambdaConverter<'a> {
         ) -> (RawLambda, Option<Ident>) {
             match lam {
                 RawLambda::Lvar(id) => {
-                    if !seen.insert(id.clone()) {
-                        return (lam.clone(), Some(id.clone()));
+                    if !seen.insert(*id) {
+                        return (lam.clone(), Some(*id));
                     }
                     match groups.get(id) {
                         Some(alias @ (RawLambda::Lvar(_) | RawLambda::Lprim(_))) => {
                             resolve_binding(alias, groups, seen)
                         }
-                        Some(resolved) => (resolved.clone(), Some(id.clone())),
-                        None => (lam.clone(), Some(id.clone())),
+                        Some(resolved) => (resolved.clone(), Some(*id)),
+                        None => (lam.clone(), Some(*id)),
                     }
                 }
                 RawLambda::Lprim(__prim0)
@@ -4441,7 +3604,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let module = groups.get(top_id)?;
                 let mut positions = Vec::new();
                 let (target_id, _target) = find_path(module, fields, &groups, &mut positions)?;
-                Some((top_id.clone(), positions, target_id))
+                Some((*top_id, positions, target_id))
             });
             let Some((_top_id, _positions, Some(target_id))) = resolved else {
                 self.report_warning(
@@ -4470,7 +3633,7 @@ impl<'a> RawLambdaConverter<'a> {
             let js_name = crate::js_ir::printer::convert_ident_name(&export_name);
             if occupied.contains(&js_name) {
                 self.report_diagnostic(
-                    hoisted.target_loc.clone(),
+                    hoisted.target_loc,
                     format!(
                         "Cannot hoist this function as `{export_name}` because that name is already used by a top-level binding."
                     ),
@@ -4534,7 +3697,7 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::Lvar(id) => f(self, id),
             _ => {
                 let id = self.fresh_ident("let");
-                let body = f(self, id.clone());
+                let body = f(self, id);
                 RawLambda::let_(strict, id, arg, body)
             }
         }
@@ -4555,9 +3718,9 @@ impl<'a> RawLambdaConverter<'a> {
         match path {
             crate::types::Path::Pident(id) => {
                 if id.is_global() {
-                    RawLambda::global_module(id.clone())
+                    RawLambda::global_module(*id)
                 } else {
-                    RawLambda::var(id.clone())
+                    RawLambda::var(*id)
                 }
             }
             crate::types::Path::Pdot(prefix, name, pos) => {
@@ -4585,10 +3748,6 @@ impl<'a> RawLambdaConverter<'a> {
             }
             crate::types::Path::Papply(_, _) => RawLambda::unit(),
         }
-    }
-
-    fn translate_normal_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
-        self.translate_normal_path_raw_in_env(self.env, path, loc)
     }
 
     /// Resolve the runtime field position of a name within a module's signature.
@@ -4967,7 +4126,7 @@ impl<'a> RawLambdaConverter<'a> {
         let path = match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
                 std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
-                name.clone(),
+                *name,
                 *pos,
             ),
             crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
@@ -5067,7 +4226,7 @@ impl<'a> RawLambdaConverter<'a> {
         match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
                 std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
-                name.clone(),
+                *name,
                 *pos,
             ),
             crate::types::Path::Pident(_) => path.clone(),
@@ -5188,16 +4347,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_ident(crate::types::Path::Pident(id), _) => {
                 if let Some(env) = self.env_for_module_expr(module_expr) {
-                    if env
-                        .lookup_module(&crate::types::Path::Pident(id.clone()))
-                        .is_err()
-                    {
+                    if env.lookup_module(&crate::types::Path::Pident(*id)).is_err() {
                         self.note_possible_required_module(id);
                         return;
                     }
                 } else if self
                     .env
-                    .lookup_module(&crate::types::Path::Pident(id.clone()))
+                    .lookup_module(&crate::types::Path::Pident(*id))
                     .is_err()
                 {
                     self.note_possible_required_module(id);
@@ -5237,7 +4393,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .map(|(id, left_pos, left_cc)| {
                         let (right_pos, right_cc) = &right_positions[*left_pos];
                         (
-                            id.clone(),
+                            *id,
                             *right_pos,
                             Self::compose_coercions_raw(left_cc, right_cc),
                         )
@@ -5310,9 +4466,9 @@ impl<'a> RawLambdaConverter<'a> {
             if fv.contains(id) {
                 let rebound = self.fresh_ident(id.name());
                 let field = get_field(self, id.name(), *pos);
-                let value = self.apply_coercion_raw(loc.clone(), LetKind::Alias, coercion, field);
-                lam = RawLambda::let_(LetKind::Alias, rebound.clone(), value, lam);
-                subst.insert(id.clone(), rebound);
+                let value = self.apply_coercion_raw(loc, LetKind::Alias, coercion, field);
+                lam = RawLambda::let_(LetKind::Alias, rebound, value, lam);
+                subst.insert(*id, rebound);
             }
         }
 
@@ -5339,14 +4495,14 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         self.name_lambda_raw(strict, funct, |this, id| {
             let body = this.apply_coercion_raw(
-                loc.clone(),
+                loc,
                 LetKind::Strict,
                 cc_res,
                 RawLambda::Lapply(Box::new(crate::raw_lambda::RawApply {
                     ap_func: Box::new(RawLambda::var(id)),
                     ap_args: vec![arg],
                     ap_info: ApInfo {
-                        loc: loc.clone(),
+                        loc,
                         inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
@@ -5361,7 +4517,7 @@ impl<'a> RawLambdaConverter<'a> {
                     is_a_functor: true,
                     ..FunctionAttribute::default()
                 },
-                loc.clone(),
+                loc,
             )
         })
     }
@@ -5379,7 +4535,7 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
                 debug_assert_eq!(positions.len(), runtime_fields.len());
                 self.name_lambda_raw(strict, arg, |this, id| {
-                    let named = RawLambda::var(id.clone());
+                    let named = RawLambda::var(id);
                     let lam = RawLambda::prim(
                         Primitive::Pmakeblock(
                             TagInfo::Module(runtime_fields.clone()),
@@ -5395,15 +4551,15 @@ impl<'a> RawLambdaConverter<'a> {
                                         FieldDbgInfo::Module { name: name.clone() },
                                     ),
                                     vec![named.clone()],
-                                    loc.clone(),
+                                    loc,
                                 );
-                                this.apply_coercion_raw(loc.clone(), LetKind::Alias, cc, field)
+                                this.apply_coercion_raw(loc, LetKind::Alias, cc, field)
                             })
                             .collect(),
-                        loc.clone(),
+                        loc,
                     );
                     this.wrap_id_pos_list_raw(
-                        loc.clone(),
+                        loc,
                         id_pos_list,
                         |_, name, pos| {
                             RawLambda::prim(
@@ -5414,7 +4570,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     },
                                 ),
                                 vec![named.clone()],
-                                loc.clone(),
+                                loc,
                             )
                         },
                         lam,
@@ -5429,12 +4585,8 @@ impl<'a> RawLambdaConverter<'a> {
                     return arg;
                 }
                 let param = self.fresh_ident("funarg");
-                let carg = self.apply_coercion_raw(
-                    loc.clone(),
-                    LetKind::Alias,
-                    cc_arg,
-                    RawLambda::var(param.clone()),
-                );
+                let carg =
+                    self.apply_coercion_raw(loc, LetKind::Alias, cc_arg, RawLambda::var(param));
                 self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
             }
             ModuleCoercion::Tcoerce_primitive(pc) => {
@@ -5443,12 +4595,12 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
                     let translated = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
-                        this.translate_normal_path_raw_in_env(env.as_ref(), path, loc.clone())
+                        this.translate_normal_path_raw_in_env(env.as_ref(), path, loc)
                     } else {
                         let env = this.env;
-                        this.translate_normal_path_raw_in_env(env, path, loc.clone())
+                        this.translate_normal_path_raw_in_env(env, path, loc)
                     };
-                    this.apply_coercion_raw(loc.clone(), LetKind::Alias, inner, translated)
+                    this.apply_coercion_raw(loc, LetKind::Alias, inner, translated)
                 })
             }
         }
@@ -5496,12 +4648,12 @@ impl<'a> RawLambdaConverter<'a> {
                         ModuleCoercion::Tcoerce_primitive(pc) => {
                             // OCaml: transl_primitive p.pc_loc p.pc_desc p.pc_env p.pc_type
                             if is_top_level {
-                                export_ids.push(pc.pc_id.clone());
+                                export_ids.push(pc.pc_id);
                             }
                             block_fields.push(self.transl_primitive_raw(
                                 &pc.pc_desc,
                                 pc.pc_type,
-                                pc.pc_loc.clone(),
+                                pc.pc_loc,
                             ));
                         }
                         _ => {
@@ -5531,10 +4683,10 @@ impl<'a> RawLambdaConverter<'a> {
                                 });
                             if let Some(id) = id {
                                 if is_top_level {
-                                    export_ids.push(id.clone());
+                                    export_ids.push(id);
                                 }
                                 block_fields.push(self.apply_coercion_raw(
-                                    loc.clone(),
+                                    loc,
                                     LetKind::Strict,
                                     field_cc,
                                     RawLambda::var(id),
@@ -5551,7 +4703,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let lam = RawLambda::prim(
                     Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
-                    loc.clone(),
+                    loc,
                 );
                 let filtered_id_pos = id_pos_list
                     .iter()
@@ -5577,9 +4729,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let block_fields = fields
                     .iter()
                     .cloned()
-                    .map(|id| {
-                        self.apply_coercion_raw(loc.clone(), LetKind::Alias, cc, RawLambda::var(id))
-                    })
+                    .map(|id| self.apply_coercion_raw(loc, LetKind::Alias, cc, RawLambda::var(id)))
                     .collect();
                 let tag = if is_top_level {
                     TagInfo::ModuleExport(fields.to_vec())
@@ -5638,9 +4788,9 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_ident(path, _) => {
                 let loc = self.loc(module_expr.mod_loc);
                 let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
-                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc.clone())
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc)
                 } else {
-                    self.translate_module_path_raw(path, loc.clone())
+                    self.translate_module_path_raw(path, loc)
                 };
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
@@ -5666,14 +4816,14 @@ impl<'a> RawLambdaConverter<'a> {
                 let body_path = Self::functor_path(rootpath, param);
                 let renamed_param = self.rename_ident(param);
                 let arg = self.apply_coercion_raw(
-                    loc.clone(),
+                    loc,
                     LetKind::Alias,
                     arg_coercion,
-                    RawLambda::var(renamed_param.clone()),
+                    RawLambda::var(renamed_param),
                 );
                 let body = RawLambda::let_(
                     LetKind::Alias,
-                    param.clone(),
+                    *param,
                     arg,
                     self.convert_module_expr_raw_with_coercion(body, &body_path, res_coercion),
                 );
@@ -5703,7 +4853,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ap_func: Box::new(funct_lam),
                     ap_args: vec![self.convert_module_expr_raw_with_coercion(arg, &None, ccarg)],
                     ap_info: ApInfo {
-                        loc: loc.clone(),
+                        loc,
                         inlined,
                         status: ApplyStatus::Na,
                     },
@@ -5799,9 +4949,9 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 let loc = self.loc(module_expr.mod_loc);
                 let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
-                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc.clone())
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc)
                 } else {
-                    self.translate_module_path_raw(path, loc.clone())
+                    self.translate_module_path_raw(path, loc)
                 };
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
@@ -5835,9 +4985,8 @@ impl<'a> RawLambdaConverter<'a> {
     fn init_shape(&self, modl: &ModuleExpr) -> Option<(RawLambda, RawLambda)> {
         let env = self.type_ctx.get_typed_env(modl.mod_env)?;
         // Get the decl::ModuleType.
-        // First try converting the typedtree mod_type directly.
-        // If that fails (e.g., Tmty_placeholder), try extracting from
-        // Tmod_constraint wrapper or looking up in the env.
+        // First try the typedtree mod_type directly; if it is unusable, try
+        // the Tmod_constraint wrapper or look it up in the env.
         let decl_mty = self.get_decl_module_type(modl, &env);
         let decl_mty = decl_mty?;
         let shape = self.init_shape_mod(&env, &decl_mty)?;
@@ -5983,13 +5132,13 @@ impl<'a> RawLambdaConverter<'a> {
                             // add_name: wrap with (shape, name) tuple
                             result.push(Constant::Block {
                                 tag_info: Box::new(TagInfo::Tuple),
-                                elements: vec![init_v, Constant::const_string(&id.name())],
+                                elements: vec![init_v, Constant::const_string(id.name())],
                             });
                         }
                     }
                 }
                 DeclSigItem::SigType(id, tdecl, _) => {
-                    env.add_type(id.clone(), tdecl.clone());
+                    env.add_type(*id, tdecl.clone());
                 }
                 DeclSigItem::SigTypext(_, _, _) => {
                     return None; // type extensions can't be initialized
@@ -5999,12 +5148,12 @@ impl<'a> RawLambdaConverter<'a> {
                     // add_name: wrap with (shape, name) tuple
                     result.push(Constant::Block {
                         tag_info: Box::new(TagInfo::Tuple),
-                        elements: vec![sub_shape, Constant::const_string(&id.name())],
+                        elements: vec![sub_shape, Constant::const_string(id.name())],
                     });
-                    env.add_module(id.clone(), md.clone());
+                    env.add_module(*id, md.clone());
                 }
                 DeclSigItem::SigModtype(id, minfo) => {
-                    env.add_modtype(id.clone(), minfo.clone());
+                    env.add_modtype(*id, minfo.clone());
                 }
                 DeclSigItem::SigClass => {
                     // ReScript doesn't have classes, but just in case
@@ -6061,14 +5210,14 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::Llet(_, id, value, cont) => {
                 if matches!(value.as_ref(), RawLambda::Lfunction(_)) {
                     let mut new_acc = acc.clone();
-                    new_acc.insert(id.clone());
+                    new_acc.insert(*id);
                     Self::is_function_or_const_block(cont, &new_acc)
                 } else if matches!(value.as_ref(), RawLambda::Lconst(_)) {
                     Self::is_function_or_const_block(cont, acc)
                 } else if let RawLambda::Lvar(id2) = value.as_ref() {
                     if acc.contains(id2) {
                         let mut new_acc = acc.clone();
-                        new_acc.insert(id.clone());
+                        new_acc.insert(*id);
                         Self::is_function_or_const_block(cont, &new_acc)
                     } else {
                         false
@@ -6083,7 +5232,7 @@ impl<'a> RawLambdaConverter<'a> {
                     if !matches!(rhs, RawLambda::Lfunction(_)) {
                         return false;
                     }
-                    new_acc.insert(id.clone());
+                    new_acc.insert(*id);
                 }
                 Self::is_function_or_const_block(cont, &new_acc)
             }
@@ -6116,7 +5265,7 @@ impl<'a> RawLambdaConverter<'a> {
             .map(|binding| raw_free_variables(&binding.rhs))
             .collect();
         let ids: Vec<&Ident> = bindings.iter().map(|binding| &binding.id).collect();
-        let locs: Vec<Location> = bindings.iter().map(|binding| binding.loc.clone()).collect();
+        let locs: Vec<Location> = bindings.iter().map(|binding| binding.loc).collect();
 
         #[derive(Clone, Copy, PartialEq)]
         enum Status {
@@ -6139,18 +5288,17 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: &mut Option<(Location, String)>,
         ) {
             match status[i] {
-                Status::Defined => return,
+                Status::Defined => (),
                 Status::Inprogress => {
                     if diagnostic.is_none() {
                         *diagnostic = Some((
-                            locs[i].clone(),
+                            locs[i],
                             format!(
                                 "Cannot safely evaluate the definition of the recursively-defined module {}",
                                 ids[i].name()
                             ),
                         ));
                     }
-                    return;
                 }
                 Status::Undefined => {
                     if inits[i].is_none() {
@@ -6230,7 +5378,7 @@ impl<'a> RawLambdaConverter<'a> {
                         Primitive::PupdateMod,
                         vec![
                             shape.clone(),
-                            RawLambda::Lvar(binding.id.clone()),
+                            RawLambda::Lvar(binding.id),
                             binding.rhs.clone(),
                         ],
                         Location::none(),
@@ -6243,12 +5391,7 @@ impl<'a> RawLambdaConverter<'a> {
         // Phase 2: bind_strict - let bindings for modules without shapes
         for binding in bindings.iter().rev() {
             if binding.init.is_none() {
-                result = RawLambda::let_(
-                    LetKind::Strict,
-                    binding.id.clone(),
-                    binding.rhs.clone(),
-                    result,
-                );
+                result = RawLambda::let_(LetKind::Strict, binding.id, binding.rhs.clone(), result);
             }
         }
 
@@ -6264,7 +5407,7 @@ impl<'a> RawLambdaConverter<'a> {
                         Location::none(),
                     )
                 };
-                result = RawLambda::let_(LetKind::Strict, binding.id.clone(), init, result);
+                result = RawLambda::let_(LetKind::Strict, binding.id, init, result);
             }
         }
 
@@ -6297,7 +5440,7 @@ impl<'a> RawLambdaConverter<'a> {
         let collected: Vec<RecModuleBinding> = bindings
             .iter()
             .map(|mb| {
-                let id = mb.mb_id.clone();
+                let id = mb.mb_id;
                 let loc = self.loc(mb.mb_expr.mod_loc);
                 let shape = self.init_shape(&mb.mb_expr);
                 let rhs = self
@@ -6374,7 +5517,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // indices in the runtime field layout.
                 let is_hidden = self.rescript_hide_attributes(&binding.mb_attributes);
                 if !is_hidden {
-                    fields.push(binding.mb_id.clone());
+                    fields.push(binding.mb_id);
                 }
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
@@ -6388,22 +5531,17 @@ impl<'a> RawLambdaConverter<'a> {
                 let inline_attr = self.get_inline_attribute_from(&binding.mb_attributes);
                 module_body =
                     self.apply_inline_attribute_raw(module_body, binding.mb_loc, inline_attr);
-                let result = RawLambda::let_(
+
+                RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
-                    binding.mb_id.clone(),
+                    binding.mb_id,
                     module_body,
                     body,
-                );
-                result
+                )
             }
             StructureItemDesc::Tstr_typext(tyext) => {
                 let old_len = fields.len();
-                fields.extend(
-                    tyext
-                        .tyext_constructors
-                        .iter()
-                        .map(|ext| ext.ext_id.clone()),
-                );
+                fields.extend(tyext.tyext_constructors.iter().map(|ext| ext.ext_id));
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
@@ -6411,13 +5549,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_exception(ext) => {
                 let old_len = fields.len();
-                fields.push(ext.ext_id.clone());
+                fields.push(ext.ext_id);
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 RawLambda::let_(
                     LetKind::Strict,
-                    ext.ext_id.clone(),
+                    ext.ext_id,
                     self.transl_extension_constructor_raw(
                         Self::field_path(rootpath, &ext.ext_id),
                         ext,
@@ -6431,26 +5569,26 @@ impl<'a> RawLambdaConverter<'a> {
                     self.note_possible_required_modules_from_empty_include(&incl.incl_mod);
                 }
                 let old_len = fields.len();
-                fields.extend(ids.iter().map(|(id, _)| id.clone()));
+                fields.extend(ids.iter().map(|(id, _)| *id));
                 let mid = self.fresh_ident("include");
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 let body =
                     self.rebind_included_idents_raw(&mid, &ids, body, self.loc(incl.incl_loc));
-                let result = RawLambda::let_(
+
+                RawLambda::let_(
                     Self::pure_module(&incl.incl_mod),
                     mid,
                     self.convert_module_expr_raw(&incl.incl_mod, &None),
                     body,
-                );
-                result
+                )
             }
             StructureItemDesc::Tstr_recmodule(bindings) => {
                 // OCaml: add all recursive module idents to fields, then generate letrec
                 let old_len = fields.len();
                 for mb in bindings.iter() {
-                    fields.push(mb.mb_id.clone());
+                    fields.push(mb.mb_id);
                 }
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
@@ -6464,110 +5602,6 @@ impl<'a> RawLambdaConverter<'a> {
             | StructureItemDesc::Tstr_open(_)
             | StructureItemDesc::Tstr_attribute(_) => {
                 self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc)
-            }
-        }
-    }
-
-    fn translate_module_path(&self, path: &crate::types::Path, loc: Location) -> Lambda {
-        match path {
-            crate::types::Path::Pident(id) => {
-                if id.is_global() {
-                    Lambda::global_module(id.clone())
-                } else {
-                    Lambda::var(id.clone())
-                }
-            }
-            crate::types::Path::Pdot(prefix, name, _) => {
-                let prefix_lam = self.translate_module_path(prefix, loc.clone());
-                Lambda::prim(
-                    Primitive::Pfield(
-                        0,
-                        FieldDbgInfo::Module {
-                            name: name.to_string(),
-                        },
-                    ),
-                    vec![prefix_lam],
-                    loc,
-                )
-            }
-            crate::types::Path::Papply(_, _) => Lambda::unit(),
-        }
-    }
-
-    fn convert_module_expr(&mut self, module_expr: &ModuleExpr) -> Lambda {
-        match &module_expr.mod_desc {
-            ModuleExprDesc::Tmod_structure(structure) => {
-                let mut fields = Vec::new();
-                self.convert_structure_items(&mut fields, &structure.str_items, false)
-            }
-            ModuleExprDesc::Tmod_constraint(inner, _, _, _) => self.convert_module_expr(inner),
-            ModuleExprDesc::Tmod_ident(path, _) => {
-                self.translate_module_path(path, self.loc(module_expr.mod_loc))
-            }
-            ModuleExprDesc::Tmod_unpack(expr, _) => self.convert_expr(expr),
-            ModuleExprDesc::Tmod_apply(_, _, _) | ModuleExprDesc::Tmod_functor(_, _, _, _) => {
-                Lambda::unit()
-            }
-        }
-    }
-
-    fn convert_structure_items(
-        &mut self,
-        fields: &mut Vec<Ident>,
-        items: &[StructureItem],
-        is_top_level: bool,
-    ) -> Lambda {
-        let Some((item, rem)) = items.split_first() else {
-            let block_fields = fields.iter().cloned().map(Lambda::var).collect();
-            let tag = if is_top_level {
-                TagInfo::ModuleExport(fields.clone())
-            } else {
-                TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
-            };
-            return Lambda::prim(
-                Primitive::Pmakeblock(tag, Mutable::Immutable),
-                block_fields,
-                Location::none(),
-            );
-        };
-
-        match &item.str_desc {
-            StructureItemDesc::Tstr_eval(expr, _) => Lambda::seq(
-                self.convert_expr(expr),
-                self.convert_structure_items(fields, rem, is_top_level),
-            ),
-            StructureItemDesc::Tstr_value(rec_flag, bindings) => {
-                let old_len = fields.len();
-                fields.extend(let_bound_idents(bindings));
-                let body = self.convert_structure_items(fields, rem, is_top_level);
-                fields.truncate(old_len);
-                self.convert_let_with_body(*rec_flag, bindings, body)
-            }
-            StructureItemDesc::Tstr_module(binding) => {
-                let old_len = fields.len();
-                if !self.rescript_hide_attributes(&binding.mb_attributes) {
-                    fields.push(binding.mb_id.clone());
-                }
-                let body = self.convert_structure_items(fields, rem, is_top_level);
-                fields.truncate(old_len);
-                let module_body = self.convert_module_expr(&binding.mb_expr);
-                Lambda::let_(
-                    Self::pure_module(&binding.mb_expr),
-                    binding.mb_id.clone(),
-                    module_body,
-                    body,
-                )
-            }
-            StructureItemDesc::Tstr_primitive(_)
-            | StructureItemDesc::Tstr_type(_, _)
-            | StructureItemDesc::Tstr_typext(_)
-            | StructureItemDesc::Tstr_exception(_)
-            | StructureItemDesc::Tstr_recmodule(_)
-            | StructureItemDesc::Tstr_modtype(_)
-            | StructureItemDesc::Tstr_open(_)
-            | StructureItemDesc::Tstr_include(_)
-            | StructureItemDesc::Tstr_attribute(_) => {
-                self.convert_structure_items(fields, rem, is_top_level)
             }
         }
     }
@@ -6804,11 +5838,11 @@ impl<'a> RawLambdaConverter<'a> {
                     let partial = *partial;
                     let loc = self.loc(expr.exp_loc);
                     // Use full matching compiler (ported from OCaml's matching.ml)
-                    self.compile_full_matching(loc, scrut, cases, partial, expr)
+                    self.compile_full_matching(loc, scrut, cases, partial)
                 }
             }
             ExpressionDesc::Texp_try(body, cases) => {
-                let loc = self.loc(expr.exp_loc);
+                let _loc = self.loc(expr.exp_loc);
                 let exn_id = self.name_pattern_ident("exn", cases);
                 let handler = self.compile_trywith_handler_raw(&exn_id, cases);
                 let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
@@ -6934,7 +5968,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 };
                 RawLambda::Lfor(
-                    var.clone(),
+                    *var,
                     Box::new(self.convert_expr_raw(start)),
                     Box::new(self.convert_expr_raw(end)),
                     dir,
@@ -6943,13 +5977,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             // Upstream #7887: typed for-of / for-await-of -> raw lambda.
             ExpressionDesc::Texp_for_of(var, _pat, iterable, body) => RawLambda::Lfor_of(
-                var.clone(),
+                *var,
                 Box::new(self.convert_expr_raw(iterable)),
                 Box::new(self.convert_expr_raw(body)),
             ),
             ExpressionDesc::Texp_for_await_of(var, _pat, iterable, body) => {
                 RawLambda::Lfor_await_of(
-                    var.clone(),
+                    *var,
                     Box::new(self.convert_expr_raw(iterable)),
                     Box::new(self.convert_expr_raw(body)),
                 )
@@ -6993,13 +6027,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
                 LetKind::Strict,
-                id.clone(),
+                *id,
                 self.convert_module_expr_raw(modl, &None),
                 self.convert_expr_raw(body),
             ),
             ExpressionDesc::Texp_letexception(ext, body) => RawLambda::let_(
                 LetKind::Strict,
-                ext.ext_id.clone(),
+                ext.ext_id,
                 self.transl_extension_constructor_raw(None, ext),
                 self.convert_expr_raw(body),
             ),
@@ -7031,259 +6065,6 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn convert_expr(&mut self, expr: &Expression) -> Lambda {
-        match &expr.exp_desc {
-            ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
-                ValueKind::ValPrim(prim) => self.translate_primitive(self.loc(expr.exp_loc), prim),
-                ValueKind::ValReg => self.translate_value_path(expr.exp_loc, path),
-            },
-            ExpressionDesc::Texp_constant(cst) => Lambda::const_(self.convert_constant(cst)),
-            ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
-                let body_lam = self.convert_expr(body);
-                self.convert_let_with_body(*rec_flag, bindings, body_lam)
-            }
-            ExpressionDesc::Texp_function { params, body, .. } => {
-                self.convert_nary_function(params, body, self.loc(expr.exp_loc))
-            }
-            ExpressionDesc::Texp_apply {
-                funct,
-                args,
-                partial,
-                transformed_jsx,
-            } => self.convert_apply(
-                self.loc(expr.exp_loc),
-                funct,
-                args,
-                *partial,
-                *transformed_jsx,
-            ),
-            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial)
-                if exn_cases.is_empty() =>
-            {
-                self.compile_irrefutable_match(scrut, cases)
-                    .or_else(|| {
-                        self.compile_simple_tuple_match(
-                            self.loc(expr.exp_loc),
-                            scrut,
-                            cases,
-                            *partial,
-                        )
-                    })
-                    .or_else(|| {
-                        self.compile_simple_constructor_match(
-                            self.loc(expr.exp_loc),
-                            scrut,
-                            cases,
-                            *partial,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
-                        let raw = self.compile_full_matching(
-                            self.loc(expr.exp_loc),
-                            scrut,
-                            cases,
-                            *partial,
-                            expr,
-                        );
-                        crate::raw_lambda::lower::lower_to_lambda(raw)
-                    })
-            }
-            ExpressionDesc::Texp_tuple(items) => {
-                let elems = items.iter().map(|e| self.convert_expr(e)).collect();
-                Lambda::prim(
-                    Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
-                    elems,
-                    self.loc(expr.exp_loc),
-                )
-            }
-            ExpressionDesc::Texp_construct(_, cstr, args) => match cstr.cstr_kind {
-                crate::types::ConstructorKind::Ordinary(reference)
-                    if matches!(
-                        reference.representation(self.type_ctx),
-                        crate::types::VariantConstructorCase::Constant(_)
-                    ) =>
-                {
-                    self.convert_construct(self.loc(expr.exp_loc), cstr, args)
-                }
-                _ => {
-                    let raw = self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args);
-                    crate::raw_lambda::lower::lower_to_lambda(raw)
-                }
-            },
-            ExpressionDesc::Texp_variant(tag, arg) => self.convert_poly_variant(tag, arg),
-            ExpressionDesc::Texp_record {
-                fields,
-                extended_expression,
-                ..
-            } => self.convert_record(
-                self.loc(expr.exp_loc),
-                fields,
-                extended_expression.as_deref(),
-                None,
-            ),
-            ExpressionDesc::Texp_record_sparse {
-                fields,
-                all_labels,
-                omitted_loc,
-                ..
-            } => {
-                let (record_fields, logical_field_count) =
-                    self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
-                self.convert_record(
-                    self.loc(expr.exp_loc),
-                    &record_fields,
-                    None,
-                    logical_field_count,
-                )
-            }
-            ExpressionDesc::Texp_field(record, _, lbl) => {
-                let rec_lam = self.convert_expr(record);
-                let primitive = Primitive::Pfield(
-                    lbl.lbl_pos,
-                    FieldDbgInfo::Record {
-                        name: label_runtime_name(lbl),
-                    },
-                );
-                Lambda::prim(primitive, vec![rec_lam], self.loc(expr.exp_loc))
-            }
-            ExpressionDesc::Texp_setfield(record, _, lbl, value) => {
-                let rec_lam = self.convert_expr(record);
-                let val_lam = self.convert_expr(value);
-                let primitive = Primitive::Psetfield(
-                    lbl.lbl_pos,
-                    crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(label_runtime_name(lbl)),
-                );
-                Lambda::prim(primitive, vec![rec_lam, val_lam], self.loc(expr.exp_loc))
-            }
-            ExpressionDesc::Texp_array(items) => {
-                let elems = items.iter().map(|e| self.convert_expr(e)).collect();
-                Lambda::prim(Primitive::Pmakearray, elems, self.loc(expr.exp_loc))
-            }
-            ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
-                let cond_lam = self.convert_expr(cond);
-                let then_lam = self.convert_expr(then_);
-                let else_lam = else_
-                    .as_ref()
-                    .map(|e| self.convert_expr(e))
-                    .unwrap_or_else(Lambda::unit);
-                Lambda::if_(cond_lam, then_lam, else_lam)
-            }
-            ExpressionDesc::Texp_sequence(a, b) => {
-                let a_lam = self.convert_expr(a);
-                let b_lam = self.convert_expr(b);
-                Lambda::seq(a_lam, b_lam)
-            }
-            // OCaml `Translcore.transl_exp0` after #8348:
-            // `Texp_break -> Lbreak | Texp_continue -> Lcontinue`.
-            ExpressionDesc::Texp_break => Lambda::break_(),
-            ExpressionDesc::Texp_continue => Lambda::continue_(),
-            ExpressionDesc::Texp_while(cond, body) => {
-                let cond_lam = self.convert_expr(cond);
-                let body_lam = self.convert_expr(body);
-                Lambda::while_(cond_lam, body_lam)
-            }
-            ExpressionDesc::Texp_for(var, _pat, start, end, dir, body) => {
-                let start_lam = self.convert_expr(start);
-                let end_lam = self.convert_expr(end);
-                let body_lam = self.convert_expr(body);
-                let dir = match dir {
-                    crate::parser::ast::DirectionFlag::Upto => crate::lambda::DirectionFlag::Upto,
-                    crate::parser::ast::DirectionFlag::Downto => {
-                        crate::lambda::DirectionFlag::Downto
-                    }
-                };
-                Lambda::for_(var.clone(), start_lam, end_lam, dir, body_lam)
-            }
-            ExpressionDesc::Texp_for_of(var, _pat, iterable, body) => {
-                let iterable_lam = self.convert_expr(iterable);
-                let body_lam = self.convert_expr(body);
-                Lambda::for_of(var.clone(), iterable_lam, body_lam)
-            }
-            ExpressionDesc::Texp_for_await_of(var, _pat, iterable, body) => {
-                let iterable_lam = self.convert_expr(iterable);
-                let body_lam = self.convert_expr(body);
-                Lambda::for_await_of(var.clone(), iterable_lam, body_lam)
-            }
-            ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
-            ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
-            ExpressionDesc::Texp_assert(inner_expr) => {
-                if matches!(
-                    inner_expr.exp_desc,
-                    ExpressionDesc::Texp_construct(_, ref cstr, ref args)
-                        if cstr.cstr_name == "false" && args.is_empty()
-                ) {
-                    self.assert_false_lambda(self.loc(expr.exp_loc))
-                } else if self.noassert {
-                    // Same branch order as compiler/ml/translcore.ml:926-931.
-                    Lambda::unit()
-                } else {
-                    let cond = self.convert_expr(inner_expr);
-                    let failure = self.assert_failed_lambda(self.loc(expr.exp_loc));
-                    Lambda::if_(cond, Lambda::unit(), failure)
-                }
-            }
-            _ => {
-                trace_raw_fallback(Self::expr_desc_name(&expr.exp_desc));
-                let raw = self.convert_expr_raw(expr);
-                crate::raw_lambda::lower::lower_to_lambda(raw)
-            }
-        }
-    }
-
-    fn expr_desc_name(desc: &ExpressionDesc) -> &'static str {
-        match desc {
-            ExpressionDesc::Texp_ident(_, _, _) => "Texp_ident",
-            ExpressionDesc::Texp_constant(_) => "Texp_constant",
-            ExpressionDesc::Texp_let(_, _, _) => "Texp_let",
-            ExpressionDesc::Texp_function { .. } => "Texp_function",
-            ExpressionDesc::Texp_apply { .. } => "Texp_apply",
-            ExpressionDesc::Texp_match(_, _, _, _) => "Texp_match",
-            ExpressionDesc::Texp_try(_, _) => "Texp_try",
-            ExpressionDesc::Texp_tuple(_) => "Texp_tuple",
-            ExpressionDesc::Texp_construct(_, _, _) => "Texp_construct",
-            ExpressionDesc::Texp_variant(_, _) => "Texp_variant",
-            ExpressionDesc::Texp_record { .. } => "Texp_record",
-            ExpressionDesc::Texp_record_sparse { .. } => "Texp_record_sparse",
-            ExpressionDesc::Texp_field(_, _, _) => "Texp_field",
-            ExpressionDesc::Texp_setfield(_, _, _, _) => "Texp_setfield",
-            ExpressionDesc::Texp_array(_) => "Texp_array",
-            ExpressionDesc::Texp_ifthenelse(_, _, _) => "Texp_ifthenelse",
-            ExpressionDesc::Texp_sequence(_, _) => "Texp_sequence",
-            ExpressionDesc::Texp_break => "Texp_break",
-            ExpressionDesc::Texp_continue => "Texp_continue",
-            ExpressionDesc::Texp_while(_, _) => "Texp_while",
-            ExpressionDesc::Texp_for(_, _, _, _, _, _) => "Texp_for",
-            ExpressionDesc::Texp_for_of(_, _, _, _) => "Texp_for_of",
-            ExpressionDesc::Texp_for_await_of(_, _, _, _) => "Texp_for_await_of",
-            ExpressionDesc::Texp_tagged_template { .. } => "Texp_tagged_template",
-            ExpressionDesc::Texp_template { .. } => "Texp_template",
-            ExpressionDesc::Texp_object_get(_, _) => "Texp_object_get",
-            ExpressionDesc::Texp_object_set(_, _, _) => "Texp_object_set",
-            ExpressionDesc::Texp_object_literal(_) => "Texp_object_literal",
-            ExpressionDesc::Texp_letmodule(_, _, _, _) => "Texp_letmodule",
-            ExpressionDesc::Texp_letexception(_, _) => "Texp_letexception",
-            ExpressionDesc::Texp_assert(_) => "Texp_assert",
-            ExpressionDesc::Texp_pack(_) => "Texp_pack",
-            ExpressionDesc::Texp_extension_constructor(_, _) => "Texp_extension_constructor",
-        }
-    }
-
-    fn pattern_desc_name(pat: &Pattern) -> &'static str {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_any => "Tpat_any",
-            PatternDesc::Tpat_var(_, _) => "Tpat_var",
-            PatternDesc::Tpat_alias(_, _, _) => "Tpat_alias",
-            PatternDesc::Tpat_constant(_) => "Tpat_constant",
-            PatternDesc::Tpat_tuple(_) => "Tpat_tuple",
-            PatternDesc::Tpat_construct(_, _, _) => "Tpat_construct",
-            PatternDesc::Tpat_variant(_, _, _) => "Tpat_variant",
-            PatternDesc::Tpat_record(_, _, _) => "Tpat_record",
-            PatternDesc::Tpat_array(_) => "Tpat_array",
-            PatternDesc::Tpat_or(_, _, _) => "Tpat_or",
-        }
-    }
-
     fn convert_constant(&self, cst: &TConstant) -> Constant {
         match cst {
             TConstant::Int(i) => i32::try_from(*i)
@@ -7303,417 +6084,30 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn match_failure(&mut self, loc: Location) -> Lambda {
-        self.raise_predef_exception("Match_failure", PREDEF_MATCH_FAILURE_STAMP, loc)
-    }
-
-    fn compile_simple_constructor_match(
-        &mut self,
-        loc: Location,
-        scrut: &Expression,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<Lambda> {
-        #[derive(Clone)]
-        enum DefaultCase {
-            Any(Lambda),
-            Bind(Ident, Lambda),
-        }
-
-        let mut seen_const_tags: Vec<crate::lambda::SwitchKey> = Vec::new();
-        let mut seen_block_tags: Vec<crate::lambda::SwitchKey> = Vec::new();
-        let mut default_case = None;
-
-        for case in cases {
-            if case.c_guard.is_some() {
-                return None;
-            }
-
-            let (pat, _) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => {
-                    let reference = match cstr.cstr_kind {
-                        crate::types::ConstructorKind::Ordinary(reference) => reference,
-                        crate::types::ConstructorKind::Extension(_) => return None,
-                    };
-                    let case = reference.representation(self.type_ctx);
-                    let key = crate::lambda::SwitchKey::Constructor(case.clone());
-                    match case {
-                        crate::types::VariantConstructorCase::Constant(_) => {
-                            if !args.is_empty() || seen_const_tags.contains(&key) {
-                                return None;
-                            }
-                            seen_const_tags.push(key);
-                        }
-                        crate::types::VariantConstructorCase::Block(block) => {
-                            if block.is_untagged()
-                                || seen_block_tags.contains(&key)
-                                || !args.iter().all(|pat| self.is_irrefutable_pattern(pat))
-                            {
-                                return None;
-                            }
-                            seen_block_tags.push(key);
-                        }
-                    }
-                }
-                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                    let key = crate::lambda::SwitchKey::Int(*i as i32);
-                    if seen_const_tags.contains(&key) {
-                        return None;
-                    }
-                    seen_const_tags.push(key);
-                }
-                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                    let key = crate::lambda::SwitchKey::Int(*c as i32);
-                    if seen_const_tags.contains(&key) {
-                        return None;
-                    }
-                    seen_const_tags.push(key);
-                }
-                PatternDesc::Tpat_any => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Any(self.convert_expr(&case.c_rhs)));
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(
-                        id.clone(),
-                        self.convert_expr(&case.c_rhs),
-                    ));
-                }
-                PatternDesc::Tpat_alias(inner, id, _)
-                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
-                {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(
-                        id.clone(),
-                        self.convert_expr(&case.c_rhs),
-                    ));
-                }
-                _ => return None,
-            }
-        }
-
-        if seen_const_tags.is_empty() && seen_block_tags.is_empty() {
-            return None;
-        }
-
-        let scrut_lam = self.convert_expr(scrut);
-        let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
-            Lambda::Lvar(id) => (id.clone(), Lambda::var(id.clone()), None),
-            _ => {
-                let scrut_id = self.fresh_ident("match");
-                (
-                    scrut_id.clone(),
-                    Lambda::var(scrut_id.clone()),
-                    Some((scrut_id, scrut_lam)),
-                )
-            }
-        };
-
-        let mut const_cases = Vec::new();
-        let mut block_cases = Vec::new();
-        for case in cases {
-            let body = self.convert_expr(&case.c_rhs);
-            let (pat, aliases) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => {
-                    let reference = match cstr.cstr_kind {
-                        crate::types::ConstructorKind::Ordinary(reference) => reference,
-                        crate::types::ConstructorKind::Extension(_) => continue,
-                    };
-                    let case = reference.representation(self.type_ctx);
-                    let key = crate::lambda::SwitchKey::Constructor(case.clone());
-                    match case {
-                        crate::types::VariantConstructorCase::Constant(_) => const_cases.push((
-                            key,
-                            wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
-                        )),
-                        crate::types::VariantConstructorCase::Block(_) => block_cases.push((
-                            key,
-                            wrap_aliases(
-                                &aliases,
-                                Lambda::var(scrut_id.clone()),
-                                self.bind_constructor_args_irrefutably(
-                                    &scrut_id, pat, cstr, args, body,
-                                ),
-                            ),
-                        )),
-                    }
-                }
-                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                    const_cases.push((
-                        crate::lambda::SwitchKey::Int(*i as i32),
-                        wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
-                    ));
-                }
-                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                    const_cases.push((
-                        crate::lambda::SwitchKey::Int(*c as i32),
-                        wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        let failaction = match default_case {
-            Some(DefaultCase::Any(body)) => Some(Box::new(body)),
-            Some(DefaultCase::Bind(id, body)) => Some(Box::new(Lambda::let_(
-                LetKind::Alias,
-                id,
-                Lambda::var(scrut_id.clone()),
-                body,
-            ))),
-            None => match partial {
-                Partial::Partial => Some(Box::new(self.match_failure(loc.clone()))),
-                Partial::Total => None,
-            },
-        };
-
-        let dispatch = cases
-            .iter()
-            .find_map(|case| match &case.c_lhs.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, _) => match cstr.cstr_kind {
-                    crate::types::ConstructorKind::Ordinary(reference) => {
-                        Some(crate::lambda::SwitchDispatch::Variant(
-                            self.type_ctx
-                                .with_variant_layout(reference.variant, |layout| {
-                                    layout.matching_facts.clone()
-                                }),
-                        ))
-                    }
-                    crate::types::ConstructorKind::Extension(_) => None,
-                },
-                _ => None,
-            })
-            .unwrap_or(crate::lambda::SwitchDispatch::Direct);
-        let sw = Lambda::Lswitch(
-            Box::new(scrut_var),
-            Box::new(LambdaSwitch {
-                sw_consts_full: false,
-                sw_consts: const_cases,
-                sw_blocks_full: false,
-                sw_blocks: block_cases,
-                sw_failaction: failaction,
-                sw_dispatch: dispatch,
-            }),
-        );
-
-        Some(match wrap_let {
-            Some((id, value)) => Lambda::let_(LetKind::Strict, id, value, sw),
-            None => sw,
-        })
-    }
-
-    fn compile_simple_string_match(
-        &mut self,
-        loc: Location,
-        scrut: &Expression,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        #[derive(Clone)]
-        enum DefaultCase {
-            Any(RawLambda),
-            Bind(Ident, RawLambda),
-        }
-
-        let mut seen = BTreeSet::new();
-        let mut default_case = None;
-        for case in cases {
-            if case.c_guard.is_some() {
-                return None;
-            }
-
-            if let Some(arms) = collect_string_pattern_arms(&case.c_lhs) {
-                for (s, _) in arms {
-                    if !seen.insert(s) {
-                        return None;
-                    }
-                }
-                continue;
-            }
-
-            let (pat, _) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_any => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Any(self.convert_expr_raw(&case.c_rhs)));
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(
-                        id.clone(),
-                        self.convert_expr_raw(&case.c_rhs),
-                    ));
-                }
-                _ => return None,
-            }
-        }
-
-        if seen.is_empty() {
-            return None;
-        }
-
-        let scrut_lam = self.convert_expr_raw(scrut);
-        let scrut_name = self.fresh_name_from_cases("match", cases);
-        let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
-            RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
-            _ => {
-                let scrut_id = self.fresh_ident(&scrut_name);
-                (
-                    scrut_id.clone(),
-                    RawLambda::var(scrut_id.clone()),
-                    Some((scrut_id, scrut_lam)),
-                )
-            }
-        };
-
-        let mut string_cases = Vec::new();
-        for case in cases {
-            let body = self.convert_expr_raw(&case.c_rhs);
-            if let Some(arms) = collect_string_pattern_arms(&case.c_lhs) {
-                for (s, aliases) in arms {
-                    string_cases.push((
-                        s,
-                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body.clone()),
-                    ));
-                }
-            }
-        }
-        string_cases.sort_by(|(left, _), (right, _)| left.cmp(right));
-
-        let failaction = match default_case {
-            Some(DefaultCase::Any(body)) => Some(body),
-            Some(DefaultCase::Bind(id, body)) => Some(RawLambda::let_(
-                LetKind::Alias,
-                id,
-                RawLambda::var(scrut_id.clone()),
-                body,
-            )),
-            None => match partial {
-                Partial::Partial => Some(RawLambda::from_lowered(self.match_failure(loc))),
-                Partial::Total => None,
-            },
-        };
-
-        let mut key_counts = Vec::<(String, usize)>::new();
-        for (_, act) in &string_cases {
-            let key = self.raw_lambda_key(act);
-            if let Some((_, count)) = key_counts.iter_mut().find(|(entry, _)| *entry == key) {
-                *count += 1;
-            } else {
-                key_counts.push((key, 1));
-            }
-        }
-
-        let mut shared_actions = Vec::<(String, RawLambda)>::new();
-        if let Some(default) = &failaction {
-            shared_actions.push((self.raw_lambda_key(default), default.clone()));
-        }
-        for (_, act) in &string_cases {
-            let key = self.raw_lambda_key(act);
-            let repeated = key_counts
-                .iter()
-                .find(|(entry, _)| *entry == key)
-                .is_some_and(|(_, count)| *count > 1);
-            if (repeated
-                || failaction
-                    .as_ref()
-                    .is_some_and(|default| self.raw_lambda_key(default) == key))
-                && !shared_actions.iter().any(|(entry, _)| *entry == key)
-            {
-                shared_actions.push((key, act.clone()));
-            }
-        }
-
-        let mut shared_ids = Vec::<(String, i32)>::new();
-        for (key, _) in shared_actions.iter().rev() {
-            shared_ids.push((key.clone(), self.next_raise_count()));
-        }
-
-        let mut cases_with_exits = Vec::new();
-        for (s, act) in string_cases {
-            if let Some((_, exit_id)) = shared_ids
-                .iter()
-                .find(|(key, _)| *key == self.raw_lambda_key(&act))
-            {
-                cases_with_exits.push((s, RawLambda::LstaticRaise(*exit_id, Vec::new())));
-            } else {
-                cases_with_exits.push((s, act));
-            }
-        }
-
-        let default = failaction.map(|act| {
-            if let Some((_, exit_id)) = shared_ids
-                .iter()
-                .find(|(key, _)| *key == self.raw_lambda_key(&act))
-            {
-                Box::new(RawLambda::LstaticRaise(*exit_id, Vec::new()))
-            } else {
-                Box::new(act)
-            }
-        });
-
-        let mut result = RawLambda::LstringSwitch(Box::new(scrut_var), cases_with_exits, default);
-        for (key, handler) in shared_actions {
-            let exit_id = shared_ids
-                .iter()
-                .find(|(entry, _)| *entry == key)
-                .map(|(_, id)| *id)
-                .expect("shared action exit");
-            result =
-                RawLambda::LstaticCatch(Box::new(result), (exit_id, Vec::new()), Box::new(handler));
-        }
-
-        Some(match wrap_let {
-            Some((id, value)) => RawLambda::let_(LetKind::Strict, id, value, result),
-            None => result,
-        })
-    }
-
     /// Use the full matching compiler (matching.rs) for patterns that
-    /// the simple matchers can't handle. Falls back to Lambda lowering
-    /// if the matching compiler panics.
+    /// the simple matchers can't handle.
     fn compile_full_matching(
         &mut self,
         loc: Location,
         scrut: &Expression,
         cases: &[Case],
         partial: Partial,
-        expr: &Expression,
     ) -> RawLambda {
-        // Reset raise count — the simple matchers may have consumed one
-        // for the partial default, but the full matching compiler manages
-        // its own raise counts.
         let pat_act_list = self.cases_to_pat_act_list(cases);
 
         // OCaml optimization: when the scrutinee is a tuple, decompose into
         // individual arguments and use for_multiple_match, which can flatten
         // the tuple pattern matching without allocating a tuple.
         // (See OCaml's translcore.ml lines 1259-1260)
-        if !crate::debug_flags::skip_for_multiple_match()
-            && let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc
-        {
+        if let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
             return self.for_multiple_match_with_synced_stamps(loc, paraml, pat_act_list, partial);
         }
 
         let scrut_lam = self.convert_expr_raw(scrut);
 
-        let loc_for_handler = loc.clone();
-        let fname = self.basename_for_loc(loc_for_handler.clone());
+        let loc_for_handler = loc;
+        let fname = self.basename_for_loc(loc_for_handler);
         let handler_fun = || {
             let line = loc_for_handler.loc_start.line;
             let char_pos = loc_for_handler.loc_start.column();
@@ -7723,7 +6117,7 @@ impl<'a> RawLambdaConverter<'a> {
             let payload = RawLambda::Lconst(Constant::Block {
                 tag_info: Box::new(TagInfo::Tuple),
                 elements: vec![
-                    Constant::const_string(&fname.clone()),
+                    Constant::const_string(&fname),
                     Constant::int(line),
                     Constant::int(char_pos),
                 ],
@@ -7733,7 +6127,7 @@ impl<'a> RawLambdaConverter<'a> {
                 args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                     args: vec![exn, payload],
-                    loc: loc_for_handler.clone(),
+                    loc: loc_for_handler,
                 }))],
                 loc: loc_for_handler,
             }))
@@ -7761,7 +6155,7 @@ impl<'a> RawLambdaConverter<'a> {
         cases: &[Case],
         exn_cases: &[Case],
         partial: Partial,
-        expr: &Expression,
+        _expr: &Expression,
         exn_id: Ident,
     ) -> RawLambda {
         let val_id = self.name_pattern_ident("val", cases);
@@ -7782,8 +6176,8 @@ impl<'a> RawLambdaConverter<'a> {
             // Note: do NOT allocate a raise_count here for Partial matches.
             // compile_matching allocates its own raise_num internally.
             let pat_act_list = self.cases_to_pat_act_list(cases);
-            let loc_for_handler = loc.clone();
-            let fname = self.basename_for_loc(loc_for_handler.clone());
+            let loc_for_handler = loc;
+            let fname = self.basename_for_loc(loc_for_handler);
             let handler_fun = || {
                 let line = loc_for_handler.loc_start.line;
                 let char_pos = loc_for_handler.loc_start.column();
@@ -7793,7 +6187,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let payload = RawLambda::Lconst(Constant::Block {
                     tag_info: Box::new(TagInfo::Tuple),
                     elements: vec![
-                        Constant::const_string(&fname.clone()),
+                        Constant::const_string(&fname),
                         Constant::int(line),
                         Constant::int(char_pos),
                     ],
@@ -7803,14 +6197,14 @@ impl<'a> RawLambdaConverter<'a> {
                     args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                         args: vec![exn, payload],
-                        loc: loc_for_handler.clone(),
+                        loc: loc_for_handler,
                     }))],
                     loc: loc_for_handler,
                 }))
             };
             self.compile_matching_with_synced_stamps(
                 handler_fun,
-                RawLambda::var(val_id.clone()),
+                RawLambda::var(val_id),
                 pat_act_list,
                 partial,
             )
@@ -7837,7 +6231,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Matches OCaml's Matching.for_trywith.
     fn compile_trywith_handler_raw(&mut self, exn_id: &Ident, exn_cases: &[Case]) -> RawLambda {
         let pat_act_list = self.cases_to_pat_act_list(exn_cases);
-        self.for_trywith_with_synced_stamps(RawLambda::var(exn_id.clone()), pat_act_list)
+        self.for_trywith_with_synced_stamps(RawLambda::var(*exn_id), pat_act_list)
     }
 
     fn compile_irrefutable_match_raw(
@@ -7870,265 +6264,12 @@ impl<'a> RawLambdaConverter<'a> {
                 let match_id = self.fresh_ident("match");
                 let bound = self.bind_irrefutable_pattern_raw(
                     &cases[0].c_lhs,
-                    RawLambda::Lvar(match_id.clone()),
+                    RawLambda::Lvar(match_id),
                     body,
                 );
                 Some(RawLambda::let_(LetKind::Strict, match_id, scrut_lam, bound))
             }
         }
-    }
-
-    fn compile_simple_trywith_raw(
-        &mut self,
-        loc: Location,
-        body: &Expression,
-        cases: &[Case],
-    ) -> Option<RawLambda> {
-        let exn_id = self.name_pattern_ident("exn", cases);
-        let handler = self
-            .compile_simple_trywith_extension_handler_raw(loc.clone(), &exn_id, cases)
-            .or_else(|| {
-                self.compile_simple_constructor_match_raw_from_scrut(
-                    loc.clone(),
-                    RawLambda::var(exn_id.clone()),
-                    cases,
-                    Partial::Partial,
-                )
-            })?;
-        Some(RawLambda::LtryWith(
-            Box::new(self.convert_expr_raw(body)),
-            exn_id,
-            Box::new(handler),
-        ))
-    }
-
-    fn bind_match_arg_pattern_raw(
-        &mut self,
-        pat: &Pattern,
-        arg: RawLambda,
-        body: RawLambda,
-    ) -> RawLambda {
-        match arg {
-            RawLambda::Lvar(_) => self.bind_irrefutable_pattern_raw(pat, arg, body),
-            _ => {
-                let id = self
-                    .id_of_pattern(pat)
-                    .unwrap_or_else(|| self.fresh_ident("match"));
-                let bound =
-                    self.bind_irrefutable_pattern_raw(pat, RawLambda::var(id.clone()), body);
-                RawLambda::let_(LetKind::Alias, id, arg, bound)
-            }
-        }
-    }
-
-    fn bind_extension_args_trywith_raw(
-        &mut self,
-        scrut_id: &Ident,
-        args: &[Pattern],
-        body: RawLambda,
-        loc: Location,
-    ) -> RawLambda {
-        // OCaml extracts extension fields from last to first (high position first)
-        // matching make_field_args order in matching.ml
-        let mut result = body;
-        for (idx, arg_pat) in args.iter().enumerate() {
-            let field = RawLambda::prim(
-                Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
-                vec![RawLambda::var(scrut_id.clone())],
-                loc,
-            );
-            result = self.bind_match_arg_pattern_raw(arg_pat, field, result);
-        }
-        result
-    }
-
-    fn compile_simple_trywith_extension_handler_raw(
-        &mut self,
-        loc: Location,
-        exn_id: &Ident,
-        cases: &[Case],
-    ) -> Option<RawLambda> {
-        #[derive(Clone)]
-        enum DefaultCase {
-            Any(RawLambda),
-            Bind(Ident, RawLambda),
-        }
-
-        let mut extension_cases = Vec::<(crate::types::Path, RawLambda)>::new();
-        let mut default_case = None;
-
-        for case in cases {
-            if case.c_guard.is_some() {
-                return None;
-            }
-
-            let body = self.convert_expr_raw(&case.c_rhs);
-            let (pat, aliases) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => {
-                    let crate::types::ConstructorKind::Extension(path) = &cstr.cstr_kind else {
-                        return None;
-                    };
-                    if !args.iter().all(|pat| self.is_irrefutable_pattern(pat)) {
-                        return None;
-                    }
-                    let inner = if cstr.cstr_inlined.is_some() {
-                        // Inline record extension: fields accessed directly from exception
-                        match args.as_slice() {
-                            [arg_pat] => self.bind_irrefutable_pattern_raw(
-                                arg_pat,
-                                RawLambda::var(exn_id.clone()),
-                                body,
-                            ),
-                            _ => self.bind_extension_args_trywith_raw(
-                                exn_id,
-                                args,
-                                body,
-                                self.loc(pat.pat_loc),
-                            ),
-                        }
-                    } else {
-                        self.bind_extension_args_trywith_raw(
-                            exn_id,
-                            args,
-                            body,
-                            self.loc(pat.pat_loc),
-                        )
-                    };
-                    let act = wrap_aliases_raw(&aliases, RawLambda::var(exn_id.clone()), inner);
-                    extension_cases.push((path.clone(), act));
-                }
-                PatternDesc::Tpat_any => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Any(body));
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(id.clone(), body));
-                }
-                PatternDesc::Tpat_alias(inner, id, _)
-                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
-                {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(id.clone(), body));
-                }
-                _ => return None,
-            }
-        }
-
-        if extension_cases.is_empty() {
-            return None;
-        }
-
-        let reraise = RawLambda::prim(Primitive::Praise, vec![RawLambda::var(exn_id.clone())], loc);
-
-        // Build the default action and the catch handler for the outermost wrap.
-        // When there's an explicit catch-all (Some), we use a static raise as
-        // the default in the chain and catch it with the real body. When there's
-        // no catch-all (None), we use static raise caught by reraise.
-        let (default, catch_handler) = match default_case {
-            Some(DefaultCase::Any(body)) => {
-                let exit_id = self.next_raise_count();
-                (
-                    RawLambda::LstaticRaise(exit_id, Vec::new()),
-                    Some((exit_id, body)),
-                )
-            }
-            Some(DefaultCase::Bind(id, body)) => {
-                let exit_id = self.next_raise_count();
-                let real_body =
-                    RawLambda::let_(LetKind::Alias, id, RawLambda::var(exn_id.clone()), body);
-                (
-                    RawLambda::LstaticRaise(exit_id, Vec::new()),
-                    Some((exit_id, real_body)),
-                )
-            }
-            None => {
-                let exit_id = self.next_raise_count();
-                (RawLambda::LstaticRaise(exit_id, Vec::new()), None)
-            }
-        };
-
-        let exit_id = match &default {
-            RawLambda::LstaticRaise(id, args) if args.is_empty() => Some(*id),
-            _ => None,
-        };
-
-        let tests =
-            self.build_simple_trywith_extension_chain_raw(loc, exn_id, extension_cases, default);
-
-        Some(match (exit_id, catch_handler) {
-            // Explicit catch-all: catch the static raise with the real body
-            (Some(exit_id), Some((_, body))) => {
-                RawLambda::LstaticCatch(Box::new(tests), (exit_id, Vec::new()), Box::new(body))
-            }
-            // No catch-all: catch with reraise
-            (Some(exit_id), None) => {
-                RawLambda::LstaticCatch(Box::new(tests), (exit_id, Vec::new()), Box::new(reraise))
-            }
-            _ => tests,
-        })
-    }
-
-    fn build_simple_trywith_extension_chain_raw(
-        &mut self,
-        loc: Location,
-        exn_id: &Ident,
-        extension_cases: Vec<(crate::types::Path, RawLambda)>,
-        default: RawLambda,
-    ) -> RawLambda {
-        let mut extension_cases = extension_cases.into_iter();
-        let (last_path, last_act) = extension_cases
-            .next_back()
-            .expect("extension handler requires at least one case");
-
-        let mut tests =
-            self.build_simple_trywith_extension_case_raw(loc, exn_id, last_path, last_act, default);
-
-        for (path, act) in extension_cases.rev() {
-            let exit_id = self.next_raise_count();
-            let body = self.build_simple_trywith_extension_case_raw(
-                loc,
-                exn_id,
-                path,
-                act,
-                RawLambda::LstaticRaise(exit_id, Vec::new()),
-            );
-            tests = RawLambda::LstaticCatch(Box::new(body), (exit_id, Vec::new()), Box::new(tests));
-        }
-
-        tests
-    }
-
-    fn build_simple_trywith_extension_case_raw(
-        &mut self,
-        loc: Location,
-        exn_id: &Ident,
-        path: crate::types::Path,
-        act: RawLambda,
-        fallback: RawLambda,
-    ) -> RawLambda {
-        let tag_id = self.fresh_ident("tag");
-        let cond = RawLambda::prim(
-            Primitive::PextensionSlotEq,
-            vec![
-                RawLambda::var(tag_id.clone()),
-                self.translate_extension_path_raw(&path, loc),
-            ],
-            loc,
-        );
-        RawLambda::let_(
-            LetKind::Alias,
-            tag_id,
-            RawLambda::var(exn_id.clone()),
-            RawLambda::LifThenElse(Box::new(cond), Box::new(act), Box::new(fallback)),
-        )
     }
 
     fn bind_constructor_args_irrefutably_raw(
@@ -8141,11 +6282,9 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         if cstr.cstr_inlined.is_some() {
             return match args {
-                [arg_pat] => self.bind_irrefutable_pattern_raw(
-                    arg_pat,
-                    RawLambda::var(scrut_id.clone()),
-                    body,
-                ),
+                [arg_pat] => {
+                    self.bind_irrefutable_pattern_raw(arg_pat, RawLambda::var(*scrut_id), body)
+                }
                 [] => body,
                 _ => RawLambda::unit(),
             };
@@ -8178,7 +6317,7 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     });
                 let payload =
-                    RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], pat_loc);
+                    RawLambda::prim(from_option, vec![RawLambda::var(*scrut_id)], pat_loc);
                 // For Tpat_any, OCaml's matching.ml still creates a binding
                 if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
                     let match_id = self.fresh_ident("match");
@@ -8205,7 +6344,7 @@ impl<'a> RawLambdaConverter<'a> {
                         crate::types::VariantConstructorCase::Block(block)
                             if block.is_untagged() =>
                         {
-                            RawLambda::var(scrut_id.clone())
+                            RawLambda::var(*scrut_id)
                         }
                         crate::types::VariantConstructorCase::Block(_) => RawLambda::prim(
                             Primitive::Pfield(
@@ -8216,7 +6355,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     FieldDbgInfo::Variant
                                 },
                             ),
-                            vec![RawLambda::var(scrut_id.clone())],
+                            vec![RawLambda::var(*scrut_id)],
                             pat_loc,
                         ),
                         crate::types::VariantConstructorCase::Constant(_) => {
@@ -8226,7 +6365,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 crate::types::ConstructorKind::Extension(_) => RawLambda::prim(
                     Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
-                    vec![RawLambda::var(scrut_id.clone())],
+                    vec![RawLambda::var(*scrut_id)],
                     pat_loc,
                 ),
             };
@@ -8237,1700 +6376,6 @@ impl<'a> RawLambdaConverter<'a> {
                 result = RawLambda::let_(LetKind::Alias, match_id, field, result);
             } else {
                 result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
-            }
-        }
-
-        result
-    }
-
-    fn compile_simple_variant_match_raw(
-        &mut self,
-        loc: Location,
-        scrut: &Expression,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        let scrut_lam = self.convert_expr_raw(scrut);
-        self.compile_simple_variant_match_raw_from_scrut(loc, scrut_lam, cases, partial)
-    }
-
-    fn compile_simple_variant_match_raw_from_scrut(
-        &mut self,
-        loc: Location,
-        scrut_lam: RawLambda,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        #[derive(Clone)]
-        enum DefaultCase {
-            Any(RawLambda),
-            Bind(Ident, RawLambda),
-        }
-
-        let mut seen_tags = std::collections::BTreeSet::new();
-        let mut const_cases = Vec::<(String, RawLambda)>::new();
-        let mut default_case = None;
-        let mut variant_pat_type = None;
-
-        for case in cases {
-            if case.c_guard.is_some() {
-                return None;
-            }
-
-            let body = self.convert_expr_raw(&case.c_rhs);
-            let (pat, aliases) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_variant(label, None, _) => {
-                    let tag = crate::types::btype::hash_variant(label);
-                    if !seen_tags.insert(tag) {
-                        return None;
-                    }
-                    if variant_pat_type.is_none() {
-                        variant_pat_type = Some(pat.pat_type);
-                    }
-                    const_cases.push((
-                        label.to_string(),
-                        wrap_aliases_raw(&aliases, raw_polyvariant_const(label), body),
-                    ));
-                }
-                PatternDesc::Tpat_any => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Any(body));
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(id.clone(), body));
-                }
-                PatternDesc::Tpat_alias(inner, id, _)
-                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
-                {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(id.clone(), body));
-                }
-                _ => return None,
-            }
-        }
-
-        if const_cases.is_empty() {
-            return None;
-        }
-
-        let row_complete = variant_pat_type.is_some_and(|pat_type| {
-            let expanded = crate::types::ctype::expand_head(self.type_ctx, self.env, pat_type);
-            let repr = self.type_ctx.repr(expanded);
-            let desc = self.type_ctx.get_desc(repr);
-            let row_complete = match &*desc {
-                TypeDesc::Tvariant(row) => {
-                    let row = crate::types::btype::row_repr(self.type_ctx, row);
-                    row.row_closed
-                        && row
-                            .row_fields
-                            .iter()
-                            .filter(|(_, field)| {
-                                !matches!(
-                                    crate::types::btype::row_field_repr(self.type_ctx, field),
-                                    crate::types::type_expr::RowField::Rabsent
-                                )
-                            })
-                            .count()
-                            == const_cases.len()
-                }
-                _ => false,
-            };
-            drop(desc);
-            row_complete
-        });
-
-        let failaction = match default_case {
-            Some(DefaultCase::Any(body)) => Some(body),
-            Some(DefaultCase::Bind(id, body)) => {
-                Some(RawLambda::let_(LetKind::Alias, id, scrut_lam.clone(), body))
-            }
-            None if row_complete || matches!(partial, Partial::Total) => None,
-            None => Some(RawLambda::from_lowered(self.match_failure(loc))),
-        };
-
-        let result = if failaction.is_none() && const_cases.len() == 1 {
-            const_cases.into_iter().next()?.1
-        } else {
-            let cases_to_test = if let Some(default) = failaction {
-                (const_cases, default)
-            } else {
-                let mut iter = const_cases.into_iter();
-                let (_, first_body) = iter.next()?;
-                (iter.collect(), first_body)
-            };
-            cases_to_test
-                .0
-                .into_iter()
-                .rev()
-                .fold(cases_to_test.1, |else_, (label, body)| {
-                    RawLambda::LifThenElse(
-                        Box::new(raw_polyvariant_compare(scrut_lam.clone(), &label, loc)),
-                        Box::new(body),
-                        Box::new(else_),
-                    )
-                })
-        };
-
-        Some(result)
-    }
-
-    fn compile_simple_constructor_match_raw(
-        &mut self,
-        loc: Location,
-        scrut: &Expression,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        let scrut_lam = self.convert_expr_raw(scrut);
-        self.compile_simple_constructor_match_raw_from_scrut(loc, scrut_lam, cases, partial)
-    }
-
-    /// Check if a single leaf pattern (after peeling aliases and flattening or-patterns)
-    /// is valid for simple constructor matching. Returns false if we should bail out.
-    fn check_simple_constructor_leaf(
-        &self,
-        type_ctx: &TypeContext,
-        pat: &Pattern,
-        seen_const_tags: &mut std::collections::BTreeSet<i32>,
-        seen_block_tags: &mut std::collections::BTreeSet<i32>,
-        seen_extensions: &mut std::collections::BTreeSet<String>,
-        repr_cstr: &mut Option<crate::types::ConstructorDescription>,
-        has_non_ctor_constants: &mut bool,
-    ) -> bool {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_construct(_, cstr, args) => {
-                if repr_cstr.is_none() {
-                    *repr_cstr = Some((**cstr).clone());
-                }
-                match cstr.cstr_kind {
-                    crate::types::ConstructorKind::Ordinary(reference) => {
-                        match reference.representation(type_ctx) {
-                            crate::types::VariantConstructorCase::Constant(_) => {
-                                args.is_empty() && seen_const_tags.insert(reference.position as i32)
-                            }
-                            crate::types::VariantConstructorCase::Block(block)
-                                if !block.is_untagged() =>
-                            {
-                                seen_block_tags.insert(reference.position as i32);
-                                true
-                            }
-                            crate::types::VariantConstructorCase::Block(_) => false,
-                        }
-                    }
-                    crate::types::ConstructorKind::Extension(ref path) => {
-                        args.iter().all(|pat| self.is_irrefutable_pattern(pat))
-                            && seen_extensions.insert(path.name())
-                    }
-                }
-            }
-            PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                *has_non_ctor_constants = true;
-                seen_const_tags.insert(*i as i32)
-            }
-            PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                *has_non_ctor_constants = true;
-                seen_const_tags.insert(*c as i32)
-            }
-            _ => false,
-        }
-    }
-
-    /// Recursively check all leaves of an or-pattern for simple constructor matching.
-    fn check_or_pattern_leaves(
-        &self,
-        type_ctx: &TypeContext,
-        pat: &Pattern,
-        seen_const_tags: &mut std::collections::BTreeSet<i32>,
-        seen_block_tags: &mut std::collections::BTreeSet<i32>,
-        seen_extensions: &mut std::collections::BTreeSet<String>,
-        repr_cstr: &mut Option<crate::types::ConstructorDescription>,
-        has_non_ctor_constants: &mut bool,
-    ) -> bool {
-        let (inner, _) = peel_aliases(pat);
-        match &inner.pat_desc {
-            PatternDesc::Tpat_or(left, right, _) => {
-                self.check_or_pattern_leaves(
-                    type_ctx,
-                    left,
-                    seen_const_tags,
-                    seen_block_tags,
-                    seen_extensions,
-                    repr_cstr,
-                    has_non_ctor_constants,
-                ) && self.check_or_pattern_leaves(
-                    type_ctx,
-                    right,
-                    seen_const_tags,
-                    seen_block_tags,
-                    seen_extensions,
-                    repr_cstr,
-                    has_non_ctor_constants,
-                )
-            }
-            _ => {
-                // For or-pattern block leaves, allow refutable sub-patterns.
-                // collect_or_pattern_cases skips field binding for LstaticRaise actions,
-                // so the sub-pattern info is lost but the tag dispatch still works.
-                // The sub-pattern matching happens through the block_sub_groups mechanism.
-                self.check_simple_constructor_leaf(
-                    type_ctx,
-                    inner,
-                    seen_const_tags,
-                    seen_block_tags,
-                    seen_extensions,
-                    repr_cstr,
-                    has_non_ctor_constants,
-                )
-            }
-        }
-    }
-
-    /// Recursively collect leaf patterns from or-patterns, adding each to const/block cases.
-    fn collect_or_pattern_cases(
-        &mut self,
-        pat: &Pattern,
-        scrut_id: &Ident,
-        action: &RawLambda,
-        const_cases: &mut Vec<(crate::lambda::SwitchKey, RawLambda)>,
-        block_cases: &mut Vec<(crate::lambda::SwitchKey, RawLambda)>,
-    ) {
-        let (inner, aliases) = peel_aliases(pat);
-        match &inner.pat_desc {
-            PatternDesc::Tpat_or(left, right, _) => {
-                self.collect_or_pattern_cases(left, scrut_id, action, const_cases, block_cases);
-                self.collect_or_pattern_cases(right, scrut_id, action, const_cases, block_cases);
-            }
-            PatternDesc::Tpat_construct(_, cstr, args) => {
-                let reference = match cstr.cstr_kind {
-                    crate::types::ConstructorKind::Ordinary(reference) => reference,
-                    crate::types::ConstructorKind::Extension(_) => return,
-                };
-                let case = reference.representation(self.type_ctx);
-                let key = crate::lambda::SwitchKey::Constructor(case.clone());
-                match case {
-                    crate::types::VariantConstructorCase::Constant(_) => const_cases.push((
-                        key,
-                        wrap_aliases_raw(
-                            &aliases,
-                            RawLambda::var(scrut_id.clone()),
-                            action.clone(),
-                        ),
-                    )),
-                    crate::types::VariantConstructorCase::Block(_) => {
-                        let is_exit = matches!(action, RawLambda::LstaticRaise(_, _));
-                        let act = if is_exit {
-                            action.clone()
-                        } else {
-                            self.bind_constructor_args_irrefutably_raw(
-                                scrut_id,
-                                inner,
-                                cstr,
-                                args,
-                                action.clone(),
-                            )
-                        };
-                        block_cases.push((
-                            key,
-                            wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), act),
-                        ));
-                    }
-                }
-            }
-            PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                const_cases.push((
-                    crate::lambda::SwitchKey::Int(*i as i32),
-                    wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
-                ));
-            }
-            PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                const_cases.push((
-                    crate::lambda::SwitchKey::Int(*c as i32),
-                    wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    fn compile_simple_constructor_match_raw_from_scrut(
-        &mut self,
-        loc: Location,
-        scrut_lam: RawLambda,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        #[derive(Clone)]
-        enum DefaultCase {
-            Any(RawLambda),
-            Bind(Ident, RawLambda),
-        }
-
-        let mut seen_const_tags = std::collections::BTreeSet::new();
-        let mut seen_block_tags = std::collections::BTreeSet::new();
-        let mut seen_extensions = std::collections::BTreeSet::new();
-        let mut default_case = None;
-        let mut repr_cstr = None::<crate::types::ConstructorDescription>;
-        let mut has_non_ctor_constants = false;
-        // Track which cases use or-patterns (need shared body via catch/exit)
-        let mut or_case_indices = std::collections::BTreeSet::new();
-
-        let mut has_guards = false;
-        for (case_idx, case) in cases.iter().enumerate() {
-            if case.c_guard.is_some() {
-                has_guards = true;
-            }
-
-            let (pat, _) = peel_aliases(&case.c_lhs);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_or(_, _, _) => {
-                    // Flatten or-pattern and validate each leaf
-                    if !self.check_or_pattern_leaves(
-                        self.type_ctx,
-                        &case.c_lhs,
-                        &mut seen_const_tags,
-                        &mut seen_block_tags,
-                        &mut seen_extensions,
-                        &mut repr_cstr,
-                        &mut has_non_ctor_constants,
-                    ) {
-                        return None;
-                    }
-                    or_case_indices.insert(case_idx);
-                }
-                PatternDesc::Tpat_construct(_, cstr, args) => {
-                    if !self.check_simple_constructor_leaf(
-                        self.type_ctx,
-                        pat,
-                        &mut seen_const_tags,
-                        &mut seen_block_tags,
-                        &mut seen_extensions,
-                        &mut repr_cstr,
-                        &mut has_non_ctor_constants,
-                    ) {
-                        return None;
-                    }
-                    // Ensure repr_cstr is set (check_simple_constructor_leaf does this)
-                    let _ = (cstr, args);
-                }
-                PatternDesc::Tpat_constant(TConstant::Int(_))
-                | PatternDesc::Tpat_constant(TConstant::Char(_)) => {
-                    if !self.check_simple_constructor_leaf(
-                        self.type_ctx,
-                        pat,
-                        &mut seen_const_tags,
-                        &mut seen_block_tags,
-                        &mut seen_extensions,
-                        &mut repr_cstr,
-                        &mut has_non_ctor_constants,
-                    ) {
-                        return None;
-                    }
-                }
-                PatternDesc::Tpat_any => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Any(self.convert_expr_raw(&case.c_rhs)));
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(
-                        id.clone(),
-                        self.convert_expr_raw(&case.c_rhs),
-                    ));
-                }
-                PatternDesc::Tpat_alias(inner, id, _)
-                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
-                {
-                    if default_case.is_some() {
-                        return None;
-                    }
-                    default_case = Some(DefaultCase::Bind(
-                        id.clone(),
-                        self.convert_expr_raw(&case.c_rhs),
-                    ));
-                }
-                _ => return None,
-            }
-        }
-
-        if seen_const_tags.is_empty() && seen_block_tags.is_empty() && seen_extensions.is_empty() {
-            return None;
-        }
-
-        let scrut_name = self.fresh_name_from_cases("match", cases);
-        let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
-            RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
-            _ => {
-                let scrut_id = self.fresh_ident(&scrut_name);
-                (
-                    scrut_id.clone(),
-                    RawLambda::var(scrut_id.clone()),
-                    Some((scrut_id, scrut_lam)),
-                )
-            }
-        };
-
-        if !seen_extensions.is_empty() {
-            let mut extension_cases = Vec::<(crate::types::Path, RawLambda)>::new();
-            for case in cases {
-                let body = self.convert_expr_raw(&case.c_rhs);
-                let (pat, aliases) = peel_aliases(&case.c_lhs);
-                if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
-                    if let crate::types::ConstructorKind::Extension(path) = &cstr.cstr_kind {
-                        let act = wrap_aliases_raw(
-                            &aliases,
-                            RawLambda::var(scrut_id.clone()),
-                            self.bind_constructor_args_irrefutably_raw(
-                                &scrut_id, pat, cstr, args, body,
-                            ),
-                        );
-                        extension_cases.push((path.clone(), act));
-                    }
-                }
-            }
-
-            let failaction = match default_case {
-                Some(DefaultCase::Any(body)) => Some(body),
-                Some(DefaultCase::Bind(id, body)) => Some(RawLambda::let_(
-                    LetKind::Alias,
-                    id,
-                    RawLambda::var(scrut_id.clone()),
-                    body,
-                )),
-                None => None,
-            };
-
-            let (default, remaining_cases) = match failaction {
-                Some(fail) => (fail, extension_cases),
-                None => {
-                    let mut iter = extension_cases.into_iter();
-                    let (_, default) = iter.next()?;
-                    (default, iter.collect())
-                }
-            };
-
-            let tests = remaining_cases
-                .into_iter()
-                .rev()
-                .fold(default, |rem, (path, act)| {
-                    RawLambda::LifThenElse(
-                        Box::new(RawLambda::prim(
-                            Primitive::PextensionSlotEq,
-                            vec![
-                                RawLambda::var(scrut_id.clone()),
-                                self.translate_extension_path_raw(&path, loc),
-                            ],
-                            loc,
-                        )),
-                        Box::new(act),
-                        Box::new(rem),
-                    )
-                });
-
-            return Some(match wrap_let {
-                Some((id, value)) => RawLambda::let_(LetKind::Alias, id, value, tests),
-                None => tests,
-            });
-        }
-
-        let mut const_cases = Vec::new();
-        let mut block_cases = Vec::new();
-        // Shared bodies from or-patterns: (exit_id, body)
-        let mut shared_bodies: Vec<(i32, RawLambda)> = Vec::new();
-
-        // Pre-scan: determine which block tags need sub-pattern grouping.
-        // A tag needs grouping if it appears multiple times OR has refutable sub-patterns.
-        let mut block_tag_counts: std::collections::BTreeMap<i32, usize> =
-            std::collections::BTreeMap::new();
-        let mut block_tags_needing_grouping: std::collections::BTreeSet<i32> =
-            std::collections::BTreeSet::new();
-        for case in cases.iter() {
-            if case.c_guard.is_some() {
-                // Skip guard cases in pre-scan (they don't affect tag grouping)
-            }
-            let (pat, _) = peel_aliases(&case.c_lhs);
-            if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc
-                && let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind
-                && matches!(
-                    reference.representation(self.type_ctx),
-                    crate::types::VariantConstructorCase::Block(_)
-                )
-            {
-                let position = reference.position as i32;
-                let count = block_tag_counts.entry(position).or_insert(0);
-                *count += 1;
-                if *count > 1 || !args.iter().all(|pat| self.is_irrefutable_pattern(pat)) {
-                    block_tags_needing_grouping.insert(position);
-                }
-            }
-        }
-
-        // Block sub-cases grouped by tag for sub-pattern matching
-        // Each entry: (sub_patterns, body_with_aliases)
-        let mut block_sub_groups: std::collections::BTreeMap<i32, Vec<(Vec<&Pattern>, RawLambda)>> =
-            std::collections::BTreeMap::new();
-        // Track constructor info per block tag
-        let mut block_tag_info: std::collections::BTreeMap<
-            i32,
-            (&crate::types::ConstructorDescription, &Pattern),
-        > = std::collections::BTreeMap::new();
-
-        // Pre-allocate a fail exit for guard failures when guards are present.
-        // This exit will be the same one used by make_switch_with_catch for the failaction.
-        let guard_fail_exit = if has_guards {
-            Some(self.next_raise_count())
-        } else {
-            None
-        };
-
-        for (case_idx, case) in cases.iter().enumerate() {
-            let mut body = self.convert_expr_raw(&case.c_rhs);
-
-            // Wrap body with guard check: if guard then body else (exit fail)
-            if let (Some(guard), Some(fail_id)) = (&case.c_guard, guard_fail_exit) {
-                let guard_lam = self.convert_expr_raw(guard);
-                body = RawLambda::LifThenElse(
-                    Box::new(guard_lam),
-                    Box::new(body),
-                    Box::new(RawLambda::LstaticRaise(fail_id, Vec::new())),
-                );
-            }
-
-            if or_case_indices.contains(&case_idx) {
-                // Or-pattern: share body via catch/exit
-                let exit_id = self.next_raise_count();
-                shared_bodies.push((exit_id, body));
-                let action = RawLambda::LstaticRaise(exit_id, Vec::new());
-                self.collect_or_pattern_cases(
-                    &case.c_lhs,
-                    &scrut_id,
-                    &action,
-                    &mut const_cases,
-                    &mut block_cases,
-                );
-            } else {
-                let (pat, aliases) = peel_aliases(&case.c_lhs);
-                match &pat.pat_desc {
-                    PatternDesc::Tpat_construct(_, cstr, args) => {
-                        if let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind {
-                            let runtime_case = reference.representation(self.type_ctx);
-                            let key = crate::lambda::SwitchKey::Constructor(runtime_case.clone());
-                            match runtime_case {
-                                crate::types::VariantConstructorCase::Constant(_) => const_cases
-                                    .push((
-                                        key,
-                                        wrap_aliases_raw(
-                                            &aliases,
-                                            RawLambda::var(scrut_id.clone()),
-                                            body,
-                                        ),
-                                    )),
-                                crate::types::VariantConstructorCase::Block(_) => {
-                                    let tag = reference.position as i32;
-                                    if block_tags_needing_grouping.contains(&tag) {
-                                        // Tag needs sub-pattern grouping: collect for later
-                                        block_tag_info.entry(tag).or_insert((cstr, pat));
-                                        let body_with_aliases = wrap_aliases_raw(
-                                            &aliases,
-                                            RawLambda::var(scrut_id.clone()),
-                                            body,
-                                        );
-                                        block_sub_groups
-                                            .entry(tag)
-                                            .or_default()
-                                            .push((args.iter().collect(), body_with_aliases));
-                                    } else {
-                                        // Single case with irrefutable args: existing behavior
-                                        let all_wildcards = args
-                                            .iter()
-                                            .all(|a| matches!(a.pat_desc, PatternDesc::Tpat_any));
-                                        let block_body = if case.c_guard.is_some() && all_wildcards
-                                        {
-                                            body
-                                        } else {
-                                            self.bind_constructor_args_irrefutably_raw(
-                                                &scrut_id, pat, cstr, args, body,
-                                            )
-                                        };
-                                        block_cases.push((
-                                            key,
-                                            wrap_aliases_raw(
-                                                &aliases,
-                                                RawLambda::var(scrut_id.clone()),
-                                                block_body,
-                                            ),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                        const_cases.push((
-                            crate::lambda::SwitchKey::Int(*i as i32),
-                            wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
-                        ));
-                    }
-                    PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                        const_cases.push((
-                            crate::lambda::SwitchKey::Int(*c as i32),
-                            wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Process block sub-groups: compile sub-matches for grouped block cases
-        for (tag, sub_cases) in block_sub_groups {
-            let (cstr, pat) = block_tag_info[&tag];
-            let pat_loc = self.loc(pat.pat_loc);
-            let block_body = self.compile_block_sub_match(&scrut_id, cstr, sub_cases, pat_loc);
-            let reference = match cstr.cstr_kind {
-                crate::types::ConstructorKind::Ordinary(reference) => reference,
-                crate::types::ConstructorKind::Extension(_) => continue,
-            };
-            block_cases.push((
-                crate::lambda::SwitchKey::Constructor(reference.representation(self.type_ctx)),
-                block_body,
-            ));
-        }
-
-        // OCaml's combine_constructor: when sig_complete (all constructor tags covered),
-        // fail_opt = None (no failaction). The wildcard/default fills missing tags explicitly.
-        let failaction = match default_case {
-            Some(default) => {
-                let default_body = match default {
-                    DefaultCase::Any(body) => body,
-                    DefaultCase::Bind(id, body) => {
-                        RawLambda::let_(LetKind::Alias, id, RawLambda::var(scrut_id.clone()), body)
-                    }
-                };
-
-                // OCaml's combine_constructor: when we have a regular constructor type
-                // (not extensions), a default/wildcard pattern makes the signature complete.
-                // Fill missing tags explicitly and drop the failaction.
-                let sig_complete = repr_cstr.as_ref().is_some_and(|cstr| {
-                    matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
-                });
-
-                if sig_complete && !has_guards {
-                    // OCaml's mk_failaction_pos: fill missing tags with exit to default,
-                    // wrap default body in catch handler (like mk_failaction_pos does).
-                    let has_missing =
-                        if let Some(cstr) = &repr_cstr {
-                            let reference = match cstr.cstr_kind {
-                                crate::types::ConstructorKind::Ordinary(reference) => reference,
-                                crate::types::ConstructorKind::Extension(_) => unreachable!(),
-                            };
-                            self.type_ctx
-                                .with_variant_layout(reference.variant, |layout| {
-                                    layout.constructors.iter().enumerate().any(
-                                        |(position, case)| match case {
-                                            crate::types::VariantConstructorCase::Constant(_) => {
-                                                !seen_const_tags.contains(&(position as i32))
-                                            }
-                                            crate::types::VariantConstructorCase::Block(_) => {
-                                                !seen_block_tags.contains(&(position as i32))
-                                            }
-                                        },
-                                    )
-                                })
-                        } else {
-                            false
-                        };
-
-                    if has_missing {
-                        let default_exit = self.next_raise_count();
-                        let default_raise = RawLambda::LstaticRaise(default_exit, Vec::new());
-                        if let Some(cstr) = &repr_cstr {
-                            let reference = match cstr.cstr_kind {
-                                crate::types::ConstructorKind::Ordinary(reference) => reference,
-                                crate::types::ConstructorKind::Extension(_) => unreachable!(),
-                            };
-                            self.type_ctx
-                                .with_variant_layout(reference.variant, |layout| {
-                                    for (position, case) in layout.constructors.iter().enumerate() {
-                                        let key =
-                                            crate::lambda::SwitchKey::Constructor(case.clone());
-                                        match case {
-                                            crate::types::VariantConstructorCase::Constant(_)
-                                                if !seen_const_tags
-                                                    .contains(&(position as i32)) =>
-                                            {
-                                                const_cases.push((key, default_raise.clone()))
-                                            }
-                                            crate::types::VariantConstructorCase::Block(_)
-                                                if !seen_block_tags
-                                                    .contains(&(position as i32)) =>
-                                            {
-                                                block_cases.push((key, default_raise.clone()))
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                });
-                        }
-                        // Store the catch handler to wrap later
-                        shared_bodies.push((default_exit, default_body));
-                    } else {
-                        // All tags already covered by explicit patterns, default is dead code
-                    }
-                    None
-                } else {
-                    Some(Box::new(default_body))
-                }
-            }
-            None => match partial {
-                Partial::Partial => Some(Box::new(RawLambda::from_lowered(
-                    self.match_failure(loc.clone()),
-                ))),
-                Partial::Total => None,
-            },
-        };
-
-        // Detect if any case pattern is an int constant (not char/variant).
-        // For int constants, OCaml uses low=min_int creating fail intervals
-        // at both ends, making isout optimal. For char/variant, fail is only
-        // at the top when starting from 0, making >= optimal.
-        let has_int_constants_detected = cases.iter().any(|case| {
-            fn has_int_in_pat(pat: &Pattern) -> bool {
-                match &pat.pat_desc {
-                    PatternDesc::Tpat_constant(TConstant::Int(_)) => true,
-                    PatternDesc::Tpat_or(l, r, _) => has_int_in_pat(l) || has_int_in_pat(r),
-                    PatternDesc::Tpat_alias(inner, _, _) => has_int_in_pat(inner),
-                    _ => false,
-                }
-            }
-            has_int_in_pat(&case.c_lhs)
-        });
-
-        let dense_const_partial = if block_cases.is_empty() {
-            failaction.as_ref().and_then(|default| {
-                let mut sorted_consts: Vec<(i32, RawLambda)> = const_cases
-                    .iter()
-                    .map(|(key, action)| match key {
-                        crate::lambda::SwitchKey::Int(value) => Some((*value, action.clone())),
-                        crate::lambda::SwitchKey::Constructor(_) => None,
-                    })
-                    .collect::<Option<_>>()?;
-                sorted_consts.sort_by_key(|(tag, _)| *tag);
-                let first = sorted_consts.first()?.0;
-                let last = sorted_consts.last()?.0;
-                let is_dense = sorted_consts
-                    .iter()
-                    .enumerate()
-                    .all(|(idx, (tag, _))| *tag == first + idx as i32);
-                if !is_dense {
-                    return None;
-                }
-
-                // Single-case optimization: use direct comparison instead of isout+switch
-                if sorted_consts.len() == 1 {
-                    let (tag, action) = sorted_consts.into_iter().next()?;
-                    let exit_id = self.next_raise_count();
-                    let cond = RawLambda::prim(
-                        Primitive::Pjscomp(Comparison::Neq),
-                        vec![scrut_var.clone(), RawLambda::const_(Constant::int(tag))],
-                        loc,
-                    );
-                    return Some(RawLambda::LstaticCatch(
-                        Box::new(RawLambda::LifThenElse(
-                            Box::new(cond),
-                            Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
-                            Box::new(action),
-                        )),
-                        (exit_id, Vec::new()),
-                        Box::new((**default).clone()),
-                    ));
-                }
-
-                let exit_id = self.next_raise_count();
-                // For char constants and variant constructors starting at 0,
-                // OCaml's Switch module picks Sep optimization: >= (last+1).
-                // For int constants, OCaml uses low=min_int which creates
-                // fail intervals at both ends, making Inter (isout) optimal.
-                let is_out = if first == 0 && !has_int_constants_detected {
-                    RawLambda::prim(
-                        Primitive::Pintcomp(Comparison::Ge),
-                        vec![
-                            scrut_var.clone(),
-                            RawLambda::const_(Constant::int(last + 1)),
-                        ],
-                        loc,
-                    )
-                } else {
-                    crate::raw_lambda::switch::out_of_range(&scrut_var, first, last)
-                };
-
-                // If all cases map to the same static raise, use it directly
-                // instead of generating a switch (matches OCaml's share_actions)
-                let all_same_exit = sorted_consts.iter().all(|(_, act)| {
-                    matches!(act, RawLambda::LstaticRaise(id, args) if args.is_empty()
-                    && *id == match &sorted_consts[0].1 {
-                        RawLambda::LstaticRaise(id0, _) => *id0,
-                        _ => return false,
-                    })
-                });
-
-                let in_range_action = if all_same_exit {
-                    sorted_consts[0].1.clone()
-                } else {
-                    RawLambda::Lswitch(
-                        Box::new(scrut_var.clone()),
-                        Box::new(crate::raw_lambda::RawLambdaSwitch {
-                            sw_consts_full: true,
-                            sw_consts: sorted_consts
-                                .into_iter()
-                                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
-                                .collect(),
-                            sw_blocks_full: true,
-                            sw_blocks: Vec::new(),
-                            sw_failaction: None,
-                            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-                        }),
-                    )
-                };
-
-                Some(RawLambda::LstaticCatch(
-                    Box::new(RawLambda::LifThenElse(
-                        Box::new(is_out),
-                        Box::new(RawLambda::LstaticRaise(exit_id, Vec::new())),
-                        Box::new(in_range_action),
-                    )),
-                    (exit_id, Vec::new()),
-                    Box::new((**default).clone()),
-                ))
-            })
-        } else {
-            None
-        };
-
-        let constructor_dispatch = repr_cstr
-            .as_ref()
-            .and_then(|cstr| match cstr.cstr_kind {
-                crate::types::ConstructorKind::Ordinary(reference) => {
-                    Some(crate::lambda::SwitchDispatch::Variant(
-                        self.type_ctx
-                            .with_variant_layout(reference.variant, |layout| {
-                                layout.matching_facts.clone()
-                            }),
-                    ))
-                }
-                crate::types::ConstructorKind::Extension(_) => None,
-            })
-            .unwrap_or(crate::lambda::SwitchDispatch::Direct);
-
-        let mut result = if let Some(result) = dense_const_partial {
-            result
-        } else if !has_non_ctor_constants {
-            if let Some(cstr) = repr_cstr.as_ref() {
-                let reference = match cstr.cstr_kind {
-                    crate::types::ConstructorKind::Ordinary(reference) => reference,
-                    crate::types::ConstructorKind::Extension(_) => unreachable!(),
-                };
-                let (num_constants, num_blocks) = self
-                    .type_ctx
-                    .with_variant_layout(reference.variant, |layout| {
-                        (layout.num_constants(), layout.num_blocks())
-                    });
-                if num_constants == 1
-                    && num_blocks == 1
-                    && const_cases.len() == 1
-                    && block_cases.len() == 1
-                    && (cstr.cstr_name == "::"
-                        || cstr.cstr_name == "[]"
-                        || constructor_has_optional_shape(cstr))
-                {
-                    let cond = if constructor_has_optional_shape(cstr) {
-                        RawLambda::prim(Primitive::PisNotNone, vec![scrut_var.clone()], loc)
-                    } else {
-                        RawLambda::prim(
-                            Primitive::Pjscomp(Comparison::Neq),
-                            vec![scrut_var.clone(), RawLambda::const_(Constant::int(0))],
-                            loc,
-                        )
-                    };
-                    RawLambda::LifThenElse(
-                        Box::new(cond),
-                        Box::new(block_cases[0].1.clone()),
-                        Box::new(const_cases[0].1.clone()),
-                    )
-                } else if num_constants == 2
-                    && num_blocks == 0
-                    && const_cases.len() == 2
-                    && failaction.is_none()
-                    && (cstr.cstr_name == "true" || cstr.cstr_name == "false")
-                {
-                    let action = |name: &str| {
-                        const_cases
-                            .iter()
-                            .find_map(|(key, action)| match key {
-                                crate::lambda::SwitchKey::Constructor(
-                                    crate::types::VariantConstructorCase::Constant(tag),
-                                ) if tag.name == name => Some(action.clone()),
-                                _ => None,
-                            })
-                            .expect("boolean constructor action")
-                    };
-                    RawLambda::LifThenElse(
-                        Box::new(scrut_var.clone()),
-                        Box::new(action("true")),
-                        Box::new(action("false")),
-                    )
-                } else if num_constants == 0 && block_cases.len() == 1 && failaction.is_none() {
-                    block_cases[0].1.clone()
-                } else {
-                    self.make_switch_with_catch_exit(
-                        scrut_var.clone(),
-                        const_cases,
-                        block_cases,
-                        failaction,
-                        guard_fail_exit,
-                        constructor_dispatch.clone(),
-                    )
-                }
-            } else {
-                self.make_switch_with_catch_exit(
-                    scrut_var.clone(),
-                    const_cases,
-                    block_cases,
-                    failaction,
-                    guard_fail_exit,
-                    constructor_dispatch.clone(),
-                )
-            }
-        } else {
-            self.make_switch_with_catch_exit(
-                scrut_var.clone(),
-                const_cases,
-                block_cases,
-                failaction,
-                guard_fail_exit,
-                constructor_dispatch,
-            )
-        };
-
-        // Wrap in catch handlers for shared or-pattern bodies
-        for (exit_id, handler) in shared_bodies.into_iter().rev() {
-            result =
-                RawLambda::LstaticCatch(Box::new(result), (exit_id, Vec::new()), Box::new(handler));
-        }
-
-        Some(match wrap_let {
-            Some((id, value)) => RawLambda::let_(LetKind::Strict, id, value, result),
-            None => result,
-        })
-    }
-
-    fn compile_irrefutable_match(&mut self, scrut: &Expression, cases: &[Case]) -> Option<Lambda> {
-        if cases.len() != 1 || cases[0].c_guard.is_some() {
-            return None;
-        }
-
-        if !self.is_irrefutable_pattern(&cases[0].c_lhs) {
-            return None;
-        }
-
-        let body = self.convert_expr(&cases[0].c_rhs);
-        let scrut_lam = self.convert_expr(scrut);
-        Some(self.bind_irrefutable_pattern(&cases[0].c_lhs, scrut_lam, body))
-    }
-
-    fn bind_constructor_args_irrefutably(
-        &mut self,
-        scrut_id: &Ident,
-        pat: &Pattern,
-        cstr: &crate::types::ConstructorDescription,
-        args: &[Pattern],
-        body: Lambda,
-    ) -> Lambda {
-        let pat_loc = self.loc(pat.pat_loc);
-        let tmp = self.fresh_ident("ctor");
-        let mut result = body;
-
-        for (idx, arg_pat) in args.iter().enumerate().rev() {
-            let field = match cstr.cstr_kind {
-                crate::types::ConstructorKind::Ordinary(reference) => {
-                    match reference.representation(self.type_ctx) {
-                        crate::types::VariantConstructorCase::Block(block)
-                            if block.is_untagged() =>
-                        {
-                            Lambda::var(tmp.clone())
-                        }
-                        crate::types::VariantConstructorCase::Block(_) => Lambda::prim(
-                            Primitive::Pfield(
-                                idx as i32,
-                                if cstr.cstr_name == "::" {
-                                    FieldDbgInfo::Cons
-                                } else {
-                                    FieldDbgInfo::Variant
-                                },
-                            ),
-                            vec![Lambda::var(tmp.clone())],
-                            pat_loc.clone(),
-                        ),
-                        crate::types::VariantConstructorCase::Constant(_) => {
-                            unreachable!("constant constructor payload")
-                        }
-                    }
-                }
-                crate::types::ConstructorKind::Extension(_) => {
-                    unreachable!("extension payload in ordinary binder")
-                }
-            };
-            result = self.bind_irrefutable_pattern(arg_pat, field, result);
-        }
-
-        Lambda::let_(LetKind::Alias, tmp, Lambda::var(scrut_id.clone()), result)
-    }
-
-    /// Compile a nested sub-match for block constructor cases that share the same tag
-    /// but have different (potentially refutable) sub-patterns.
-    ///
-    /// This implements OCaml's matching.ml behavior for constructor sub-matrix compilation:
-    /// extract fields, then recursively match on the extracted field values.
-    fn compile_block_sub_match(
-        &mut self,
-        scrut_id: &Ident,
-        cstr: &crate::types::ConstructorDescription,
-        sub_cases: Vec<(Vec<&Pattern>, RawLambda)>,
-        loc: Location,
-    ) -> RawLambda {
-        let arity = cstr.cstr_arity as usize;
-
-        // Handle optional shape (Some(...) with refutable inner pattern)
-        if constructor_has_optional_shape(cstr) && arity == 1 {
-            return self.compile_optional_block_sub_match(scrut_id, cstr, sub_cases, loc);
-        }
-
-        // Determine field variable names using OCaml's name_pattern convention:
-        // use the first variable name found across all cases for each field position
-        let field_ids: Vec<Ident> = (0..arity)
-            .map(|i| {
-                sub_cases
-                    .iter()
-                    .find_map(|(pats, _)| {
-                        pats.get(i).and_then(|p| {
-                            let (inner, _) = peel_aliases(p);
-                            match &inner.pat_desc {
-                                PatternDesc::Tpat_var(id, _) => Some(id.clone()),
-                                _ => None,
-                            }
-                        })
-                    })
-                    .unwrap_or_else(|| self.fresh_ident("match"))
-            })
-            .collect();
-
-        let field_info = if cstr.cstr_name == "::" {
-            FieldDbgInfo::Cons
-        } else {
-            FieldDbgInfo::Variant
-        };
-
-        // For arity 1: try to build a specialized sub-match (string switch, etc.)
-        if arity == 1 {
-            let field_id = &field_ids[0];
-            let field_read = RawLambda::prim(
-                Primitive::Pfield(0, field_info),
-                vec![RawLambda::var(scrut_id.clone())],
-                loc,
-            );
-
-            let inner = self.compile_single_field_sub_match(field_id, &sub_cases, loc);
-
-            return RawLambda::let_(LetKind::Alias, field_id.clone(), field_read, inner);
-        }
-
-        // For multi-field: use sequential catch/exit approach
-        // Each row (case) is tried in order; if its sub-pattern test fails, exit to the next row.
-        self.compile_multi_field_sub_match(scrut_id, cstr, &field_ids, &field_info, sub_cases, loc)
-    }
-
-    /// Compile a sub-match for a single-field constructor.
-    /// Analyzes sub-pattern types and generates the appropriate match structure.
-    fn compile_single_field_sub_match(
-        &mut self,
-        field_id: &Ident,
-        sub_cases: &[(Vec<&Pattern>, RawLambda)],
-        loc: Location,
-    ) -> RawLambda {
-        // Categorize sub-patterns
-        let mut string_cases: Vec<(String, RawLambda)> = Vec::new();
-        let mut int_cases: Vec<(i32, RawLambda)> = Vec::new();
-        let mut ctor_cases: Vec<(Vec<&Pattern>, RawLambda)> = Vec::new();
-        let mut default_body: Option<RawLambda> = None;
-        let mut has_complex = false;
-        let mut ctor_info: Option<&crate::types::ConstructorDescription> = None;
-
-        for (pats, body) in sub_cases {
-            let (pat, _aliases) = peel_aliases(pats[0]);
-            match &pat.pat_desc {
-                PatternDesc::Tpat_constant(TConstant::String(s)) => {
-                    string_cases.push((s.clone(), body.clone()));
-                }
-                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                    int_cases.push((*i as i32, body.clone()));
-                }
-                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                    int_cases.push((*c as i32, body.clone()));
-                }
-                PatternDesc::Tpat_construct(_, cstr, args) => {
-                    // Constructor sub-pattern: collect for nested switch
-                    if ctor_info.is_none() {
-                        ctor_info = Some(cstr);
-                    }
-                    ctor_cases.push((args.iter().collect(), body.clone()));
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    if id == field_id {
-                        default_body = Some(body.clone());
-                    } else {
-                        default_body = Some(RawLambda::let_(
-                            LetKind::Alias,
-                            id.clone(),
-                            RawLambda::var(field_id.clone()),
-                            body.clone(),
-                        ));
-                    }
-                }
-                PatternDesc::Tpat_any => {
-                    default_body = Some(body.clone());
-                }
-                PatternDesc::Tpat_alias(inner, id, _)
-                    if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
-                {
-                    default_body = Some(RawLambda::let_(
-                        LetKind::Alias,
-                        id.clone(),
-                        RawLambda::var(field_id.clone()),
-                        body.clone(),
-                    ));
-                }
-                _ => {
-                    has_complex = true;
-                }
-            }
-        }
-
-        // String switch
-        if !string_cases.is_empty() && !has_complex && int_cases.is_empty() {
-            string_cases.sort_by(|(a, _), (b, _)| a.cmp(b));
-            if let Some(default) = default_body {
-                let fail_exit = self.next_raise_count();
-                let sw = RawLambda::LstringSwitch(
-                    Box::new(RawLambda::var(field_id.clone())),
-                    string_cases,
-                    Some(Box::new(RawLambda::LstaticRaise(fail_exit, Vec::new()))),
-                );
-                return RawLambda::LstaticCatch(
-                    Box::new(sw),
-                    (fail_exit, Vec::new()),
-                    Box::new(default),
-                );
-            } else {
-                // No default - string switch without catch
-                return RawLambda::LstringSwitch(
-                    Box::new(RawLambda::var(field_id.clone())),
-                    string_cases,
-                    None,
-                );
-            }
-        }
-
-        // Int constant tests with catch/exit (OCaml's != comparison pattern)
-        if !int_cases.is_empty() && !has_complex && string_cases.is_empty() && ctor_cases.is_empty()
-        {
-            return self.compile_int_test_chain(field_id, &int_cases, default_body, loc);
-        }
-
-        // Constructor sub-patterns: generate nested switch on the field var
-        if !ctor_cases.is_empty() && !has_complex && string_cases.is_empty() && int_cases.is_empty()
-        {
-            // Re-scan the original sub_cases to build a nested constructor switch
-            // using the inner constructor tags
-            let mut inner_const_cases: Vec<(crate::lambda::SwitchKey, RawLambda)> = Vec::new();
-            let mut inner_block_groups: std::collections::BTreeMap<
-                i32,
-                Vec<(Vec<&Pattern>, RawLambda)>,
-            > = std::collections::BTreeMap::new();
-            let mut inner_repr_cstr: Option<&crate::types::ConstructorDescription> = None;
-
-            for (pats, body) in sub_cases {
-                let (pat, _) = peel_aliases(pats[0]);
-                if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
-                    if inner_repr_cstr.is_none() {
-                        inner_repr_cstr = Some(cstr);
-                    }
-                    if let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind {
-                        let case = reference.representation(self.type_ctx);
-                        match case {
-                            crate::types::VariantConstructorCase::Constant(_) => {
-                                inner_const_cases.push((
-                                    crate::lambda::SwitchKey::Constructor(case),
-                                    body.clone(),
-                                ));
-                            }
-                            crate::types::VariantConstructorCase::Block(_) => {
-                                let inner_body =
-                                    if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) {
-                                        self.bind_constructor_args_irrefutably_raw(
-                                            field_id,
-                                            pat,
-                                            cstr,
-                                            args,
-                                            body.clone(),
-                                        )
-                                    } else {
-                                        body.clone()
-                                    };
-                                inner_block_groups
-                                    .entry(reference.position as i32)
-                                    .or_default()
-                                    .push((args.iter().collect(), inner_body));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Build the inner switch
-            let mut final_block_cases: Vec<(crate::lambda::SwitchKey, RawLambda)> = Vec::new();
-            for (tag, group) in inner_block_groups {
-                if group.len() == 1 {
-                    let reference = match inner_repr_cstr.expect("inner constructor").cstr_kind {
-                        crate::types::ConstructorKind::Ordinary(reference) => reference,
-                        crate::types::ConstructorKind::Extension(_) => unreachable!(),
-                    };
-                    let case = self
-                        .type_ctx
-                        .with_variant_layout(reference.variant, |layout| {
-                            layout.constructors[tag as usize].clone()
-                        });
-                    final_block_cases.push((
-                        crate::lambda::SwitchKey::Constructor(case),
-                        group.into_iter().next().unwrap().1,
-                    ));
-                } else {
-                    // Multiple cases for same inner tag: recursive sub-match
-                    if let Some(cstr) = inner_repr_cstr {
-                        let body = self.compile_block_sub_match(field_id, cstr, group, loc);
-                        let reference = match cstr.cstr_kind {
-                            crate::types::ConstructorKind::Ordinary(reference) => reference,
-                            crate::types::ConstructorKind::Extension(_) => unreachable!(),
-                        };
-                        let case = self
-                            .type_ctx
-                            .with_variant_layout(reference.variant, |layout| {
-                                layout.constructors[tag as usize].clone()
-                            });
-                        final_block_cases.push((crate::lambda::SwitchKey::Constructor(case), body));
-                    }
-                }
-            }
-
-            let failaction = default_body.map(Box::new);
-
-            return self.make_switch_with_catch_exit(
-                RawLambda::var(field_id.clone()),
-                inner_const_cases,
-                final_block_cases,
-                failaction,
-                None,
-                inner_repr_cstr
-                    .and_then(|cstr| match cstr.cstr_kind {
-                        crate::types::ConstructorKind::Ordinary(reference) => {
-                            Some(crate::lambda::SwitchDispatch::Variant(
-                                self.type_ctx
-                                    .with_variant_layout(reference.variant, |layout| {
-                                        layout.matching_facts.clone()
-                                    }),
-                            ))
-                        }
-                        crate::types::ConstructorKind::Extension(_) => None,
-                    })
-                    .unwrap_or(crate::lambda::SwitchDispatch::Direct),
-            );
-        }
-
-        // Fallback: sequential catch/exit for complex sub-patterns
-        self.compile_sequential_single_field(field_id, sub_cases, loc)
-    }
-
-    /// Compile int constant test chain matching OCaml's != comparison pattern:
-    /// (catch (if (!= x val0) (exit N) body0) with (N) ...)
-    fn compile_int_test_chain(
-        &mut self,
-        field_id: &Ident,
-        int_cases: &[(i32, RawLambda)],
-        default_body: Option<RawLambda>,
-        loc: Location,
-    ) -> RawLambda {
-        let fail_exit = self.next_raise_count();
-        let fail_raise = RawLambda::LstaticRaise(fail_exit, Vec::new());
-
-        // Build nested if-chain: if (!= x val0) (exit N) body0
-        // For the last case with no default, don't add exit check
-        let mut inner = fail_raise;
-        for (val, body) in int_cases.iter().rev() {
-            let cond = RawLambda::prim(
-                Primitive::Pjscomp(Comparison::Neq),
-                vec![
-                    RawLambda::var(field_id.clone()),
-                    RawLambda::const_(Constant::int(*val)),
-                ],
-                loc,
-            );
-            inner = RawLambda::LifThenElse(
-                Box::new(cond),
-                Box::new(inner.clone()),
-                Box::new(body.clone()),
-            );
-        }
-
-        if let Some(default) = default_body {
-            RawLambda::LstaticCatch(Box::new(inner), (fail_exit, Vec::new()), Box::new(default))
-        } else {
-            inner
-        }
-    }
-
-    /// Fallback: sequential single-field sub-match with catch/exit chains
-    fn compile_sequential_single_field(
-        &mut self,
-        field_id: &Ident,
-        sub_cases: &[(Vec<&Pattern>, RawLambda)],
-        loc: Location,
-    ) -> RawLambda {
-        // Process cases in reverse, building catch/exit chains
-        let mut result: Option<RawLambda> = None;
-
-        for (pats, body) in sub_cases.iter().rev() {
-            let (pat, _) = peel_aliases(pats[0]);
-            match result {
-                None => {
-                    // Last case: bind the pattern and run
-                    result = Some(self.bind_sub_pattern_raw(field_id, pat, body.clone()));
-                }
-                Some(rest) => {
-                    let exit_id = self.next_raise_count();
-                    let test = self.test_sub_pattern_raw(field_id, pat, body.clone(), exit_id, loc);
-                    result = Some(RawLambda::LstaticCatch(
-                        Box::new(test),
-                        (exit_id, Vec::new()),
-                        Box::new(rest),
-                    ));
-                }
-            }
-        }
-
-        result.unwrap_or(RawLambda::unit())
-    }
-
-    /// Bind a sub-pattern variable to the field value (for the last/default case)
-    fn bind_sub_pattern_raw(&self, field_id: &Ident, pat: &Pattern, body: RawLambda) -> RawLambda {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, _) => {
-                if id == field_id {
-                    body
-                } else {
-                    RawLambda::let_(
-                        LetKind::Alias,
-                        id.clone(),
-                        RawLambda::var(field_id.clone()),
-                        body,
-                    )
-                }
-            }
-            PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_alias(inner, id, _) => {
-                let inner_body = self.bind_sub_pattern_raw(field_id, inner, body);
-                RawLambda::let_(
-                    LetKind::Alias,
-                    id.clone(),
-                    RawLambda::var(field_id.clone()),
-                    inner_body,
-                )
-            }
-            _ => body, // Constants/constructors in last position are unusual
-        }
-    }
-
-    /// Test a sub-pattern against the field value, with exit on failure
-    fn test_sub_pattern_raw(
-        &mut self,
-        field_id: &Ident,
-        pat: &Pattern,
-        body: RawLambda,
-        fail_exit: i32,
-        loc: Location,
-    ) -> RawLambda {
-        let fail_raise = RawLambda::LstaticRaise(fail_exit, Vec::new());
-        match &pat.pat_desc {
-            PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                let cond = RawLambda::prim(
-                    Primitive::Pjscomp(Comparison::Neq),
-                    vec![
-                        RawLambda::var(field_id.clone()),
-                        RawLambda::const_(Constant::int(*i as i32)),
-                    ],
-                    loc,
-                );
-                RawLambda::LifThenElse(Box::new(cond), Box::new(fail_raise), Box::new(body))
-            }
-            PatternDesc::Tpat_constant(TConstant::String(s)) => {
-                let cond = RawLambda::prim(
-                    Primitive::Pjscomp(Comparison::Neq),
-                    vec![
-                        RawLambda::var(field_id.clone()),
-                        RawLambda::const_(Constant::string(s.clone())),
-                    ],
-                    loc,
-                );
-                RawLambda::LifThenElse(Box::new(cond), Box::new(fail_raise), Box::new(body))
-            }
-            PatternDesc::Tpat_var(id, _) => {
-                if id == field_id {
-                    body
-                } else {
-                    RawLambda::let_(
-                        LetKind::Alias,
-                        id.clone(),
-                        RawLambda::var(field_id.clone()),
-                        body,
-                    )
-                }
-            }
-            PatternDesc::Tpat_any => body,
-            _ => {
-                // For other patterns, fall through (exit to next case)
-                fail_raise
-            }
-        }
-    }
-
-    /// Compile sub-match for optional-shape constructors (Some(...) with refutable inner)
-    fn compile_optional_block_sub_match(
-        &mut self,
-        scrut_id: &Ident,
-        cstr: &crate::types::ConstructorDescription,
-        sub_cases: Vec<(Vec<&Pattern>, RawLambda)>,
-        loc: Location,
-    ) -> RawLambda {
-        // Extract the option payload using val_from_option
-        let field_id = sub_cases
-            .iter()
-            .find_map(|(pats, _)| {
-                pats.first().and_then(|p| {
-                    let (inner, _) = peel_aliases(p);
-                    match &inner.pat_desc {
-                        PatternDesc::Tpat_var(id, _) => Some(id.clone()),
-                        _ => None,
-                    }
-                })
-            })
-            .unwrap_or_else(|| self.fresh_ident("match"));
-
-        let from_option = sub_cases
-            .first()
-            .and_then(|(pats, _)| pats.first())
-            .map(|p| {
-                let env_ref = self.type_ctx.get_typed_env(p.pat_env);
-                if env_ref
-                    .as_ref()
-                    .map(|e| type_cannot_contain_undefined(self.type_ctx, e.as_ref(), p.pat_type))
-                    .unwrap_or_else(|| {
-                        type_cannot_contain_undefined_no_env(self.type_ctx, p.pat_type)
-                    })
-                {
-                    Primitive::PvalFromOptionNotNest
-                } else {
-                    Primitive::PvalFromOption
-                }
-            })
-            .unwrap_or(Primitive::PvalFromOption);
-
-        let payload = RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], loc);
-
-        let inner = self.compile_single_field_sub_match(&field_id, &sub_cases, loc);
-
-        RawLambda::let_(LetKind::Alias, field_id, payload, inner)
-    }
-
-    /// Compile multi-field sub-match using sequential catch/exit approach.
-    /// Matches OCaml's column-by-column pattern testing with lazy field extraction.
-    fn compile_multi_field_sub_match(
-        &mut self,
-        scrut_id: &Ident,
-        _cstr: &crate::types::ConstructorDescription,
-        field_ids: &[Ident],
-        field_info: &FieldDbgInfo,
-        sub_cases: Vec<(Vec<&Pattern>, RawLambda)>,
-        loc: Location,
-    ) -> RawLambda {
-        if sub_cases.is_empty() {
-            return RawLambda::unit();
-        }
-        if sub_cases.len() == 1 {
-            // Single case: bind all fields
-            let (pats, body) = &sub_cases[0];
-            return self.bind_multi_field_patterns(
-                scrut_id,
-                field_ids,
-                field_info,
-                pats,
-                body.clone(),
-                loc,
-            );
-        }
-
-        // Multiple cases: try each row with catch/exit
-        let mut result: Option<RawLambda> = None;
-
-        for (pats, body) in sub_cases.iter().rev() {
-            match result {
-                None => {
-                    // Last case: bind all fields and run
-                    result = Some(self.bind_multi_field_patterns(
-                        scrut_id,
-                        field_ids,
-                        field_info,
-                        pats,
-                        body.clone(),
-                        loc,
-                    ));
-                }
-                Some(rest) => {
-                    let exit_id = self.next_raise_count();
-                    // Test this row's patterns with exit on failure
-                    let test = self.test_multi_field_row(
-                        scrut_id,
-                        field_ids,
-                        field_info,
-                        pats,
-                        body.clone(),
-                        exit_id,
-                        loc,
-                    );
-                    result = Some(RawLambda::LstaticCatch(
-                        Box::new(test),
-                        (exit_id, Vec::new()),
-                        Box::new(rest),
-                    ));
-                }
-            }
-        }
-
-        result.unwrap_or(RawLambda::unit())
-    }
-
-    /// Bind all fields from a multi-field constructor pattern (for the default/last case)
-    fn bind_multi_field_patterns(
-        &mut self,
-        scrut_id: &Ident,
-        field_ids: &[Ident],
-        field_info: &FieldDbgInfo,
-        pats: &[&Pattern],
-        body: RawLambda,
-        loc: Location,
-    ) -> RawLambda {
-        let mut result = body;
-        // Bind fields in reverse order for correct scoping
-        for (i, (pat, field_id)) in pats.iter().zip(field_ids.iter()).enumerate().rev() {
-            let (inner, _) = peel_aliases(pat);
-            let field_read = RawLambda::prim(
-                Primitive::Pfield(i as i32, field_info.clone()),
-                vec![RawLambda::var(scrut_id.clone())],
-                loc,
-            );
-            match &inner.pat_desc {
-                PatternDesc::Tpat_var(id, _) => {
-                    result = RawLambda::let_(LetKind::Alias, id.clone(), field_read, result);
-                }
-                PatternDesc::Tpat_any => {
-                    // OCaml's make_constr_matching still creates a binding for wildcards
-                    let match_id = self.fresh_ident("match");
-                    result = RawLambda::let_(LetKind::Alias, match_id, field_read, result);
-                }
-                _ => {
-                    // For constants etc. in last row, bind with field_id name
-                    result = RawLambda::let_(LetKind::Alias, field_id.clone(), field_read, result);
-                }
-            }
-        }
-        result
-    }
-
-    /// Test a row of multi-field patterns, with lazy field extraction.
-    /// Matches OCaml's approach of extracting and testing fields sequentially.
-    fn test_multi_field_row(
-        &mut self,
-        scrut_id: &Ident,
-        field_ids: &[Ident],
-        field_info: &FieldDbgInfo,
-        pats: &[&Pattern],
-        body: RawLambda,
-        fail_exit: i32,
-        loc: Location,
-    ) -> RawLambda {
-        let fail_raise = RawLambda::LstaticRaise(fail_exit, Vec::new());
-        let mut result = body;
-
-        // Process fields in reverse order, building up the test chain
-        for (i, (pat, field_id)) in pats.iter().zip(field_ids.iter()).enumerate().rev() {
-            let (inner, _) = peel_aliases(pat);
-            let field_read = RawLambda::prim(
-                Primitive::Pfield(i as i32, field_info.clone()),
-                vec![RawLambda::var(scrut_id.clone())],
-                loc,
-            );
-
-            match &inner.pat_desc {
-                PatternDesc::Tpat_constant(TConstant::Int(val)) => {
-                    let cond = RawLambda::prim(
-                        Primitive::Pjscomp(Comparison::Neq),
-                        vec![
-                            RawLambda::var(field_id.clone()),
-                            RawLambda::const_(Constant::int(*val as i32)),
-                        ],
-                        loc,
-                    );
-                    result = RawLambda::let_(
-                        LetKind::Alias,
-                        field_id.clone(),
-                        field_read,
-                        RawLambda::LifThenElse(
-                            Box::new(cond),
-                            Box::new(fail_raise.clone()),
-                            Box::new(result),
-                        ),
-                    );
-                }
-                PatternDesc::Tpat_var(id, _) => {
-                    // Variable: just bind, no test needed
-                    result = RawLambda::let_(LetKind::Alias, id.clone(), field_read, result);
-                }
-                PatternDesc::Tpat_any => {
-                    // Wildcard: no binding or test needed in test path
-                    // (OCaml skips unused field reads in test rows)
-                }
-                _ => {
-                    // Unknown pattern in test row - exit (can't match)
-                    result = fail_raise.clone();
-                }
             }
         }
 
@@ -9975,102 +6420,6 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn bind_irrefutable_pattern(&mut self, pat: &Pattern, scrut: Lambda, body: Lambda) -> Lambda {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_var(id, _) => Lambda::let_(LetKind::Alias, id.clone(), scrut, body),
-            PatternDesc::Tpat_alias(inner, id, _) => {
-                let inner = self.bind_irrefutable_pattern(inner, scrut.clone(), body);
-                Lambda::let_(LetKind::Alias, id.clone(), scrut, inner)
-            }
-            PatternDesc::Tpat_tuple(items) => {
-                let tmp = self.fresh_ident("tuple");
-                let pat_loc = self.loc(pat.pat_loc);
-                let mut result = body;
-                for (idx, item) in items.iter().enumerate().rev() {
-                    let field = Lambda::prim(
-                        Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
-                        vec![Lambda::var(tmp.clone())],
-                        pat_loc.clone(),
-                    );
-                    result = self.bind_irrefutable_pattern(item, field, result);
-                }
-                Lambda::let_(LetKind::Alias, tmp, scrut, result)
-            }
-            PatternDesc::Tpat_record(fields, _, rest) => {
-                let tmp = self.fresh_ident("match");
-                let mut result = match rest {
-                    Some(rest) => Lambda::let_(
-                        LetKind::Strict,
-                        rest.rest_ident.clone(),
-                        Lambda::prim(
-                            Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                            vec![Lambda::var(tmp.clone())],
-                            self.loc(pat.pat_loc),
-                        ),
-                        body,
-                    ),
-                    None => body,
-                };
-                for (lid, lbl, inner_pat, _) in fields.iter().rev() {
-                    let field = Lambda::prim(
-                        Primitive::Pfield(
-                            lbl.lbl_pos,
-                            FieldDbgInfo::Record {
-                                name: label_runtime_name(lbl),
-                            },
-                        ),
-                        vec![Lambda::var(tmp.clone())],
-                        self.loc(lid.loc),
-                    );
-                    result = self.bind_irrefutable_pattern(inner_pat, field, result);
-                }
-                Lambda::let_(LetKind::Alias, tmp, scrut, result)
-            }
-            PatternDesc::Tpat_array(items) => {
-                let tmp = self.fresh_ident("array");
-                let pat_loc = self.loc(pat.pat_loc);
-                let mut result = body;
-                for (idx, item) in items.iter().enumerate().rev() {
-                    let field = Lambda::prim(
-                        Primitive::Parrayrefs,
-                        vec![
-                            Lambda::var(tmp.clone()),
-                            Lambda::const_(Constant::int(idx as i32)),
-                        ],
-                        pat_loc.clone(),
-                    );
-                    result = self.bind_irrefutable_pattern(item, field, result);
-                }
-                Lambda::let_(LetKind::Alias, tmp, scrut, result)
-            }
-            PatternDesc::Tpat_construct(_, cstr, args) => {
-                match constructor_case(self.type_ctx, cstr) {
-                    Some(crate::types::VariantConstructorCase::Block(block))
-                        if block.is_untagged() =>
-                    {
-                        args.first().map_or(body.clone(), |arg| {
-                            self.bind_irrefutable_pattern(arg, scrut, body)
-                        })
-                    }
-                    Some(crate::types::VariantConstructorCase::Constant(_)) if args.is_empty() => {
-                        body
-                    }
-                    _ => unreachable!("expected irrefutable constructor"),
-                }
-            }
-            PatternDesc::Tpat_variant(_, Some(inner), _) => {
-                let payload = Lambda::prim(
-                    Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
-                    vec![scrut],
-                    self.loc(pat.pat_loc),
-                );
-                self.bind_irrefutable_pattern(inner, payload, body)
-            }
-            _ => unreachable!("expected irrefutable pattern"),
-        }
-    }
-
     fn bind_irrefutable_pattern_raw(
         &mut self,
         pat: &Pattern,
@@ -10086,7 +6435,7 @@ impl<'a> RawLambdaConverter<'a> {
                         return body;
                     }
                 }
-                RawLambda::let_(LetKind::Alias, id.clone(), scrut, body)
+                RawLambda::let_(LetKind::Alias, *id, scrut, body)
             }
             PatternDesc::Tpat_alias(inner, id, _) => {
                 let inner = self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body);
@@ -10096,14 +6445,14 @@ impl<'a> RawLambdaConverter<'a> {
                         return inner;
                     }
                 }
-                RawLambda::let_(LetKind::Alias, id.clone(), scrut, inner)
+                RawLambda::let_(LetKind::Alias, *id, scrut, inner)
             }
             PatternDesc::Tpat_tuple(items) => {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
                         let tmp = self.fresh_ident("match");
-                        (tmp.clone(), Some((tmp, scrut)))
+                        (tmp, Some((tmp, scrut)))
                     }
                 };
                 let pat_loc = self.loc(pat.pat_loc);
@@ -10111,7 +6460,7 @@ impl<'a> RawLambdaConverter<'a> {
                 for (idx, item) in items.iter().enumerate() {
                     let field = RawLambda::prim(
                         Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
-                        vec![RawLambda::var(tmp.clone())],
+                        vec![RawLambda::var(tmp)],
                         pat_loc,
                     );
                     // OCaml's make_tuple_matching always generates field access
@@ -10144,16 +6493,16 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
                         let tmp = self.fresh_ident("match");
-                        (tmp.clone(), Some((tmp, scrut)))
+                        (tmp, Some((tmp, scrut)))
                     }
                 };
                 let mut result = match rest {
                     Some(rest) => RawLambda::let_(
                         LetKind::Strict,
-                        rest.rest_ident.clone(),
+                        rest.rest_ident,
                         RawLambda::prim(
                             Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
-                            vec![RawLambda::var(tmp.clone())],
+                            vec![RawLambda::var(tmp)],
                             self.loc(pat.pat_loc),
                         ),
                         body,
@@ -10192,10 +6541,9 @@ impl<'a> RawLambdaConverter<'a> {
                                 continue;
                             }
                             if let Some((_, _, inner_pat)) = mentioned.get(pos) {
-                                let field = RawLambda::var(tmp.clone());
+                                let field = RawLambda::var(tmp);
                                 if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
-                                    result =
-                                        RawLambda::let_(LetKind::Alias, id.clone(), field, result);
+                                    result = RawLambda::let_(LetKind::Alias, *id, field, result);
                                 } else {
                                     result =
                                         self.bind_irrefutable_pattern_raw(inner_pat, field, result);
@@ -10276,15 +6624,14 @@ impl<'a> RawLambdaConverter<'a> {
 
                             let field = RawLambda::prim(
                                 Primitive::Pfield(field_pos, info),
-                                vec![RawLambda::var(tmp.clone())],
+                                vec![RawLambda::var(tmp)],
                                 loc,
                             );
 
                             if let Some((_, _, inner_pat)) = mentioned.get(pos) {
                                 // Mentioned in pattern: bind using the pattern's variable
                                 if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
-                                    result =
-                                        RawLambda::let_(field_let_kind, id.clone(), field, result);
+                                    result = RawLambda::let_(field_let_kind, *id, field, result);
                                 } else {
                                     result =
                                         self.bind_irrefutable_pattern_raw(inner_pat, field, result);
@@ -10300,14 +6647,14 @@ impl<'a> RawLambdaConverter<'a> {
                     // Fallback: bind only mentioned fields (can't resolve all labels)
                     for (lid, lbl, inner_pat, _) in fields.iter() {
                         let field = match &lbl.lbl_repres {
-                            RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp.clone()),
+                            RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp),
                             _ => {
                                 let Some((pos, info)) = raw_record_field_access(lbl) else {
                                     continue;
                                 };
                                 RawLambda::prim(
                                     Primitive::Pfield(pos, info),
-                                    vec![RawLambda::var(tmp.clone())],
+                                    vec![RawLambda::var(tmp)],
                                     self.loc(lid.loc),
                                 )
                             }
@@ -10318,7 +6665,7 @@ impl<'a> RawLambdaConverter<'a> {
                             LetKind::Alias
                         };
                         if let PatternDesc::Tpat_var(id, _) = &inner_pat.pat_desc {
-                            result = RawLambda::let_(field_let_kind, id.clone(), field, result);
+                            result = RawLambda::let_(field_let_kind, *id, field, result);
                         } else {
                             result = self.bind_irrefutable_pattern_raw(inner_pat, field, result);
                         }
@@ -10335,7 +6682,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
                         let tmp = self.fresh_ident("array");
-                        (tmp.clone(), Some((tmp, scrut)))
+                        (tmp, Some((tmp, scrut)))
                     }
                 };
                 let pat_loc = self.loc(pat.pat_loc);
@@ -10344,7 +6691,7 @@ impl<'a> RawLambdaConverter<'a> {
                     let field = RawLambda::prim(
                         Primitive::Parrayrefs,
                         vec![
-                            RawLambda::var(tmp.clone()),
+                            RawLambda::var(tmp),
                             RawLambda::const_(Constant::int(idx as i32)),
                         ],
                         pat_loc,
@@ -10374,10 +6721,10 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_construct(_, cstr, args) => {
                 // Single-constructor block type: bind fields directly from scrutinee
                 let (scrut_id, wrap_let) = match &scrut {
-                    RawLambda::Lvar(id) => (id.clone(), None),
+                    RawLambda::Lvar(id) => (*id, None),
                     _ => {
                         let id = self.fresh_ident("match");
-                        (id.clone(), Some((id, scrut)))
+                        (id, Some((id, scrut)))
                     }
                 };
                 let result =
@@ -10396,662 +6743,6 @@ impl<'a> RawLambdaConverter<'a> {
                 self.bind_irrefutable_pattern_raw(inner, payload, body)
             }
             _ => unreachable!("expected irrefutable pattern"),
-        }
-    }
-
-    fn raw_simple_for_let(
-        &mut self,
-        pat: &Pattern,
-        param: RawLambda,
-        body: RawLambda,
-    ) -> RawLambda {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_any => RawLambda::seq(param, body),
-            PatternDesc::Tpat_var(id, _) => {
-                RawLambda::let_(LetKind::Strict, id.clone(), param, body)
-            }
-            _ => match param {
-                RawLambda::Lvar(_) => self.bind_irrefutable_pattern_raw(pat, param, body),
-                _ => {
-                    let match_id = self.fresh_ident("match");
-                    let body = self.bind_irrefutable_pattern_raw(
-                        pat,
-                        RawLambda::var(match_id.clone()),
-                        body,
-                    );
-                    RawLambda::let_(LetKind::Strict, match_id, param, body)
-                }
-            },
-        }
-    }
-
-    fn bind_selected_tuple_pattern_raw(
-        &mut self,
-        scrut_id: &Ident,
-        pat: &Pattern,
-        body: RawLambda,
-    ) -> Option<RawLambda> {
-        let (inner, aliases) = peel_aliases(pat);
-        let scrut = RawLambda::var(scrut_id.clone());
-        let body = match &inner.pat_desc {
-            PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_var(_, _)
-            | PatternDesc::Tpat_tuple(_)
-            | PatternDesc::Tpat_record(_, _, _)
-            | PatternDesc::Tpat_array(_)
-            | PatternDesc::Tpat_variant(_, Some(_), _) => {
-                self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
-            }
-            PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
-                crate::types::ConstructorKind::Extension(_) => body,
-                crate::types::ConstructorKind::Ordinary(_)
-                    if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
-                {
-                    self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
-                }
-                crate::types::ConstructorKind::Ordinary(_) if args.is_empty() => body,
-                crate::types::ConstructorKind::Ordinary(_)
-                    if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) =>
-                {
-                    self.bind_constructor_args_irrefutably_raw(scrut_id, inner, cstr, args, body)
-                }
-                crate::types::ConstructorKind::Ordinary(_) => return None,
-            },
-            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_variant(_, None, _) => body,
-            PatternDesc::Tpat_alias(_, _, _) | PatternDesc::Tpat_or(_, _, _) => return None,
-        };
-        Some(wrap_aliases_raw(&aliases, scrut, body))
-    }
-
-    fn raw_lambda_key(&self, lam: &RawLambda) -> String {
-        format!("{}", crate::raw_lambda::print::RawLambdaPrinter::new(lam))
-    }
-
-    fn compile_simple_tuple_match(
-        &mut self,
-        loc: Location,
-        scrut: &Expression,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<Lambda> {
-        let expanded = Self::expand_tuple_cases(cases)?;
-        let arity = expanded.first()?.items.len();
-        if arity == 0 {
-            return None;
-        }
-
-        let ids = (0..arity)
-            .map(|idx| self.fresh_ident(&format!("match{idx}")))
-            .collect::<Vec<_>>();
-        let states = expanded
-            .into_iter()
-            .map(|case| TupleCaseState {
-                case,
-                selected: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let body = self.compile_simple_tuple_components(loc.clone(), &ids, &states, 0, partial)?;
-
-        let result = match &scrut.exp_desc {
-            ExpressionDesc::Texp_tuple(items) if items.len() == arity => items
-                .iter()
-                .zip(ids.iter())
-                .rev()
-                .fold(body, |acc, (item, id)| {
-                    Lambda::let_(LetKind::Strict, id.clone(), self.convert_expr(item), acc)
-                }),
-            _ => {
-                let tuple_id = self.fresh_ident("tuple");
-                let tuple_var = Lambda::var(tuple_id.clone());
-                let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
-                    let field = Lambda::prim(
-                        Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
-                        vec![tuple_var.clone()],
-                        loc.clone(),
-                    );
-                    Lambda::let_(LetKind::Alias, id.clone(), field, acc)
-                });
-                Lambda::let_(
-                    LetKind::Strict,
-                    tuple_id,
-                    self.convert_expr(scrut),
-                    with_fields,
-                )
-            }
-        };
-
-        Some(result)
-    }
-
-    fn compile_simple_tuple_match_raw(
-        &mut self,
-        loc: Location,
-        scrut: &Expression,
-        cases: &[Case],
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        let expanded = Self::expand_tuple_cases(cases)?;
-        let arity = expanded.first()?.items.len();
-        if arity == 0 {
-            return None;
-        }
-
-        let ids = (0..arity)
-            .map(|_| self.fresh_ident("match"))
-            .collect::<Vec<_>>();
-        let states = expanded
-            .into_iter()
-            .map(|case| TupleCaseState {
-                case,
-                selected: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let body = self.compile_simple_tuple_components_raw(loc, &ids, &states, 0, partial)?;
-
-        let result = match &scrut.exp_desc {
-            ExpressionDesc::Texp_tuple(items) if items.len() == arity => items
-                .iter()
-                .zip(ids.iter())
-                .rev()
-                .fold(body, |acc, (item, id)| {
-                    RawLambda::let_(
-                        LetKind::Strict,
-                        id.clone(),
-                        self.convert_expr_raw(item),
-                        acc,
-                    )
-                }),
-            _ => {
-                let tuple_id = self.fresh_ident("tuple");
-                let tuple_var = RawLambda::var(tuple_id.clone());
-                let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
-                    let field = RawLambda::prim(
-                        Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
-                        vec![tuple_var.clone()],
-                        loc,
-                    );
-                    RawLambda::let_(LetKind::Alias, id.clone(), field, acc)
-                });
-                RawLambda::let_(
-                    LetKind::Strict,
-                    tuple_id,
-                    self.convert_expr_raw(scrut),
-                    with_fields,
-                )
-            }
-        };
-
-        Some(result)
-    }
-
-    fn compile_simple_tuple_components(
-        &mut self,
-        loc: Location,
-        ids: &[Ident],
-        states: &[TupleCaseState<'_>],
-        idx: usize,
-        partial: Partial,
-    ) -> Option<Lambda> {
-        if states.is_empty() {
-            return Some(match partial {
-                Partial::Partial => self.match_failure(loc),
-                Partial::Total => Lambda::unit(),
-            });
-        }
-
-        if idx >= ids.len() {
-            let mut body = self.convert_expr(&states[0].case.case.c_rhs);
-            for (pos, pat) in states[0].selected.iter().rev() {
-                body = self.bind_selected_tuple_pattern(&ids[*pos], pat, body)?;
-            }
-            return Some(body);
-        }
-
-        let mut const_keys = Vec::new();
-        let mut block_keys = Vec::new();
-        let mut default_states = Vec::new();
-        for state in states {
-            let pat = state.case.items[idx];
-            match self.simple_switch_key(pat) {
-                Some(key) => {
-                    if key.is_block() {
-                        if !block_keys.contains(&key) {
-                            block_keys.push(key);
-                        }
-                    } else if !const_keys.contains(&key) {
-                        const_keys.push(key);
-                    }
-                }
-                None if Self::is_default_pattern(pat) => default_states.push(state.clone()),
-                None => return None,
-            }
-        }
-
-        if const_keys.is_empty() && block_keys.is_empty() {
-            return self.compile_simple_tuple_components(
-                loc,
-                ids,
-                &default_states,
-                idx + 1,
-                partial,
-            );
-        }
-
-        let mut sw_consts = Vec::new();
-        for key in const_keys {
-            let branch_states = states
-                .iter()
-                .filter(|state| {
-                    let pat = state.case.items[idx];
-                    Self::is_default_pattern(pat)
-                        || self.simple_switch_key(pat).as_ref() == Some(&key)
-                })
-                .cloned()
-                .map(|mut state| {
-                    state.selected.push((idx, state.case.items[idx]));
-                    state
-                })
-                .collect::<Vec<_>>();
-            let branch = self.compile_simple_tuple_components(
-                loc.clone(),
-                ids,
-                &branch_states,
-                idx + 1,
-                partial,
-            )?;
-            sw_consts.push((key.switch_key(), branch));
-        }
-
-        let mut sw_blocks = Vec::new();
-        for key in block_keys {
-            let branch_states = states
-                .iter()
-                .filter(|state| {
-                    let pat = state.case.items[idx];
-                    Self::is_default_pattern(pat)
-                        || self.simple_switch_key(pat).as_ref() == Some(&key)
-                })
-                .cloned()
-                .map(|mut state| {
-                    state.selected.push((idx, state.case.items[idx]));
-                    state
-                })
-                .collect::<Vec<_>>();
-            let branch = self.compile_simple_tuple_components(
-                loc.clone(),
-                ids,
-                &branch_states,
-                idx + 1,
-                partial,
-            )?;
-            sw_blocks.push((key.switch_key(), branch));
-        }
-
-        let failaction = if default_states.is_empty() {
-            match partial {
-                Partial::Partial => Some(Box::new(self.match_failure(loc.clone()))),
-                Partial::Total => None,
-            }
-        } else {
-            Some(Box::new(self.compile_simple_tuple_components(
-                loc.clone(),
-                ids,
-                &default_states,
-                idx + 1,
-                partial,
-            )?))
-        };
-
-        Some(Lambda::Lswitch(
-            Box::new(Lambda::var(ids[idx].clone())),
-            Box::new(LambdaSwitch {
-                sw_consts_full: false,
-                sw_consts,
-                sw_blocks_full: false,
-                sw_blocks,
-                sw_failaction: failaction,
-                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            }),
-        ))
-    }
-
-    fn compile_simple_tuple_components_raw(
-        &mut self,
-        loc: Location,
-        ids: &[Ident],
-        states: &[TupleCaseState<'_>],
-        idx: usize,
-        partial: Partial,
-    ) -> Option<RawLambda> {
-        if states.is_empty() {
-            return Some(match partial {
-                Partial::Partial => RawLambda::from_lowered(self.match_failure(loc)),
-                Partial::Total => RawLambda::unit(),
-            });
-        }
-
-        if idx >= ids.len() {
-            let mut body = self.convert_expr_raw(&states[0].case.case.c_rhs);
-            for (pos, pat) in states[0].selected.iter().rev() {
-                body = self.bind_selected_tuple_pattern_raw(&ids[*pos], pat, body)?;
-            }
-            return Some(body);
-        }
-
-        let mut const_keys = Vec::new();
-        let mut block_keys = Vec::new();
-        let mut default_states = Vec::new();
-        for state in states {
-            let pat = state.case.items[idx];
-            match self.simple_switch_key(pat) {
-                Some(key) => {
-                    if key.is_block() {
-                        if !block_keys.contains(&key) {
-                            block_keys.push(key);
-                        }
-                    } else if !const_keys.contains(&key) {
-                        const_keys.push(key);
-                    }
-                }
-                None if Self::is_default_pattern(pat) => default_states.push(state.clone()),
-                None => return None,
-            }
-        }
-
-        if const_keys.is_empty() && block_keys.is_empty() {
-            return self.compile_simple_tuple_components_raw(
-                loc,
-                ids,
-                &default_states,
-                idx + 1,
-                partial,
-            );
-        }
-
-        let mut sw_consts = Vec::new();
-        for key in const_keys {
-            let branch_states = states
-                .iter()
-                .filter(|state| {
-                    let pat = state.case.items[idx];
-                    Self::is_default_pattern(pat)
-                        || self.simple_switch_key(pat).as_ref() == Some(&key)
-                })
-                .cloned()
-                .map(|mut state| {
-                    state.selected.push((idx, state.case.items[idx]));
-                    state
-                })
-                .collect::<Vec<_>>();
-            let branch = self.compile_simple_tuple_components_raw(
-                loc,
-                ids,
-                &branch_states,
-                idx + 1,
-                partial,
-            )?;
-            sw_consts.push((key.switch_key(), branch));
-        }
-
-        let mut sw_blocks = Vec::new();
-        for key in block_keys {
-            let branch_states = states
-                .iter()
-                .filter(|state| {
-                    let pat = state.case.items[idx];
-                    Self::is_default_pattern(pat)
-                        || self.simple_switch_key(pat).as_ref() == Some(&key)
-                })
-                .cloned()
-                .map(|mut state| {
-                    state.selected.push((idx, state.case.items[idx]));
-                    state
-                })
-                .collect::<Vec<_>>();
-            let branch = self.compile_simple_tuple_components_raw(
-                loc,
-                ids,
-                &branch_states,
-                idx + 1,
-                partial,
-            )?;
-            sw_blocks.push((key.switch_key(), branch));
-        }
-
-        let failaction = if default_states.is_empty() {
-            match partial {
-                Partial::Partial => {
-                    Some(Box::new(RawLambda::from_lowered(self.match_failure(loc))))
-                }
-                Partial::Total => None,
-            }
-        } else {
-            Some(Box::new(self.compile_simple_tuple_components_raw(
-                loc,
-                ids,
-                &default_states,
-                idx + 1,
-                partial,
-            )?))
-        };
-
-        // OCaml's matching.ml sorts cases by tag via sort_int_lambda_list/split_cases
-
-        Some(RawLambda::Lswitch(
-            Box::new(RawLambda::var(ids[idx].clone())),
-            Box::new(crate::raw_lambda::RawLambdaSwitch {
-                sw_consts_full: true,
-                sw_consts,
-                sw_blocks_full: true,
-                sw_blocks,
-                sw_failaction: failaction,
-                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
-            }),
-        ))
-    }
-
-    fn expand_tuple_cases<'b>(cases: &'b [Case]) -> Option<Vec<ExpandedTupleCase<'b>>> {
-        let mut expanded = Vec::new();
-        let mut arity = None;
-        for case in cases {
-            if case.c_guard.is_some() {
-                return None;
-            }
-            for items in Self::expand_tuple_pattern(&case.c_lhs)? {
-                let len = items.len();
-                match arity {
-                    Some(existing) if existing != len => return None,
-                    None => arity = Some(len),
-                    _ => {}
-                }
-                expanded.push(ExpandedTupleCase { case, items });
-            }
-        }
-        Some(expanded)
-    }
-
-    fn expand_tuple_pattern<'b>(pat: &'b Pattern) -> Option<Vec<Vec<&'b Pattern>>> {
-        let (pat, _) = peel_aliases(pat);
-        match &pat.pat_desc {
-            PatternDesc::Tpat_or(left, right, _) => {
-                let mut out = Self::expand_tuple_pattern(left)?;
-                out.extend(Self::expand_tuple_pattern(right)?);
-                Some(out)
-            }
-            PatternDesc::Tpat_tuple(items) => Some(vec![items.iter().collect()]),
-            _ => None,
-        }
-    }
-
-    fn is_default_pattern(pat: &Pattern) -> bool {
-        matches!(
-            peel_aliases(pat).0.pat_desc,
-            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)
-        )
-    }
-
-    fn simple_switch_key(&self, pat: &Pattern) -> Option<SimpleSwitchKey> {
-        match &peel_aliases(pat).0.pat_desc {
-            PatternDesc::Tpat_construct(_, cstr, args)
-                if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) =>
-            {
-                constructor_case(self.type_ctx, cstr).map(SimpleSwitchKey::Constructor)
-            }
-
-            PatternDesc::Tpat_constant(TConstant::Int(i)) => Some(SimpleSwitchKey::Int(*i as i32)),
-            PatternDesc::Tpat_constant(TConstant::Char(c)) => Some(SimpleSwitchKey::Int(*c as i32)),
-            _ => None,
-        }
-    }
-
-    fn bind_selected_tuple_pattern(
-        &mut self,
-        scrut_id: &Ident,
-        pat: &Pattern,
-        body: Lambda,
-    ) -> Option<Lambda> {
-        let (inner, aliases) = peel_aliases(pat);
-        let scrut = Lambda::var(scrut_id.clone());
-        let body = match &inner.pat_desc {
-            PatternDesc::Tpat_any => body,
-            PatternDesc::Tpat_var(_, _)
-            | PatternDesc::Tpat_tuple(_)
-            | PatternDesc::Tpat_record(_, _, _)
-            | PatternDesc::Tpat_array(_)
-            | PatternDesc::Tpat_variant(_, Some(_), _) => {
-                self.bind_irrefutable_pattern(inner, scrut.clone(), body)
-            }
-            PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
-                crate::types::ConstructorKind::Extension(_) => body,
-                crate::types::ConstructorKind::Ordinary(_)
-                    if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
-                {
-                    self.bind_irrefutable_pattern(inner, scrut.clone(), body)
-                }
-                crate::types::ConstructorKind::Ordinary(_) if args.is_empty() => body,
-                crate::types::ConstructorKind::Ordinary(_)
-                    if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) =>
-                {
-                    self.bind_constructor_args_irrefutably(scrut_id, inner, cstr, args, body)
-                }
-                crate::types::ConstructorKind::Ordinary(_) => return None,
-            },
-            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_variant(_, None, _) => body,
-            PatternDesc::Tpat_alias(_, _, _) | PatternDesc::Tpat_or(_, _, _) => return None,
-        };
-        Some(wrap_aliases(&aliases, scrut, body))
-    }
-
-    fn convert_poly_variant(&mut self, tag: &str, arg: &Option<Box<Expression>>) -> Lambda {
-        match arg {
-            None => Lambda::const_(Constant::Pointer(tag.to_string())),
-            Some(expr) => {
-                let arg_lam = self.convert_expr(expr);
-                Lambda::prim(
-                    Primitive::Pmakeblock(TagInfo::PolyVar(tag.to_string()), Mutable::Immutable),
-                    vec![Lambda::const_(Constant::Pointer(tag.to_string())), arg_lam],
-                    self.loc(expr.exp_loc),
-                )
-            }
-        }
-    }
-
-    fn convert_record(
-        &mut self,
-        loc: Location,
-        fields: &[(
-            Located<LidentIdx>,
-            LabelDescription,
-            RecordLabelDefinition,
-            bool,
-        )],
-        base: Option<&Expression>,
-        logical_field_count: Option<usize>,
-    ) -> Lambda {
-        let mut values = vec![None; fields.len()];
-        let base_lam = base.map(|e| self.convert_expr(e));
-
-        for (idx, (lid, lbl, def, _opt)) in fields.iter().enumerate() {
-            let value = match def {
-                RecordLabelDefinition::Overridden(_, expr) => self.convert_expr(expr),
-                RecordLabelDefinition::OmittedOptionalNone(_, _) => lambda_optional_none(),
-                RecordLabelDefinition::Kept(_) => {
-                    if let Some(base_expr) = &base_lam {
-                        let field_pos = match lbl.lbl_repres {
-                            RecordRepresentation::RecordExtension => idx as i32 + 1,
-                            _ => idx as i32,
-                        };
-                        Lambda::prim(
-                            Primitive::Pfield(
-                                field_pos,
-                                FieldDbgInfo::Record {
-                                    name: label_runtime_name(lbl),
-                                },
-                            ),
-                            vec![base_expr.clone()],
-                            self.loc(lid.loc),
-                        )
-                    } else {
-                        Lambda::unit()
-                    }
-                }
-            };
-            values[idx] = Some(value);
-        }
-
-        let elements = values
-            .into_iter()
-            .map(|v| v.unwrap_or_else(Lambda::unit))
-            .collect();
-
-        let fields_info = fields
-            .iter()
-            .map(|(_, lbl, _, _)| (label_runtime_name(lbl), lbl.lbl_optional))
-            .collect();
-
-        let tag_info = TagInfo::Record {
-            fields: fields_info,
-            logical_field_count,
-            mutable_flag: fields
-                .iter()
-                .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
-                .map(|_| ParserMutableFlag::Mutable)
-                .unwrap_or(ParserMutableFlag::Immutable),
-        };
-
-        Lambda::prim(
-            Primitive::Pmakeblock(tag_info, Mutable::Immutable),
-            elements,
-            loc,
-        )
-    }
-
-    fn translate_value_path(&self, loc_idx: LocIdx, path: &crate::types::Path) -> Lambda {
-        if let Some(lam) = self.value_path_loc_constant(path, self.loc(loc_idx)) {
-            return crate::raw_lambda::lower::lower_to_lambda(lam);
-        }
-        match path {
-            crate::types::Path::Pident(id) => {
-                if id.is_global() {
-                    Lambda::global_module(id.clone())
-                } else {
-                    Lambda::var(id.clone())
-                }
-            }
-            crate::types::Path::Pdot(prefix, name, _) => {
-                let prefix_lam = self.translate_value_path(loc_idx, prefix);
-                Lambda::prim(
-                    Primitive::Pfield(
-                        0,
-                        FieldDbgInfo::Module {
-                            name: name.to_string(),
-                        },
-                    ),
-                    vec![prefix_lam],
-                    self.loc(loc_idx),
-                )
-            }
-            crate::types::Path::Papply(_, _) => Lambda::unit(),
         }
     }
 
@@ -11119,8 +6810,8 @@ impl<'a> RawLambdaConverter<'a> {
                             // Use matching compiler's for_let (OCaml: Matching.for_let)
                             let pat_act_list = vec![(&binding.vb_pat, acc.into())];
                             let loc = self.loc(binding.vb_pat.pat_loc);
-                            let fname = self.basename_for_loc(loc.clone());
-                            let loc_for_handler = loc.clone();
+                            let fname = self.basename_for_loc(loc);
+                            let loc_for_handler = loc;
                             let handler_fun = move || {
                                 let line = loc_for_handler.loc_start.line;
                                 let char_pos = loc_for_handler.loc_start.column();
@@ -11299,7 +6990,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         let param_ids = params
             .iter()
-            .map(|param| param.fp_param.clone())
+            .map(|param| param.fp_param)
             .collect::<Vec<_>>();
         // `transl_function` (translcore.ml:1395-1409) evaluates its result
         // tuple right to left: `is_base_type body.exp_env body.exp_type
@@ -11317,7 +7008,7 @@ impl<'a> RawLambdaConverter<'a> {
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
                 _ => self.for_function_with_synced_stamps(
                     self.loc(pat.pat_loc),
-                    RawLambda::var(id.clone()),
+                    RawLambda::var(*id),
                     vec![(pat, lambda_body.into())],
                     param.fp_partial,
                 ),
@@ -11377,24 +7068,6 @@ impl<'a> RawLambdaConverter<'a> {
         )
     }
 
-    fn convert_nary_function(
-        &mut self,
-        params: &[FunctionParam],
-        body: &Expression,
-        loc: Location,
-    ) -> Lambda {
-        let raw = self.convert_nary_function_raw(
-            None,
-            params,
-            body,
-            false,
-            None,
-            InlineAttribute::default(),
-            loc,
-        );
-        crate::raw_lambda::lower::lower_to_lambda(raw)
-    }
-
     fn convert_apply_raw(
         &mut self,
         loc_idx: LocIdx,
@@ -11446,7 +7119,7 @@ impl<'a> RawLambdaConverter<'a> {
                         && let [arg] = applied_exprs.as_slice()
                     {
                         // translcore.ml:1030-1032
-                        self.transl_dynamic_import(loc.clone(), arg)
+                        self.transl_dynamic_import(loc, arg)
                     } else {
                         let arg_lams = applied_exprs
                             .iter()
@@ -11456,7 +7129,7 @@ impl<'a> RawLambdaConverter<'a> {
                             prim,
                             funct.exp_type,
                             &applied_exprs,
-                            loc.clone(),
+                            loc,
                         ) {
                             // an external: expand its FFI spec here; %raw
                             // parses and classifies its snippet
@@ -11475,14 +7148,14 @@ impl<'a> RawLambdaConverter<'a> {
                                             },
                                         ),
                                         vec![],
-                                        loc.clone(),
+                                        loc,
                                     )
                                 }
                                 _ => {
                                     let env = self.env_for_expr(funct);
                                     let env = env.as_deref().unwrap_or(self.env);
                                     self.transl_external_application(
-                                        loc.clone(),
+                                        loc,
                                         env,
                                         prim,
                                         desc.val_type,
@@ -11495,7 +7168,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.report_polymorphic_comparison_warning(
                                     loc_idx, &primitive, &arg_lams,
                                 );
-                                self.mk_builtin(primitive, arg_lams, loc.clone())
+                                self.mk_builtin(primitive, arg_lams, loc)
                             }
                         }
                     };
@@ -11532,294 +7205,6 @@ impl<'a> RawLambdaConverter<'a> {
             uncurried_partial_application,
             inlined,
         )
-    }
-
-    fn convert_let_with_body(
-        &mut self,
-        rec_flag: crate::parser::ast::RecFlag,
-        bindings: &[ValueBinding],
-        body: Lambda,
-    ) -> Lambda {
-        match rec_flag {
-            crate::parser::ast::RecFlag::Nonrecursive => {
-                if bindings
-                    .iter()
-                    .all(|binding| simple_let_binding_id(binding).is_some())
-                {
-                    bindings.iter().rev().fold(body, |acc, binding| {
-                        let id = simple_let_binding_id(binding).expect("checked above");
-                        let value = self.convert_expr(&binding.vb_expr);
-                        Lambda::let_(LetKind::Strict, id, value, acc)
-                    })
-                } else {
-                    let raw = self.convert_let_with_body_raw(
-                        rec_flag,
-                        bindings,
-                        RawLambda::from_lowered(body),
-                    );
-                    crate::raw_lambda::lower::lower_to_lambda(raw)
-                }
-            }
-            crate::parser::ast::RecFlag::Recursive => {
-                if bindings
-                    .iter()
-                    .all(|binding| simple_let_binding_id(binding).is_some())
-                {
-                    let lam_bindings = bindings
-                        .iter()
-                        .map(|binding| {
-                            (
-                                simple_let_binding_id(binding).expect("checked above"),
-                                self.convert_expr(&binding.vb_expr),
-                            )
-                        })
-                        .collect();
-                    Lambda::letrec(lam_bindings, body)
-                } else {
-                    let raw = self.convert_let_with_body_raw(
-                        rec_flag,
-                        bindings,
-                        RawLambda::from_lowered(body),
-                    );
-                    crate::raw_lambda::lower::lower_to_lambda(raw)
-                }
-            }
-        }
-    }
-
-    /// OCaml's Parmatch.inactive: checks if a pattern has no mutable field access.
-    /// Returns false for Partial, or if the pattern accesses any mutable record fields.
-    fn parmatch_inactive(pat: &Pattern, partial: Partial) -> bool {
-        match partial {
-            Partial::Partial => false,
-            Partial::Total => Self::pattern_inactive(pat),
-        }
-    }
-
-    fn pattern_inactive(pat: &Pattern) -> bool {
-        match &pat.pat_desc {
-            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
-            PatternDesc::Tpat_constant(_) => true,
-            PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_construct(_, _, ps) => {
-                ps.iter().all(|p| Self::pattern_inactive(p))
-            }
-            PatternDesc::Tpat_alias(p, _, _) => Self::pattern_inactive(p),
-            PatternDesc::Tpat_variant(_, None, _) => true,
-            PatternDesc::Tpat_variant(_, Some(p), _) => Self::pattern_inactive(p),
-            PatternDesc::Tpat_record(fields, _, _) => fields.iter().all(|(_, lbl, p, _)| {
-                lbl.lbl_mut == crate::types::asttypes::MutableFlag::Immutable
-                    && Self::pattern_inactive(p)
-            }),
-            PatternDesc::Tpat_or(p, q, _) => Self::pattern_inactive(p) && Self::pattern_inactive(q),
-            PatternDesc::Tpat_array(_) => false,
-        }
-    }
-
-    fn param_pattern(param: &FunctionParam) -> Pattern {
-        param.fp_pat.clone()
-    }
-
-    fn convert_apply(
-        &mut self,
-        loc: Location,
-        funct: &Expression,
-        args: &[ApplyArg],
-        _partial: bool,
-        transformed_jsx: bool,
-    ) -> Lambda {
-        if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
-            if let ValueKind::ValPrim(prim) = &desc.val_kind {
-                let prim_arity = prim.prim_arity.max(0) as usize;
-                if args.len() >= prim_arity
-                    && args
-                        .iter()
-                        .take(prim_arity)
-                        .all(|arg| arg.expression.is_some())
-                {
-                    let (applied, rest) = args.split_at(prim_arity);
-                    let applied_exprs = applied
-                        .iter()
-                        .map(|arg| arg.expression.as_ref().expect("checked above"))
-                        .collect::<Vec<_>>();
-                    let prim_args = applied_exprs
-                        .iter()
-                        .map(|expr| self.convert_expr(expr))
-                        .collect::<Vec<_>>();
-                    let prim =
-                        self.translate_primitive_application(prim, loc.clone(), transformed_jsx);
-                    let base = Lambda::prim(prim, prim_args, loc.clone());
-                    return if rest.is_empty() {
-                        base
-                    } else {
-                        self.transl_apply(base, rest, loc, transformed_jsx)
-                    };
-                }
-            }
-        }
-
-        let funct_lam = self.convert_expr(funct);
-        self.transl_apply(funct_lam, args, loc, transformed_jsx)
-    }
-
-    fn convert_construct(
-        &mut self,
-        _loc: Location,
-        cstr: &crate::types::ConstructorDescription,
-        args: &[Expression],
-    ) -> Lambda {
-        match constructor_case(self.type_ctx, cstr) {
-            Some(crate::types::VariantConstructorCase::Constant(tag)) => {
-                match cstr.cstr_name.as_str() {
-                    "true" => Lambda::const_(Constant::JsTrue),
-                    "false" => Lambda::const_(Constant::JsFalse),
-                    _ => Lambda::const_(Constant::Constructor(tag)),
-                }
-            }
-            Some(crate::types::VariantConstructorCase::Block(block))
-                if block.is_untagged()
-                    && matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(reference)
-                    if self.type_ctx.with_variant_layout(reference.variant, |layout| {
-                        layout.constructors.len() == 1
-                    })) =>
-            {
-                args.first()
-                    .map_or_else(Lambda::unit, |arg| self.convert_expr(arg))
-            }
-            Some(crate::types::VariantConstructorCase::Block(_)) | None => {
-                unreachable!("convert_construct is only used for constant/unboxed constructors")
-            }
-        }
-    }
-
-    fn transl_apply(
-        &mut self,
-        lam: Lambda,
-        sargs: &[ApplyArg],
-        loc: Location,
-        transformed_jsx: bool,
-    ) -> Lambda {
-        fn lapply(loc: Location, func: Lambda, args: Vec<Lambda>, transformed_jsx: bool) -> Lambda {
-            Lambda::Lapply(Box::new(Apply {
-                ap_func: Box::new(func),
-                ap_args: args,
-                ap_info: ApInfo {
-                    loc,
-                    inlined: InlineAttribute::Default,
-                    status: ApplyStatus::Na,
-                },
-                ap_transformed_jsx: transformed_jsx,
-            }))
-        }
-
-        fn is_simple(lam: &Lambda) -> bool {
-            matches!(lam, Lambda::Lvar(_) | Lambda::Lconst(_))
-        }
-
-        fn build_apply(
-            conv: &mut RawLambdaConverter<'_>,
-            lam: Lambda,
-            mut args_rev: Vec<(Lambda, bool)>,
-            mut pending: std::collections::VecDeque<(Option<Lambda>, bool)>,
-            loc: Location,
-            transformed_jsx: bool,
-        ) -> Lambda {
-            match pending.pop_front() {
-                Some((None, optional)) => {
-                    let mut defs: Vec<(Ident, Lambda)> = Vec::new();
-                    let protect =
-                        |conv: &mut RawLambdaConverter<'_>,
-                         name: &str,
-                         lam: Lambda,
-                         defs: &mut Vec<(Ident, Lambda)>| {
-                            if is_simple(&lam) {
-                                lam
-                            } else {
-                                let id = conv.fresh_ident(name);
-                                defs.push((id.clone(), lam));
-                                Lambda::var(id)
-                            }
-                        };
-
-                    let all_optional = args_rev.iter().all(|(_, is_optional)| *is_optional);
-                    let remaining_args = if all_optional {
-                        std::mem::take(&mut args_rev)
-                    } else {
-                        Vec::new()
-                    };
-                    let applied = if args_rev.is_empty() {
-                        lam
-                    } else {
-                        lapply(
-                            loc.clone(),
-                            lam,
-                            args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
-                            transformed_jsx,
-                        )
-                    };
-                    let handle = protect(conv, "func", applied, &mut defs);
-                    let protected_tail = pending
-                        .into_iter()
-                        .map(|(arg, is_optional)| {
-                            (
-                                arg.map(|lam| protect(conv, "arg", lam, &mut defs)),
-                                is_optional,
-                            )
-                        })
-                        .collect::<std::collections::VecDeque<_>>();
-                    let id_arg = conv.fresh_ident("param");
-                    let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
-                    next_args_rev.push((Lambda::var(id_arg.clone()), optional));
-                    next_args_rev.extend(remaining_args);
-                    let body = match build_apply(
-                        conv,
-                        handle,
-                        next_args_rev,
-                        protected_tail,
-                        loc.clone(),
-                        transformed_jsx,
-                    ) {
-                        Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-                            arity: func.arity + 1,
-                            params: std::iter::once(id_arg).chain(func.params).collect(),
-                            body: func.body,
-                            attr: func.attr,
-                            loc: func.loc,
-                        })),
-                        lam => Lambda::function_(
-                            1,
-                            vec![id_arg],
-                            lam,
-                            FunctionAttribute::default(),
-                            loc.clone(),
-                        ),
-                    };
-                    defs.into_iter().fold(body, |body, (id, lam)| {
-                        Lambda::let_(LetKind::Strict, id, lam, body)
-                    })
-                }
-                Some((Some(arg), optional)) => {
-                    args_rev.insert(0, (arg, optional));
-                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx)
-                }
-                None => lapply(
-                    loc,
-                    lam,
-                    args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
-                    transformed_jsx,
-                ),
-            }
-        }
-
-        let pending = sargs
-            .iter()
-            .map(|arg| {
-                (
-                    arg.expression.as_ref().map(|expr| self.convert_expr(expr)),
-                    arg.label.is_optional(),
-                )
-            })
-            .collect::<Vec<_>>();
-        build_apply(self, lam, Vec::new(), pending.into(), loc, transformed_jsx)
     }
 
     fn transl_apply_raw(
@@ -11875,7 +7260,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 lam
                             } else {
                                 let id = conv.fresh_ident(name);
-                                defs.push((id.clone(), lam));
+                                defs.push((id, lam));
                                 RawLambda::var(id)
                             }
                         };
@@ -11909,14 +7294,14 @@ impl<'a> RawLambdaConverter<'a> {
                         .collect::<std::collections::VecDeque<_>>();
                     let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
-                    next_args_rev.push((RawLambda::var(id_arg.clone()), optional));
+                    next_args_rev.push((RawLambda::var(id_arg), optional));
                     next_args_rev.extend(remaining_args);
                     let body = match build_apply(
                         conv,
                         handle,
                         next_args_rev,
                         protected_tail,
-                        loc.clone(),
+                        loc,
                         transformed_jsx,
                         inlined,
                     ) {
@@ -11961,12 +7346,12 @@ impl<'a> RawLambdaConverter<'a> {
                 let mut none_ids = Vec::new();
                 let args = sargs
                     .iter()
-                    .filter_map(|arg| match &arg.expression {
-                        Some(expr) => Some(self.convert_expr_raw(expr)),
+                    .map(|arg| match &arg.expression {
+                        Some(expr) => self.convert_expr_raw(expr),
                         None => {
                             let id = self.fresh_ident("none");
-                            none_ids.push(id.clone());
-                            Some(RawLambda::var(id))
+                            none_ids.push(id);
+                            RawLambda::var(id)
                         }
                     })
                     .collect::<Vec<_>>();
@@ -11975,7 +7360,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
-                let body = lapply(loc.clone(), lam, ap_args, transformed_jsx, inlined);
+                let body = lapply(loc, lam, ap_args, transformed_jsx, inlined);
                 RawLambda::function_(
                     (none_ids.len() + extra_ids.len()) as i32,
                     none_ids.into_iter().chain(extra_ids).collect(),
@@ -12028,7 +7413,7 @@ impl<'a> RawLambdaConverter<'a> {
                     let param = self.fresh_ident("prim");
                     RawLambda::function_(
                         1,
-                        vec![param.clone()],
+                        vec![param],
                         RawLambda::prim(
                             Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                             vec![lam, RawLambda::var(param)],
@@ -12077,7 +7462,13 @@ impl<'a> RawLambdaConverter<'a> {
             };
             let args = params.iter().cloned().map(RawLambda::var).collect();
             let body = self.transl_external_application(loc, env, prim, val_type, args, false);
-            return RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default(), loc);
+            return RawLambda::function_(
+                prim.prim_arity,
+                params,
+                body,
+                FunctionAttribute::default(),
+                loc,
+            );
         };
         if let Some(warn_loc) = warn_loc {
             self.report_polymorphic_comparison_warning(warn_loc, &primitive, &[]);
@@ -12102,7 +7493,13 @@ impl<'a> RawLambdaConverter<'a> {
                 .map(RawLambda::var)
                 .collect::<Vec<_>>();
             let body = self.mk_builtin(primitive, args, loc);
-            RawLambda::function_(prim.prim_arity, params, body, FunctionAttribute::default(), loc)
+            RawLambda::function_(
+                prim.prim_arity,
+                params,
+                body,
+                FunctionAttribute::default(),
+                loc,
+            )
         }
     }
 
@@ -12132,81 +7529,6 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn translate_primitive(
-        &mut self,
-        loc: Location,
-        prim: &crate::types::PrimitiveDescription,
-    ) -> Lambda {
-        let raw_name = Self::raw_primitive_name(&prim.prim_name);
-        if raw_name == "%null" && prim.prim_arity == 0 {
-            return Lambda::const_(Constant::JsNull);
-        }
-        if raw_name == "%undefined" && prim.prim_arity == 0 {
-            return Lambda::const_(Constant::JsUndefined { is_unit: false });
-        }
-        let primitive = self.translate_primitive_application(prim, loc.clone(), false);
-        if prim.prim_arity == 0 {
-            Lambda::prim(primitive, vec![], loc)
-        } else {
-            let params = if prim.prim_arity == 1 {
-                vec![self.fresh_ident("prim")]
-            } else {
-                let mut params = (0..prim.prim_arity)
-                    .rev()
-                    .map(|i| self.fresh_ident(&format!("prim{i}")))
-                    .collect::<Vec<_>>();
-                params.reverse();
-                params
-            };
-            let args = params.iter().cloned().map(Lambda::var).collect();
-            Lambda::function_(
-                prim.prim_arity,
-                params,
-                Lambda::prim(primitive, args, loc),
-                FunctionAttribute::default(),
-                loc,
-            )
-        }
-    }
-
-    fn translate_primitive_application(
-        &mut self,
-        prim: &crate::types::PrimitiveDescription,
-        loc: Location,
-        transformed_jsx: bool,
-    ) -> Primitive {
-        use crate::types::decl::PrimKind;
-        use crate::types::external_ffi_types::ExternalFfi;
-        let raw_name = Self::raw_primitive_name(&prim.prim_name);
-        if let Some(primitive) = self.find_raw_primitive(raw_name) {
-            return primitive;
-        }
-        self.report_unknown_builtin_primitive(loc.clone(), raw_name);
-        // The direct-to-Lambda path has no result wrapping; it is only used
-        // for the call itself.
-        match &prim.prim_kind {
-            PrimKind::KindExternal(spec) => match spec.as_ref() {
-                ExternalFfi::FfiObjCreate(labels) => Primitive::PjsObjectCreate(labels.clone()),
-                ExternalFfi::FfiBs(arg_types, _, decl) => Primitive::PjsCall {
-                    prim_name: prim.prim_name.clone(),
-                    arg_types: arg_types.clone(),
-                    ffi: Box::new(decl.clone()),
-                    transformed_jsx,
-                },
-            },
-            PrimKind::KindIntrinsic | PrimKind::KindInlineConst(_) => {
-                self.report_diagnostic(
-                    loc,
-                    format!(
-                        "internal error, using unrecognized primitive {}",
-                        prim.prim_name
-                    ),
-                );
-                Primitive::Pidentity
-            }
-        }
-    }
-
     fn raw_primitive_name(name: &str) -> &str {
         name.strip_suffix("[js]").unwrap_or(name)
     }
@@ -12221,37 +7543,14 @@ mod tests {
     }
 
     use super::*;
-    use std::borrow::Cow;
+    use crate::types::typedtree::EnvRef;
 
-    use crate::binary_ast::ppx;
     use crate::context::IdGenerator;
     use crate::parse_arena::ParseArena;
-    use crate::parser::Parser;
+
     use crate::parser::ast::Attributes;
-    use crate::parser::module;
+
     use crate::types::env::initial_env;
-
-    #[test]
-    fn raw_polyvariant_compare_keeps_named_tag_metadata() {
-        let scrutinee_id = Ident::create_local("value");
-        let comparison = raw_polyvariant_compare(
-            RawLambda::var(scrutinee_id.clone()),
-            "InvalidNext",
-            Location::none(),
-        );
-
-        let RawLambda::Lprim(info) = comparison else {
-            panic!("expected primitive comparison");
-        };
-
-        assert!(matches!(info.primitive, Primitive::Pjscomp(Comparison::Eq)));
-        assert!(
-            matches!(info.args.as_slice(), [RawLambda::Lvar(id), RawLambda::Lconst(Constant::Int { i, comment: Some(comment) })]
-            if id.same(&scrutinee_id)
-                && *i == crate::types::btype::hash_variant("InvalidNext")
-                && matches!(&**comment, PointerInfo::PolyVariant(name) if name == "InvalidNext"))
-        );
-    }
 
     #[test]
     fn nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda() {
@@ -12368,19 +7667,6 @@ mod tests {
         ));
     }
 
-    fn else_exit_id(raw: &RawLambda) -> Option<i32> {
-        let RawLambda::Llet(_, _, _, body) = raw else {
-            return None;
-        };
-        let RawLambda::LifThenElse(_, _, else_) = body.as_ref() else {
-            return None;
-        };
-        let RawLambda::LstaticRaise(id, args) = else_.as_ref() else {
-            return None;
-        };
-        if args.is_empty() { Some(*id) } else { None }
-    }
-
     fn try_handler_exit_id(raw: &RawLambda) -> Option<i32> {
         let RawLambda::LtryWith(_, _, handler) = raw else {
             return None;
@@ -12454,7 +7740,7 @@ mod tests {
     fn simple_value_binding(id: Ident, expr: Expression) -> ValueBinding {
         ValueBinding {
             vb_pat: Pattern::new(
-                PatternDesc::Tpat_var(id.clone(), Located::mknoloc(id.name().to_string())),
+                PatternDesc::Tpat_var(id, Located::mknoloc(id.name().to_string())),
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),
@@ -12494,7 +7780,7 @@ mod tests {
 
         let param_id = Ident::create_local("name");
         let param_pat = Pattern::new(
-            PatternDesc::Tpat_var(param_id.clone(), Located::mknoloc("name".to_string())),
+            PatternDesc::Tpat_var(param_id, Located::mknoloc("name".to_string())),
             LocIdx::none(),
             any_ty,
             EnvRef(0),
@@ -12529,55 +7815,6 @@ mod tests {
             panic!("expected raw function");
         };
         assert_eq!(func.attr.directive.as_deref(), Some("'use memo'"));
-    }
-
-    #[test]
-    fn simple_trywith_extension_handler_assigns_exit_ids_in_source_order() {
-        let arena = ParseArena::new();
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        let env = initial_env(&ctx);
-        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
-        converter.next_static_raise = 1;
-        let exn_id = Ident::create_local("exn");
-
-        let handler = converter.build_simple_trywith_extension_chain_raw(
-            Location::none(),
-            &exn_id,
-            vec![
-                (
-                    crate::types::Path::Pident(Ident::create_persistent("A")),
-                    RawLambda::const_(Constant::int(1)),
-                ),
-                (
-                    crate::types::Path::Pident(Ident::create_persistent("B")),
-                    RawLambda::const_(Constant::int(2)),
-                ),
-                (
-                    crate::types::Path::Pident(Ident::create_persistent("C")),
-                    RawLambda::const_(Constant::int(3)),
-                ),
-            ],
-            RawLambda::LstaticRaise(1, Vec::new()),
-        );
-
-        let RawLambda::LstaticCatch(first_case, (first_handler, first_params), rest) = handler
-        else {
-            panic!("expected outer static catch");
-        };
-        assert_eq!(first_handler, 3);
-        assert!(first_params.is_empty());
-        assert_eq!(else_exit_id(&first_case), Some(3));
-
-        let RawLambda::LstaticCatch(second_case, (second_handler, second_params), last_case) =
-            *rest
-        else {
-            panic!("expected second static catch");
-        };
-        assert_eq!(second_handler, 2);
-        assert!(second_params.is_empty());
-        assert_eq!(else_exit_id(&second_case), Some(2));
-        assert_eq!(else_exit_id(&last_case), Some(1));
     }
 
     #[test]
@@ -12625,12 +7862,12 @@ mod tests {
         let caught = Ident::new("caught", 7, crate::ident::IdentFlags::NONE);
         let raw = RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pmakeblock(
-                crate::lambda::TagInfo::ModuleExport(vec![export.clone()]),
+                crate::lambda::TagInfo::ModuleExport(vec![export]),
                 crate::lambda::lam_primitive::Mutable::Immutable,
             ),
             args: vec![RawLambda::LtryWith(
                 Box::new(RawLambda::unit()),
-                caught.clone(),
+                caught,
                 Box::new(RawLambda::var(caught)),
             )],
             loc: Location::none(),
@@ -12687,7 +7924,7 @@ mod tests {
             let export = Ident::new("value", 1, IdentFlags::NONE);
             let raw = RawLambda::prim(
                 Primitive::Pmakeblock(
-                    crate::lambda::TagInfo::ModuleExport(vec![export.clone()]),
+                    crate::lambda::TagInfo::ModuleExport(vec![export]),
                     crate::lambda::lam_primitive::Mutable::Immutable,
                 ),
                 vec![RawLambda::unit()],
@@ -12875,14 +8112,8 @@ mod tests {
         let first_id = Ident::create_local("first");
         let second_id = Ident::create_local("second");
         let bindings = vec![
-            simple_value_binding(
-                first_id.clone(),
-                simple_extension_try(&mut arena, "A", 1, 11),
-            ),
-            simple_value_binding(
-                second_id.clone(),
-                simple_extension_try(&mut arena, "B", 2, 22),
-            ),
+            simple_value_binding(first_id, simple_extension_try(&mut arena, "A", 1, 11)),
+            simple_value_binding(second_id, simple_extension_try(&mut arena, "B", 2, 22)),
         ];
 
         let id_gen = IdGenerator::new();
@@ -12945,7 +8176,7 @@ mod tests {
         let int_ty = ctx.predef_int();
         let compare_ty = ctx.new_arrow_simple(int_ty, ctx.new_arrow_simple(int_ty, int_ty));
         let alias_id = Ident::create_local("cmp_alias");
-        env.add_type(alias_id.clone(), type_alias_decl(compare_ty));
+        env.add_type(alias_id, type_alias_decl(compare_ty));
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -12979,14 +8210,14 @@ mod tests {
         let original_module = Ident::create_local("M'");
         let local_n = Ident::create_local("N");
         env.add_module(
-            original_module.clone(),
+            original_module,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
-                    local_n.clone(),
+                    local_n,
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyAlias(
                             crate::types::decl::AliasPresence::MtaPresent,
-                            crate::types::Path::Pident(local_n.clone()),
+                            crate::types::Path::Pident(local_n),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: Location::none(),
@@ -13000,11 +8231,8 @@ mod tests {
             },
         );
 
-        let alias_path = crate::types::Path::pdot_pos(
-            crate::types::Path::Pident(original_module.clone()),
-            "N",
-            0,
-        );
+        let alias_path =
+            crate::types::Path::pdot_pos(crate::types::Path::Pident(original_module), "N", 0);
         let coercion = ModuleCoercion::Tcoerce_alias(
             EnvRef(0),
             alias_path,
@@ -13042,7 +8270,7 @@ mod tests {
         let bool_ty = ctx.predef_bool();
         let eq_ty = ctx.new_arrow_simple(string_ty, ctx.new_arrow_simple(string_ty, bool_ty));
         let alias_id = Ident::create_local("string_eq_alias");
-        env.add_type(alias_id.clone(), type_alias_decl(eq_ty));
+        env.add_type(alias_id, type_alias_decl(eq_ty));
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -13079,13 +8307,13 @@ mod tests {
         let pkg = Ident::create_persistent("Pkg");
         let pkg_list = Ident::create_persistent("Pkg_List");
         env.add_module(
-            pkg.clone(),
+            pkg,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
                     Ident::create_local("List"),
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyIdent(
-                            crate::types::Path::Pident(pkg_list.clone()),
+                            crate::types::Path::Pident(pkg_list),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: Location::none(),
@@ -13099,7 +8327,7 @@ mod tests {
             },
         );
         env.add_module(
-            pkg_list.clone(),
+            pkg_list,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![]),
                 md_attributes: Vec::new(),
@@ -13129,10 +8357,8 @@ mod tests {
         let side_effect = Ident::create_persistent("Side_effect");
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
-        let lowered = converter.translate_module_path_raw(
-            &crate::types::Path::Pident(side_effect.clone()),
-            Location::none(),
-        );
+        let lowered = converter
+            .translate_module_path_raw(&crate::types::Path::Pident(side_effect), Location::none());
         let possible_required_modules = converter.take_possible_required_modules();
 
         assert!(matches!(
@@ -13151,13 +8377,13 @@ mod tests {
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
             mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                crate::types::Path::Pident(side_effect.clone()),
+                crate::types::Path::Pident(side_effect),
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
-                crate::types::Path::Pident(side_effect.clone()),
+                crate::types::Path::Pident(side_effect),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -13167,7 +8393,7 @@ mod tests {
         converter.note_possible_required_modules_from_empty_include(&module_expr);
         let possible_required_modules = converter.take_possible_required_modules();
         let expected = ModuleId {
-            id: side_effect.clone(),
+            id: side_effect,
             kind: Kind::Ml,
             dynamic_import: false,
         };
@@ -13184,7 +8410,7 @@ mod tests {
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
             mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                crate::types::Path::Pident(side_effect.clone()),
+                crate::types::Path::Pident(side_effect),
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
@@ -13214,10 +8440,10 @@ mod tests {
         let modtype_x = Ident::create_local("X");
         let local_l = Ident::create_local("L");
         env.add_module(
-            local_l.clone(),
+            local_l,
             crate::types::decl::ModuleDeclaration {
                 md_type: crate::types::decl::ModuleType::MtyIdent(crate::types::Path::Pident(
-                    modtype_x.clone(),
+                    modtype_x,
                 )),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
@@ -13228,7 +8454,7 @@ mod tests {
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
-            &crate::types::Path::pdot(crate::types::Path::Pident(local_l.clone()), "length"),
+            &crate::types::Path::pdot(crate::types::Path::Pident(local_l), "length"),
             Location::none(),
         );
 
@@ -13255,13 +8481,13 @@ mod tests {
         let pkg = Ident::create_persistent("Pkg");
         let pkg_list = Ident::create_persistent("Pkg_List");
         env.add_module(
-            pkg.clone(),
+            pkg,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
                     Ident::create_local("List"),
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyIdent(
-                            crate::types::Path::Pident(pkg_list.clone()),
+                            crate::types::Path::Pident(pkg_list),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: Location::none(),
@@ -13275,7 +8501,7 @@ mod tests {
             },
         );
         env.add_module(
-            pkg_list.clone(),
+            pkg_list,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
                     Ident::create_local("length"),
@@ -13330,17 +8556,15 @@ mod tests {
         let separate = Ident::create_local("Separate");
         let make = Ident::create_local("make");
 
-        let icon_export_path = crate::types::Path::pdot(
-            crate::types::Path::Pident(icon.clone()),
-            export.name().to_string(),
-        );
+        let icon_export_path =
+            crate::types::Path::pdot(crate::types::Path::Pident(icon), export.name().to_string());
         let subtitles_path =
             crate::types::Path::pdot(icon_export_path.clone(), subtitles.name().to_string());
         let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
 
         let main_decl = crate::types::decl::ModuleDeclaration {
             md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigValue(
-                make.clone(),
+                make,
                 crate::types::decl::ValueDescription {
                     val_type: ctx.new_var(None),
                     val_kind: crate::types::decl::ValueKind::ValReg,
@@ -13355,23 +8579,23 @@ mod tests {
         };
 
         env.add_module(
-            icon.clone(),
+            icon,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![crate::types::SignatureItem::SigModule(
-                    export.clone(),
+                    export,
                     crate::types::decl::ModuleDeclaration {
                         md_type: test_signature_module_type(vec![
                             crate::types::SignatureItem::SigModule(
-                                subtitles.clone(),
+                                subtitles,
                                 crate::types::decl::ModuleDeclaration {
                                     md_type: test_signature_module_type(vec![
                                         crate::types::SignatureItem::SigModule(
-                                            main.clone(),
+                                            main,
                                             main_decl,
                                             crate::types::decl::RecStatus::TrecNot,
                                         ),
                                         crate::types::SignatureItem::SigModule(
-                                            separate.clone(),
+                                            separate,
                                             crate::types::decl::ModuleDeclaration {
                                                 md_type: crate::types::decl::ModuleType::MtyAlias(
                                                     crate::types::decl::AliasPresence::MtaPresent,
@@ -13440,7 +8664,7 @@ mod tests {
         let runtime_n1 = Ident::create_local("N1");
         let modtype_s0 = Ident::create_local("S0");
         env.add_module(
-            inner_define.clone(),
+            inner_define,
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigModule(
@@ -13477,7 +8701,7 @@ mod tests {
                         crate::types::decl::ModuleDeclaration {
                             md_type: crate::types::decl::ModuleType::MtyIdent(
                                 crate::types::Path::pdot(
-                                    crate::types::Path::Pident(inner_define.clone()),
+                                    crate::types::Path::Pident(inner_define),
                                     "S0",
                                 ),
                             ),
@@ -13508,11 +8732,7 @@ mod tests {
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
             &crate::types::Path::pdot_pos(
-                crate::types::Path::pdot_pos(
-                    crate::types::Path::Pident(inner_define.clone()),
-                    "N0",
-                    1,
-                ),
+                crate::types::Path::pdot_pos(crate::types::Path::Pident(inner_define), "N0", 1),
                 "f1",
                 0,
             ),

@@ -4,9 +4,11 @@ use ahash::AHashMap;
 use log::error;
 use rayon::prelude::*;
 use regex::Regex;
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use super::packages;
 
@@ -28,26 +30,21 @@ pub fn does_ocaml_build_compiler_log_exist(package: &packages::Package) -> bool 
     get_log_file_path(package, Location::Ocaml).exists()
 }
 
-pub(crate) fn escape_colours(str: &str) -> String {
-    let re = Regex::new(r"[\u001b\u009b]\[[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]")
-        .expect("Could not create regex");
-    re.replace_all(str, "").to_string()
+static ANSI_ESCAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\u001b\u009b]\[[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]")
+        .expect("Could not create regex")
+});
+
+pub(crate) fn escape_colours(str: &str) -> Cow<'_, str> {
+    ANSI_ESCAPE.replace_all(str, "")
 }
 
 fn write_to_log_file(mut file: File, package_name: &str, content: &str) {
-    let res = file.write(escape_colours(content).as_bytes()).map_err(|e| {
+    if let Err(e) = file.write_all(escape_colours(content).as_bytes()) {
         error!(
             "Could not create compiler log file. {}. \n{:?}",
             &package_name, &e
         );
-    });
-
-    match res {
-        Ok(_) => {}
-        Err(e) => error!(
-            "Could not create compiler log file. {}. \n{:?}",
-            &package_name, &e
-        ),
     }
 }
 

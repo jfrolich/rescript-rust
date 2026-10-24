@@ -1,19 +1,13 @@
 // Port of compiler/gentype/ModuleResolver.ml:1-201.
-// This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
+
+use crate::gentype::paths::concat;
 
 type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, String>;
-type LazyFind = Arc<
-    dyn Fn(bool, &crate::gentype::module_name::T) -> Option<(String, Case, bool)> + Send + Sync,
->;
-
-fn concat(left: &str, right: &str) -> String {
-    Path::new(left).join(right).to_string_lossy().to_string()
-}
 
 pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
     // Mirrors compiler/gentype/ModuleResolver.ml:6-20.
@@ -25,7 +19,7 @@ pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
             false => concat(root, dir),
         };
         if Path::new(&abs_dir).exists() && Path::new(&abs_dir).is_dir() {
-            dirs.insert(0, dir.to_string());
+            dirs.push(dir.to_string());
             if let Ok(entries) = fs::read_dir(&abs_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -36,6 +30,9 @@ pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
     }
 
     find_sub_dirs(root, "", &mut dirs);
+    // OCaml conses each directory onto the result, so it lists them in
+    // reverse visit order.
+    dirs.reverse();
     dirs
 }
 
@@ -121,8 +118,9 @@ pub enum Case {
 pub struct Resolver {
     config: crate::gentype::config::T,
     extensions: Vec<String>,
-    exclude_file: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-    pub lazy_find: OnceLock<LazyFind>,
+    exclude_file: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    /// The source and bs-dependency module maps, built on first use.
+    maps: OnceLock<(ModuleNameMap, ModuleNameMap)>,
 }
 
 pub fn create_lazy_resolver(
@@ -134,8 +132,8 @@ pub fn create_lazy_resolver(
     Resolver {
         config: config.clone(),
         extensions: extensions.to_vec(),
-        exclude_file: Arc::new(exclude_file),
-        lazy_find: OnceLock::new(),
+        exclude_file: Box::new(exclude_file),
+        maps: OnceLock::new(),
     }
 }
 
@@ -169,19 +167,15 @@ pub fn apply(
     module_name: &crate::gentype::module_name::T,
 ) -> Option<(String, Case, bool)> {
     // Mirrors compiler/gentype/ModuleResolver.ml:108-109.
-    let lazy_find = resolver.lazy_find.get_or_init(|| {
-        let (module_name_map, bs_dependencies_file_map) =
-            sourcedirs_to_map(&resolver.config, &resolver.extensions, &|file_name| {
-                (resolver.exclude_file)(file_name)
-            });
-        Arc::new(move |use_bs_dependencies, module_name| {
-            match find(false, &module_name_map, module_name) {
-                None if use_bs_dependencies => find(true, &bs_dependencies_file_map, module_name),
-                res => res,
-            }
+    let (module_name_map, bs_dependencies_file_map) = resolver.maps.get_or_init(|| {
+        sourcedirs_to_map(&resolver.config, &resolver.extensions, &|file_name| {
+            (resolver.exclude_file)(file_name)
         })
     });
-    lazy_find(use_bs_dependencies, module_name)
+    match find(false, module_name_map, module_name) {
+        None if use_bs_dependencies => find(true, bs_dependencies_file_map, module_name),
+        res => res,
+    }
 }
 
 /// Whether a source file exists. Sources do not change during a build, so

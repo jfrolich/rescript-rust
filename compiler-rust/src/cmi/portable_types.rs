@@ -14,7 +14,7 @@
 //!    the portable graph, allocates fresh `TypeExprRef`s in the current arena,
 //!    and produces a valid `PersStruct`.
 
-use std::collections::HashMap;
+use crate::fast_hash::AHashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -200,11 +200,7 @@ impl std::ops::Deref for HashGraph<'_> {
     }
 }
 
-pub fn compute_type_graph_fingerprint_pub(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
-    compute_type_graph_fingerprint(entries, sig)
-}
-
-fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
+pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
     // Deterministic within a build (fixed seeds); the fingerprint only lives
     // in the in-memory interface registry.
     use std::hash::BuildHasher;
@@ -401,11 +397,7 @@ fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &HashGraph
 }
 
 /// The fingerprint contribution of one signature item.
-pub fn hash_sig_item_pub(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
-    hash_sig_item(hasher, item, entries)
-}
-
-fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
+pub fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
     std::mem::discriminant(item).hash(hasher);
     match item {
         SignatureItem::SigValue(ident, vd) => {
@@ -652,10 +644,13 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
-    let (sig, type_graph) = serialize_signature(ps.ps_sig.as_ref(), ctx, arena);
+    // File-name indices used by the signatures' locations: only those names
+    // need to travel with them (`remap_signature_file_names`).
+    let mut file_names = crate::fast_hash::AHashSet::new();
+    let (sig, type_graph) = serialize_signature(ps.ps_sig.as_ref(), ctx, arena, &mut file_names);
     let raw = ctx
         .find_raw_module_sig(&ps.ps_name)
-        .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena));
+        .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena, &mut file_names));
     let (raw_ps_sig, raw_type_graph) = match raw {
         Some((sig, graph)) => (Some(sig), Some(graph)),
         None => (None, None),
@@ -668,32 +663,35 @@ pub fn serialize_pers_struct(
         ps_crcs: ps.ps_crcs.clone(),
         ps_sig: sig,
         raw_ps_sig,
-        cmi_longident_names: ctx.snapshot_cmi_longident_names(),
+        cmi_longident_names: ctx.snapshot_cmi_longident_names(file_names),
         type_graph,
         raw_type_graph,
         fingerprint,
     }
 }
 
+/// Serialize `sig`, adding the raw file-name indices of its locations to
+/// `file_names`.
 fn serialize_signature(
     sig: &Signature,
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
+    file_names: &mut crate::fast_hash::AHashSet<u32>,
 ) -> (Signature, PortableTypeGraph) {
     let mut ser = TypeGraphSerializer {
         ctx,
         arena,
         entries: Vec::new(),
-        cache: HashMap::new(),
+        cache: AHashMap::new(),
         variant_layouts: Vec::new(),
-        variant_layout_cache: HashMap::new(),
-        file_name_cache: HashMap::new(),
+        variant_layout_cache: AHashMap::new(),
+        file_name_cache: AHashMap::new(),
         mutabilities: Vec::new(),
-        mutability_cache: HashMap::new(),
+        mutability_cache: AHashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
-    ser.remap_signature_locations(&mut sig);
+    ser.remap_signature_locations(&mut sig, file_names);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
@@ -706,20 +704,29 @@ struct TypeGraphSerializer<'a> {
     ctx: &'a TypeContext,
     arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
-    cache: HashMap<TypeExprRef, usize>,
+    cache: AHashMap<TypeExprRef, usize>,
     variant_layouts: Vec<crate::types::VariantLayout>,
-    variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
+    variant_layout_cache: AHashMap<crate::types::VariantLayoutRef, usize>,
     /// Source-arena file names re-interned as synthetic CMI names.
-    file_name_cache: HashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
+    file_name_cache: AHashMap<crate::intern::StrIdx, crate::intern::StrIdx>,
     mutabilities: Vec<crate::types::asttypes::MutableFlag>,
-    mutability_cache: HashMap<MutabilityRef, usize>,
+    mutability_cache: AHashMap<MutabilityRef, usize>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
     /// Remap the file names of every location in a signature (declarations
-    /// and attributes) to names portable across contexts.
-    fn remap_signature_locations(&mut self, sig: &mut Signature) {
-        crate::types::decl::for_each_signature_location(sig, &mut |loc| self.remap_loc(loc));
+    /// and attributes) to names portable across contexts, recording the
+    /// resulting raw indices in `file_names`.
+    fn remap_signature_locations(
+        &mut self,
+        sig: &mut Signature,
+        file_names: &mut crate::fast_hash::AHashSet<u32>,
+    ) {
+        crate::types::decl::for_each_signature_location(sig, &mut |loc| {
+            self.remap_loc(loc);
+            file_names.insert(loc.loc_start.file_name.raw());
+            file_names.insert(loc.loc_end.file_name.raw());
+        });
     }
 
     /// Declaration locations name their file through the source arena's
@@ -1143,55 +1150,6 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
     }
 
     let shareable = graph_is_shareable(&pps.type_graph);
-    if crate::debug_flags::debug_store() {
-        let non_generic = pps
-            .type_graph
-            .entries
-            .iter()
-            .filter(|entry| !entry_is_shareable(entry))
-            .count();
-        let mut kinds = std::collections::BTreeMap::new();
-        for entry in pps
-            .type_graph
-            .entries
-            .iter()
-            .filter(|entry| !entry_is_shareable(entry))
-        {
-            let kind = match entry.desc {
-                PortableTypeDesc::Tvar(_) => "Tvar",
-                PortableTypeDesc::Tarrow { .. } => "Tarrow",
-                PortableTypeDesc::Ttuple(_) => "Ttuple",
-                PortableTypeDesc::Tconstr { .. } => "Tconstr",
-                PortableTypeDesc::Tobject { .. } => "Tobject",
-                PortableTypeDesc::Tfield { .. } => "Tfield",
-                PortableTypeDesc::Tnil => "Tnil",
-                PortableTypeDesc::Tlink(_) => "Tlink",
-                PortableTypeDesc::Tsubst(_) => "Tsubst",
-                PortableTypeDesc::Tvariant(_) => "Tvariant",
-                PortableTypeDesc::Tunivar(_) => "Tunivar",
-                PortableTypeDesc::Tpoly { .. } => "Tpoly",
-                PortableTypeDesc::Tpackage { .. } => "Tpackage",
-            };
-            *kinds
-                .entry(format!("{kind}@{}", entry.level))
-                .or_insert(0usize) += 1;
-        }
-        if non_generic > 0 {
-            eprintln!("[store] non-shareable kinds {}: {kinds:?}", pps.ps_name);
-        }
-        let tsubst = pps
-            .type_graph
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.desc, PortableTypeDesc::Tsubst(_)))
-            .count();
-        eprintln!(
-            "[store] internalize {} entries={} shareable={shareable} non_generic={non_generic} tsubst={tsubst} store_types={}",
-            pps.ps_name,
-            pps.type_graph.entries.len(),
-            store.type_count()
-        );
-    }
     if shareable {
         // Internalize once per build for every worker; the worker store
         // keeps the result so later units on this worker skip the pool map.
@@ -1355,11 +1313,11 @@ fn remap_signature_file_names(
     names: &[(u32, String)],
     intern: &dyn Fn(&str) -> crate::intern::StrIdx,
 ) {
-    let names: HashMap<u32, &str> = names
+    let names: AHashMap<u32, &str> = names
         .iter()
         .map(|(raw, name)| (*raw, name.as_str()))
         .collect();
-    let mut fresh: HashMap<u32, crate::intern::StrIdx> = HashMap::new();
+    let mut fresh: AHashMap<u32, crate::intern::StrIdx> = AHashMap::new();
     crate::types::decl::for_each_signature_location(sig, &mut |loc| {
         for pos in [&mut loc.loc_start, &mut loc.loc_end] {
             let raw = pos.file_name.raw();
@@ -1720,12 +1678,12 @@ mod type_arg_tests {
             ctx: &ctx,
             arena: None,
             entries: Vec::new(),
-            cache: HashMap::new(),
+            cache: AHashMap::new(),
             variant_layouts: Vec::new(),
-            variant_layout_cache: HashMap::new(),
-            file_name_cache: HashMap::new(),
+            variant_layout_cache: AHashMap::new(),
+            file_name_cache: AHashMap::new(),
             mutabilities: Vec::new(),
-            mutability_cache: HashMap::new(),
+            mutability_cache: AHashMap::new(),
         };
         let index = ser.serialize_type(arrow);
         let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {

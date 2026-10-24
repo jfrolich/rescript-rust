@@ -5,8 +5,9 @@
 //! declarations carry (`types::decl::Attribute`); [`Attrs`] reads either.
 
 use super::shared_types::{Declared, Loc, Located, ModulePath, ModulePathList};
+use crate::ast_payload::payload_expression;
 use crate::parse_arena::{ExprIdx, ParseArena};
-use crate::parser::ast::{Attribute, ExpressionDesc, Payload, StructureItemDesc};
+use crate::parser::ast::{Attribute, ExpressionDesc, Payload};
 use crate::parser::longident::Longident;
 use crate::types::decl;
 
@@ -15,17 +16,6 @@ use crate::types::decl;
 pub enum Attrs<'a> {
     Parsed(&'a [Attribute], &'a ParseArena),
     Decl(&'a [decl::Attribute]),
-}
-
-/// The expression of a `PStr [Pstr_eval (e, _)]` payload.
-fn single_eval(payload: &Payload) -> Option<ExprIdx> {
-    match payload {
-        Payload::PStr(items) if items.len() == 1 => match &*items[0].pstr_desc {
-            StructureItemDesc::Pstr_eval(eval) => Some(eval.0),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 /// `Ast_payload.semantic_string_of_expression`. OCaml raises on an invalid
@@ -82,40 +72,53 @@ pub fn find_deprecated_attribute(attrs: Attrs<'_>) -> Option<String> {
         Attrs::Parsed(attrs, arena) => {
             let (_, payload) = attrs
                 .iter()
-                .find(|(name, _)| arena.get_string(name.txt) == "deprecated")?;
-            let Some(e) = single_eval(payload) else {
-                return Some(String::new());
-            };
-            if let Some(msg) = string_constant(arena, e) {
-                return Some(msg);
-            }
-            match &*arena.get_expr(e).pexp_desc {
-                ExpressionDesc::Pexp_record(record) => {
-                    let mut reason = String::new();
-                    for field in &record.0 {
-                        if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
-                            && arena.get_string(*txt) == "reason"
-                            && let Some(msg) = string_constant(arena, field.expr)
-                        {
-                            reason = msg;
-                        }
-                    }
-                    Some(reason)
+                .find(|attr| is_parsed_deprecated(arena, attr))?;
+            parsed_deprecated_reason(arena, payload)
+        }
+        Attrs::Decl(attrs) => decl_deprecated_reason(attrs.iter().find(|a| is_decl_deprecated(a))?),
+    }
+}
+
+fn is_parsed_deprecated(arena: &ParseArena, (name, _): &Attribute) -> bool {
+    arena.get_string(name.txt) == "deprecated"
+}
+
+fn is_decl_deprecated(attr: &decl::Attribute) -> bool {
+    attr.attr_name.txt == "deprecated"
+}
+
+/// The reason of a found `@deprecated` attribute.
+fn parsed_deprecated_reason(arena: &ParseArena, payload: &Payload) -> Option<String> {
+    let Some(e) = payload_expression(payload) else {
+        return Some(String::new());
+    };
+    if let Some(msg) = string_constant(arena, e) {
+        return Some(msg);
+    }
+    match &*arena.get_expr(e).pexp_desc {
+        ExpressionDesc::Pexp_record(record) => {
+            let mut reason = String::new();
+            for field in &record.0 {
+                if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
+                    && arena.get_string(*txt) == "reason"
+                    && let Some(msg) = string_constant(arena, field.expr)
+                {
+                    reason = msg;
                 }
-                _ => None,
             }
+            Some(reason)
         }
-        Attrs::Decl(attrs) => {
-            let attr = attrs
-                .iter()
-                .find(|attr| attr.attr_name.txt == "deprecated")?;
-            match &attr.attr_payload {
-                decl::AttributePayload::Str(msg) => Some(msg.clone()),
-                decl::AttributePayload::Deprecated { reason, .. } => Some(reason.clone()),
-                decl::AttributePayload::Empty => Some(String::new()),
-                _ => None,
-            }
-        }
+        _ => None,
+    }
+}
+
+/// The reason of a found `@deprecated` declaration attribute.
+fn decl_deprecated_reason(attr: &decl::Attribute) -> Option<String> {
+    match &attr.attr_payload {
+        decl::AttributePayload::Str(msg) => Some(msg.clone()),
+        decl::AttributePayload::Deprecated { reason, .. } => Some(reason.clone()),
+        decl::AttributePayload::Empty => Some(String::new()),
+        _ => None,
     }
 }
 
@@ -128,7 +131,7 @@ pub fn find_editor_complete_from_attribute(attrs: Attrs<'_>) -> Vec<ModulePathLi
                 if arena.get_string(name.txt) != "editor.completeFrom" {
                     continue;
                 }
-                let Some(e) = single_eval(payload) else {
+                let Some(e) = payload_expression(payload) else {
                     continue;
                 };
                 let items: Vec<ExprIdx> = match &*arena.get_expr(e).pexp_desc {
@@ -164,16 +167,18 @@ pub fn find_editor_complete_from_attribute(attrs: Attrs<'_>) -> Vec<ModulePathLi
     module_paths
 }
 
-/// The attributes in reverse, as OCaml's `List.rev attributes`.
+/// `find_deprecated_attribute (List.rev attributes)`.
 fn reversed_deprecated(attrs: Attrs<'_>) -> Option<String> {
     match attrs {
         Attrs::Parsed(attrs, arena) => {
-            let reversed: Vec<Attribute> = attrs.iter().rev().cloned().collect();
-            find_deprecated_attribute(Attrs::Parsed(&reversed, arena))
+            let (_, payload) = attrs
+                .iter()
+                .rev()
+                .find(|attr| is_parsed_deprecated(arena, attr))?;
+            parsed_deprecated_reason(arena, payload)
         }
         Attrs::Decl(attrs) => {
-            let reversed: Vec<decl::Attribute> = attrs.iter().rev().cloned().collect();
-            find_deprecated_attribute(Attrs::Decl(&reversed))
+            decl_deprecated_reason(attrs.iter().rev().find(|a| is_decl_deprecated(a))?)
         }
     }
 }

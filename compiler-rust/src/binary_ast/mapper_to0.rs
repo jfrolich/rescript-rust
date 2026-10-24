@@ -182,15 +182,6 @@ impl<'a> Mapper<'a> {
         self.arena.get_longident(idx)
     }
 
-    /// Create an OldLocated from text and location index
-    #[allow(dead_code)]
-    fn mkloc<T>(&mut self, txt: T, loc: LocIdx) -> OldLocated<T> {
-        OldLocated {
-            txt,
-            loc: self.loc(loc),
-        }
-    }
-
     // ========== Arena index lookup helpers ==========
     // These methods look up an arena-indexed AST node and map it.
     // We clone the looked-up node to avoid borrow conflicts (`self.arena` is `&mut`).
@@ -238,57 +229,11 @@ impl<'a> Mapper<'a> {
 
     // ========== Helper functions ==========
 
-    #[allow(dead_code)]
-    fn mk_optional_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
-        (
-            OldLocated::new("res.optional".to_string(), self.loc(loc)),
-            pt0::Payload::PStr(vec![]),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn mk_async_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
-        (
-            OldLocated::new("res.async".to_string(), self.loc(loc)),
-            pt0::Payload::PStr(vec![]),
-        )
-    }
-
     fn mk_await_attr(&mut self) -> pt0::Attribute {
         let loc = self.arena.none_loc();
         (
             OldLocated::new("res.await".to_string(), self.loc(loc)),
             pt0::Payload::PStr(vec![]),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn mk_partial_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
-        (
-            OldLocated::new("res.partial".to_string(), self.loc(loc)),
-            pt0::Payload::PStr(vec![]),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn mk_arity_attr(&mut self, arity: usize, loc: LocIdx) -> pt0::Attribute {
-        let full_loc = self.loc(loc);
-        (
-            OldLocated::new("res.arity".to_string(), full_loc.clone()),
-            pt0::Payload::PStr(vec![pt0::StructureItem {
-                pstr_desc: pt0::StructureItemDesc::Eval(
-                    pt0::Expression {
-                        pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::Integer(
-                            arity.to_string(),
-                            None,
-                        )),
-                        pexp_loc: full_loc.clone(),
-                        pexp_attributes: vec![],
-                    },
-                    vec![],
-                ),
-                pstr_loc: full_loc,
-            }]),
         )
     }
 
@@ -306,7 +251,7 @@ impl<'a> Mapper<'a> {
         let unit_idx = self.intern("()");
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(Longident::Lident(unit_idx), full_loc.clone()),
+                OldLocated::new(Longident::Lident(unit_idx), full_loc),
                 None,
             ),
             pexp_loc: full_loc,
@@ -319,7 +264,7 @@ impl<'a> Mapper<'a> {
         let nil_idx = self.intern("[]");
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(Longident::Lident(nil_idx), full_loc.clone()),
+                OldLocated::new(Longident::Lident(nil_idx), full_loc),
                 None,
             ),
             pexp_loc: full_loc,
@@ -342,7 +287,7 @@ impl<'a> Mapper<'a> {
                     let ident_expr = pt0::Expression {
                         pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
                             Longident::Lident(name_idx),
-                            name_loc.clone(),
+                            name_loc,
                         )),
                         pexp_loc: name_loc,
                         pexp_attributes: vec![],
@@ -422,14 +367,14 @@ impl<'a> Mapper<'a> {
             let child_expr = self.map_expr_idx(*child);
             result = pt0::Expression {
                 pexp_desc: pt0::ExpressionDesc::Construct(
-                    OldLocated::new(Longident::Lident(cons_idx), full_loc.clone()),
+                    OldLocated::new(Longident::Lident(cons_idx), full_loc),
                     Some(Box::new(pt0::Expression {
                         pexp_desc: pt0::ExpressionDesc::Tuple(vec![child_expr, result]),
-                        pexp_loc: full_loc.clone(),
+                        pexp_loc: full_loc,
                         pexp_attributes: vec![],
                     })),
                 ),
-                pexp_loc: full_loc.clone(),
+                pexp_loc: full_loc,
                 pexp_attributes: vec![],
             };
         }
@@ -555,7 +500,7 @@ impl<'a> Mapper<'a> {
     pub fn map_core_type(&mut self, ty: &current::CoreType) -> pt0::CoreType {
         let current::CoreTypeDesc::Ptyp_arrow(inner) = &*ty.ptyp_desc else {
             return pt0::CoreType {
-                ptyp_desc: self.map_core_type_desc(&*ty.ptyp_desc),
+                ptyp_desc: self.map_core_type_desc(&ty.ptyp_desc),
                 ptyp_loc: self.loc(ty.ptyp_loc),
                 ptyp_attributes: self.map_attributes(&ty.ptyp_attributes),
             };
@@ -582,13 +527,13 @@ impl<'a> Mapper<'a> {
                 pt0::ClosedFlag::Closed,
                 None,
             ),
-            ptyp_loc: loc.clone(),
+            ptyp_loc: loc,
             ptyp_attributes: vec![],
         };
         let function_idx = self.intern("function$");
         pt0::CoreType {
             ptyp_desc: pt0::CoreTypeDesc::Constr(
-                OldLocated::new(Longident::Lident(function_idx), loc.clone()),
+                OldLocated::new(Longident::Lident(function_idx), loc),
                 vec![typ0, arity_type],
             ),
             ptyp_loc: loc,
@@ -618,11 +563,11 @@ impl<'a> Mapper<'a> {
         };
         let arg_typ = self.map_core_type_idx(arg.typ);
         let arrow_loc = if is_head {
-            loc.clone()
+            *loc
         } else {
             FullLocation {
-                loc_start: arg_typ.ptyp_loc.loc_start.clone(),
-                ..loc.clone()
+                loc_start: arg_typ.ptyp_loc.loc_start,
+                ..*loc
             }
         };
         let rest_typ = self.build_arrow_chain(rest, ret, loc, Vec::new(), false);
@@ -664,7 +609,7 @@ impl<'a> Mapper<'a> {
             current::CoreTypeDesc::Ptyp_any => pt0::CoreTypeDesc::Any,
             current::CoreTypeDesc::Ptyp_var(s) => pt0::CoreTypeDesc::Var(s.to_string()),
             current::CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret_idx, ref arity) = **inner;
+                let (ref arg, ref ret_idx, _arity) = **inner;
                 // This branch should not normally be reached since map_core_type handles arrows
                 // But keep it for completeness - treat as no arity
                 pt0::CoreTypeDesc::Arrow(
@@ -805,7 +750,7 @@ impl<'a> Mapper<'a> {
                 ),
             );
         }
-        let ppat_desc = self.map_pattern_desc(&*pat.ppat_desc);
+        let ppat_desc = self.map_pattern_desc(&pat.ppat_desc);
         self.take_constructor_args_marker(&mut attrs);
         pt0::Pattern {
             ppat_desc,
@@ -818,7 +763,7 @@ impl<'a> Mapper<'a> {
         let loc = self.loc(rest.rest_loc);
         let var = pt0::Pattern {
             ppat_desc: pt0::PatternDesc::Var(self.map_string_loc(&rest.rest_name)),
-            ppat_loc: loc.clone(),
+            ppat_loc: loc,
             ppat_attributes: vec![],
         };
         match rest.rest_type {
@@ -848,8 +793,8 @@ impl<'a> Mapper<'a> {
             current::JsxElement::Fragment(fragment) => {
                 // The fragment spans from its opening `>` to its closing `</`.
                 let fragment_loc = FullLocation {
-                    loc_start: self.arena.get_position(fragment.opening).clone(),
-                    loc_end: self.arena.get_position(fragment.closing).clone(),
+                    loc_start: *self.arena.get_position(fragment.opening),
+                    loc_end: *self.arena.get_position(fragment.closing),
                     loc_ghost: loc.loc_ghost,
                 };
                 let mut list = self.jsx_children_list(&fragment.children, &fragment_loc);
@@ -919,10 +864,10 @@ impl<'a> Mapper<'a> {
         let idx = self.intern(name);
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(Longident::Lident(idx), lid_loc.clone()),
+                OldLocated::new(Longident::Lident(idx), *lid_loc),
                 None,
             ),
-            pexp_loc: loc.clone(),
+            pexp_loc: *loc,
             pexp_attributes: vec![],
         }
     }
@@ -930,7 +875,7 @@ impl<'a> Mapper<'a> {
     /// `Ast_helper.Exp.make_list_expression loc children None`, mapped.
     fn jsx_children_list(&mut self, children: &[ExprIdx], loc: &FullLocation) -> pt0::Expression {
         let mut list = self.jsx_children_seq(children, loc);
-        list.pexp_loc = loc.clone();
+        list.pexp_loc = *loc;
         list
     }
 
@@ -938,7 +883,7 @@ impl<'a> Mapper<'a> {
         let Some((first, rest)) = children.split_first() else {
             let nil_loc = FullLocation {
                 loc_ghost: true,
-                ..loc.clone()
+                ..*loc
             };
             return self.construct_noarg("[]", &nil_loc, &nil_loc);
         };
@@ -950,16 +895,16 @@ impl<'a> Mapper<'a> {
         let head = self.map_expr_idx(*first);
         let cell_loc = FullLocation {
             loc_start: head_start,
-            loc_end: tail.pexp_loc.loc_end.clone(),
+            loc_end: tail.pexp_loc.loc_end,
             loc_ghost: false,
         };
         let cons = self.intern("::");
         pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(Longident::Lident(cons), cell_loc.clone()),
+                OldLocated::new(Longident::Lident(cons), cell_loc),
                 Some(Box::new(pt0::Expression {
                     pexp_desc: pt0::ExpressionDesc::Tuple(vec![head, tail]),
-                    pexp_loc: cell_loc.clone(),
+                    pexp_loc: cell_loc,
                     pexp_attributes: vec![],
                 })),
             ),
@@ -996,7 +941,7 @@ impl<'a> Mapper<'a> {
         let e = self.build_fun_chain(&params, body, &loc, head_attrs, fun.is_async, true);
         let noloc = self.noloc();
         let arity_attr = (
-            OldLocated::new("res.arity".to_string(), noloc.clone()),
+            OldLocated::new("res.arity".to_string(), noloc),
             pt0::Payload::PStr(vec![pt0::StructureItem {
                 pstr_desc: pt0::StructureItemDesc::Eval(
                     pt0::Expression {
@@ -1004,18 +949,18 @@ impl<'a> Mapper<'a> {
                             params.len().to_string(),
                             None,
                         )),
-                        pexp_loc: noloc.clone(),
+                        pexp_loc: noloc,
                         pexp_attributes: vec![],
                     },
                     vec![],
                 ),
-                pstr_loc: noloc.clone(),
+                pstr_loc: noloc,
             }]),
         );
         let function_idx = self.intern("Function$");
         let fn_expr = pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Construct(
-                OldLocated::new(Longident::Lident(function_idx), e.pexp_loc.clone()),
+                OldLocated::new(Longident::Lident(function_idx), e.pexp_loc),
                 Some(Box::new(e)),
             ),
             pexp_loc: noloc,
@@ -1028,7 +973,7 @@ impl<'a> Mapper<'a> {
         for (name, nt_attrs) in rest_newtypes.iter().rev() {
             inner = pt0::Expression {
                 pexp_desc: pt0::ExpressionDesc::Newtype(self.map_string_loc(name), Box::new(inner)),
-                pexp_loc: loc.clone(),
+                pexp_loc: loc,
                 pexp_attributes: self.map_attributes(nt_attrs),
             };
         }
@@ -1083,11 +1028,11 @@ impl<'a> Mapper<'a> {
         let default = param.p_default.map(|e| Box::new(self.map_expr_idx(e)));
         let pat = self.map_pat_idx(param.p_pat);
         let fun_loc = if is_head {
-            loc.clone()
+            *loc
         } else {
             FullLocation {
-                loc_start: pat.ppat_loc.loc_start.clone(),
-                ..loc.clone()
+                loc_start: pat.ppat_loc.loc_start,
+                ..*loc
             }
         };
         let rest_expr = self.build_fun_chain(rest, body, loc, Vec::new(), false, false);
@@ -1266,7 +1211,7 @@ impl<'a> Mapper<'a> {
             let attr = self.internal_attr("res.partial");
             attrs.insert(0, attr);
         }
-        let pexp_desc = self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc, owner_idx);
+        let pexp_desc = self.map_expression_desc(&expr.pexp_desc, expr.pexp_loc, owner_idx);
         self.take_constructor_args_marker(&mut attrs);
         pt0::Expression {
             pexp_desc,
@@ -1323,7 +1268,7 @@ impl<'a> Mapper<'a> {
                     Longident::Lident(caret),
                     none,
                 )),
-                pexp_loc: loc.clone(),
+                pexp_loc: loc,
                 pexp_attributes: vec![],
             };
             expression = pt0::Expression {
@@ -1334,7 +1279,7 @@ impl<'a> Mapper<'a> {
                         (pt0::ArgLabel::Nolabel, rhs),
                     ],
                 ),
-                pexp_loc: loc.clone(),
+                pexp_loc: loc,
                 pexp_attributes: vec![template_attr],
             };
         }
@@ -1369,12 +1314,12 @@ impl<'a> Mapper<'a> {
             .collect();
         let values = pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Array(values),
-            pexp_loc: loc.clone(),
+            pexp_loc: loc,
             pexp_attributes: vec![],
         };
         let segments = pt0::Expression {
             pexp_desc: pt0::ExpressionDesc::Array(segments),
-            pexp_loc: loc.clone(),
+            pexp_loc: loc,
             pexp_attributes: vec![],
         };
         let tag = self.map_expr_idx(template.tag);
@@ -1508,7 +1453,7 @@ impl<'a> Mapper<'a> {
 
                 let mut mapped_args = Vec::with_capacity(args.len());
                 for (label, e_idx) in args {
-                    mapped_args.push((self.map_arg_label(&label), self.map_expr_idx(*e_idx)));
+                    mapped_args.push((self.map_arg_label(label), self.map_expr_idx(*e_idx)));
                 }
 
                 let _ = (partial, transformed_jsx);
@@ -1607,7 +1552,7 @@ impl<'a> Mapper<'a> {
                 let full_loc = self.loc(loc);
                 let source = format!("/{}/{}", regexp.pattern, regexp.flags);
                 pt0::ExpressionDesc::Extension((
-                    OldLocated::new("re".to_string(), full_loc.clone()),
+                    OldLocated::new("re".to_string(), full_loc),
                     pt0::Payload::PStr(vec![pt0::StructureItem {
                         pstr_desc: pt0::StructureItemDesc::Eval(
                             pt0::Expression {
@@ -1615,7 +1560,7 @@ impl<'a> Mapper<'a> {
                                     source,
                                     Some("js".to_string()),
                                 )),
-                                pexp_loc: full_loc.clone(),
+                                pexp_loc: full_loc,
                                 pexp_attributes: vec![],
                             },
                             vec![],
@@ -1674,7 +1619,7 @@ impl<'a> Mapper<'a> {
                         "0".to_string(),
                         None,
                     )),
-                    pexp_loc: dummy_loc.clone(),
+                    pexp_loc: dummy_loc,
                     pexp_attributes: vec![],
                 };
                 pt0::ExpressionDesc::For(
@@ -1719,14 +1664,14 @@ impl<'a> Mapper<'a> {
                 let e = self.map_expr_idx(*e_idx);
                 let send = pt0::Expression {
                     pexp_desc: pt0::ExpressionDesc::Send(Box::new(e), name),
-                    pexp_loc: full_loc.clone(),
+                    pexp_loc: full_loc,
                     pexp_attributes: vec![],
                 };
                 let op = self.intern("#=");
                 let op = pt0::Expression {
                     pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
                         Longident::Lident(op),
-                        full_loc.clone(),
+                        full_loc,
                     )),
                     pexp_loc: full_loc,
                     pexp_attributes: vec![],
@@ -1753,11 +1698,11 @@ impl<'a> Mapper<'a> {
                 let full_loc = self.loc(loc);
                 let record = pt0::Expression {
                     pexp_desc: pt0::ExpressionDesc::Record(rows, None),
-                    pexp_loc: full_loc.clone(),
+                    pexp_loc: full_loc,
                     pexp_attributes: vec![],
                 };
                 pt0::ExpressionDesc::Extension((
-                    OldLocated::new("obj".to_string(), full_loc.clone()),
+                    OldLocated::new("obj".to_string(), full_loc),
                     pt0::Payload::PStr(vec![pt0::StructureItem {
                         pstr_desc: pt0::StructureItemDesc::Eval(record, vec![]),
                         pstr_loc: full_loc,
@@ -1834,8 +1779,7 @@ impl<'a> Mapper<'a> {
                         pt0::ExpressionDesc::Apply(
                             Box::new(pt0::Expression {
                                 pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
-                                    tag_ident,
-                                    tag_loc.clone(),
+                                    tag_ident, tag_loc,
                                 )),
                                 pexp_loc: tag_loc,
                                 pexp_attributes: vec![],
@@ -1859,8 +1803,7 @@ impl<'a> Mapper<'a> {
                         pt0::ExpressionDesc::Apply(
                             Box::new(pt0::Expression {
                                 pexp_desc: pt0::ExpressionDesc::Ident(OldLocated::new(
-                                    tag_ident,
-                                    tag_loc.clone(),
+                                    tag_ident, tag_loc,
                                 )),
                                 pexp_loc: tag_loc,
                                 pexp_attributes: vec![],
@@ -2069,7 +2012,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_type(&mut self, mt: &current::ModuleType) -> pt0::ModuleType {
         pt0::ModuleType {
-            pmty_desc: self.map_module_type_desc(&*mt.pmty_desc),
+            pmty_desc: self.map_module_type_desc(&mt.pmty_desc),
             pmty_loc: self.loc(mt.pmty_loc),
             pmty_attributes: self.map_attributes(&mt.pmty_attributes),
         }
@@ -2140,7 +2083,7 @@ impl<'a> Mapper<'a> {
 
     fn map_module_expr(&mut self, me: &current::ModuleExpr) -> pt0::ModuleExpr {
         pt0::ModuleExpr {
-            pmod_desc: self.map_module_expr_desc(&*me.pmod_desc),
+            pmod_desc: self.map_module_expr_desc(&me.pmod_desc),
             pmod_loc: self.loc(me.pmod_loc),
             pmod_attributes: self.map_attributes(&me.pmod_attributes),
         }
@@ -2275,7 +2218,7 @@ impl<'a> Mapper<'a> {
 
     fn map_structure_item(&mut self, item: &current::StructureItem) -> pt0::StructureItem {
         pt0::StructureItem {
-            pstr_desc: self.map_structure_item_desc(&*item.pstr_desc),
+            pstr_desc: self.map_structure_item_desc(&item.pstr_desc),
             pstr_loc: self.loc(item.pstr_loc),
         }
     }
@@ -2350,7 +2293,7 @@ impl<'a> Mapper<'a> {
 
     fn map_signature_item(&mut self, item: &current::SignatureItem) -> pt0::SignatureItem {
         pt0::SignatureItem {
-            psig_desc: self.map_signature_item_desc(&*item.psig_desc),
+            psig_desc: self.map_signature_item_desc(&item.psig_desc),
             psig_loc: self.loc(item.psig_loc),
         }
     }
@@ -2408,6 +2351,28 @@ impl<'a> Mapper<'a> {
             }
         }
     }
+}
+
+/// ast_mapper_to0.ml `offset_position`: move a position `offset`
+/// characters back.
+fn offset_position(pos: &crate::location::Position, offset: i32) -> crate::location::Position {
+    let mut pos = *pos;
+    let mut offset = offset;
+    while offset > 0 {
+        if offset <= pos.cnum - pos.bol {
+            pos.cnum -= offset;
+            return pos;
+        }
+        let remaining = offset - (pos.cnum - pos.bol);
+        pos = crate::location::Position {
+            line: pos.line - 1,
+            cnum: pos.bol,
+            bol: (pos.bol - remaining).max(0),
+            ..pos
+        };
+        offset = remaining;
+    }
+    pos
 }
 
 #[cfg(test)]
@@ -2476,26 +2441,4 @@ mod tests {
         let c4 = mapper.map_constant(&current::Constant::Json(Cow::Borrowed("{}")));
         assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "{}" && d == "json"));
     }
-}
-
-/// ast_mapper_to0.ml `offset_position`: move a position `offset`
-/// characters back.
-fn offset_position(pos: &crate::location::Position, offset: i32) -> crate::location::Position {
-    let mut pos = pos.clone();
-    let mut offset = offset;
-    while offset > 0 {
-        if offset <= pos.cnum - pos.bol {
-            pos.cnum -= offset;
-            return pos;
-        }
-        let remaining = offset - (pos.cnum - pos.bol);
-        pos = crate::location::Position {
-            line: pos.line - 1,
-            cnum: pos.bol,
-            bol: (pos.bol - remaining).max(0),
-            ..pos
-        };
-        offset = remaining;
-    }
-    pos
 }

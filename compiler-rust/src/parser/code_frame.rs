@@ -136,17 +136,12 @@ const ANSI_WARN: &str = "\x1b[1;33m";
 const ANSI_FILENAME: &str = "\x1b[36m";
 const ANSI_RESET: &str = "\x1b[0m";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum ColorMode {
+    #[default]
     Auto = 0,
     Always = 1,
     Never = 2,
-}
-
-impl Default for ColorMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 static COLOR_MODE: AtomicU8 = AtomicU8::new(ColorMode::Auto as u8);
@@ -539,7 +534,6 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
     }
 }
 
-/// Format a location as "filename:line:col" or "filename:line:col-endcol"
 /// Whether `Location.normalize_range` (location.ml:53-73) gives a range: a
 /// column of -1 (a dummy position) prints the file name alone, with no code
 /// frame.
@@ -549,6 +543,7 @@ pub fn has_printable_range(start_pos: &Position, end_pos: &Position) -> bool {
     start_pos.line != 0 && start_pos.cnum - start_pos.bol != -1 && end_pos.cnum - end_pos.bol != -1
 }
 
+/// Format a location as "filename:line:col" or "filename:line:col-endcol"
 pub fn format_location(filename: &str, start_pos: &Position, end_pos: &Position) -> String {
     if !has_printable_range(start_pos, end_pos) {
         return filename.to_string();
@@ -595,7 +590,7 @@ pub fn format_error(
     if has_printable_range(start_pos, end_pos) {
         result.push_str(&print(src, start_pos, end_pos));
         // Extra blank line after code frame
-        result.push_str("\n");
+        result.push('\n');
     }
 
     // Message

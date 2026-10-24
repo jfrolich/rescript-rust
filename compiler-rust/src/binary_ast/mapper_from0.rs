@@ -425,7 +425,7 @@ fn varify_constructors(
     };
     Some(pt0::CoreType {
         ptyp_desc: desc,
-        ptyp_loc: t.ptyp_loc.clone(),
+        ptyp_loc: t.ptyp_loc,
         ptyp_attributes: t.ptyp_attributes.clone(),
     })
 }
@@ -678,8 +678,8 @@ impl<'a> Mapper<'a> {
         match lbl {
             pt0::ArgLabel::Nolabel => current::ArgLabel::Nolabel,
             // parsetree0 doesn't have location info, so use mknoloc
-            pt0::ArgLabel::Labelled(s) => current::ArgLabel::Labelled(Located::mknoloc(s.clone())),
-            pt0::ArgLabel::Optional(s) => current::ArgLabel::Optional(Located::mknoloc(s.clone())),
+            pt0::ArgLabel::Labelled(s) => current::ArgLabel::Labelled(Located::mknoloc(*s)),
+            pt0::ArgLabel::Optional(s) => current::ArgLabel::Optional(Located::mknoloc(*s)),
         }
     }
 
@@ -877,7 +877,7 @@ impl<'a> Mapper<'a> {
         current::CoreType {
             ptyp_desc: Box::new(desc),
             ptyp_loc: loc,
-            ptyp_attributes: attrs.into(),
+            ptyp_attributes: attrs,
         }
     }
 
@@ -1005,8 +1005,7 @@ impl<'a> Mapper<'a> {
                         let mapped_pat = if has_optional_attribute(self.arena, &mapped_attrs) {
                             let mut mapped = self.map_pattern(pat);
                             mapped.ppat_attributes =
-                                remove_optional_attribute(self.arena, &mapped.ppat_attributes)
-                                    .into();
+                                remove_optional_attribute(self.arena, &mapped.ppat_attributes);
                             mapped
                         } else {
                             self.map_pattern(pat)
@@ -1065,7 +1064,7 @@ impl<'a> Mapper<'a> {
         current::Pattern {
             ppat_desc: Box::new(desc),
             ppat_loc: loc,
-            ppat_attributes: attrs.into(),
+            ppat_attributes: attrs,
         }
     }
 
@@ -1130,7 +1129,7 @@ impl<'a> Mapper<'a> {
                 && name.txt == attr_name
                 && matches!(payload, pt0::Payload::PStr(items) if items.is_empty());
             if is_match {
-                found = Some(name.loc.clone());
+                found = Some(name.loc);
             } else {
                 out.push(attr.clone());
             }
@@ -1153,7 +1152,7 @@ impl<'a> Mapper<'a> {
                     self.extract_internal_loc_attr(JSX_SPREAD_LOC_ATTR, &expr.pexp_attributes);
                 let mut stripped = expr.clone();
                 stripped.pexp_attributes = attrs;
-                let loc = loc.unwrap_or_else(|| expr.pexp_loc.clone());
+                let loc = loc.unwrap_or(expr.pexp_loc);
                 Some(current::JsxProp::Spreading {
                     loc: self.loc(&loc),
                     expr: self.push_expr(&stripped),
@@ -1176,7 +1175,7 @@ impl<'a> Mapper<'a> {
                     self.extract_internal_loc_attr(JSX_PROP_LOC_ATTR, &expr.pexp_attributes);
                 let mut stripped = expr.clone();
                 stripped.pexp_attributes = attrs;
-                let loc = loc.unwrap_or_else(|| expr.pexp_loc.clone());
+                let loc = loc.unwrap_or(expr.pexp_loc);
                 Some(current::JsxProp::Value {
                     name: self.mk_string_loc(&name_str, &loc),
                     optional: false,
@@ -1200,7 +1199,7 @@ impl<'a> Mapper<'a> {
                     self.extract_internal_loc_attr(JSX_PROP_LOC_ATTR, &expr.pexp_attributes);
                 let mut stripped = expr.clone();
                 stripped.pexp_attributes = attrs;
-                let loc = loc.unwrap_or_else(|| expr.pexp_loc.clone());
+                let loc = loc.unwrap_or(expr.pexp_loc);
                 Some(current::JsxProp::Value {
                     name: self.mk_string_loc(&name_str, &loc),
                     optional: true,
@@ -1327,7 +1326,7 @@ impl<'a> Mapper<'a> {
             let braces_loc = self.loc(&expr.pexp_attributes[at].0.loc);
             let inner_expr = pt0::Expression {
                 pexp_desc: expr.pexp_desc.clone(),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes[at + 1..].to_vec(),
             };
             let inner_idx = self.push_expr(&inner_expr);
@@ -1351,7 +1350,7 @@ impl<'a> Mapper<'a> {
                 split_at_marker(&expr.pexp_attributes, "res.await").unwrap_or((&[], &[]));
             let inner_expr = pt0::Expression {
                 pexp_desc: expr.pexp_desc.clone(),
-                pexp_loc: expr.pexp_loc.clone(),
+                pexp_loc: expr.pexp_loc,
                 pexp_attributes: inner_attrs.to_vec(),
             };
             let await_idx = self.push_expr(&inner_expr);
@@ -1693,7 +1692,7 @@ impl<'a> Mapper<'a> {
                                 Box::new(jsx_element),
                             )),
                             pexp_loc: loc,
-                            pexp_attributes: jsx_attrs.into(),
+                            pexp_attributes: jsx_attrs,
                         };
                     }
                 }
@@ -1731,9 +1730,9 @@ impl<'a> Mapper<'a> {
                                 pt0::Expression {
                                     pexp_desc: pt0::ExpressionDesc::Ident(OldLocated {
                                         txt: Longident::Lident(new_str_idx),
-                                        loc: lid.loc.clone(),
+                                        loc: lid.loc,
                                     }),
-                                    pexp_loc: func.pexp_loc.clone(),
+                                    pexp_loc: func.pexp_loc,
                                     pexp_attributes: func.pexp_attributes.clone(),
                                 }
                             } else {
@@ -1761,7 +1760,7 @@ impl<'a> Mapper<'a> {
                         transformed_jsx: false,
                     }))),
                     pexp_loc: loc,
-                    pexp_attributes: attrs.into(),
+                    pexp_attributes: attrs,
                 };
             }
             pt0::ExpressionDesc::Match(e, cases) => {
@@ -1802,7 +1801,7 @@ impl<'a> Mapper<'a> {
                                     Box::new(jsx_element),
                                 )),
                                 pexp_loc: loc,
-                                pexp_attributes: jsx_attrs.into(),
+                                pexp_attributes: jsx_attrs,
                             };
                         }
                     }
@@ -2138,7 +2137,7 @@ impl<'a> Mapper<'a> {
                 // Map to an extension point that represents unreachable
                 current::ExpressionDesc::Pexp_extension(Box::new((
                     self.mk_string_loc("rescript.exprhole", &expr.pexp_loc),
-                    current::Payload::PStr(Box::new(vec![])),
+                    current::Payload::PStr(Box::default()),
                 )))
             }
         };
@@ -2146,7 +2145,7 @@ impl<'a> Mapper<'a> {
         current::Expression {
             pexp_desc: Box::new(desc),
             pexp_loc: loc,
-            pexp_attributes: attrs.into(),
+            pexp_attributes: attrs,
         }
     }
 
@@ -2448,14 +2447,14 @@ impl<'a> Mapper<'a> {
             return current::ValueBinding {
                 pvb_pat,
                 pvb_expr,
-                pvb_attributes: self.map_attributes(&vb.pvb_attributes).into(),
+                pvb_attributes: self.map_attributes(&vb.pvb_attributes),
                 pvb_loc,
             };
         }
         current::ValueBinding {
             pvb_pat: self.push_pat(&vb.pvb_pat),
             pvb_expr: self.push_expr(&vb.pvb_expr),
-            pvb_attributes: self.map_attributes(&vb.pvb_attributes).into(),
+            pvb_attributes: self.map_attributes(&vb.pvb_attributes),
             pvb_loc: self.loc(&vb.pvb_loc),
         }
     }
@@ -2504,7 +2503,7 @@ impl<'a> Mapper<'a> {
         current::ModuleExpr {
             pmod_desc: Box::new(desc),
             pmod_loc: loc,
-            pmod_attributes: attrs.into(),
+            pmod_attributes: attrs,
         }
     }
 
@@ -2555,7 +2554,7 @@ impl<'a> Mapper<'a> {
         current::ModuleType {
             pmty_desc: Box::new(desc),
             pmty_loc: loc,
-            pmty_attributes: attrs.into(),
+            pmty_attributes: attrs,
         }
     }
 
@@ -2758,7 +2757,7 @@ impl<'a> Mapper<'a> {
             ptype_private: map_private_flag(td.ptype_private),
             ptype_manifest: td.ptype_manifest.as_ref().map(|t| self.push_core_type(t)),
             ptype_origin,
-            ptype_attributes: ptype_attributes.into(),
+            ptype_attributes,
             ptype_loc: self.loc(&td.ptype_loc),
         }
     }
@@ -2790,7 +2789,7 @@ impl<'a> Mapper<'a> {
         let args = self.map_constructor_arguments(&cd.pcd_args);
         let res = cd.pcd_res.as_ref().map(|t| self.push_core_type(t));
         let loc = self.loc(&cd.pcd_loc);
-        let attrs = self.map_attributes(&cd.pcd_attributes).into();
+        let attrs = self.map_attributes(&cd.pcd_attributes);
         crate::ast_helper_type::constructor(self.arena, loc, attrs, args, res, None, name)
     }
 
@@ -2828,7 +2827,7 @@ impl<'a> Mapper<'a> {
         crate::ast_helper_type::field(
             self.arena,
             loc,
-            final_attrs.into(),
+            final_attrs,
             mutable,
             optional,
             None,
@@ -2851,7 +2850,7 @@ impl<'a> Mapper<'a> {
                 .map(|ec| self.map_extension_constructor(ec))
                 .collect(),
             ptyext_private: map_private_flag(te.ptyext_private),
-            ptyext_attributes: self.map_attributes(&te.ptyext_attributes).into(),
+            ptyext_attributes: self.map_attributes(&te.ptyext_attributes),
         }
     }
 
@@ -2863,7 +2862,7 @@ impl<'a> Mapper<'a> {
             pext_name: self.map_string_loc(&ec.pext_name),
             pext_kind: self.map_extension_constructor_kind(&ec.pext_kind),
             pext_loc: self.loc(&ec.pext_loc),
-            pext_attributes: self.map_attributes(&ec.pext_attributes).into(),
+            pext_attributes: self.map_attributes(&ec.pext_attributes),
         }
     }
 
@@ -2908,7 +2907,7 @@ impl<'a> Mapper<'a> {
             pval_name: self.map_string_loc(&vd.pval_name),
             pval_type: self.push_core_type(&vd.pval_type),
             pval_prim,
-            pval_attributes: self.map_attributes(&vd.pval_attributes).into(),
+            pval_attributes: self.map_attributes(&vd.pval_attributes),
             pval_loc: self.loc(&vd.pval_loc),
         }
     }
@@ -2920,7 +2919,7 @@ impl<'a> Mapper<'a> {
         current::ModuleDeclaration {
             pmd_name: self.map_string_loc(&md.pmd_name),
             pmd_type: self.push_mod_type(&md.pmd_type),
-            pmd_attributes: self.map_attributes(&md.pmd_attributes).into(),
+            pmd_attributes: self.map_attributes(&md.pmd_attributes),
             pmd_loc: self.loc(&md.pmd_loc),
         }
     }
@@ -2932,7 +2931,7 @@ impl<'a> Mapper<'a> {
         current::ModuleTypeDeclaration {
             pmtd_name: self.map_string_loc(&mtd.pmtd_name),
             pmtd_type: mtd.pmtd_type.as_ref().map(|mt| self.push_mod_type(mt)),
-            pmtd_attributes: self.map_attributes(&mtd.pmtd_attributes).into(),
+            pmtd_attributes: self.map_attributes(&mtd.pmtd_attributes),
             pmtd_loc: self.loc(&mtd.pmtd_loc),
         }
     }
@@ -2941,7 +2940,7 @@ impl<'a> Mapper<'a> {
         current::ModuleBinding {
             pmb_name: self.map_string_loc(&mb.pmb_name),
             pmb_expr: self.push_mod_expr(&mb.pmb_expr),
-            pmb_attributes: self.map_attributes(&mb.pmb_attributes).into(),
+            pmb_attributes: self.map_attributes(&mb.pmb_attributes),
             pmb_loc: self.loc(&mb.pmb_loc),
         }
     }
@@ -2951,7 +2950,7 @@ impl<'a> Mapper<'a> {
             popen_lid: self.map_longident_loc(&od.popen_lid),
             popen_override: map_override_flag(od.popen_override),
             popen_loc: self.loc(&od.popen_loc),
-            popen_attributes: self.map_attributes(&od.popen_attributes).into(),
+            popen_attributes: self.map_attributes(&od.popen_attributes),
         }
     }
 
@@ -2962,7 +2961,7 @@ impl<'a> Mapper<'a> {
         current::IncludeDeclaration {
             pincl_mod: self.push_mod_expr(&id.pincl_mod),
             pincl_loc: self.loc(&id.pincl_loc),
-            pincl_attributes: self.map_attributes(&id.pincl_attributes).into(),
+            pincl_attributes: self.map_attributes(&id.pincl_attributes),
         }
     }
 
@@ -2973,7 +2972,7 @@ impl<'a> Mapper<'a> {
         current::IncludeDescription {
             pincl_mod: self.push_mod_type(&id.pincl_mod),
             pincl_loc: self.loc(&id.pincl_loc),
-            pincl_attributes: self.map_attributes(&id.pincl_attributes).into(),
+            pincl_attributes: self.map_attributes(&id.pincl_attributes),
         }
     }
 }

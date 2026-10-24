@@ -79,7 +79,7 @@ impl TailcallInlineState {
             } else {
                 UsedStats::Used
             };
-            statuses.insert(ident.clone(), status);
+            statuses.insert(*ident, status);
         }
 
         // OCaml's stats table keeps the existing variable declarations by
@@ -144,7 +144,7 @@ impl TailcallInlineState {
             }],
             StatementDesc::Variable(mut decl) => {
                 if let Some(value) = decl.value.take() {
-                    self.active_decls.push(decl.ident.clone());
+                    self.active_decls.push(decl.ident);
                     decl.value = Some(self.transform_expression(value));
                     self.active_decls.pop();
                 }
@@ -163,7 +163,7 @@ impl TailcallInlineState {
                     && self.tail_callees.contains(&decl.ident)
                     && let Some(inline_decl) = inline_function_decl_from_variable(&decl)
                 {
-                    self.inline_decls.insert(decl.ident.clone(), inline_decl);
+                    self.inline_decls.insert(decl.ident, inline_decl);
                 }
                 decl.ident_info.used_stats = status;
                 match status {
@@ -267,7 +267,7 @@ impl TailcallInlineState {
                             (
                                 value,
                                 CaseClause {
-                                    source_loc: None,
+                                    source_loc: clause.source_loc,
                                     body: self.transform_block(clause.body),
                                     should_break: clause.should_break,
                                     comment: clause.comment,
@@ -592,15 +592,20 @@ impl TailcallInlineState {
             return Err(args);
         }
 
+        // `when Ext_list.same_length params args` (js_pass_tailcall_inline.ml:185)
+        // is checked against the stored declaration without consuming it.
+        if self
+            .inline_decls
+            .get(ident)
+            .is_none_or(|decl| decl.params.len() != args.len())
+        {
+            return Err(args);
+        }
         let Some(decl) = self.inline_decls.remove(ident) else {
             return Err(args);
         };
 
-        if decl.params.len() != args.len() {
-            return Err(args);
-        }
-
-        self.statuses.insert(ident.clone(), UsedStats::DeadPure);
+        self.statuses.insert(*ident, UsedStats::DeadPure);
         Ok(self.inline_function_call_owned(decl.params, decl.body, args))
     }
 
@@ -639,7 +644,7 @@ fn collect_tailcall_use_counts_statement(
         StatementDesc::Block(block) => collect_tailcall_use_counts_block(block, decls, counts),
         StatementDesc::Variable(decl) => {
             decls.insert(
-                decl.ident.clone(),
+                decl.ident,
                 DeclUsageInfo {
                     pure: decl.value.as_ref().is_some_and(js_expr_no_side_effects),
                 },
@@ -710,7 +715,7 @@ fn collect_tailcall_use_counts_expression(
 ) {
     match &expr.desc {
         ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-            *counts.entry(id.clone()).or_insert(0) += 1;
+            *counts.entry(*id).or_insert(0) += 1;
         }
         ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(_, _))
         | ExpressionDesc::Undefined { .. }
@@ -851,7 +856,7 @@ fn collect_once_pure_inline_decls_statement(
                 && tail_callees.contains(&decl.ident)
                 && let Some(inline_decl) = inline_function_decl_from_variable(decl)
             {
-                inline_decls.insert(decl.ident.clone(), inline_decl);
+                inline_decls.insert(decl.ident, inline_decl);
             }
             if let Some(value) = &decl.value {
                 collect_once_pure_inline_decls_expression(
@@ -1253,7 +1258,7 @@ fn inline_tailcall_call(
     {
         if immutable {
             if let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &arg.desc {
-                substitution.insert(param, id.clone());
+                substitution.insert(param, *id);
                 continue;
             }
         }
@@ -1770,11 +1775,49 @@ fn collect_tail_callees(block: &Block) -> HashSet<Ident> {
             }) = block.last()
                 && let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &func.desc
             {
-                self.0.insert(id.clone());
+                self.0.insert(*id);
             }
         }
     }
     let mut callees = TailCallees(HashSet::new());
     crate::js_ir::walk::walk_block(&mut callees, block);
     callees.0
+}
+
+#[cfg(test)]
+mod source_loc_tests {
+    use super::*;
+    use crate::js_ir::Number;
+    use crate::location::Location;
+
+    #[test]
+    fn int_switch_clause_keeps_source_loc() {
+        // Js_record_map (js_record_map.ml:200-202) rebuilds case clauses with
+        // their original `source_loc`.
+        let clause = CaseClause {
+            body: vec![],
+            should_break: true,
+            comment: None,
+            source_loc: Some(Location::none()),
+        };
+        let program = Program::new(
+            vec![Statement {
+                source_loc: None,
+                desc: StatementDesc::IntSwitch(
+                    Expression::number(Number::int(0)),
+                    vec![(0, clause)],
+                    None,
+                ),
+                comment: None,
+            }],
+            vec![],
+        );
+
+        let program = tailcall_inline_program(program);
+
+        let StatementDesc::IntSwitch(_, clauses, _) = &program.block[0].desc else {
+            panic!("expected an int switch");
+        };
+        assert!(clauses[0].1.source_loc.is_some());
+    }
 }

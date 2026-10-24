@@ -12,9 +12,7 @@ use std::sync::Arc;
 pub type ModulePathList = Vec<String>;
 
 /// A source position (`Lexing.position` without the file name).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
     pub line: i32,
     pub bol: i32,
@@ -38,9 +36,7 @@ impl Pos {
 
 /// A source location (`Location.t`). The derived order is OCaml's
 /// polymorphic compare on the record, file names aside.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Loc {
     pub start: Pos,
     pub end: Pos,
@@ -118,7 +114,7 @@ impl Loc {
 }
 
 /// `string Location.loc`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Located<T> {
     pub txt: T,
     pub loc: Loc,
@@ -174,18 +170,10 @@ impl ModulePath {
         }
         current
     }
-
-    /// `Module_path.to_path_with_prefix`.
-    pub fn to_path_with_prefix(&self, prefix: &str) -> ModulePathList {
-        let mut path = self.to_path("");
-        path.pop();
-        path.insert(0, prefix.to_string());
-        path
-    }
 }
 
 /// `field`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Field {
     pub stamp: i32,
     pub fname: Located<String>,
@@ -196,14 +184,14 @@ pub struct Field {
 }
 
 /// `constructor_args`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ConstructorArgs {
     InlineRecord(Vec<Field>),
     Args(Vec<(TypeExprRef, Loc)>),
 }
 
 /// `Constructor.t`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Constructor {
     pub stamp: i32,
     pub cname: Located<String>,
@@ -215,7 +203,7 @@ pub struct Constructor {
 }
 
 /// `Type.kind`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypeKind {
     Abstract(Option<(Path, Vec<TypeExprRef>)>),
     Open,
@@ -226,7 +214,7 @@ pub enum TypeKind {
 
 /// `Type.t`. OCaml keeps the declaration's attributes, which the analysis
 /// only reads for `@editor.completeFrom`; that list is kept instead.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Type {
     pub kind: TypeKind,
     pub decl: Arc<TypeDeclaration>,
@@ -243,7 +231,7 @@ pub enum ExportedKind {
 }
 
 /// `Exported.t`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Exported {
     pub types: Hashtbl<String, i32>,
     pub values: Hashtbl<String, i32>,
@@ -276,17 +264,16 @@ impl Exported {
             ExportedKind::Value => &mut self.values,
             ExportedKind::Module => &mut self.modules,
         };
-        let name = name.to_string();
-        if table.mem(&name) {
+        if table.mem(name) {
             false
         } else {
-            table.add(name, stamp);
+            table.add(name.to_string(), stamp);
             true
         }
     }
 
     pub fn find(&self, kind: ExportedKind, name: &str) -> Option<i32> {
-        self.table(kind).find(&name.to_string()).copied()
+        self.table(kind).find(name).copied()
     }
 
     pub fn iter(&self, kind: ExportedKind) -> impl Iterator<Item = (&String, &i32)> {
@@ -295,7 +282,7 @@ impl Exported {
 }
 
 /// `Module.kind`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleItemKind {
     Value(TypeExprRef),
     Type(Type, RecStatus),
@@ -303,7 +290,7 @@ pub enum ModuleItemKind {
 }
 
 /// `Module.item`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleItem {
     pub kind: ModuleItemKind,
     pub name: String,
@@ -313,7 +300,7 @@ pub struct ModuleItem {
 }
 
 /// `Module.structure`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Structure {
     pub name: String,
     pub docstring: Vec<String>,
@@ -323,7 +310,7 @@ pub struct Structure {
 }
 
 /// `Module.t`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Module {
     Ident(Path),
     Structure(Arc<Structure>),
@@ -412,13 +399,6 @@ impl Stamps {
         }
     }
 
-    pub fn find_constructor(&self, stamp: i32) -> Option<&Declared<Constructor>> {
-        match self.0.find(&stamp) {
-            Some(StampKind::Constructor(d)) => Some(d),
-            _ => None,
-        }
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = (&i32, &StampKind)> {
         self.0.iter()
     }
@@ -491,18 +471,6 @@ pub enum Tip {
     Module,
 }
 
-impl Tip {
-    pub fn to_string(&self) -> String {
-        match self {
-            Tip::Value => "Value".to_string(),
-            Tip::Type => "Type".to_string(),
-            Tip::Field(f) => format!("Field({f})"),
-            Tip::Constructor(a) => format!("Constructor({a})"),
-            Tip::Module => "Module".to_string(),
-        }
-    }
-}
-
 /// `loc_kind`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocKind {
@@ -553,13 +521,6 @@ impl QueryEnv {
         }
     }
 
-    /// `Query_env.to_string`.
-    pub fn to_string(&self) -> String {
-        let mut parts = vec![self.file_module_name.clone()];
-        parts.extend(self.path_rev.iter().rev().cloned());
-        parts.join(".")
-    }
-
     /// `prune_path`: `path_rev` is this env's path, or a suffix of it while
     /// walking up the parents.
     fn prune_path(path_rev: &[String], env: &QueryEnv, name: &str) -> (bool, Vec<String>) {
@@ -588,15 +549,26 @@ impl QueryEnv {
 
     /// `Query_env.enter_structure`.
     pub fn enter_structure(&self, structure: &Structure) -> QueryEnv {
-        let name = structure.name.clone();
-        let mut path_rev = vec![name.clone()];
-        path_rev.extend(QueryEnv::prune_path(&self.path_rev, self, &name).1);
+        let mut path_rev = vec![structure.name.clone()];
+        path_rev.extend(QueryEnv::prune_path(&self.path_rev, self, &structure.name).1);
         QueryEnv {
+            file: self.file,
+            file_module_name: self.file_module_name.clone(),
             exported: structure.exported.clone(),
             path_rev,
             parent: Some(Box::new(self.clone())),
-            ..self.clone()
         }
+    }
+}
+
+/// `Query_env.to_string`.
+impl std::fmt::Display for QueryEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.file_module_name)?;
+        for part in self.path_rev.iter().rev() {
+            write!(f, ".{part}")?;
+        }
+        Ok(())
     }
 }
 
@@ -606,7 +578,9 @@ pub type LocationSet = std::collections::BTreeSet<std::cmp::Reverse<Loc>>;
 /// `extra`.
 #[derive(Debug, Clone)]
 pub struct Extra {
+    /// Each list oldest first: the reverse of OCaml's consed list.
     pub internal_references: Hashtbl<i32, Vec<Loc>>,
+    /// Each list oldest first: the reverse of OCaml's consed list.
     pub external_references: Hashtbl<String, Vec<(ModulePathList, Tip, Loc)>>,
     pub file_references: Hashtbl<String, LocationSet>,
     /// In insertion order: the reverse of OCaml's consed list.

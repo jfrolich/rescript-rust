@@ -131,7 +131,7 @@ fn flatten_and_mark_dead_statement(
                                     &tag_info,
                                     index,
                                 ));
-                                rewritten_items.push(Expression::var(temp.clone()));
+                                rewritten_items.push(Expression::var(temp));
                                 bindings.push(Statement::variable(VariableDeclaration {
                                     ident: temp,
                                     value: Some(rewritten),
@@ -150,7 +150,7 @@ fn flatten_and_mark_dead_statement(
                             ),
                             comment: value_comment,
                         };
-                        substitution.insert(decl.ident.clone(), rewritten_value.clone());
+                        substitution.insert(decl.ident, rewritten_value.clone());
 
                         let original = Statement {
                             source_loc: source_loc.clone(),
@@ -863,15 +863,15 @@ fn is_simple_block_binding_item(expr: &Expression) -> bool {
     // `Self::compile_constant`) so it intentionally does NOT match
     // `Caml_block(Immutable, ...)` patterns elsewhere — and therefore does
     // NOT count as simple here either.
-    match &expr.desc {
+    matches!(
+        &expr.desc,
         ExpressionDesc::Var(_)
-        | ExpressionDesc::Number(_)
-        | ExpressionDesc::Str(_)
-        | ExpressionDesc::TemplateLiteral(_)
-        | ExpressionDesc::Bool(_)
-        | ExpressionDesc::Undefined { .. } => true,
-        _ => false,
-    }
+            | ExpressionDesc::Number(_)
+            | ExpressionDesc::Str(_)
+            | ExpressionDesc::TemplateLiteral(_)
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+    )
 }
 
 fn is_simple_substituted_index_value(expr: &Expression) -> bool {
@@ -1030,7 +1030,7 @@ fn collect_mark_dead_states_variable(
     match states.get(&decl.ident).copied() {
         Some(MarkDeadInfo::Recursive) => {
             states.insert(
-                decl.ident.clone(),
+                decl.ident,
                 MarkDeadInfo::Info {
                     pure,
                     used: true,
@@ -1041,7 +1041,7 @@ fn collect_mark_dead_states_variable(
         Some(MarkDeadInfo::Info { .. }) => {}
         None => {
             states.insert(
-                decl.ident.clone(),
+                decl.ident,
                 MarkDeadInfo::Info {
                     pure,
                     used: false,
@@ -1151,7 +1151,7 @@ fn collect_mark_dead_states_expression(
 fn mark_dead_ident_use(id: &Ident, states: &mut HashMap<Ident, MarkDeadInfo>) {
     match states.get_mut(id) {
         None => {
-            states.insert(id.clone(), MarkDeadInfo::Recursive);
+            states.insert(*id, MarkDeadInfo::Recursive);
         }
         Some(MarkDeadInfo::Recursive) => {}
         Some(MarkDeadInfo::Info { used, .. }) => {

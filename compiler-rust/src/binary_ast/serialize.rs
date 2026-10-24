@@ -46,27 +46,24 @@ impl Marshal for f64 {
     }
 }
 
+// String encoding (including the Latin-1 byte mapping) is handled by
+// `MarshalWriter::write_str`.
+
 impl Marshal for String {
-    /// Strings from source identifiers are Latin-1 encoded (each byte → char),
-    /// so we convert back to Latin-1 to match OCaml's byte-level representation.
-    /// This is safe for ASCII strings (the common case) as Latin-1 = UTF-8 for ASCII.
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        w.write_str(self);
+        self.as_str().marshal(w);
     }
 }
 
 impl Marshal for str {
-    /// Strings from source identifiers are Latin-1 encoded (each byte → char),
-    /// so we convert back to Latin-1 to match OCaml's byte-level representation.
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_str(self);
     }
 }
 
 impl Marshal for Cow<'static, str> {
-    /// Cow<'static, str> delegates to the underlying str slice.
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        w.write_str(self);
+        (**self).marshal(w);
     }
 }
 
@@ -108,40 +105,22 @@ impl<T: Marshal> Marshal for Option<T> {
 // ========== Vec/List type ==========
 
 impl<T: Marshal> Marshal for Vec<T> {
-    /// Lists are encoded as linked cons cells:
-    /// - [] → integer 0
-    /// - [a; b; c] → Block(tag=0, [a, Block(tag=0, [b, Block(tag=0, [c, 0])])])
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        if self.is_empty() {
-            w.write_int(0); // Empty list = int 0
-        } else {
-            // Build cons cells from head to tail
-            for (i, item) in self.iter().enumerate() {
-                // Cons cell: tag 0, size 2
-                w.write_block_header(0, 2);
-                item.marshal(w);
-                // If this is the last element, write nil; otherwise continue
-                if i == self.len() - 1 {
-                    w.write_int(0); // Nil
-                }
-            }
-        }
+        self.as_slice().marshal(w);
     }
 }
 
 impl<T: Marshal> Marshal for [T] {
+    /// Lists are encoded as linked cons cells:
+    /// - [] → integer 0
+    /// - [a; b; c] → Block(tag=0, [a, Block(tag=0, [b, Block(tag=0, [c, 0])])])
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        if self.is_empty() {
-            w.write_int(0);
-        } else {
-            for (i, item) in self.iter().enumerate() {
-                w.write_block_header(0, 2);
-                item.marshal(w);
-                if i == self.len() - 1 {
-                    w.write_int(0);
-                }
-            }
+        for item in self {
+            // Cons cell: tag 0, size 2; the tail follows the head in the stream.
+            w.write_block_header(0, 2);
+            item.marshal(w);
         }
+        w.write_int(0); // Nil
     }
 }
 

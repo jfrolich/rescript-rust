@@ -3,6 +3,7 @@
 //! This module contains the pattern parsing logic, converting tokens
 //! into pattern AST nodes.
 
+use super::module::parse_attributes;
 use std::borrow::Cow;
 
 use super::ast::*;
@@ -13,65 +14,7 @@ use super::longident::Longident;
 use super::state::Parser;
 use super::token::Token;
 use crate::location::Position;
-use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx, StrIdx};
-
-// ============================================================================
-// Attribute Parsing for Patterns
-// ============================================================================
-
-/// Parse attributes (including doc comments which become res.doc attributes).
-fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
-    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
-    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
-    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
-    let mut attrs = vec![];
-    loop {
-        match &p.token {
-            Token::At => {
-                if let Some(attr) = parse_attribute(p) {
-                    attrs.push(attr);
-                }
-            }
-            Token::DocComment { loc, content } => {
-                let loc_cloned = loc.clone();
-                let content = content.clone();
-                p.next();
-                let loc = p.from_location(&loc_cloned);
-                attrs.push(super::core::doc_comment_to_attribute(
-                    p.arena_mut(),
-                    loc,
-                    content,
-                ));
-            }
-            _ => break,
-        }
-    }
-    p.eat_breadcrumb();
-    Attributes::from_vec(attrs)
-}
-
-/// Parse a single attribute.
-fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
-    if p.token != Token::At {
-        return None;
-    }
-    // Capture position before @ so attribute location includes it
-    let start_pos_idx = p.start_pos_idx();
-    p.next();
-
-    let attr_id = parse_attribute_id(p, start_pos_idx);
-
-    let payload = super::module::parse_payload_region(p);
-
-    Some((attr_id, payload))
-}
-
-/// Parse an attribute identifier.
-/// The `start_pos_idx` parameter should be the position BEFORE the `@` was consumed.
-fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrIdx> {
-    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
-    super::module::parse_extension_id(p, start_pos_idx)
-}
+use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx};
 
 // ============================================================================
 // Main Pattern Parsing (OCaml res_core.ml:1210-1830)
@@ -80,7 +23,7 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrI
 /// OCaml `make_pat_variant_spread_attr` (res_core.ml:278-279).
 fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
     let name = p.arena_mut().intern("res.patVariantSpread");
-    (mknoloc(name), Payload::PStr(Box::new(vec![])))
+    (mknoloc(name), Payload::PStr(Box::default()))
 }
 
 fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
@@ -175,12 +118,12 @@ pub fn parse_pattern(p: &mut Parser<'_>) -> Pattern {
 fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
     let attrs = parse_attributes(p);
-    let token = p.token.clone().into_owned();
+    let token = p.token.clone();
     let pattern = match token {
         Token::True | Token::False => {
             let end_pos = p.end_pos_idx();
             p.next();
-            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, end_pos);
             let name = if token == Token::True {
                 "true"
             } else {
@@ -214,7 +157,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             }
         }
         Token::Backtick => {
-            let start_pos = p.arena().get_position(start_pos_idx).clone();
+            let start_pos = *p.arena().get_position(start_pos_idx);
             let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             pat(
@@ -254,17 +197,17 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
         Token::Lbrace => parse_record_pattern(p, attrs.clone()),
         Token::Underscore => {
             let end_pos = p.end_pos_idx();
-            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, end_pos);
             p.next();
             pat(PatternDesc::Ppat_any, loc, attrs.clone())
         }
         Token::Lident(ident) => {
             let ident = ident.to_string();
             let end_pos = p.end_pos_idx();
-            let loc = p.mk_loc_idx_full(start_pos_idx, end_pos);
+            let loc = p.mk_loc_idx(start_pos_idx, end_pos);
             p.next();
             if p.token == Token::Backtick {
-                let start_pos = p.arena().get_position(start_pos_idx).clone();
+                let start_pos = *p.arena().get_position(start_pos_idx);
                 let constant = parse_template_constant(p, start_pos, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 pat(
@@ -379,7 +322,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
         }
     };
     let pattern = if alias {
-        parse_alias_pattern(p, pattern, attrs.as_slice().to_vec())
+        parse_alias_pattern(p, pattern, attrs.as_slice())
     } else {
         pattern
     };
@@ -391,7 +334,8 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
 }
 
 /// OCaml `parse_alias_pattern ~attrs` (res_core.ml:1377-1386).
-pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: Vec<Attribute>) -> Pattern {
+/// The attributes are only copied once an `as` alias is actually parsed.
+pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: &[Attribute]) -> Pattern {
     if p.token != Token::As {
         return pattern;
     }
@@ -403,7 +347,7 @@ pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: Vec<Attr
     pat(
         PatternDesc::Ppat_alias(pattern_idx, with_loc(name_idx, name_loc)),
         loc,
-        Attributes::from_vec(attrs),
+        Attributes::from_vec(attrs.to_vec()),
     )
 }
 
@@ -558,7 +502,7 @@ fn parse_module_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
         p.expect(Token::Rparen);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let unpack = pat(
-            PatternDesc::Ppat_unpack(uident.clone()),
+            PatternDesc::Ppat_unpack(uident),
             uident.loc,
             Attributes::new(),
         );
@@ -716,8 +660,8 @@ fn parse_record_pattern_row_field(p: &mut Parser<'_>, attrs: Attributes) -> Patt
         }
         Token::Equal => {
             p.err_at(
-                p.start_pos.clone(),
-                p.end_pos.clone(),
+                p.start_pos,
+                p.end_pos,
                 DiagnosticCategory::message(
                     "Record patterns use `:` when matching fields. Example: `{field: value}`",
                 ),
@@ -889,7 +833,7 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
                 if has_spread {
                     p.err_at(
                         p.loc_start(p.arena().get_pat(field.pat).ppat_loc),
-                        p.end_pos.clone(),
+                        p.end_pos,
                         DiagnosticCategory::Message(
                             super::core::error_messages::RECORD_PATTERN_SPREAD.to_string(),
                         ),
@@ -903,7 +847,7 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
                 } else {
                     p.err_at(
                         p.loc_start(rest_pat.rest_loc),
-                        p.end_pos.clone(),
+                        p.end_pos,
                         DiagnosticCategory::Message(
                             super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
                         ),
@@ -963,7 +907,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(
             mknoloc(dict_idx),
-            Payload::PStr(Box::new(vec![])),
+            Payload::PStr(Box::default()),
         )])
         .concat(attrs),
     }

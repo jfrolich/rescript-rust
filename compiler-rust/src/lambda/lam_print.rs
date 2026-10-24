@@ -11,7 +11,6 @@ use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{DirectionFlag, Lambda};
-use crate::location::Location;
 
 /// Print kind for let bindings.
 #[derive(Debug, Clone, Copy)]
@@ -131,7 +130,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PinitMod => write!(f, "init_mod!"),
         Primitive::PupdateMod => write!(f, "update_mod!"),
         Primitive::PjsApply => write!(f, "#apply"),
-        Primitive::PjsRuntimeApply => write!(f, "#runtime_apply"),
         Primitive::PtaggedTemplate(_) => write!(f, "#tagged_template"),
         Primitive::Ptemplate(_) => write!(f, "#template"),
         Primitive::PjsObjectGet(name) => write!(f, "js_object_get[{name}]"),
@@ -273,31 +271,14 @@ impl<'a> LambdaPrinter<'a> {
     }
 }
 
-/// OCaml-style raw lambda printer for `-drawlambda`.
-pub struct RawLambdaPrinter<'a> {
-    lambda: &'a Lambda,
-}
-
-impl<'a> RawLambdaPrinter<'a> {
-    pub fn new(lambda: &'a Lambda) -> Self {
-        Self { lambda }
-    }
-}
-
 impl fmt::Display for LambdaPrinter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format_lambda(self.lambda, f, 0)
+        format_lambda(self.lambda, f)
     }
 }
 
-impl fmt::Display for RawLambdaPrinter<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format_raw_lambda(self.lambda, f, 0)
-    }
-}
-
-/// Format a Lambda expression with indentation.
-fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
+/// Format a Lambda expression on a single line.
+fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match lam {
         Lambda::Lvar(id) => write!(f, "{}", id.name()),
 
@@ -314,10 +295,10 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
                 write!(f, "%inlined")?;
             }
             write!(f, " ")?;
-            format_lambda(&apply.ap_func, f, indent)?;
+            format_lambda(&apply.ap_func, f)?;
             for arg in &apply.ap_args {
                 write!(f, " ")?;
-                format_lambda(arg, f, indent)?;
+                format_lambda(arg, f)?;
             }
             write!(f, ")")
         }
@@ -328,27 +309,22 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
                 write!(f, " {}", param.name())?;
             }
             write!(f, " ")?;
-            format_lambda(&func.body, f, indent + 1)?;
+            format_lambda(&func.body, f)?;
             write!(f, ")")
         }
 
-        Lambda::Llet(_kind, _id, _arg, body) => {
-            let bindings = flatten_lets(lam);
+        Lambda::Llet(..) => {
+            let (bindings, body) = flatten_lets(lam);
             write!(f, "(let (")?;
             for (i, (k, id, expr)) in bindings.iter().enumerate() {
                 if i > 0 {
                     write!(f, " ")?;
                 }
                 write!(f, "{}{} = ", id.name(), k.as_str())?;
-                format_lambda(expr, f, indent + 1)?;
+                format_lambda(expr, f)?;
             }
             write!(f, ") ")?;
-            // Get the innermost body
-            let mut current = body.as_ref();
-            while let Lambda::Llet(_, _, _, inner) = current {
-                current = inner.as_ref();
-            }
-            format_lambda(current, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, ")")
         }
 
@@ -359,10 +335,10 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
                     write!(f, " ")?;
                 }
                 write!(f, "{}r = ", id.name())?;
-                format_lambda(expr, f, indent + 1)?;
+                format_lambda(expr, f)?;
             }
             write!(f, ") ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, ")")
         }
 
@@ -378,7 +354,7 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
             format_primitive(&prim_info.primitive, f)?;
             for arg in &prim_info.args {
                 write!(f, " ")?;
-                format_lambda(arg, f, indent)?;
+                format_lambda(arg, f)?;
             }
             write!(f, ")")
         }
@@ -386,32 +362,32 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
         Lambda::Lswitch(arg, switch) => {
             let has_fail = switch.sw_failaction.is_some();
             write!(f, "({}switch ", if has_fail { "" } else { "*" })?;
-            format_lambda(arg, f, indent)?;
+            format_lambda(arg, f)?;
             for (tag, case) in &switch.sw_consts {
                 write!(f, " case int {tag}: ")?;
-                format_lambda(case, f, indent + 1)?;
+                format_lambda(case, f)?;
             }
             for (tag, case) in &switch.sw_blocks {
                 write!(f, " case tag {tag}: ")?;
-                format_lambda(case, f, indent + 1)?;
+                format_lambda(case, f)?;
             }
             if let Some(ref fail) = switch.sw_failaction {
                 write!(f, " default: ")?;
-                format_lambda(fail, f, indent + 1)?;
+                format_lambda(fail, f)?;
             }
             write!(f, ")")
         }
 
         Lambda::LstringSwitch(arg, cases, default) => {
             write!(f, "(stringswitch ")?;
-            format_lambda(arg, f, indent)?;
+            format_lambda(arg, f)?;
             for (s, case) in cases {
                 write!(f, " case {s:?}: ")?;
-                format_lambda(case, f, indent + 1)?;
+                format_lambda(case, f)?;
             }
             if let Some(d) = default {
                 write!(f, " default: ")?;
-                format_lambda(d, f, indent + 1)?;
+                format_lambda(d, f)?;
             }
             write!(f, ")")
         }
@@ -420,54 +396,54 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
             write!(f, "(exit {i}")?;
             for arg in args {
                 write!(f, " ")?;
-                format_lambda(arg, f, indent)?;
+                format_lambda(arg, f)?;
             }
             write!(f, ")")
         }
 
         Lambda::LstaticCatch(body, (i, vars), handler) => {
             write!(f, "(catch ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, " with ({i}")?;
             for v in vars {
                 write!(f, " {}", v.name())?;
             }
             write!(f, ") ")?;
-            format_lambda(handler, f, indent + 1)?;
+            format_lambda(handler, f)?;
             write!(f, ")")
         }
 
         Lambda::LtryWith(body, exn, handler) => {
             write!(f, "(try ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, " with {} ", exn.name())?;
-            format_lambda(handler, f, indent + 1)?;
+            format_lambda(handler, f)?;
             write!(f, ")")
         }
 
         Lambda::LifThenElse(cond, then_, else_) => {
             write!(f, "(if ")?;
-            format_lambda(cond, f, indent)?;
+            format_lambda(cond, f)?;
             write!(f, " ")?;
-            format_lambda(then_, f, indent + 1)?;
+            format_lambda(then_, f)?;
             write!(f, " ")?;
-            format_lambda(else_, f, indent + 1)?;
+            format_lambda(else_, f)?;
             write!(f, ")")
         }
 
         Lambda::Lsequence(e1, e2) => {
             write!(f, "(seq ")?;
-            format_sequence(e1, f, indent)?;
+            format_sequence(e1, f)?;
             write!(f, " ")?;
-            format_sequence(e2, f, indent)?;
+            format_sequence(e2, f)?;
             write!(f, ")")
         }
 
         Lambda::Lwhile(cond, body) => {
             write!(f, "(while ")?;
-            format_lambda(cond, f, indent)?;
+            format_lambda(cond, f)?;
             write!(f, " ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, ")")
         }
 
@@ -477,27 +453,27 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
                 DirectionFlag::Downto => "downto",
             };
             write!(f, "(for {} ", v.name())?;
-            format_lambda(lo, f, indent)?;
+            format_lambda(lo, f)?;
             write!(f, " {dir_str} ")?;
-            format_lambda(hi, f, indent)?;
+            format_lambda(hi, f)?;
             write!(f, " ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, ")")
         }
 
         Lambda::Lfor_of(v, iterable, body) => {
             write!(f, "(for {} of ", v.name())?;
-            format_lambda(iterable, f, indent)?;
+            format_lambda(iterable, f)?;
             write!(f, " ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, ")")
         }
 
         Lambda::Lfor_await_of(v, iterable, body) => {
             write!(f, "(for await {} of ", v.name())?;
-            format_lambda(iterable, f, indent)?;
+            format_lambda(iterable, f)?;
             write!(f, " ")?;
-            format_lambda(body, f, indent + 1)?;
+            format_lambda(body, f)?;
             write!(f, ")")
         }
 
@@ -506,14 +482,15 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
 
         Lambda::Lassign(id, expr) => {
             write!(f, "(assign {} ", id.name())?;
-            format_lambda(expr, f, indent)?;
+            format_lambda(expr, f)?;
             write!(f, ")")
         }
     }
 }
 
 /// Flatten nested let bindings for pretty printing.
-fn flatten_lets(lam: &Lambda) -> Vec<(PrintKind, &crate::ident::Ident, &Lambda)> {
+/// Returns the collected bindings and the innermost body.
+fn flatten_lets(lam: &Lambda) -> (Vec<(PrintKind, &Ident, &Lambda)>, &Lambda) {
     let mut result = Vec::new();
     let mut current = lam;
 
@@ -533,18 +510,18 @@ fn flatten_lets(lam: &Lambda) -> Vec<(PrintKind, &crate::ident::Ident, &Lambda)>
         }
     }
 
-    result
+    (result, current)
 }
 
 /// Format a sequence expression.
-fn format_sequence(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
+fn format_sequence(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match lam {
         Lambda::Lsequence(e1, e2) => {
-            format_sequence(e1, f, indent)?;
+            format_sequence(e1, f)?;
             write!(f, " ")?;
-            format_sequence(e2, f, indent)
+            format_sequence(e2, f)
         }
-        _ => format_lambda(lam, f, indent),
+        _ => format_lambda(lam, f),
     }
 }
 
@@ -573,10 +550,6 @@ pub fn raw_primitive_to_string(p: &Primitive) -> String {
         }
     }
     format!("{}", PrimWrapper(p))
-}
-
-fn format_raw_ident(id: &Ident, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{id:?}")
 }
 
 fn format_raw_tag_info(tag_info: &TagInfo, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -655,374 +628,6 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
     }
 }
 
-fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match c {
-        Constant::JsTrue => write!(f, "true"),
-        Constant::JsFalse => write!(f, "false"),
-        Constant::JsUndefined { .. } => write!(f, "0a"),
-        Constant::JsNull => write!(f, "null"),
-        Constant::Int { i, .. } => write!(f, "{i}"),
-        Constant::NativeInt { i, .. } => write!(f, "{i}"),
-        Constant::Constructor(tag) => write!(f, "{}", tag.name),
-        Constant::Char(c) => {
-            if let Some(ch) = char::from_u32(*c as u32) {
-                write!(f, "'{ch}'")
-            } else {
-                write!(f, "'\\x{c:02x}'")
-            }
-        }
-        Constant::String(s) => write!(f, "{s:?}"),
-        Constant::ImmString(s) => write!(f, "#{s:?}"),
-        Constant::Float(s) => write!(f, "{s}"),
-        Constant::BigInt { negative, value } => {
-            if *negative {
-                write!(f, "-{value}n")
-            } else {
-                write!(f, "{value}n")
-            }
-        }
-        Constant::Pointer(name) => write!(f, "{name}"),
-        Constant::Block { tag_info, elements } => {
-            let tag = tag_info.tag_label();
-            if elements.is_empty() {
-                write!(f, "[{tag}]")
-            } else {
-                write!(f, "[{tag}:")?;
-                for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    format_raw_constant(elem, f)?;
-                }
-                write!(f, "]")
-            }
-        }
-        Constant::Some(inner) => format_raw_constant(inner, f),
-        Constant::ModuleAlias => write!(f, "0a"),
-    }
-}
-
-fn raw_innermost_let_body<'a>(mut lam: &'a Lambda) -> &'a Lambda {
-    loop {
-        match lam {
-            Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => lam = body.as_ref(),
-            _ => return lam,
-        }
-    }
-}
-
-fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
-    match lam {
-        Lambda::Lvar(id) => format_raw_ident(id, f),
-        Lambda::LglobalModule(id) => {
-            write!(f, "global ")?;
-            format_raw_ident(id, f)
-        }
-        Lambda::Lconst(c) => format_raw_constant(c, f),
-        Lambda::Lapply(apply) => {
-            write!(f, "(apply")?;
-            if matches!(
-                apply.ap_info.inlined,
-                crate::lambda::InlineAttribute::Always
-            ) {
-                write!(f, "%inlined")?;
-            }
-            write!(f, " ")?;
-            format_raw_lambda(&apply.ap_func, f, indent)?;
-            for arg in &apply.ap_args {
-                write!(f, " ")?;
-                format_raw_lambda(arg, f, indent)?;
-            }
-            write!(f, ")")
-        }
-        Lambda::Lfunction(func) => {
-            write!(f, "(function")?;
-            for param in &func.params {
-                write!(f, " ")?;
-                format_raw_ident(param, f)?;
-            }
-            write!(f, " ")?;
-            format_raw_lambda(&func.body, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Llet(_kind, _id, _arg, body) => {
-            let bindings = flatten_lets(lam);
-            write!(f, "(let (")?;
-            for (i, (k, id, expr)) in bindings.iter().enumerate() {
-                if i > 0 {
-                    write!(f, " ")?;
-                }
-                format_raw_ident(id, f)?;
-                write!(f, " ={}", k.as_str())?;
-                if !k.as_str().is_empty() {
-                    write!(f, "")?;
-                }
-                write!(f, " ")?;
-                format_raw_lambda(expr, f, indent + 1)?;
-            }
-            write!(f, ") ")?;
-            format_raw_lambda(raw_innermost_let_body(body), f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lletrec(bindings, body) => {
-            write!(f, "(letrec (")?;
-            for (i, (id, expr)) in bindings.iter().enumerate() {
-                if i > 0 {
-                    write!(f, " ")?;
-                }
-                format_raw_ident(id, f)?;
-                write!(f, " ")?;
-                format_raw_lambda(expr, f, indent + 1)?;
-            }
-            write!(f, ") ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lprim(prim_info) => {
-            if let Primitive::Pfield(n, FieldDbgInfo::Module { name }) = &prim_info.primitive {
-                if let [Lambda::LglobalModule(id)] = prim_info.args.as_slice() {
-                    format_raw_ident(id, f)?;
-                    return write!(f, ".{name}/{n}");
-                }
-            }
-
-            write!(f, "(")?;
-            format_raw_primitive(&prim_info.primitive, f)?;
-            for arg in &prim_info.args {
-                write!(f, " ")?;
-                format_raw_lambda(arg, f, indent)?;
-            }
-            write!(f, ")")
-        }
-        Lambda::Lswitch(arg, switch) => {
-            let has_fail = switch.sw_failaction.is_some();
-            write!(f, "({}switch ", if has_fail { "" } else { "*" })?;
-            format_raw_lambda(arg, f, indent)?;
-            for (tag, case) in &switch.sw_consts {
-                write!(f, " case int {tag}: ")?;
-                format_raw_lambda(case, f, indent + 1)?;
-            }
-            for (tag, case) in &switch.sw_blocks {
-                write!(f, " case tag {tag}: ")?;
-                format_raw_lambda(case, f, indent + 1)?;
-            }
-            if let Some(ref fail) = switch.sw_failaction {
-                write!(f, " default: ")?;
-                format_raw_lambda(fail, f, indent + 1)?;
-            }
-            write!(f, ")")
-        }
-        Lambda::LstringSwitch(arg, cases, default) => {
-            write!(f, "(stringswitch ")?;
-            format_raw_lambda(arg, f, indent)?;
-            for (s, case) in cases {
-                write!(f, " case {s:?}: ")?;
-                format_raw_lambda(case, f, indent + 1)?;
-            }
-            if let Some(d) = default {
-                write!(f, " default: ")?;
-                format_raw_lambda(d, f, indent + 1)?;
-            }
-            write!(f, ")")
-        }
-        Lambda::LstaticRaise(i, args) => {
-            write!(f, "(exit {i}")?;
-            for arg in args {
-                write!(f, " ")?;
-                format_raw_lambda(arg, f, indent)?;
-            }
-            write!(f, ")")
-        }
-        Lambda::LstaticCatch(body, (i, vars), handler) => {
-            write!(f, "(catch ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, " with ({i}")?;
-            for v in vars {
-                write!(f, " ")?;
-                format_raw_ident(v, f)?;
-            }
-            write!(f, ") ")?;
-            format_raw_lambda(handler, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::LtryWith(body, exn, handler) => {
-            write!(f, "(try ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, " with ")?;
-            format_raw_ident(exn, f)?;
-            write!(f, " ")?;
-            format_raw_lambda(handler, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::LifThenElse(cond, then_, else_) => {
-            write!(f, "(if ")?;
-            format_raw_lambda(cond, f, indent)?;
-            write!(f, " ")?;
-            format_raw_lambda(then_, f, indent + 1)?;
-            write!(f, " ")?;
-            format_raw_lambda(else_, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lsequence(e1, e2) => {
-            write!(f, "(seq ")?;
-            format_raw_sequence(e1, f, indent)?;
-            write!(f, " ")?;
-            format_raw_sequence(e2, f, indent)?;
-            write!(f, ")")
-        }
-        Lambda::Lwhile(cond, body) => {
-            write!(f, "(while ")?;
-            format_raw_lambda(cond, f, indent)?;
-            write!(f, " ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lfor(v, lo, hi, dir, body) => {
-            let dir_str = match dir {
-                DirectionFlag::Upto => "to",
-                DirectionFlag::Downto => "downto",
-            };
-            write!(f, "(for ")?;
-            format_raw_ident(v, f)?;
-            write!(f, " ")?;
-            format_raw_lambda(lo, f, indent)?;
-            write!(f, " {dir_str} ")?;
-            format_raw_lambda(hi, f, indent)?;
-            write!(f, " ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lfor_of(v, iterable, body) => {
-            write!(f, "(for ")?;
-            format_raw_ident(v, f)?;
-            write!(f, " of ")?;
-            format_raw_lambda(iterable, f, indent)?;
-            write!(f, " ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lfor_await_of(v, iterable, body) => {
-            write!(f, "(for await ")?;
-            format_raw_ident(v, f)?;
-            write!(f, " of ")?;
-            format_raw_lambda(iterable, f, indent)?;
-            write!(f, " ")?;
-            format_raw_lambda(body, f, indent + 1)?;
-            write!(f, ")")
-        }
-        Lambda::Lbreak => write!(f, "break"),
-        Lambda::Lcontinue => write!(f, "continue"),
-        Lambda::Lassign(id, expr) => {
-            write!(f, "(assign ")?;
-            format_raw_ident(id, f)?;
-            write!(f, " ")?;
-            format_raw_lambda(expr, f, indent)?;
-            write!(f, ")")
-        }
-    }
-}
-
-fn format_raw_sequence(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
-    match lam {
-        Lambda::Lsequence(e1, e2) => {
-            format_raw_sequence(e1, f, indent)?;
-            write!(f, " ")?;
-            format_raw_sequence(e2, f, indent)
-        }
-        _ => format_raw_lambda(lam, f, indent),
-    }
-}
-
-#[derive(Clone)]
-enum TopLevelItem {
-    Eval(Lambda),
-    Lets(Vec<(LetKind, Ident, Lambda)>),
-    LetRec(Vec<(Ident, Lambda)>),
-}
-
-fn flatten_top_level_sequence<'a>(lam: &'a Lambda, out: &mut Vec<&'a Lambda>) {
-    match lam {
-        Lambda::Lsequence(left, right) => {
-            flatten_top_level_sequence(left, out);
-            flatten_top_level_sequence(right, out);
-        }
-        _ => out.push(lam),
-    }
-}
-
-fn extract_top_level_lets(lam: &Lambda) -> Option<Vec<(LetKind, Ident, Lambda)>> {
-    let mut bindings = Vec::new();
-    let mut current = lam;
-    loop {
-        match current {
-            Lambda::Llet(kind, id, arg, body) => {
-                bindings.push((*kind, id.clone(), arg.as_ref().clone()));
-                current = body.as_ref();
-            }
-            other if other.is_unit() => return Some(bindings),
-            _ => return None,
-        }
-    }
-}
-
-fn extract_top_level_letrec(lam: &Lambda) -> Option<Vec<(Ident, Lambda)>> {
-    match lam {
-        Lambda::Lletrec(bindings, body) if body.is_unit() => Some(bindings.clone()),
-        _ => None,
-    }
-}
-
-fn rebuild_top_level_structure(lam: &Lambda) -> Option<Lambda> {
-    let mut flat_items = Vec::new();
-    flatten_top_level_sequence(lam, &mut flat_items);
-    if flat_items.is_empty() {
-        return None;
-    }
-
-    let mut items = Vec::new();
-    let mut export_ids = Vec::new();
-
-    for item in flat_items {
-        if let Some(bindings) = extract_top_level_lets(item) {
-            export_ids.extend(bindings.iter().map(|(_, id, _)| id.clone()));
-            items.push(TopLevelItem::Lets(bindings));
-        } else if let Some(bindings) = extract_top_level_letrec(item) {
-            export_ids.extend(bindings.iter().map(|(id, _)| id.clone()));
-            items.push(TopLevelItem::LetRec(bindings));
-        } else {
-            items.push(TopLevelItem::Eval(item.clone()));
-        }
-    }
-
-    let export_block = Lambda::prim(
-        Primitive::Pmakeblock(
-            TagInfo::ModuleExport(export_ids.clone()),
-            Mutable::Immutable,
-        ),
-        export_ids.iter().cloned().map(Lambda::var).collect(),
-        Location::none(),
-    );
-
-    let mut body = export_block;
-    for item in items.into_iter().rev() {
-        match item {
-            TopLevelItem::Eval(expr) => {
-                body = Lambda::seq(expr, body);
-            }
-            TopLevelItem::Lets(bindings) => {
-                for (kind, id, expr) in bindings.into_iter().rev() {
-                    body = Lambda::Llet(kind, id, Box::new(expr), Box::new(body));
-                }
-            }
-            TopLevelItem::LetRec(bindings) => {
-                body = Lambda::Lletrec(bindings, Box::new(body));
-            }
-        }
-    }
-
-    Some(body)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1058,9 +663,10 @@ mod tests {
         let x = Ident::create_local("x");
         let func = Lambda::function_(
             1,
-            vec![x.clone()],
-            Lambda::var(x.clone()),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            vec![x],
+            Lambda::var(x),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         let s = lambda_to_string(&func);
         assert!(s.contains("function"));

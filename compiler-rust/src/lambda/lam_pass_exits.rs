@@ -196,16 +196,13 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
             no_bounded_variables(arg)
                 && sw.sw_consts.iter().all(|(_, x)| no_bounded_variables(x))
                 && sw.sw_blocks.iter().all(|(_, x)| no_bounded_variables(x))
-                && sw
-                    .sw_failaction
-                    .as_deref()
-                    .map_or(true, no_bounded_variables)
+                && sw.sw_failaction.as_deref().is_none_or(no_bounded_variables)
         }
         // lam_pass_exits.ml:44-45
         Lambda::LstringSwitch(arg, cases, default) => {
             no_bounded_variables(arg)
                 && cases.iter().all(|(_, x)| no_bounded_variables(x))
-                && default.as_deref().map_or(true, no_bounded_variables)
+                && default.as_deref().is_none_or(no_bounded_variables)
         }
         // lam_pass_exits.ml:46
         Lambda::LstaticRaise(_, args) => args.iter().all(no_bounded_variables),
@@ -301,14 +298,14 @@ fn subst_helper_owned(
                     l
                 })
                 .collect();
-            if let Some((xs, handler)) = subst.get(&i).cloned() {
+            if let Some((xs, handler)) = subst.get(&i) {
                 // Rename xs to fresh ys (lam_pass_exits.ml:193-197).
                 let ys: Vec<Ident> = xs.iter().map(|x| x.rename(id_gen)).collect();
                 let mut env = HashMap::new();
                 for (x, y) in xs.iter().zip(ys.iter()) {
-                    env.insert(x.clone(), Lambda::Lvar(y.clone()));
+                    env.insert(*x, Lambda::Lvar(*y));
                 }
-                let body = subst_lambda(&env, handler);
+                let body = subst_lambda(&env, handler.clone());
                 // fold_right2 ys ls' body (fun y l r -> Lambda.let_ Strict y l r)
                 let mut result = body;
                 for (y, l) in ys.into_iter().zip(ls.into_iter()).rev() {
@@ -406,8 +403,8 @@ mod tests {
         // catch (raise 1 [Lconst 7]) with (1 x) Lvar x => let x' = 7 in Lvar x'
         let x = Ident::create_local("x");
         let raise = Lambda::LstaticRaise(1, vec![Lambda::Lconst(crate::lambda::Constant::int(7))]);
-        let handler = Lambda::Lvar(x.clone());
-        let lam = Lambda::LstaticCatch(Box::new(raise), (1, vec![x.clone()]), Box::new(handler));
+        let handler = Lambda::Lvar(x);
+        let lam = Lambda::LstaticCatch(Box::new(raise), (1, vec![x]), Box::new(handler));
         let simplified = simplify_exits_standalone(&lam);
         match simplified {
             Lambda::Llet(LetKind::Strict, _, _, body) => {

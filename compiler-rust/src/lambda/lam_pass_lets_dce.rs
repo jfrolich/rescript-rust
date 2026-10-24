@@ -1,7 +1,7 @@
 //! Direct port of `compiler/core/lam_pass_lets_dce.ml`.
 //!
 //! Combines dead-code elimination of let bindings with alias inlining: every
-//! decision is driven by the precomputed [`OccTbl`] from
+//! decision is driven by the precomputed [`OccurrenceTable`] from
 //! [`super::lam_pass_count::collect_occurs`], so this pass is O(n).
 //!
 //! Each match arm cites the OCaml line in `lam_pass_lets_dce.ml` that
@@ -14,7 +14,7 @@ use crate::lambda::lam_analysis::{lfunction_can_be_inlined, no_side_effects};
 use crate::lambda::lam_beta_reduce::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_pass_count::{OccTbl, UsedInfo, collect_occurs, dummy_info};
+use crate::lambda::lam_pass_count::{OccurrenceTable, UsedInfo, collect_occurs};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_util::refine_let_original;
 use crate::lambda::lambda_traverse::{Mapped, shallow_map_sharing};
@@ -24,13 +24,13 @@ use crate::lambda::{Apply, Lambda, PrimInfo};
 /// string table for downstream `Pstringadd` constant folding. Both mirror
 /// OCaml's `Hash_ident.t` (lam_pass_lets_dce.ml:15-16).
 struct LetsState<'a> {
-    occ: &'a OccTbl,
+    occ: &'a OccurrenceTable,
     subst: HashMap<Ident, Lambda>,
     string_table: HashMap<Ident, String>,
 }
 
 impl<'a> LetsState<'a> {
-    fn new(occ: &'a OccTbl) -> Self {
+    fn new(occ: &'a OccurrenceTable) -> Self {
         Self {
             occ,
             subst: HashMap::with_capacity(32),
@@ -41,10 +41,7 @@ impl<'a> LetsState<'a> {
     /// Equivalent of OCaml's `count_var v` lookup
     /// (lam_pass_lets_dce.ml:209-213): returns the recorded info or the dummy.
     fn count_var(&self, v: &Ident) -> UsedInfo {
-        self.occ
-            .get(v)
-            .map(|cell| *cell.borrow())
-            .unwrap_or_else(dummy_info)
+        self.occ.get(v)
     }
 
     /// Equivalent of OCaml's `used` helper (lam_pass_lets_dce.ml:17).
@@ -125,7 +122,7 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             }
 
             if let Lambda::Lconst(Constant::String(s)) = l1.as_ref() {
-                state.string_table.insert(v.clone(), s.clone());
+                state.string_table.insert(v, s.clone());
                 let (simplified_body, _) = simplif(state, *l2);
                 return (Lambda::let_(LetKind::Alias, v, *l1, simplified_body), true);
             }
@@ -143,7 +140,7 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             }
             let (new_l1, c1) = simplif(state, *l1);
             if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
-                state.string_table.insert(v.clone(), s.clone());
+                state.string_table.insert(v, s.clone());
                 let (simplified_body, _) = simplif(state, *lbody);
                 return (
                     Lambda::let_(LetKind::Alias, v, new_l1, simplified_body),
@@ -170,7 +167,7 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             let (new_l1, c1) = simplif(state, *l1);
             if matches!(kind, LetKind::Strict) {
                 if let Lambda::Lconst(Constant::String(s)) = &new_l1 {
-                    state.string_table.insert(v.clone(), s.clone());
+                    state.string_table.insert(v, s.clone());
                     let (simplified_body, _) = simplif(state, *l2);
                     return (
                         Lambda::let_(LetKind::Alias, v, new_l1, simplified_body),
@@ -207,14 +204,14 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             let mut args = args.into_iter();
             let (l_simpl, _) = simplif(state, args.next().expect("checked left arg"));
             let (r_simpl, _) = simplif(state, args.next().expect("checked right arg"));
-            let opt_l = lookup_string(&l_simpl, &state.string_table);
-            let result = match opt_l {
-                None => Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc),
-                Some(l_s) => match lookup_string(&r_simpl, &state.string_table) {
-                    None => Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc),
-                    Some(r_s) => Lambda::Lconst(Constant::String(format!("{}{}", l_s, r_s))),
-                },
+            let folded = match lookup_string(&l_simpl, &state.string_table) {
+                None => None,
+                Some(l_s) => lookup_string(&r_simpl, &state.string_table)
+                    .map(|r_s| Lambda::Lconst(Constant::String([l_s, r_s].concat()))),
             };
+            let result = folded.unwrap_or_else(|| {
+                Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc)
+            });
             (result, true)
         }
 
@@ -225,16 +222,17 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
 /// Equivalent of OCaml's nested string-table lookup used by the Pstringadd
 /// branch (lam_pass_lets_dce.ml:158-163, 167-172). Returns Some(s) when the
 /// argument is an inline string literal or an alias for one.
-fn lookup_string(lam: &Lambda, table: &HashMap<Ident, String>) -> Option<String> {
+fn lookup_string<'a>(lam: &'a Lambda, table: &'a HashMap<Ident, String>) -> Option<&'a str> {
     match lam {
-        Lambda::Lconst(Constant::String(s)) => Some(s.clone()),
-        Lambda::Lvar(i) => table.get(i).cloned(),
+        Lambda::Lconst(Constant::String(s)) => Some(s),
+        Lambda::Lvar(i) => table.get(i).map(String::as_str),
         _ => None,
     }
 }
 
-/// Direct port of `Lam_pass_lets_dce.simplify_lets` (lam_pass_lets_dce.ml:216-219).
-pub fn simplify_lets(lam: &Lambda) -> Lambda {
+/// Borrowing test helper around [`simplify_lets_owned`].
+#[cfg(test)]
+fn simplify_lets(lam: &Lambda) -> Lambda {
     simplify_lets_owned(lam.clone())
 }
 
@@ -264,7 +262,7 @@ mod tests {
         let x = ident("x", 100);
         let lam = Lambda::let_(
             LetKind::Alias,
-            x.clone(),
+            x,
             Lambda::Lconst(Constant::int(1)),
             Lambda::Lvar(x),
         );
@@ -282,7 +280,7 @@ mod tests {
             LetKind::Alias,
             x,
             Lambda::Lconst(Constant::int(1)),
-            Lambda::Lvar(other.clone()),
+            Lambda::Lvar(other),
         );
         let result = simplify_lets(&lam);
         match result {
@@ -301,7 +299,7 @@ mod tests {
             LetKind::Strict,
             x,
             Lambda::Lconst(Constant::int(7)),
-            Lambda::Lvar(other.clone()),
+            Lambda::Lvar(other),
         );
         let result = simplify_lets(&lam);
         match result {
@@ -318,7 +316,7 @@ mod tests {
         let y = ident("y", 106);
         let concat = Lambda::prim(
             Primitive::Pstringadd,
-            vec![Lambda::Lvar(x.clone()), Lambda::Lvar(y.clone())],
+            vec![Lambda::Lvar(x), Lambda::Lvar(y)],
             crate::location::Location::none(),
         );
         let inner = Lambda::let_(

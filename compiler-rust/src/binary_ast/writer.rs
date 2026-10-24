@@ -28,6 +28,8 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -40,67 +42,24 @@ use super::serialize::Marshal;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{
     Attributes, IncludeDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc,
-    Signature, Structure, StructureItem, StructureItemDesc,
+    Signature, SignatureItem, Structure, StructureItem, StructureItemDesc,
 };
 
 /// The separator character used in the binary AST format.
 const MAGIC_SEP_CHAR: u8 = b'\n';
-const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
-const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
+pub const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
+pub const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
 
-/// Write a binary AST file for a structure (implementation, .ast file).
-///
-/// # Arguments
-///
-/// * `output_path` - Path to the output .ast file
-/// * `source_path` - Absolute path to the source file
-/// * `arena` - The parse arena containing location data
-/// * `ast` - The parsed structure AST
-///
-/// # Returns
-///
-/// Returns `Ok(())` on success, or an `io::Error` if writing fails.
-pub fn write_structure_ast(
+/// Write a parsetree0 binary AST file for a structure (implementation, .ast file).
+#[cfg(test)]
+fn write_structure_ast(
     output_path: &Path,
     source_path: &str,
     arena: &mut ParseArena,
     ast: &Structure,
 ) -> io::Result<()> {
-    // 1. Extract dependencies
     let deps = extract_structure_deps(arena, ast);
-
-    // 2. Convert AST to parsetree0 format
     let ast0 = map_structure(arena, ast);
-
-    // 3. Write the binary AST file (parsetree0 doesn't need arena for marshalling)
-    write_ast_file(output_path, source_path, arena, &deps, &ast0)
-}
-
-/// Write a binary AST file for a signature (interface, .iast file).
-///
-/// # Arguments
-///
-/// * `output_path` - Path to the output .iast file
-/// * `source_path` - Absolute path to the source file
-/// * `arena` - The parse arena containing location data
-/// * `ast` - The parsed signature AST
-///
-/// # Returns
-///
-/// Returns `Ok(())` on success, or an `io::Error` if writing fails.
-pub fn write_signature_ast(
-    output_path: &Path,
-    source_path: &str,
-    arena: &mut ParseArena,
-    ast: &Signature,
-) -> io::Result<()> {
-    // 1. Extract dependencies
-    let deps = extract_signature_deps(arena, ast);
-
-    // 2. Convert AST to parsetree0 format
-    let ast0 = map_signature(arena, ast);
-
-    // 3. Write the binary AST file (parsetree0 doesn't need arena for marshalling)
     write_ast_file(output_path, source_path, arena, &deps, &ast0)
 }
 
@@ -146,17 +105,7 @@ pub fn write_external_ppx_signature_input(
 
 /// Write the external `-ppx` input for an already converted Parsetree0 AST
 /// (`Cmd_ppx_apply.write_ast`): magic, marshaled input name, marshaled AST.
-pub fn write_external_ppx_input0<A: Marshal>(
-    output_path: &Path,
-    source_path: &str,
-    arena: &ParseArena,
-    magic: &[u8],
-    ast: &A,
-) -> io::Result<()> {
-    write_external_ppx_input(output_path, source_path, arena, magic, ast)
-}
-
-fn write_external_ppx_input<A: Marshal>(
+pub fn write_external_ppx_input<A: Marshal + ?Sized>(
     output_path: &Path,
     source_path: &str,
     arena: &ParseArena,
@@ -179,31 +128,12 @@ fn write_external_ppx_input<A: Marshal>(
     writer.flush()
 }
 
-/// Write a binary AST file for a structure in the CURRENT parsetree format.
-///
-/// This is different from `write_structure_ast` which converts to parsetree0.
-/// The current format is what OCaml's `-bs-ast` flag outputs.
-///
-/// This applies built-in PPX transformations (FFI encoding for externals)
-/// before writing, matching OCaml's behavior.
-pub fn write_structure_ast_current(
+/// Write a current-format structure AST with built-in PPX applied (test helper).
+#[cfg(test)]
+fn write_structure_ast_current_with_extra_deps(
     output_path: &Path,
     source_path: &str,
-    arena: &mut crate::parse_arena::ParseArena,
-    ast: &Structure,
-) -> io::Result<()> {
-    write_structure_ast_current_with_extra_deps(output_path, source_path, arena, ast, &[])
-}
-
-/// Write a binary AST file for a structure in the CURRENT parsetree format,
-/// with additional dependency names.
-///
-/// `extra_deps` are merged with extracted dependencies and used for section 2
-/// of the .ast file (dependency list).
-pub fn write_structure_ast_current_with_extra_deps(
-    output_path: &Path,
-    source_path: &str,
-    arena: &mut crate::parse_arena::ParseArena,
+    arena: &mut ParseArena,
     ast: &Structure,
     extra_deps: &[String],
 ) -> io::Result<()> {
@@ -217,98 +147,64 @@ pub fn write_structure_ast_current_with_extra_deps(
     )
 }
 
-/// Write a current-format structure AST, optionally applying built-in PPX first.
+fn ppx_rewrite_error(e: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("PPX rewrite failed: {e}"),
+    )
+}
+
+/// Write a binary AST file for a structure in the CURRENT parsetree format
+/// (what OCaml's `-bs-ast` flag outputs), optionally applying built-in PPX
+/// transformations first.
+///
+/// `extra_deps` are merged with extracted dependencies and used for section 2
+/// of the .ast file (dependency list).
 pub fn write_structure_ast_current_with_extra_deps_and_builtin_ppx(
     output_path: &Path,
     source_path: &str,
-    arena: &mut crate::parse_arena::ParseArena,
+    arena: &mut ParseArena,
     ast: &Structure,
     extra_deps: &[String],
     builtin_ppx: bool,
 ) -> io::Result<()> {
     // 1. Optionally apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = if builtin_ppx {
-        ppx::rewrite_structure(ast, arena).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("PPX rewrite failed: {e}"),
-            )
-        })?
-    } else {
-        ast.clone()
-    };
-
-    // 2. Process @@config attributes (no_export wrapping). When the caller
-    //    ran the frontend (`builtin_ppx == false`), it already applied it
+    //    and process @@config attributes (no_export wrapping). When the caller
+    //    ran the frontend (`builtin_ppx == false`), it already applied both
     //    (js_implementation.ml:130).
-    let rewritten_ast = if builtin_ppx {
-        apply_no_export_config(arena, rewritten_ast)
+    let rewritten_ast: Cow<'_, [StructureItem]> = if builtin_ppx {
+        let rewritten = ppx::rewrite_structure(ast, arena).map_err(ppx_rewrite_error)?;
+        Cow::Owned(apply_no_export_config(arena, rewritten))
     } else {
-        rewritten_ast
+        Cow::Borrowed(ast)
     };
 
-    // 3. Extract dependencies from the rewritten AST and merge explicit opens.
+    // 2. Extract dependencies from the rewritten AST and merge explicit opens.
     let mut deps = extract_structure_deps(arena, &rewritten_ast);
     deps.extend(extra_deps.iter().cloned());
 
-    // 4. Write the binary AST file directly (current format, no parsetree0 conversion)
-    write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
-}
-
-/// Write a binary AST file for a signature in the CURRENT parsetree format.
-///
-/// This applies built-in PPX transformations (FFI encoding for externals)
-/// before writing, matching OCaml's behavior.
-pub fn write_signature_ast_current(
-    output_path: &Path,
-    source_path: &str,
-    arena: &mut crate::parse_arena::ParseArena,
-    ast: &Signature,
-) -> io::Result<()> {
-    write_signature_ast_current_with_extra_deps(output_path, source_path, arena, ast, &[])
+    // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
+    write_ast_file(output_path, source_path, arena, &deps, &*rewritten_ast)
 }
 
 /// Write a binary AST file for a signature in the CURRENT parsetree format,
-/// with additional dependency names.
+/// optionally applying built-in PPX transformations first.
 ///
 /// `extra_deps` are merged with extracted dependencies and used for section 2
 /// of the .iast file (dependency list).
-pub fn write_signature_ast_current_with_extra_deps(
-    output_path: &Path,
-    source_path: &str,
-    arena: &mut crate::parse_arena::ParseArena,
-    ast: &Signature,
-    extra_deps: &[String],
-) -> io::Result<()> {
-    write_signature_ast_current_with_extra_deps_and_builtin_ppx(
-        output_path,
-        source_path,
-        arena,
-        ast,
-        extra_deps,
-        true,
-    )
-}
-
-/// Write a current-format signature AST, optionally applying built-in PPX first.
 pub fn write_signature_ast_current_with_extra_deps_and_builtin_ppx(
     output_path: &Path,
     source_path: &str,
-    arena: &mut crate::parse_arena::ParseArena,
+    arena: &mut ParseArena,
     ast: &Signature,
     extra_deps: &[String],
     builtin_ppx: bool,
 ) -> io::Result<()> {
     // 1. Optionally apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = if builtin_ppx {
-        ppx::rewrite_signature(ast, arena).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("PPX rewrite failed: {e}"),
-            )
-        })?
+    let rewritten_ast: Cow<'_, [SignatureItem]> = if builtin_ppx {
+        Cow::Owned(ppx::rewrite_signature(ast, arena).map_err(ppx_rewrite_error)?)
     } else {
-        ast.clone()
+        Cow::Borrowed(ast)
     };
 
     // 2. Extract dependencies from the rewritten AST and merge explicit opens.
@@ -316,17 +212,52 @@ pub fn write_signature_ast_current_with_extra_deps_and_builtin_ppx(
     deps.extend(extra_deps.iter().cloned());
 
     // 3. Write the binary AST file directly (current format, no parsetree0 conversion)
-    write_ast_file(output_path, source_path, arena, &deps, &rewritten_ast)
+    write_ast_file(output_path, source_path, arena, &deps, &*rewritten_ast)
 }
 
 /// Write a binary AST file with the given dependencies and AST.
-fn write_ast_file<A: Marshal>(
+fn write_ast_file<A: Marshal + ?Sized>(
     output_path: &Path,
     source_path: &str,
-    arena: &crate::parse_arena::ParseArena,
-    deps: &std::collections::BTreeSet<String>,
+    arena: &ParseArena,
+    deps: &BTreeSet<String>,
     ast: &A,
 ) -> io::Result<()> {
+    std::fs::write(output_path, write_ast_to_vec(source_path, arena, deps, ast))
+}
+
+/// Write a parsetree0 structure AST to a Vec<u8> (for testing).
+#[cfg(test)]
+fn write_structure_ast_to_vec(
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Structure,
+) -> Vec<u8> {
+    let deps = extract_structure_deps(arena, ast);
+    let ast0 = map_structure(arena, ast);
+    write_ast_to_vec(source_path, arena, &deps, &ast0)
+}
+
+/// Write a parsetree0 signature AST to a Vec<u8> (for testing).
+#[cfg(test)]
+fn write_signature_ast_to_vec(
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Signature,
+) -> Vec<u8> {
+    let deps = extract_signature_deps(arena, ast);
+    let ast0 = map_signature(arena, ast);
+    write_ast_to_vec(source_path, arena, &deps, &ast0)
+}
+
+/// Frame an AST as a binary AST file: dependency section size, dependency
+/// section, source path line, then the marshalled AST.
+fn write_ast_to_vec<A: Marshal + ?Sized>(
+    source_path: &str,
+    arena: &ParseArena,
+    deps: &BTreeSet<String>,
+    ast: &A,
+) -> Vec<u8> {
     // Build the dependency section
     let mut dep_buf = Vec::with_capacity(256);
     dep_buf.push(MAGIC_SEP_CHAR); // Leading '\n'
@@ -341,85 +272,19 @@ fn write_ast_file<A: Marshal>(
     ast.marshal(&mut marshal_writer);
     let marshal_data = marshal_writer.finish();
 
-    // Open output file
-    let file = File::create(output_path)?;
-    let mut writer = BufWriter::new(file);
+    let mut result =
+        Vec::with_capacity(4 + dep_buf.len() + source_path.len() + 1 + marshal_data.len());
 
-    // Write Section 1: Dependency section size (big-endian u32)
-    let dep_size = dep_buf.len() as u32;
-    writer.write_all(&dep_size.to_be_bytes())?;
-
-    // Write Section 2: Dependencies
-    writer.write_all(&dep_buf)?;
-
-    // Write source path + newline
-    writer.write_all(source_path.as_bytes())?;
-    writer.write_all(&[MAGIC_SEP_CHAR])?;
-
-    // Write Section 3: Marshal data
-    writer.write_all(&marshal_data)?;
-
-    writer.flush()?;
-    Ok(())
-}
-
-/// Write a structure AST to a Vec<u8> (for testing).
-pub fn write_structure_ast_to_vec(
-    source_path: &str,
-    arena: &mut ParseArena,
-    ast: &Structure,
-) -> Vec<u8> {
-    let deps = extract_structure_deps(arena, ast);
-    let ast0 = map_structure(arena, ast);
-    write_ast_to_vec(source_path, arena, &deps, &ast0)
-}
-
-/// Write a signature AST to a Vec<u8> (for testing).
-pub fn write_signature_ast_to_vec(
-    source_path: &str,
-    arena: &mut ParseArena,
-    ast: &Signature,
-) -> Vec<u8> {
-    let deps = extract_signature_deps(arena, ast);
-    let ast0 = map_signature(arena, ast);
-    write_ast_to_vec(source_path, arena, &deps, &ast0)
-}
-
-/// Write an AST to a Vec<u8>.
-fn write_ast_to_vec<A: Marshal>(
-    source_path: &str,
-    arena: &ParseArena,
-    deps: &std::collections::BTreeSet<String>,
-    ast: &A,
-) -> Vec<u8> {
-    let mut result = Vec::new();
-
-    // Build the dependency section
-    let mut dep_buf = Vec::with_capacity(256);
-    dep_buf.push(MAGIC_SEP_CHAR);
-    for dep in deps {
-        dep_buf.extend_from_slice(dep.as_bytes());
-        dep_buf.push(MAGIC_SEP_CHAR);
-    }
-
-    // Marshal the AST
-    let mut marshal_writer = MarshalWriter::new();
-    marshal_writer.set_arena(arena);
-    ast.marshal(&mut marshal_writer);
-    let marshal_data = marshal_writer.finish();
-
-    // Write Section 1: Dependency section size
+    // Section 1: Dependency section size (big-endian u32)
     let dep_size = dep_buf.len() as u32;
     result.extend_from_slice(&dep_size.to_be_bytes());
 
-    // Write Section 2: Dependencies
+    // Section 2: Dependencies, then source path + newline
     result.extend_from_slice(&dep_buf);
-
-    // Write source path + newline
     result.extend_from_slice(source_path.as_bytes());
     result.push(MAGIC_SEP_CHAR);
 
-    // Write Section 3: Marshal data
+    // Section 3: Marshal data
     result.extend_from_slice(&marshal_data);
 
     result
@@ -536,7 +401,7 @@ fn wrap_no_export(arena: &mut ParseArena, structure: Vec<StructureItem>) -> Vec<
     };
 
     let empty_sig = ModuleType {
-        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![]))),
+        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::default())),
         pmty_loc: loc,
         pmty_attributes: Attributes::new(),
     };

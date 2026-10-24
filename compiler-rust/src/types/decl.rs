@@ -557,12 +557,12 @@ pub fn signature_runtime_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usiz
         match item {
             SignatureItem::SigValue(id, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                    bound.push((id.clone(), runtime_pos));
+                    bound.push((*id, runtime_pos));
                     runtime_pos += 1;
                 }
             }
             SignatureItem::SigTypext(id, _, _) | SignatureItem::SigModule(id, _, _) => {
-                bound.push((id.clone(), runtime_pos));
+                bound.push((*id, runtime_pos));
                 runtime_pos += 1;
             }
             SignatureItem::SigClass => {
@@ -855,7 +855,9 @@ pub(crate) fn parse_ocaml_int_literal(s: &str) -> Option<i64> {
     } else {
         (10, digits)
     };
-    if digits.is_empty() {
+    // OCaml `parse_sign_and_base` accepts a single sign; the remaining
+    // digits must not carry another one (`from_str_radix` would accept it).
+    if digits.is_empty() || digits.starts_with(['+', '-']) {
         return None;
     }
     let magnitude = i128::from_str_radix(digits, base).ok()?;
@@ -878,6 +880,15 @@ mod tests {
         let r1 = RecordRepresentation::RecordRegular;
         let r2 = RecordRepresentation::RecordRegular;
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn parse_ocaml_int_literal_rejects_doubled_sign() {
+        assert_eq!(parse_ocaml_int_literal("-5"), Some(-5));
+        assert_eq!(parse_ocaml_int_literal("+0x1_0"), Some(16));
+        assert_eq!(parse_ocaml_int_literal("--5"), None);
+        assert_eq!(parse_ocaml_int_literal("-+5"), None);
+        assert_eq!(parse_ocaml_int_literal("0x-5"), None);
     }
 
     #[test]

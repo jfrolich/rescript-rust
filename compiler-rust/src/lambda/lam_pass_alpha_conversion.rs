@@ -14,26 +14,8 @@ use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
 use crate::lambda::{map_function_body, map_prim_args};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
-/// (lam_pass_alpha_conversion.ml:25-129).
-pub fn alpha_conversion(meta: &LamStats, lam: &Lambda) -> Lambda {
-    alpha_conversion_owned(meta, lam.clone())
-}
-
-/// Owned entry point for the same OCaml pass
-/// (`compiler/core/lam_pass_alpha_conversion.ml:25-129`).
-///
-/// OCaml rebuilds the immutable Lambda tree. Rust can consume the previous
-/// pass result in the backend pipeline, preserving the same case behavior while
-/// avoiding an eager clone of the whole tree before the rebuild.
-pub fn alpha_conversion_owned(meta: &LamStats, lam: Lambda) -> Lambda {
-    let mut meta = meta.clone();
-    let mut alpha = Alpha {
-        meta: &mut meta,
-        external_arity: None,
-    };
-    alpha.simpl_owned(lam)
-}
-
+/// (`compiler/core/lam_pass_alpha_conversion.ml:25-129`), consuming the
+/// previous pass result instead of cloning it.
 pub fn alpha_conversion_with_external_arity_owned(
     meta: &mut LamStats,
     lam: Lambda,
@@ -209,15 +191,13 @@ impl<'a, 'r> Alpha<'a, 'r> {
             }
 
             // lam_pass_alpha_conversion.ml:62
-            Lambda::Llet(str, v, l1, l2) => {
-                Lambda::let_(*str, v.clone(), self.simpl(l1), self.simpl(l2))
-            }
+            Lambda::Llet(str, v, l1, l2) => Lambda::let_(*str, *v, self.simpl(l1), self.simpl(l2)),
 
             // lam_pass_alpha_conversion.ml:63-65
             Lambda::Lletrec(bindings, body) => {
                 let bindings = bindings
                     .iter()
-                    .map(|(id, e)| (id.clone(), self.simpl(e)))
+                    .map(|(id, e)| (*id, self.simpl(e)))
                     .collect();
                 Lambda::letrec(bindings, self.simpl(body))
             }
@@ -235,7 +215,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 Lambda::prim(
                     primitive.clone(),
                     args.iter().map(|a| self.simpl(a)).collect(),
-                    loc.clone(),
+                    *loc,
                 )
             }
 
@@ -290,7 +270,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
             }
 
             // lam_pass_alpha_conversion.ml:116
-            Lambda::LtryWith(l1, v, l2) => Lambda::try_(self.simpl(l1), v.clone(), self.simpl(l2)),
+            Lambda::LtryWith(l1, v, l2) => Lambda::try_(self.simpl(l1), *v, self.simpl(l2)),
 
             // lam_pass_alpha_conversion.ml:117
             Lambda::LifThenElse(l1, l2, l3) => {
@@ -308,20 +288,14 @@ impl<'a, 'r> Alpha<'a, 'r> {
             Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl(l1), self.simpl(l2)),
 
             // lam_pass_alpha_conversion.ml:120-121
-            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
-                var.clone(),
-                self.simpl(l1),
-                self.simpl(l2),
-                *dir,
-                self.simpl(l3),
-            ),
+            Lambda::Lfor(var, l1, l2, dir, l3) => {
+                Lambda::for_(*var, self.simpl(l1), self.simpl(l2), *dir, self.simpl(l3))
+            }
 
             // lam_pass_alpha_conversion.ml after #7887: Lfor_of / Lfor_await_of.
-            Lambda::Lfor_of(var, l1, l2) => {
-                Lambda::for_of(var.clone(), self.simpl(l1), self.simpl(l2))
-            }
+            Lambda::Lfor_of(var, l1, l2) => Lambda::for_of(*var, self.simpl(l1), self.simpl(l2)),
             Lambda::Lfor_await_of(var, l1, l2) => {
-                Lambda::for_await_of(var.clone(), self.simpl(l1), self.simpl(l2))
+                Lambda::for_await_of(*var, self.simpl(l1), self.simpl(l2))
             }
 
             // OCaml `Lam_pass_alpha_conversion.simpl` after #8348:
@@ -330,7 +304,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
             Lambda::Lcontinue => Lambda::continue_(),
 
             // lam_pass_alpha_conversion.ml:122-125
-            Lambda::Lassign(v, l) => Lambda::assign(v.clone(), self.simpl(l)),
+            Lambda::Lassign(v, l) => Lambda::assign(*v, self.simpl(l)),
         }
     }
 

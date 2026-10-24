@@ -1,23 +1,22 @@
 //! UTF-8 utilities for the ReScript parser.
 //!
-//! This module provides UTF-8 encoding/decoding utilities needed by the scanner,
-//! including codepoint validation and UTF-16 length calculation for column tracking.
+//! UTF-8 decoding and codepoint validation used by the scanner.
 
 /// The Unicode replacement character (U+FFFD).
 pub const REPLACEMENT_CHAR: i32 = 0xFFFD;
 
 /// Maximum valid Unicode codepoint (U+10FFFF).
-pub const MAX_CODEPOINT: i32 = 0x10FFFF;
+const MAX_CODEPOINT: i32 = 0x10FFFF;
 
 /// Start of surrogate range.
-pub const SURROGATE_MIN: i32 = 0xD800;
+const SURROGATE_MIN: i32 = 0xD800;
 
 /// End of surrogate range.
-pub const SURROGATE_MAX: i32 = 0xDFFF;
+const SURROGATE_MAX: i32 = 0xDFFF;
 
 /// Classification of a UTF-8 byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ByteClass {
+enum ByteClass {
     /// Single-byte ASCII character (0x00-0x7F).
     Single(u8),
     /// Continuation byte (10xxxxxx).
@@ -30,7 +29,7 @@ pub enum ByteClass {
 
 impl ByteClass {
     /// Classify a byte according to UTF-8 encoding rules.
-    pub fn classify(byte: u8) -> Self {
+    fn classify(byte: u8) -> Self {
         if byte & 0b1000_0000 == 0 {
             // 0xxxxxxx - ASCII
             ByteClass::Single(byte)
@@ -107,46 +106,6 @@ pub fn decode_codepoint(bytes: &[u8], offset: usize) -> (i32, usize) {
     }
 }
 
-/// Encode a codepoint as UTF-8 bytes.
-pub fn encode_codepoint(c: i32) -> Vec<u8> {
-    if c <= 0x7F {
-        vec![c as u8]
-    } else if c <= 0x7FF {
-        vec![
-            (0b1100_0000 | (c >> 6)) as u8,
-            (0b1000_0000 | (c & 0b0011_1111)) as u8,
-        ]
-    } else if c <= 0xFFFF {
-        vec![
-            (0b1110_0000 | (c >> 12)) as u8,
-            (0b1000_0000 | ((c >> 6) & 0b0011_1111)) as u8,
-            (0b1000_0000 | (c & 0b0011_1111)) as u8,
-        ]
-    } else {
-        vec![
-            (0b1111_0000 | (c >> 18)) as u8,
-            (0b1000_0000 | ((c >> 12) & 0b0011_1111)) as u8,
-            (0b1000_0000 | ((c >> 6) & 0b0011_1111)) as u8,
-            (0b1000_0000 | (c & 0b0011_1111)) as u8,
-        ]
-    }
-}
-
-/// Calculate the UTF-16 length of a character for column tracking.
-///
-/// Returns the number of UTF-16 code units needed to represent the character.
-pub fn utf16_len(byte: u8) -> usize {
-    match ByteClass::classify(byte) {
-        ByteClass::Single(_) | ByteClass::Invalid => 1,
-        ByteClass::Leading(n, _) => {
-            // UTF-16 uses 2 code units for codepoints >= 0x10000 (4-byte UTF-8)
-            // and 1 code unit for everything else
-            if n >= 3 { 2 } else { 1 }
-        }
-        ByteClass::Cont(_) => 0, // Continuation bytes don't add to UTF-16 length
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,18 +171,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_ascii() {
-        let bytes = encode_codepoint(b'a' as i32);
-        assert_eq!(bytes, vec![b'a']);
-    }
-
-    #[test]
-    fn test_encode_multibyte() {
-        let bytes = encode_codepoint(0xE9); // é
-        assert_eq!(bytes, vec![0xC3, 0xA9]);
-    }
-
-    #[test]
     fn test_is_valid_codepoint() {
         assert!(is_valid_codepoint(0x0000));
         assert!(is_valid_codepoint(0x7F));
@@ -232,23 +179,5 @@ mod tests {
         assert!(!is_valid_codepoint(0xD800)); // surrogate
         assert!(!is_valid_codepoint(0xDFFF)); // surrogate
         assert!(!is_valid_codepoint(0x110000)); // too large
-    }
-
-    #[test]
-    fn test_utf16_len() {
-        // ASCII
-        assert_eq!(utf16_len(b'a'), 1);
-
-        // 2-byte UTF-8 (still 1 UTF-16 code unit)
-        assert_eq!(utf16_len(0xC3), 1);
-
-        // 3-byte UTF-8 (still 1 UTF-16 code unit)
-        assert_eq!(utf16_len(0xE0), 1);
-
-        // 4-byte UTF-8 (2 UTF-16 code units)
-        assert_eq!(utf16_len(0xF0), 2);
-
-        // Continuation byte
-        assert_eq!(utf16_len(0x80), 0);
     }
 }

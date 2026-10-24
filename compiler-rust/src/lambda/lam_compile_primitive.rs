@@ -5,25 +5,20 @@
 
 use super::js_exp_make::{
     bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
-    both_string_literals, compare_bigint_literals, compare_bool_literals, compare_int_literals,
-    compare_string_literals, comparison_to_binop, comparison_to_runtime_member,
-    compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
-    int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
-    int32_minus, int32_mul, int32_offset, int32_pow, is_nullish_literal, is_optional_block,
-    is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects, js_seq,
-    ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access, runtime_compare_call_args,
-    runtime_member_for_eta_wrapped_primitive, to_int32,
+    both_string_literals, compare_bigint_literals, compare_bool_literals, compare_string_literals,
+    comparison_to_binop, comparison_to_runtime_member, compile_int_equality,
+    compile_nullish_strict_comparison, compile_raw_comparison, int_bnot, int_expr, int_literal,
+    int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr, int32_minus, int32_mul,
+    int32_pow, is_nullish_literal, is_optional_block, is_type_number_expr, is_type_object_expr,
+    is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args,
+    to_int32,
 };
-use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
+use super::lam_compile::{Compiled, LambdaCompiler};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
 use crate::ident::Ident;
 use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
-use crate::js_ir::{
-    BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
-    VariableDeclaration,
-};
-use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-use crate::lambda::lam_constant::Constant;
+use crate::js_ir::{BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement};
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
@@ -91,7 +86,7 @@ impl LambdaCompiler {
             prelude: Vec::new(),
             expr: Expression::qualified(
                 crate::js_ir::ModuleId {
-                    id: id.clone(),
+                    id: *id,
                     kind: crate::js_ir::Kind::Ml,
                     dynamic_import: false,
                 },
@@ -140,38 +135,38 @@ impl LambdaCompiler {
             ),
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
             // direct call of the first argument with the remaining arguments.
-            PjsApply => match compiled_args.split_first() {
-                Some((func, args)) => {
-                    Expression::call(func.clone(), args.to_vec(), CallInfo::default())
+            PjsApply => {
+                let mut args = std::mem::take(&mut compiled_args).into_iter();
+                match args.next() {
+                    Some(func) => Expression::call(func, args.collect(), CallInfo::default()),
+                    None => Expression::undefined(false),
                 }
-                None => Expression::undefined(false),
-            },
+            }
             // OCaml lam_compile_primitive.ml:136 lowers Pfn_arity to
             // function_length, i.e. `.length` on the function value.
-            PfnArity => match compiled_args.first() {
-                Some(func) => Expression::length(func.clone(), LengthObject::Function),
+            PfnArity => match first_arg(compiled_args) {
+                Some(func) => Expression::length(func, LengthObject::Function),
                 None => Expression::undefined(false),
             },
             Pstringrefs | Pstringrefu => {
                 self.runtime_call_expr("Primitive_string", "getChar", compiled_args)
             }
-            Parrayrefu => match compiled_args.as_slice() {
-                [array, index] => Expression::new(ExpressionDesc::ArrayIndex(
-                    Box::new(array.clone()),
-                    Box::new(index.clone()),
-                )),
+            Parrayrefu => match <[Expression; 2]>::try_from(compiled_args) {
+                Ok([array, index]) => {
+                    Expression::new(ExpressionDesc::ArrayIndex(Box::new(array), Box::new(index)))
+                }
                 _ => Expression::undefined(false),
             },
             Parrayrefs => self.runtime_call_expr("Primitive_array", "get", compiled_args),
-            Parraysetu => match compiled_args.as_slice() {
-                [array, index, value] => Expression::new(ExpressionDesc::Seq(
+            Parraysetu => match <[Expression; 3]>::try_from(compiled_args) {
+                Ok([array, index, value]) => Expression::new(ExpressionDesc::Seq(
                     Box::new(Expression::bin(
                         BinOp::Eq,
                         Expression::new(ExpressionDesc::ArrayIndex(
-                            Box::new(array.clone()),
-                            Box::new(index.clone()),
+                            Box::new(array),
+                            Box::new(index),
                         )),
-                        value.clone(),
+                        value,
                     )),
                     Box::new(Expression::undefined(false)),
                 )),
@@ -307,14 +302,7 @@ impl LambdaCompiler {
                 bool_literal(&compiled_args[0]),
                 bool_literal(&compiled_args[1]),
             ) {
-                (Some(left), Some(right)) => {
-                    let result = match left.cmp(&right) {
-                        std::cmp::Ordering::Less => -1,
-                        std::cmp::Ordering::Equal => 0,
-                        std::cmp::Ordering::Greater => 1,
-                    };
-                    int_expr(result)
-                }
+                (Some(left), Some(right)) => int_expr(left.cmp(&right) as i32),
                 _ => self.runtime_call_expr("Primitive_bool", "compare", compiled_args),
             },
             Pboolmin => self.compile_typed_min_max(
@@ -478,11 +466,11 @@ impl LambdaCompiler {
                 // literal zero shift, otherwise wraps the logical shift in
                 // `to_int32` (`compiler/core/lam_compile_primitive.ml:264-267`).
                 if is_zero_int(&compiled_args[1]) {
-                    compiled_args[0].clone()
+                    take_arg(&mut compiled_args, 0)
                 } else {
                     to_int32(int32_lsr(
-                        compiled_args[0].clone(),
-                        compiled_args[1].clone(),
+                        take_arg(&mut compiled_args, 0),
+                        take_arg(&mut compiled_args, 1),
                     ))
                 }
             }
@@ -499,39 +487,31 @@ impl LambdaCompiler {
             Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0)),
             PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0)),
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
-            Pmakedict => match compiled_args.as_slice() {
-                [
-                    Expression {
-                        desc: ExpressionDesc::Array(items, _),
-                        ..
-                    },
-                ] => {
+            Pmakedict => match <[Expression; 1]>::try_from(compiled_args) {
+                Ok(
+                    [
+                        Expression {
+                            desc: ExpressionDesc::Array(items, _),
+                            ..
+                        },
+                    ],
+                ) => {
                     let props = items
-                        .iter()
-                        .filter_map(|item| match &item.desc {
-                            ExpressionDesc::CamlBlock(fields, _, _)
-                                if matches!(
-                                    fields.as_slice(),
-                                    [
-                                        Expression {
-                                            desc: ExpressionDesc::Str(_),
-                                            ..
-                                        },
-                                        _
-                                    ]
-                                ) =>
-                            {
-                                let [
-                                    Expression {
-                                        desc: ExpressionDesc::Str(txt),
-                                        ..
-                                    },
-                                    value,
-                                ] = fields.as_slice()
-                                else {
-                                    unreachable!("checked by matches! above");
-                                };
-                                Some((PropertyName::lit(txt.clone()), value.clone()))
+                        .into_iter()
+                        .filter_map(|item| match item.desc {
+                            ExpressionDesc::CamlBlock(fields, _, _) => {
+                                match <[Expression; 2]>::try_from(fields) {
+                                    Ok(
+                                        [
+                                            Expression {
+                                                desc: ExpressionDesc::Str(txt),
+                                                ..
+                                            },
+                                            value,
+                                        ],
+                                    ) => Some((PropertyName::lit(txt), value)),
+                                    _ => None,
+                                }
                             }
                             _ => None,
                         })
@@ -540,11 +520,10 @@ impl LambdaCompiler {
                 }
                 _ => Expression::undefined(false),
             },
-            PdictHas => match compiled_args.as_slice() {
-                [obj, prop] => Expression::new(ExpressionDesc::In(
-                    Box::new(prop.clone()),
-                    Box::new(obj.clone()),
-                )),
+            PdictHas => match <[Expression; 2]>::try_from(compiled_args) {
+                Ok([obj, prop]) => {
+                    Expression::new(ExpressionDesc::In(Box::new(prop), Box::new(obj)))
+                }
                 _ => {
                     self.report_diagnostic(
                         loc,
@@ -553,15 +532,14 @@ impl LambdaCompiler {
                     Expression::undefined(false)
                 }
             },
-            Pduprecord => match compiled_args.as_slice() {
-                [source] => Expression::new(ExpressionDesc::Object(
-                    Some(Box::new(source.clone())),
-                    vec![],
-                )),
+            Pduprecord => match <[Expression; 1]>::try_from(compiled_args) {
+                Ok([source]) => {
+                    Expression::new(ExpressionDesc::Object(Some(Box::new(source)), vec![]))
+                }
                 _ => Expression::undefined(false),
             },
-            PrecordRest(excluded) => match compiled_args.as_slice() {
-                [source] => Expression::new(ExpressionDesc::RecordRest(
+            PrecordRest(excluded) => match <[Expression; 1]>::try_from(compiled_args) {
+                Ok([source]) => Expression::new(ExpressionDesc::RecordRest(
                     excluded
                         .iter()
                         .map(|label| crate::js_ir::RecordRestField {
@@ -569,7 +547,7 @@ impl LambdaCompiler {
                             ident: None,
                         })
                         .collect(),
-                    Box::new(source.clone()),
+                    Box::new(source),
                 )),
                 _ => Expression::undefined(false),
             },
@@ -629,34 +607,21 @@ impl LambdaCompiler {
                 Expression::undefined(false)
             }
             Praise => {
-                let expr = compiled_args
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| Expression::undefined(false));
+                let expr = first_arg(compiled_args).unwrap_or_else(|| Expression::undefined(false));
                 let mut statement = Statement::throw(expr);
                 statement.source_loc = (self.source_loc(loc)).map(Box::new);
                 prelude.push(statement);
                 Expression::undefined(false)
             }
-            Pidentity => compiled_args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| Expression::undefined(false)),
+            Pidentity | Pfloatofint => {
+                first_arg(compiled_args).unwrap_or_else(|| Expression::undefined(false))
+            }
             Pignore => Expression::new(ExpressionDesc::Seq(
-                Box::new(
-                    compiled_args
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| Expression::undefined(false)),
-                ),
+                Box::new(first_arg(compiled_args).unwrap_or_else(|| Expression::undefined(false))),
                 Box::new(Expression::undefined(true)),
             )),
             Ptypeof => ocaml_typeof_expr(take_arg(&mut compiled_args, 0)),
             Pintoffloat => to_int32(take_arg(&mut compiled_args, 0)),
-            Pfloatofint => compiled_args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| Expression::undefined(false)),
             Pawait => Expression::new(ExpressionDesc::Await(Box::new(take_arg(
                 &mut compiled_args,
                 0,
@@ -669,7 +634,7 @@ impl LambdaCompiler {
             PjsObjectCreate(obj_params) => {
                 self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
             }
-            PjsFnMethod => match compiled_args.first().cloned() {
+            PjsFnMethod => match first_arg(compiled_args) {
                 Some(Expression {
                     source_loc,
                     desc:
@@ -702,16 +667,24 @@ impl LambdaCompiler {
                 None => Expression::undefined(false),
             },
             PjsObjectGet(name) | PjsObjectSet(name) => {
-                match (matches!(prim, PjsObjectSet(_)), compiled_args.as_slice()) {
-                    (false, [receiver]) => self.static_index(receiver.clone(), name),
-                    (true, [receiver, value]) => Expression::new(ExpressionDesc::Seq(
-                        Box::new(Expression::bin(
-                            BinOp::Eq,
-                            self.static_index(receiver.clone(), name),
-                            value.clone(),
-                        )),
-                        Box::new(Expression::undefined(true)),
-                    )),
+                let mut args = std::mem::take(&mut compiled_args).into_iter();
+                match (
+                    matches!(prim, PjsObjectSet(_)),
+                    args.next(),
+                    args.next(),
+                    args.next(),
+                ) {
+                    (false, Some(receiver), None, None) => self.static_index(receiver, name),
+                    (true, Some(receiver), Some(value), None) => {
+                        Expression::new(ExpressionDesc::Seq(
+                            Box::new(Expression::bin(
+                                BinOp::Eq,
+                                self.static_index(receiver, name),
+                                value,
+                            )),
+                            Box::new(Expression::undefined(true)),
+                        ))
+                    }
                     _ => Expression::undefined(false),
                 }
             }
@@ -722,7 +695,7 @@ impl LambdaCompiler {
                 ffi,
                 transformed_jsx,
             } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
-            _ => Expression::undefined(false),
+            PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
 
         Compiled { prelude, expr }
@@ -809,7 +782,7 @@ impl LambdaCompiler {
         right: Expression,
     ) -> Expression {
         if let (Some(lhs), Some(rhs)) = (int_literal(&left), int_literal(&right)) {
-            return Expression::bool(compare_int_literals(cmp, lhs, rhs));
+            return Expression::bool(cmp.cmp_int32(lhs, rhs));
         }
 
         // OCaml's Js_exp_make.int_comp strips Runtime.compare(..., ...) when
@@ -925,6 +898,11 @@ impl LambdaCompiler {
 }
 
 /// Move argument `index` out of `args`, which the calling arm uses once.
+/// Consume the argument list, returning its first element if any.
+fn first_arg(args: Vec<Expression>) -> Option<Expression> {
+    args.into_iter().next()
+}
+
 fn take_arg(args: &mut [Expression], index: usize) -> Expression {
     std::mem::replace(&mut args[index], Expression::undefined(false))
 }

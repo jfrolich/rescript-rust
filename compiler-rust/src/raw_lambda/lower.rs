@@ -176,8 +176,8 @@ impl LoweringContext {
 
         match primitive {
             Primitive::Pidentity => args.into_iter().next().unwrap_or_else(Lambda::unit),
-            Primitive::PextensionSlotEq => match args.as_slice() {
-                [lhs, rhs] => Lambda::prim(
+            Primitive::PextensionSlotEq => match <[Lambda; 2]>::try_from(args) {
+                Ok([lhs, rhs]) => Lambda::prim(
                     Primitive::Pstringcomp(Comparison::Eq),
                     vec![
                         Lambda::prim(
@@ -187,14 +187,14 @@ impl LoweringContext {
                                     name: EXCEPTION_ID_FIELD.to_string(),
                                 },
                             ),
-                            vec![lhs.clone()],
+                            vec![lhs],
                             loc,
                         ),
-                        rhs.clone(),
+                        rhs,
                     ],
                     loc,
                 ),
-                _ => unreachable!("PextensionSlotEq expects exactly two arguments"),
+                Err(_) => unreachable!("PextensionSlotEq expects exactly two arguments"),
             },
             // lambda.ml `mk_builtin`: `Lsequence (arg, lambda_unit)`, not the
             // folding `Lambda.seq`.
@@ -202,17 +202,16 @@ impl LoweringContext {
                 let arg = args.into_iter().next().unwrap_or_else(Lambda::unit);
                 Lambda::Lsequence(Box::new(arg), Box::new(Lambda::unit()))
             }
-            Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
-                [_, value] => Lambda::prim(
-                    Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
-                    vec![
-                        Lambda::const_(polyvar_block_tag_constant(&name)),
-                        value.clone(),
-                    ],
-                    loc,
-                ),
-                _ => unreachable!("polyvariant blocks expect tag and payload"),
-            },
+            Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => {
+                match <[Lambda; 2]>::try_from(args) {
+                    Ok([_, value]) => Lambda::prim(
+                        Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
+                        vec![Lambda::const_(polyvar_block_tag_constant(&name)), value],
+                        loc,
+                    ),
+                    Err(_) => unreachable!("polyvariant blocks expect tag and payload"),
+                }
+            }
             Primitive::Pmakeblock(TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
@@ -244,50 +243,36 @@ impl LoweringContext {
             .map(|lam| Box::new(self.lower_lambda(*lam)));
         let lowered_scrutinee = self.lower_lambda(scrutinee);
 
-        if const_only_switch {
-            if let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch) {
-                if diff == 0 {
-                    return lowered_scrutinee;
-                }
-                return Lambda::prim(
-                    Primitive::Paddint,
-                    vec![
-                        lowered_scrutinee,
-                        Lambda::const_(Constant::Int {
-                            i: diff,
-                            comment: None,
-                        }),
-                    ],
-                    Location::none(),
-                );
+        if const_only_switch
+            && let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch)
+        {
+            if diff == 0 {
+                return lowered_scrutinee;
             }
+            return Lambda::prim(
+                Primitive::Paddint,
+                vec![
+                    lowered_scrutinee,
+                    Lambda::const_(Constant::Int {
+                        i: diff,
+                        comment: None,
+                    }),
+                ],
+                Location::none(),
+            );
         }
 
-        if const_only_switch {
-            Lambda::Lswitch(
-                Box::new(lowered_scrutinee),
-                Box::new(LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: lowered_consts,
-                    sw_blocks_full: true,
-                    sw_blocks: lowered_blocks,
-                    sw_failaction: lowered_failaction,
-                    sw_dispatch: switch.sw_dispatch,
-                }),
-            )
-        } else {
-            Lambda::Lswitch(
-                Box::new(lowered_scrutinee),
-                Box::new(LambdaSwitch {
-                    sw_consts_full: switch.sw_consts_full,
-                    sw_consts: lowered_consts,
-                    sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: lowered_blocks,
-                    sw_failaction: lowered_failaction,
-                    sw_dispatch: switch.sw_dispatch,
-                }),
-            )
-        }
+        Lambda::Lswitch(
+            Box::new(lowered_scrutinee),
+            Box::new(LambdaSwitch {
+                sw_consts_full: switch.sw_consts_full,
+                sw_consts: lowered_consts,
+                sw_blocks_full: switch.sw_blocks_full,
+                sw_blocks: lowered_blocks,
+                sw_failaction: lowered_failaction,
+                sw_dispatch: switch.sw_dispatch,
+            }),
+        )
     }
 
     fn lower_try_with(&mut self, body: RawLambda, id: Ident, handler: RawLambda) -> Lambda {
@@ -340,7 +325,7 @@ pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
         vec![Lambda::global_module(Ident::create_persistent(
             "Primitive_exceptions",
         ))],
-        loc.clone(),
+        loc,
     );
     Lambda::apply(
         internal_to_exception,
@@ -598,49 +583,34 @@ fn eta_reduce_function_apply(
     ap_info: &ApInfo,
 ) -> Option<Lambda> {
     match function.body.as_ref() {
-        Lambda::Lprim(__prim1)
+        Lambda::Lprim(wrap)
             if matches!(
-                __prim1.as_ref(),
-                PrimInfo {
-                    primitive: Primitive::PnullToOpt
-                        | Primitive::PnullUndefinedToOpt
-                        | Primitive::PisNull
-                        | Primitive::PisNullUndefined
-                        | Primitive::Ptypeof,
-                    args: _wrap_args,
-                    ..
-                }
-            ) =>
-        {
-            let PrimInfo {
-                primitive:
-                    Primitive::PnullToOpt
+                wrap.primitive,
+                Primitive::PnullToOpt
                     | Primitive::PnullUndefinedToOpt
                     | Primitive::PisNull
                     | Primitive::PisNullUndefined
-                    | Primitive::Ptypeof,
-                args: wrap_args,
-                ..
-            } = __prim1.as_ref()
-            else {
-                unreachable!()
-            };
-
-            let [Lambda::Lprim(inner_call)] = wrap_args.as_slice() else {
+                    | Primitive::Ptypeof
+            ) =>
+        {
+            let [Lambda::Lprim(inner_call)] = wrap.args.as_slice() else {
                 return None;
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
-            let wrap = function_primitive(function.body.as_ref())?;
-            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone());
-            Some(Lambda::prim(wrap, vec![inner], ap_info.loc.clone()))
+            let inner = Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc);
+            Some(Lambda::prim(
+                wrap.primitive.clone(),
+                vec![inner],
+                ap_info.loc,
+            ))
         }
         Lambda::Lprim(inner_call) => {
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::prim(
                 inner_call.primitive.clone(),
                 eta_args,
-                ap_info.loc.clone(),
+                ap_info.loc,
             ))
         }
         Lambda::Lsequence(first, second) => {
@@ -652,19 +622,9 @@ fn eta_reduce_function_apply(
             };
             let eta_args = eta_conversion_args(&function.params, &inner_call.args, args)?;
             Some(Lambda::seq(
-                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc.clone()),
+                Lambda::prim(inner_call.primitive.clone(), eta_args, ap_info.loc),
                 Lambda::Lconst(constant.clone()),
             ))
-        }
-        _ => None,
-    }
-}
-
-fn function_primitive(body: &Lambda) -> Option<Primitive> {
-    match body {
-        Lambda::Lprim(__prim0) => {
-            let PrimInfo { primitive, .. } = __prim0.as_ref();
-            Some(primitive.clone())
         }
         _ => None,
     }
@@ -709,13 +669,6 @@ fn bool_const(value: bool) -> Lambda {
         Lambda::true_()
     } else {
         Lambda::false_()
-    }
-}
-
-fn int_const_value_any(lam: &Lambda) -> Option<i32> {
-    match lam {
-        Lambda::Lconst(Constant::Int { i, .. }) => Some(*i),
-        _ => None,
     }
 }
 
@@ -812,10 +765,8 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
             | (Primitive::Plslint, _, _)
             | (Primitive::Plsrint, _, _)
             | (Primitive::Pasrint, _, _) => {
-                let Some(lhs) = int_const_value_any(&Lambda::Lconst(lhs.clone())) else {
-                    return Lambda::prim(primitive, args, loc);
-                };
-                let Some(rhs) = int_const_value_any(&Lambda::Lconst(rhs.clone())) else {
+                let (&Constant::Int { i: lhs, .. }, &Constant::Int { i: rhs, .. }) = (lhs, rhs)
+                else {
                     return Lambda::prim(primitive, args, loc);
                 };
                 let folded = match primitive {
@@ -920,16 +871,16 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
     let (first_arg, rest_args) = args.split_first()?;
 
     let (field_name, first_index, module_value) = module_field_access(first_arg)?;
-    if field_name != first_field.as_str() || first_index != 0 {
+    if field_name != first_field || first_index != 0 {
         return None;
     }
 
     let mut expected_index = 1i32;
     for (field, arg) in rest_fields.iter().zip(rest_args.iter()) {
         let (field_name, arg_index, arg_module_value) = module_field_access(arg)?;
-        if field_name != field.as_str()
+        if field_name != field
             || arg_index != expected_index
-            || !same_module_source(&module_value, &arg_module_value)
+            || !same_module_source(module_value, arg_module_value)
         {
             return None;
         }
@@ -940,18 +891,18 @@ fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {
         return None;
     }
 
-    Some(module_value)
+    Some(module_value.clone())
 }
 
-fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
-    let Lambda::Lprim(__prim200) = arg else {
+fn module_field_access(arg: &Lambda) -> Option<(&str, i32, &Lambda)> {
+    let Lambda::Lprim(prim) = arg else {
         return None;
     };
     let PrimInfo {
         primitive: Primitive::Pfield(index, FieldDbgInfo::Module { name }),
         args,
         ..
-    } = __prim200.as_ref()
+    } = prim.as_ref()
     else {
         return None;
     };
@@ -961,7 +912,7 @@ fn module_field_access(arg: &Lambda) -> Option<(String, i32, Lambda)> {
     if *index < 0 {
         return None;
     }
-    Some((name.clone(), *index, module_value.clone()))
+    Some((name.as_str(), *index, module_value))
 }
 
 fn same_module_source(lhs: &Lambda, rhs: &Lambda) -> bool {
@@ -1163,7 +1114,7 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::FunctionAttribute;
+
     use crate::lambda::InlineAttribute;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
@@ -1218,15 +1169,16 @@ mod tests {
         let raw = RawLambda::Lapply(Box::new(RawApply {
             ap_func: Box::new(RawLambda::function_(
                 2,
-                vec![prim0.clone(), prim1.clone()],
+                vec![prim0, prim1],
                 RawLambda::prim(
                     Primitive::Paddint,
-                    vec![RawLambda::var(prim0.clone()), RawLambda::var(prim1.clone())],
+                    vec![RawLambda::var(prim0), RawLambda::var(prim1)],
                     Location::none(),
                 ),
-                crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
+                crate::lambda::FunctionAttribute::default(),
+                crate::location::Location::none(),
             )),
-            ap_args: vec![RawLambda::var(lhs.clone()), RawLambda::var(rhs.clone())],
+            ap_args: vec![RawLambda::var(lhs), RawLambda::var(rhs)],
             ap_info: ApInfo {
                 loc: Location::none(),
                 inlined: InlineAttribute::Default,
@@ -1253,7 +1205,7 @@ mod tests {
         let slot = Ident::create_local("slot");
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PextensionSlotEq,
-            vec![RawLambda::var(exn.clone()), RawLambda::var(slot.clone())],
+            vec![RawLambda::var(exn), RawLambda::var(slot)],
             Location::none(),
         ));
 
@@ -1351,8 +1303,8 @@ mod tests {
         let alias = Ident::create_local("alias");
         let raw = RawLambda::let_(
             LetKind::Alias,
-            alias.clone(),
-            RawLambda::var(source.clone()),
+            alias,
+            RawLambda::var(source),
             RawLambda::var(alias),
         );
 
@@ -1369,14 +1321,11 @@ mod tests {
         let alias = Ident::create_local("alias");
         let raw = RawLambda::let_(
             LetKind::Alias,
-            alias.clone(),
-            RawLambda::var(source.clone()),
+            alias,
+            RawLambda::var(source),
             RawLambda::prim(
-                Primitive::Pmakeblock(
-                    TagInfo::ModuleExport(vec![alias.clone()]),
-                    Mutable::Immutable,
-                ),
-                vec![RawLambda::var(alias.clone())],
+                Primitive::Pmakeblock(TagInfo::ModuleExport(vec![alias]), Mutable::Immutable),
+                vec![RawLambda::var(alias)],
                 Location::none(),
             ),
         );
@@ -1636,7 +1585,7 @@ mod tests {
     fn keeps_named_linear_switches_instead_of_collapsing_to_scrutinee() {
         let scrutinee = Ident::create_local("scrutinee");
         let lowered = lower_to_lambda(RawLambda::Lswitch(
-            Box::new(RawLambda::var(scrutinee.clone())),
+            Box::new(RawLambda::var(scrutinee)),
             Box::new(RawLambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![
@@ -1707,7 +1656,7 @@ mod tests {
                         name: "presentLight".to_string(),
                     },
                 ),
-                vec![RawLambda::var(module_id.clone())],
+                vec![RawLambda::var(module_id)],
                 Location::none(),
             )],
             Location::none(),

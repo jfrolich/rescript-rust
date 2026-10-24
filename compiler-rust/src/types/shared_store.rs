@@ -105,10 +105,6 @@ impl SharedTypePool {
         }
     }
 
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
-
     pub(crate) fn pages(&self) -> SharedPages {
         self.pages.clone()
     }
@@ -118,11 +114,6 @@ impl SharedTypePool {
         self.pages[(idx >> PAGE_BITS) as usize]
             .get()
             .expect("shared type index refers to an unpublished page")
-    }
-
-    #[inline]
-    pub(crate) fn node(&self, idx: u32) -> &SharedTypeNode {
-        page_node(&self.pages, idx)
     }
 
     pub(crate) fn contains(&self, idx: u32) -> bool {
@@ -227,15 +218,6 @@ impl SharedTypePool {
         }
         self.longident_names.read().unwrap().get(&raw).cloned()
     }
-
-    pub(crate) fn snapshot_longident_names(&self) -> Vec<(u32, String)> {
-        self.longident_names
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(raw, name)| (*raw, name.clone()))
-            .collect()
-    }
 }
 
 /// Shared reference to node `offset` of the graph published at `base`.
@@ -286,9 +268,9 @@ mod tests {
         assert_ne!(base, second);
         let reader = pool.clone();
         std::thread::spawn(move || {
-            assert_eq!(reader.node(base + 1).level, 8);
+            assert_eq!(page_node(&reader.pages(), base + 1).level, 8);
             assert!(matches!(
-                reader.node(base + 1).desc,
+                page_node(&reader.pages(), base + 1).desc,
                 TypeDesc::Tvar(Some(_))
             ));
             assert!(reader.contains(base + 2));

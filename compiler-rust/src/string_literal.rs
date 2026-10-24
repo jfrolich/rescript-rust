@@ -370,7 +370,12 @@ fn encode_js(mode: EncodeJsMode, s: &str) -> String {
             b'\t' => buf.extend_from_slice(b"\\t"),
             0x0b => buf.extend_from_slice(b"\\v"),
             b'\\' => buf.extend_from_slice(b"\\\\"),
-            0x00..=0x1f | 0x7f => buf.extend_from_slice(format!("\\x{byte:02X}").as_bytes()),
+            0x00..=0x1f | 0x7f => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                buf.extend_from_slice(b"\\x");
+                buf.push(HEX[usize::from(byte >> 4)]);
+                buf.push(HEX[usize::from(byte & 0x0f)]);
+            }
             b'"' => match mode {
                 EncodeJsMode::String => buf.extend_from_slice(b"\\\""),
                 EncodeJsMode::Template => buf.push(byte),
@@ -388,7 +393,6 @@ fn encode_js(mode: EncodeJsMode, s: &str) -> String {
     string_of_bytes(buf)
 }
 
-/// OCaml `String_literal.encode_js_string`.
 /// OCaml `String_literal.decode_raw_template_source`: the JavaScript code of a
 /// `%raw` template. Escaped `\\`, `$` and `` ` `` lose their backslash; a
 /// backslash line continuation (`\n`, `\r\n`, `\r`, U+2028, U+2029) is
@@ -439,6 +443,7 @@ pub fn decode_raw_template_source(source: &str) -> String {
     }
 }
 
+/// OCaml `String_literal.encode_js_string`.
 pub fn encode_js_string(s: &str) -> String {
     encode_js(EncodeJsMode::String, s)
 }
@@ -591,6 +596,7 @@ mod tests {
     fn encodes_semantic_values() {
         assert_eq!(encode_js_string("a\"b`$\n\u{1}"), "a\\\"b`$\\n\\x01");
         assert_eq!(encode_js_template("a\"b`$"), "a\"b\\`\\$");
+        assert_eq!(encode_js_string("\u{1f}\u{7f}\u{0}"), "\\x1F\\x7F\\x00");
         assert_eq!(encode_char_source(0x27), "\\'");
         assert_eq!(encode_char_source(0x110000), "\\u{110000}");
     }

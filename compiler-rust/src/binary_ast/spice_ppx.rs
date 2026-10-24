@@ -14,14 +14,16 @@ use crate::parser::ast::{
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind,
     IncludeDeclaration, IncludeDescription, JsxClosingTag, JsxContainerElement, JsxElement,
-    JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration, ModuleBinding, ModuleDeclaration,
-    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, ObjectField,
+    JsxFragment, JsxProp, LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr,
+    ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, ObjectField,
     OpenDescription, PackageType, Pattern, PatternDesc, PatternRecordField, Payload, PexpApply,
     PexpFun, RecFlag, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeArg, TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription,
     WithConstraint, extend_cow_lifetime,
 };
 use crate::parser::longident::Longident;
+
+mod serde;
 
 const ANNOTATION_NAME: &str = "spice";
 const ENCODER_FUNC_SUFFIX: &str = "_encode";
@@ -34,6 +36,8 @@ const DECODER_VAR_PREFIX: &str = "decoder_";
 struct GeneratorSettings {
     do_encode: bool,
     do_decode: bool,
+    /// utils.ml `generator_settings.serde`: `@spice.serde` on the type.
+    serde: Option<serde::Serde>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,7 +50,6 @@ enum EncodeContext {
 struct ParsedRecordField {
     name: StrIdx,
     key: Expression,
-    key_identity: Option<StrIdx>,
     codecs: (Option<Expression>, Option<Expression>),
     default: Option<Expression>,
     is_optional: bool,
@@ -72,16 +75,24 @@ struct ParsedPolyvariantField {
 
 type SpiceResult<T> = Result<T, String>;
 
-fn spice_error(message: impl Into<String>) -> String {
-    message.into()
+/// utils.ml `field_var`: the variable a record field's value is bound to in
+/// generated code; the prefix keeps field names such as `v` or `dict` from
+/// shadowing the generated code's own variables.
+fn field_var(arena: &mut ParseArena, name: StrIdx) -> StrIdx {
+    let var = format!("spice_field_{}", arena.get_string(name));
+    arena.intern_string(&var)
+}
+
+fn require_codec(codec: Option<Expression>, what: &str) -> SpiceResult<Expression> {
+    codec.ok_or_else(|| format!("Internal spice error: missing {what}"))
 }
 
 fn require_encoder(encoder: Option<Expression>) -> SpiceResult<Expression> {
-    encoder.ok_or_else(|| spice_error("Internal spice error: missing encoder"))
+    require_codec(encoder, "encoder")
 }
 
 fn require_decoder(decoder: Option<Expression>) -> SpiceResult<Expression> {
-    decoder.ok_or_else(|| spice_error("Internal spice error: missing decoder"))
+    require_codec(decoder, "decoder")
 }
 
 fn lident_path_static(arena: &mut ParseArena, parts: &[&str]) -> LidentIdx {
@@ -200,21 +211,6 @@ fn expr_ident_spice_codecs_with_loc(
 
 fn expr_ident_spice_records(arena: &mut ParseArena, suffix: &str) -> Expression {
     let prefix = arena.spice_records_str();
-    expr_ident_spice_prefix(arena, prefix, suffix)
-}
-
-fn expr_ident_spice_variants(arena: &mut ParseArena, suffix: &str) -> Expression {
-    let prefix = arena.spice_variants_str();
-    expr_ident_spice_prefix(arena, prefix, suffix)
-}
-
-fn expr_ident_spice_polyvars(arena: &mut ParseArena, suffix: &str) -> Expression {
-    let prefix = arena.spice_polyvars_str();
-    expr_ident_spice_prefix(arena, prefix, suffix)
-}
-
-fn expr_ident_spice_tuple(arena: &mut ParseArena, suffix: &str) -> Expression {
-    let prefix = arena.spice_tuple_str();
     expr_ident_spice_prefix(arena, prefix, suffix)
 }
 
@@ -534,14 +530,6 @@ fn expr_field(expr: Expression, lid_idx: LidentIdx, arena: &mut ParseArena) -> E
     expr_field_with_loc(expr, lid_idx, arena.none_loc(), arena)
 }
 
-fn expr_field_default_loc(
-    expr: Expression,
-    lid_idx: LidentIdx,
-    arena: &mut ParseArena,
-) -> Expression {
-    expr_field_with_loc(expr, lid_idx, arena.none_loc(), arena)
-}
-
 fn expr_record(
     fields: Vec<ExpressionRecordField>,
     base: Option<Expression>,
@@ -571,7 +559,7 @@ fn pat_var_idx(arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
     }
 }
 
-fn pat_var_idx_with_loc(arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
+fn pat_var_idx_with_loc(_arena: &mut ParseArena, idx: StrIdx, loc: LocIdx) -> Pattern {
     Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_var(Located::new(idx, loc))),
         ppat_loc: loc,
@@ -734,27 +722,21 @@ fn mk_type_var(name: &str, arena: &mut ParseArena) -> CoreType {
 }
 
 fn mk_type_arrow(arg_type: CoreType, ret_type: CoreType, arena: &mut ParseArena) -> CoreType {
-    let arg_type_idx = arena.push_core_type(arg_type);
-    let arg = TypeArg {
-        attrs: Attributes::new(),
-        lbl: ArgLabel::Nolabel,
-        typ: arg_type_idx,
-    };
-    let ret_idx = arena.push_core_type(ret_type);
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(arg),
-            ret_idx,
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: arena.dummy_loc(),
-        ptyp_attributes: Attributes::new(),
-    }
+    mk_type_arrow_with_arity(arg_type, ret_type, Some(1), arena)
 }
 
 fn mk_type_arrow_no_arity(
     arg_type: CoreType,
     ret_type: CoreType,
+    arena: &mut ParseArena,
+) -> CoreType {
+    mk_type_arrow_with_arity(arg_type, ret_type, None, arena)
+}
+
+fn mk_type_arrow_with_arity(
+    arg_type: CoreType,
+    ret_type: CoreType,
+    arity: Option<i32>,
     arena: &mut ParseArena,
 ) -> CoreType {
     let arg_type_idx = arena.push_core_type(arg_type);
@@ -768,7 +750,7 @@ fn mk_type_arrow_no_arity(
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
             Box::new(arg),
             ret_idx,
-            arena.push_arity(None),
+            arena.push_arity(arity),
         )))),
         ptyp_loc: arena.dummy_loc(),
         ptyp_attributes: Attributes::new(),
@@ -810,31 +792,29 @@ fn get_attribute_by_name<'a>(
     Ok(found)
 }
 
+/// utils.ml `get_generator_settings_from_attributes`.
 fn get_generator_settings_from_attributes(
     attrs: &[Attribute],
-    arena: &ParseArena,
+    arena: &mut ParseArena,
 ) -> Result<Option<GeneratorSettings>, String> {
+    let serde = serde::get_serde_from_attributes(attrs, arena)?;
+    let make = |do_encode, do_decode| {
+        Ok(Some(GeneratorSettings {
+            do_encode,
+            do_decode,
+            serde,
+        }))
+    };
     match get_attribute_by_name(attrs, ANNOTATION_NAME, arena)? {
-        Some(_) => Ok(Some(GeneratorSettings {
-            do_encode: true,
-            do_decode: true,
-        })),
+        Some(_) => make(true, true),
         None => {
             let decode = get_attribute_by_name(attrs, "spice.decode", arena)?;
             let encode = get_attribute_by_name(attrs, "spice.encode", arena)?;
             match (decode, encode) {
-                (Some(_), Some(_)) => Ok(Some(GeneratorSettings {
-                    do_encode: true,
-                    do_decode: true,
-                })),
-                (Some(_), None) => Ok(Some(GeneratorSettings {
-                    do_encode: false,
-                    do_decode: true,
-                })),
-                (None, Some(_)) => Ok(Some(GeneratorSettings {
-                    do_encode: true,
-                    do_decode: false,
-                })),
+                (Some(_), Some(_)) => make(true, true),
+                (Some(_), None) => make(false, true),
+                (None, Some(_)) => make(true, false),
+                (None, None) if serde.is_some() => make(true, true),
                 (None, None) => Ok(None),
             }
         }
@@ -875,24 +855,42 @@ fn get_param_names(
     Ok(names)
 }
 
-fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
+/// The constant a `@spice.as` payload denotes. The external PPX reads the
+/// Parsetree0 form, where a backquoted string without interpolations is a
+/// `Pconst_string (source, Some "js")` constant (ast_mapper_to0.ml
+/// `Pexp_template`), which `ast_mapper_from0.ml` `map_constant` reads back as
+/// a string constant.
+fn alias_constant(expr: &Expression, arena: &ParseArena) -> Option<Constant> {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_) => Ok(Some((**constant).clone())),
-            Constant::Float(_, _) => Ok(None),
-            _ => Err("cannot find a name??".to_string()),
-        },
+        ExpressionDesc::Pexp_constant(constant) => Some((**constant).clone()),
+        ExpressionDesc::Pexp_template(template)
+            if template.values.is_empty() && template.source_segments.len() == 1 =>
+        {
+            let source = arena.get_string(template.source_segments[0].txt);
+            crate::string_literal::string_from_source(source).map(Constant::String)
+        }
+        _ => None,
+    }
+}
+
+fn get_string_from_expression(
+    expr: &Expression,
+    arena: &ParseArena,
+) -> Result<Option<Constant>, String> {
+    match alias_constant(expr, arena) {
+        Some(constant @ Constant::String(_)) => Ok(Some(constant)),
+        Some(Constant::Float(_, _)) => Ok(None),
         _ => Err("cannot find a name??".to_string()),
     }
 }
 
-fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_) => Ok(None),
-            Constant::Float(_, _) => Ok(Some((**constant).clone())),
-            _ => Err("cannot find a name??".to_string()),
-        },
+fn get_float_from_expression(
+    expr: &Expression,
+    arena: &ParseArena,
+) -> Result<Option<Constant>, String> {
+    match alias_constant(expr, arena) {
+        Some(Constant::String(_)) => Ok(None),
+        Some(constant @ Constant::Float(_, _)) => Ok(Some(constant)),
         _ => Err("cannot find a name??".to_string()),
     }
 }
@@ -1031,11 +1029,11 @@ fn build_ifthenelse_with_prefix(
     cases: Vec<(Expression, Expression)>,
     prefix: StrIdx,
 ) -> Expression {
-    let mut iter = cases.into_iter().rev();
+    let iter = cases.into_iter().rev();
     let v_expr = expr_ident_path(arena, &["v"]);
     let not_matched = expr_constant_literal(arena, "Not matched");
     let mut acc = expr_spice_error_with_prefix(arena, prefix, not_matched, v_expr, None);
-    while let Some((if_expr, then_expr)) = iter.next() {
+    for (if_expr, then_expr) in iter {
         acc = expr_ifthenelse(if_expr, then_expr, Some(acc), arena);
     }
     acc
@@ -1162,14 +1160,13 @@ fn tuple_generate_encoder(
     }
     let deconstructor = pat_tuple(pat_vars, arena);
 
-    let fun_expr = expr_fun(
+    expr_fun(
         ArgLabel::Nolabel,
         deconstructor,
         constrained,
         Some(1),
         arena,
-    );
-    fun_expr
+    )
 }
 
 fn tuple_generate_decode_success_case(num_args: usize, arena: &mut ParseArena) -> Case {
@@ -1568,6 +1565,68 @@ fn codecs_generate_constr_codecs(
     (encode, decode)
 }
 
+/// codecs.ml `is_dict_identifier`.
+fn is_dict_identifier(lid_idx: LidentIdx, arena: &ParseArena) -> bool {
+    longident_matches(arena, lid_idx, &["dict"])
+        || longident_matches(arena, lid_idx, &["Js", "Dict", "t"])
+        || longident_matches(arena, lid_idx, &["Dict", "t"])
+}
+
+/// codecs.ml `generate_dict_codecs`: a dict of options leaves out the
+/// entries that are `None`.
+fn codecs_generate_dict_codecs(
+    settings: GeneratorSettings,
+    value_type: &CoreType,
+    arena: &mut ParseArena,
+) -> SpiceResult<(Option<Expression>, Option<Expression>)> {
+    let Some(inner) = default_option_inner_type(value_type, arena) else {
+        let encoder = settings
+            .do_encode
+            .then(|| expr_ident_path(arena, &["Spice", "dictToJson"]));
+        let decoder = settings
+            .do_decode
+            .then(|| expr_ident_path(arena, &["Spice", "dictFromJson"]));
+        let value_type_idx = arena.push_core_type(value_type.clone());
+        return codecs_parameterize_codecs(&[value_type_idx], encoder, decoder, settings, arena);
+    };
+    let inner_type = arena.get_core_type(inner).clone();
+    let (inner_encode, inner_decode) =
+        codecs_generate_codecs_for(EncodeContext::Value, settings, &inner_type, arena)?;
+    let partial = |func: &str, arg: Expression, arena: &mut ParseArena| {
+        let func = expr_ident_path(arena, &["Spice", func]);
+        expr_apply(
+            func,
+            vec![(ArgLabel::Nolabel, arg)],
+            true,
+            arena.dummy_loc(),
+            arena,
+        )
+    };
+    // OCaml builds both inner codecs before checking the settings
+    // (`Option.get` on the one that is not generated never runs).
+    let optional_value_encoder = inner_encode.map(|e| partial("optionToJson", e, arena));
+    let value_decoder = inner_decode.map(|d| partial("optionFromJson", d, arena));
+    let encoder = if settings.do_encode {
+        Some(partial(
+            "dictOptionalToJson",
+            require_encoder(optional_value_encoder)?,
+            arena,
+        ))
+    } else {
+        None
+    };
+    let decoder = if settings.do_decode {
+        Some(partial(
+            "dictFromJson",
+            require_decoder(value_decoder)?,
+            arena,
+        ))
+    } else {
+        None
+    };
+    Ok((encoder, decoder))
+}
+
 fn codecs_parameterize_codecs(
     type_args: &[CoreTypeIdx],
     encoder_func: Option<Expression>,
@@ -1624,12 +1683,12 @@ fn codecs_generate_codecs_for(
     // All sub-types inside it that are indices need to be resolved through the arena.
     let typ = typ_ref;
     match &*typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_any => Err(spice_error("Can't generate codecs for `any` type")),
+        CoreTypeDesc::Ptyp_any => Err("Can't generate codecs for `any` type".to_string()),
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (..) = **inner;
-            Err(spice_error("Can't generate codecs for function type"))
+            Err("Can't generate codecs for function type".to_string())
         }
-        CoreTypeDesc::Ptyp_package(_) => Err(spice_error("Can't generate codecs for module type")),
+        CoreTypeDesc::Ptyp_package(_) => Err("Can't generate codecs for module type".to_string()),
         CoreTypeDesc::Ptyp_tuple(types) => {
             let types_vec: Vec<CoreType> = types
                 .iter()
@@ -1680,6 +1739,13 @@ fn codecs_generate_codecs_for(
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref constr, ref type_args) = **inner;
             let custom_codec = get_attribute_by_name(&typ.ptyp_attributes, "spice.codec", arena);
+            if matches!(custom_codec, Ok(None))
+                && type_args.len() == 1
+                && is_dict_identifier(constr.txt, arena)
+            {
+                let value_type = arena.get_core_type(type_args[0]).clone();
+                return codecs_generate_dict_codecs(settings, &value_type, arena);
+            }
             let (encode, decode) = match custom_codec {
                 Ok(Some(attr)) => {
                     let expr = get_expression_from_payload(attr, arena)?;
@@ -1725,7 +1791,7 @@ fn codecs_generate_codecs_for(
                 codecs_parameterize_codecs(type_args, encode, decode, settings, arena)
             }
         }
-        _ => Err(spice_error("This syntax is not yet handled by spice")),
+        _ => Err("This syntax is not yet handled by spice".to_string()),
     }
 }
 
@@ -1781,18 +1847,13 @@ fn records_parse_decl(
         Err(e) => return Err(e),
     };
 
-    let (key, key_identity) = match get_attribute_by_name(&decl.pld_attributes, "spice.key", arena)
-    {
-        Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, None),
+    let key = match get_attribute_by_name(&decl.pld_attributes, "spice.key", arena) {
+        Ok(Some(attr)) => get_expression_from_payload(attr, arena)?,
         Ok(None) => {
             let name_idx = decl.pld_name.txt;
             let name = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_idx)));
             arena.register_shareable_literal(name.as_ref());
-            arena.register_constant_string_identity(name.as_ref(), name_idx);
-            (
-                expr_constant(Constant::string(&name), arena),
-                Some(name_idx),
-            )
+            expr_constant(Constant::string(&name), arena)
         }
         Err(e) => return Err(e),
     };
@@ -1831,23 +1892,11 @@ fn records_parse_decl(
     Ok(ParsedRecordField {
         name: decl.pld_name.txt,
         key,
-        key_identity,
         codecs,
         default,
         is_optional,
         is_option,
     })
-}
-
-fn clone_record_key(field: &ParsedRecordField, arena: &mut ParseArena) -> Expression {
-    let key = field.key.clone();
-    if let (Some(identity), ExpressionDesc::Pexp_constant(constant)) =
-        (field.key_identity, &*key.pexp_desc)
-        && let Constant::String(value) = &**constant
-    {
-        arena.register_constant_string_identity(value.semantic(), identity);
-    }
-    key
 }
 
 fn records_generate_encoder(
@@ -1862,7 +1911,7 @@ fn records_generate_encoder(
     if unboxed {
         let field = fields
             .first()
-            .ok_or_else(|| spice_error("Internal spice error: missing field"))?;
+            .ok_or_else(|| "Internal spice error: missing field".to_string())?;
         let encoder = require_encoder(field.codecs.0.clone())?;
         let name_str = arena.get_string(field.name).to_string();
         let name_slice = [name_str.as_str()];
@@ -1895,7 +1944,7 @@ fn records_generate_encoder(
             arena,
         );
         let tuple_expr = if field.is_optional || field.is_option {
-            expr_tuple(vec![clone_record_key(field, arena), encoded], arena)
+            expr_tuple(vec![field.key.clone(), encoded], arena)
         } else {
             let some_expr = expr_construct_with_loc(
                 {
@@ -1906,7 +1955,7 @@ fn records_generate_encoder(
                 arena.dummy_loc(),
                 arena,
             );
-            expr_tuple(vec![clone_record_key(field, arena), some_expr], arena)
+            expr_tuple(vec![field.key.clone(), some_expr], arena)
         };
         arr_items.push(tuple_expr);
     }
@@ -1961,7 +2010,7 @@ fn records_generate_flat_decoder_expr(
                     expr_ident_path(arena, &["Dict", "get"]),
                     vec![
                         (ArgLabel::Nolabel, dict_expr.clone()),
-                        (ArgLabel::Nolabel, clone_record_key(field, arena)),
+                        (ArgLabel::Nolabel, field.key.clone()),
                     ],
                     false,
                     arena.dummy_loc(),
@@ -1979,7 +2028,7 @@ fn records_generate_flat_decoder_expr(
                     arena,
                 );
 
-                let default_expr = if field.is_optional {
+                if field.is_optional {
                     match &field.default {
                         Some(d) => expr_apply(
                             expr_ident_path(arena, &["Option", "getOr"]),
@@ -2086,7 +2135,7 @@ fn records_generate_flat_decoder_expr(
                     )
                 } else {
                     let missing = expr_constant(Constant::string(" missing"), arena);
-                    let key = clone_record_key(field, arena);
+                    let key = field.key.clone();
                     let msg = expr_concat(arena, key, missing);
                     let v_loc = arena.dummy_loc();
                     let v_expr = expr_ident_from_str_idx(arena, v_idx, v_loc);
@@ -2101,13 +2150,11 @@ fn records_generate_flat_decoder_expr(
                         arena.dummy_loc(),
                         arena,
                     )
-                };
-
-                default_expr
+                }
             }
             None => {
                 let missing = expr_constant(Constant::string(" missing"), arena);
-                let key = clone_record_key(field, arena);
+                let key = field.key.clone();
                 let msg = expr_concat(arena, key, missing);
                 let v_loc = arena.dummy_loc();
                 let v_expr = expr_ident_from_str_idx(arena, v_idx, v_loc);
@@ -2123,7 +2170,9 @@ fn records_generate_flat_decoder_expr(
         let name_str = arena.get_string(field.name).to_string();
         let name_slice = [name_str.as_str()];
         let lid = lident_path_parse(arena, &name_slice);
-        let expr = expr_ident_path_dynamic_mknoloc(arena, &name_slice);
+        let var = field_var(arena, field.name);
+        let var_str = arena.get_string(var).to_string();
+        let expr = expr_ident_path_dynamic_mknoloc(arena, &[var_str.as_str()]);
         record_fields.push(ExpressionRecordField {
             lid: Located::new(lid, arena.none_loc()),
             expr: arena.push_expr(expr),
@@ -2151,7 +2200,10 @@ fn records_generate_flat_decoder_expr(
                 let lident_name = arena.intern_string("Ok");
                 arena.push_lident_from_idx(lident_name)
             },
-            Some(pat_var_idx(arena, field.name, arena.none_loc())),
+            Some({
+                let var = field_var(arena, field.name);
+                pat_var_idx(arena, var, arena.none_loc())
+            }),
             arena.none_loc(),
             arena,
         );
@@ -2191,7 +2243,7 @@ fn records_generate_flat_decoder_expr(
             arena.dummy_loc(),
             arena,
         );
-        let field_key = clone_record_key(field, arena);
+        let field_key = field.key.clone();
         let error_path = expr_field_with_loc(
             e_expr,
             {
@@ -2224,7 +2276,7 @@ fn records_generate_decoder(
     if unboxed {
         let field = fields
             .first()
-            .ok_or_else(|| spice_error("Internal spice error: missing field"))?;
+            .ok_or_else(|| "Internal spice error: missing field".to_string())?;
         let decoder = require_decoder(field.codecs.1.clone())?;
 
         let map_v_idx = arena.spice_field_v();
@@ -2333,19 +2385,23 @@ fn records_generate_codecs(
     Ok((encoder, decoder))
 }
 
+/// records.ml `generate_inline_record_encoder_expr ?leading_entries`.
 fn records_generate_inline_encoder_expr(
     settings: GeneratorSettings,
     decls: &[LabelDeclaration],
+    leading_entries: Vec<Expression>,
     arena: &mut ParseArena,
 ) -> SpiceResult<Expression> {
     let fields = decls
         .iter()
         .map(|decl| records_parse_decl(settings, decl, arena))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut arr_items = Vec::with_capacity(fields.len());
+    let mut arr_items = leading_entries;
+    arr_items.reserve(fields.len());
     for field in &fields {
         let encoder = require_encoder(field.codecs.0.clone())?;
-        let field_expr = expr_ident_from_str_idx(arena, field.name, arena.dummy_loc());
+        let var = field_var(arena, field.name);
+        let field_expr = expr_ident_from_str_idx(arena, var, arena.none_loc());
         let encoded = expr_apply(
             encoder,
             vec![(ArgLabel::Nolabel, field_expr)],
@@ -2366,7 +2422,7 @@ fn records_generate_inline_encoder_expr(
                 arena,
             )
         };
-        let key = clone_record_key(field, arena);
+        let key = field.key.clone();
         arr_items.push(expr_tuple(vec![key, value], arena));
     }
 
@@ -2412,6 +2468,18 @@ fn records_generate_inline_decoder_expr(
 }
 
 fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseArena) -> Expression {
+    arena.register_shareable_literal("[1]");
+    let index = expr_constant(Constant::string("[1]"), arena);
+    prefix_decode_error_path(decoded, index, arena)
+}
+
+/// `match decoded with Ok v -> Ok v | Error (e : Spice.decodeError) ->
+/// Error {...e, path: prefix ++ e.path}`.
+fn prefix_decode_error_path(
+    decoded: Expression,
+    prefix: Expression,
+    arena: &mut ParseArena,
+) -> Expression {
     let ok_pattern = pat_construct_with_loc(
         {
             let name = arena.intern_string("Ok");
@@ -2433,11 +2501,12 @@ fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseAr
 
     let error_pattern = pat_constraint(
         pat_var_dummy(arena, "e"),
-        mk_type_constr(
-            lident_path_parse(arena, &["Spice", "decodeError"]),
-            vec![],
-            arena,
-        ),
+        {
+            // `[%expr ...]`: every location is the quotation's.
+            let lid = lident_path_parse(arena, &["Spice", "decodeError"]);
+            let loc = arena.dummy_loc();
+            mk_type_constr_with_lid_loc(lid, loc, vec![], arena)
+        },
         arena,
     );
     let error_pattern = pat_construct_with_loc(
@@ -2459,16 +2528,14 @@ fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseAr
         arena.dummy_loc(),
         arena,
     );
-    arena.register_shareable_literal("[1]");
-    let index = expr_constant(Constant::string("[1]"), arena);
-    let path = expr_concat(arena, index, previous_path);
+    let path = expr_concat(arena, prefix, previous_path);
     let path_lid = {
         let name = arena.intern_string("path");
         arena.push_lident_from_idx(name)
     };
     let error_record = expr_record(
         vec![ExpressionRecordField {
-            lid: Located::new(path_lid, arena.none_loc()),
+            lid: Located::new(path_lid, arena.dummy_loc()),
             expr: arena.push_expr(path),
             opt: false,
         }],
@@ -2506,7 +2573,6 @@ fn variants_parse_decl(
         Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, true),
         Ok(None) => {
             let name_str = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal)));
-            arena.register_constant_string_identity(name_str.as_ref(), name_literal);
             (expr_constant(Constant::string(&name_str), arena), false)
         }
         Err(e) => return Err(e),
@@ -2521,6 +2587,37 @@ fn variants_parse_decl(
     })
 }
 
+/// variants.ml `generate_inline_record_payload_pattern`.
+fn variants_inline_record_payload_pattern(
+    fields: &[LabelDeclaration],
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Pattern {
+    let mut pattern_fields = Vec::with_capacity(fields.len());
+    for field in fields {
+        let field_name = field.pld_name.txt;
+        let var = field_var(arena, field_name);
+        let variable = pat_var_idx_with_loc(arena, var, field.pld_name.loc);
+        pattern_fields.push(PatternRecordField {
+            // `lid txt`: no location.
+            lid: Located::new(arena.push_lident_from_idx(field_name), arena.none_loc()),
+            pat: arena.push_pat(variable),
+            opt: field.pld_optional,
+        });
+    }
+    // `Pat.record` at the default location.
+    let _ = loc;
+    Pattern {
+        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
+            pattern_fields,
+            ClosedFlag::Closed,
+            None,
+        )))),
+        ppat_loc: arena.dummy_loc(),
+        ppat_attributes: Attributes::new(),
+    }
+}
+
 fn variants_generate_encoder_case(
     settings: GeneratorSettings,
     unboxed: bool,
@@ -2530,8 +2627,8 @@ fn variants_generate_encoder_case(
 ) -> SpiceResult<Case> {
     let pcd_loc = arena.clone_loc(decl.constr_decl.pcd_loc);
 
-    let json_expr = match &*decl.alias.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
+    let json_expr = match alias_constant(&decl.alias, arena) {
+        Some(constant) => match constant {
             Constant::String(_) => expr_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(decl.alias.clone()),
@@ -2544,9 +2641,9 @@ fn variants_generate_encoder_case(
                 arena.dummy_loc(),
                 arena,
             ),
-            _ => return Err(spice_error("cannot find a name??!")),
+            _ => return Err("cannot find a name??!".to_string()),
         },
-        _ => return Err(spice_error("cannot find a name???")),
+        _ => return Err("cannot find a name???".to_string()),
     };
 
     let (lhs_vars, rhs) = match &decl.constr_decl.pcd_args {
@@ -2602,26 +2699,8 @@ fn variants_generate_encoder_case(
             (lhs_vars, rhs)
         }
         crate::parser::ast::ConstructorArguments::Pcstr_record(fields) => {
-            let mut pattern_fields = Vec::with_capacity(fields.len());
-            for field in fields {
-                let field_name = field.pld_name.txt;
-                let variable = pat_var_idx(arena, field_name, field.pld_name.loc);
-                pattern_fields.push(PatternRecordField {
-                    lid: Located::new(arena.push_lident_from_idx(field_name), field.pld_name.loc),
-                    pat: arena.push_pat(variable),
-                    opt: field.pld_optional,
-                });
-            }
-            let payload_pattern = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
-                    pattern_fields,
-                    ClosedFlag::Closed,
-                    None,
-                )))),
-                ppat_loc: pcd_loc,
-                ppat_attributes: Attributes::new(),
-            };
-            let payload = records_generate_inline_encoder_expr(settings, fields, arena)?;
+            let payload_pattern = variants_inline_record_payload_pattern(fields, pcd_loc, arena);
+            let payload = records_generate_inline_encoder_expr(settings, fields, vec![], arena)?;
             let rhs = if unboxed {
                 payload.clone()
             } else if has_attr_as {
@@ -2790,7 +2869,6 @@ fn variants_generate_decoder_case(
             };
 
             let name_const = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal_idx)));
-            arena.register_constant_string_identity(name_const.as_ref(), name_literal_idx);
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
@@ -2872,7 +2950,6 @@ fn variants_generate_decoder_case(
             let decoded = variants_prefix_inline_payload_error(decoded, arena);
 
             let name_const = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal_idx)));
-            arena.register_constant_string_identity(name_const.as_ref(), name_literal_idx);
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
@@ -2915,9 +2992,9 @@ fn variants_generate_decoder_case_attr(
     match &decl.constr_decl.pcd_args {
         crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
             let const_opt = if is_string {
-                get_string_from_expression(&decl.alias)?
+                get_string_from_expression(&decl.alias, arena)?
             } else {
-                get_float_from_expression(&decl.alias)?
+                get_float_from_expression(&decl.alias, arena)?
             };
             let const_value = match const_opt {
                 Some(c) => c,
@@ -2951,7 +3028,7 @@ fn variants_generate_decoder_case_attr(
             Ok(Some((if_expr, decoded)))
         }
         crate::parser::ast::ConstructorArguments::Pcstr_record(_) => {
-            Err(spice_error("This syntax is not yet implemented by spice"))
+            Err("This syntax is not yet implemented by spice".to_string())
         }
     }
 }
@@ -2964,7 +3041,7 @@ fn variants_generate_unboxed_decode(
     match &decl.pcd_args {
         crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
             if args.len() != 1 {
-                return Err(spice_error("Expected exactly one type argument"));
+                return Err("Expected exactly one type argument".to_string());
             }
             let arg0 = arena.get_core_type(args[0]).clone();
             let (_, dec) = codecs_generate_value_codecs(settings, &arg0, arena)?;
@@ -3012,10 +3089,67 @@ fn variants_generate_unboxed_decode(
                 arena,
             )))
         }
-        crate::parser::ast::ConstructorArguments::Pcstr_record(_) => {
-            Err(spice_error("This syntax is not yet implemented by spice"))
+        // variants.ml `generate_unboxed_inline_record_decoder`.
+        crate::parser::ast::ConstructorArguments::Pcstr_record(fields) => {
+            let record =
+                records_generate_inline_decoder_expr(settings, fields, decl.pcd_name.txt, arena)?;
+            let object_pat = pat_construct_with_loc(
+                lident_path_static(arena, &["JSON", "Object"]),
+                Some(pat_var_dummy(arena, "dict")),
+                arena.dummy_loc(),
+                arena,
+            );
+            let v = expr_ident_path(arena, &["v"]);
+            let not_object = expr_constant_literal(arena, "Not an object");
+            let error = expr_spice_error_variants(arena, not_object, v, None);
+            let v = expr_ident_path(arena, &["v"]);
+            let scrutinee = expr_constraint(v, ctyp_json_t(arena), arena);
+            let match_expr = expr_match(
+                scrutinee,
+                vec![
+                    case(object_pat, record, arena),
+                    case(pat_any(arena), error, arena),
+                ],
+                arena,
+            );
+            Ok(Some(expr_fun(
+                ArgLabel::Nolabel,
+                pat_var_dummy(arena, "v"),
+                match_expr,
+                Some(1),
+                arena,
+            )))
         }
     }
+}
+
+/// variants.ml `generate_encoder`.
+fn variants_generate_encoder(
+    settings: GeneratorSettings,
+    unboxed: bool,
+    has_attr_as: bool,
+    parsed: &[ParsedVariantDecl],
+    arena: &mut ParseArena,
+) -> SpiceResult<Expression> {
+    let mut cases = Vec::new();
+    for decl in parsed {
+        cases.push(variants_generate_encoder_case(
+            settings,
+            unboxed,
+            has_attr_as,
+            decl,
+            arena,
+        )?);
+    }
+    let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
+    let constrained = expr_constraint(match_expr, ctyp_json_t_const(arena), arena);
+    Ok(expr_fun(
+        ArgLabel::Nolabel,
+        pat_var_dummy(arena, "v"),
+        constrained,
+        Some(1),
+        arena,
+    ))
 }
 
 fn variants_generate_codecs(
@@ -3028,37 +3162,66 @@ fn variants_generate_codecs(
         .iter()
         .map(|d| variants_parse_decl(d, arena))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(serde_settings) = settings.serde {
+        if unboxed {
+            return Err("@spice.serde can't be combined with @unboxed".to_string());
+        }
+        let cases = parsed
+            .iter()
+            .map(|decl| serde::variant_case(decl, arena))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (encoder, decoder) = serde::generate_codecs(
+            settings,
+            serde_settings,
+            serde_settings.tag,
+            |arena| serde::variants_legacy_decoder(settings, &parsed, arena),
+            &cases,
+            arena,
+        )?;
+        let encoder = if serde_settings.legacy_write && settings.do_encode {
+            // A constructor as the default spice encoding writes it: an array
+            // led by the constructor's own name.
+            let legacy: Vec<ParsedVariantDecl> = parsed
+                .iter()
+                .map(|decl| {
+                    let name = arena.get_string(decl.name).to_string();
+                    ParsedVariantDecl {
+                        alias: expr_constant(Constant::string(&name), arena),
+                        has_attr_as: false,
+                        ..decl.clone()
+                    }
+                })
+                .collect();
+            Some(variants_generate_encoder(
+                settings, false, false, &legacy, arena,
+            )?)
+        } else {
+            encoder
+        };
+        return Ok((encoder, decoder));
+    }
+    for decl in constr_decls {
+        serde::reject_flags(&decl.pcd_attributes, arena)?;
+    }
     let count_has_attr = parsed.iter().filter(|v| v.has_attr_as).count();
     let has_attr_as = if count_has_attr > 0 {
         if count_has_attr == parsed.len() {
             true
         } else {
-            return Err(spice_error("Partial @spice.as usage is not allowed"));
+            return Err("Partial @spice.as usage is not allowed".to_string());
         }
     } else {
         false
     };
 
     let encoder = if settings.do_encode {
-        let mut cases = Vec::new();
-        for decl in &parsed {
-            cases.push(variants_generate_encoder_case(
-                settings,
-                unboxed,
-                has_attr_as,
-                decl,
-                arena,
-            )?);
-        }
-        let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
-        let constrained = expr_constraint(match_expr, ctyp_json_t_const(arena), arena);
-        Some(expr_fun(
-            ArgLabel::Nolabel,
-            pat_var_dummy(arena, "v"),
-            constrained,
-            Some(1),
+        Some(variants_generate_encoder(
+            settings,
+            unboxed,
+            has_attr_as,
+            &parsed,
             arena,
-        ))
+        )?)
     } else {
         None
     };
@@ -3067,7 +3230,7 @@ fn variants_generate_codecs(
         if unboxed {
             let first_decl = constr_decls
                 .first()
-                .ok_or_else(|| spice_error("Internal spice error: missing constructor"))?;
+                .ok_or_else(|| "Internal spice error: missing constructor".to_string())?;
             variants_generate_unboxed_decode(settings, first_decl, arena)?
         } else if has_attr_as {
             let mut string_cases = Vec::new();
@@ -3254,9 +3417,10 @@ fn polyvars_get_args(
                 _ => Ok(vec![ct.clone()]),
             }
         }
-        _ => Err(spice_error(
-            "This error shoudn't happen, means that the AST of your polyvariant is wrong",
-        )),
+        _ => Err(
+            "This error shoudn't happen, means that the AST of your polyvariant is wrong"
+                .to_string(),
+        ),
     }
 }
 
@@ -3266,7 +3430,7 @@ fn polyvars_parse_decl(
 ) -> SpiceResult<ParsedPolyvariantField> {
     let name = match row_field {
         RowField::Rtag(tag, _, _, _) => tag.txt.clone(),
-        _ => return Err(spice_error("cannot get polymorphic variant constructor")),
+        _ => return Err("cannot get polymorphic variant constructor".to_string()),
     };
 
     let (alias, has_attr_as) = match row_field {
@@ -3276,7 +3440,7 @@ fn polyvars_parse_decl(
             Err(e) => return Err(e),
         },
         RowField::Rinherit(_) => {
-            return Err(spice_error("This syntax is not yet implemented by spice"));
+            return Err("This syntax is not yet implemented by spice".to_string());
         }
     };
 
@@ -3297,8 +3461,8 @@ fn polyvars_generate_encoder_case(
 ) -> SpiceResult<Case> {
     let (json_expr, args) = match &row.row_field {
         RowField::Rtag(_, _, _, core_types) => {
-            let json_expr = match &*row.alias.pexp_desc {
-                ExpressionDesc::Pexp_constant(constant) => match &**constant {
+            let json_expr = match alias_constant(&row.alias, arena) {
+                Some(constant) => match constant {
                     Constant::String(_) => expr_construct_with_loc(
                         lident_path_static(arena, &["JSON", "String"]),
                         Some(row.alias.clone()),
@@ -3311,15 +3475,15 @@ fn polyvars_generate_encoder_case(
                         arena.dummy_loc(),
                         arena,
                     ),
-                    _ => return Err(spice_error("cannot find a name??")),
+                    _ => return Err("cannot find a name??".to_string()),
                 },
-                _ => return Err(spice_error("cannot find a name??")),
+                _ => return Err("cannot find a name??".to_string()),
             };
             let args = polyvars_get_args(arena.dummy_loc(), core_types, arena)?;
             (json_expr, args)
         }
         RowField::Rinherit(_arg) => {
-            return Err(spice_error("This syntax is not yet implemented by spice"));
+            return Err("This syntax is not yet implemented by spice".to_string());
         }
     };
 
@@ -3537,7 +3701,7 @@ fn polyvars_generate_decoder_case(
             Ok(case(json_str_pat, rhs, arena))
         }
         RowField::Rinherit(_core_type) => {
-            Err(spice_error("This syntax is not yet implemented by spice"))
+            Err("This syntax is not yet implemented by spice".to_string())
         }
     }
 }
@@ -3552,9 +3716,9 @@ fn polyvars_generate_decoder_case_attr(
         RowField::Rtag(tag, _, _, core_types) => {
             let args = polyvars_get_args(arena.dummy_loc(), core_types, arena)?;
             let const_opt = if is_string {
-                get_string_from_expression(&row.alias)?
+                get_string_from_expression(&row.alias, arena)?
             } else {
-                get_float_from_expression(&row.alias)?
+                get_float_from_expression(&row.alias, arena)?
             };
             let const_value = match const_opt {
                 Some(c) => c,
@@ -3581,7 +3745,7 @@ fn polyvars_generate_decoder_case_attr(
             let if_expr = expr_equal(arena, const_expr, str_expr);
             Ok(Some((if_expr, decoded)))
         }
-        RowField::Rinherit(_) => Err(spice_error("This syntax is not yet implemented by spice")),
+        RowField::Rinherit(_) => Err("This syntax is not yet implemented by spice".to_string()),
     }
 }
 
@@ -3594,7 +3758,7 @@ fn polyvars_generate_unboxed_decode(
         RowField::Rtag(tag, _, _, args) => {
             let mut args = bridge_rtag_types(args, arena);
             if args.len() != 1 {
-                return Err(spice_error("Expected exactly one type argument"));
+                return Err("Expected exactly one type argument".to_string());
             }
             let arg0 = args.pop().expect("one type argument");
             let (_, dec) = codecs_generate_value_codecs(settings, &arg0, arena)?;
@@ -3643,9 +3807,37 @@ fn polyvars_generate_unboxed_decode(
             )))
         }
         RowField::Rinherit(_core_type) => {
-            Err(spice_error("This syntax is not yet implemented by spice"))
+            Err("This syntax is not yet implemented by spice".to_string())
         }
     }
+}
+
+/// polyvariants.ml `generate_encoder`.
+fn polyvars_generate_encoder(
+    settings: GeneratorSettings,
+    unboxed: bool,
+    has_attr_as: bool,
+    parsed: &[ParsedPolyvariantField],
+    arena: &mut ParseArena,
+) -> SpiceResult<Expression> {
+    let mut cases = Vec::new();
+    for row in parsed {
+        cases.push(polyvars_generate_encoder_case(
+            settings,
+            unboxed,
+            has_attr_as,
+            row,
+            arena,
+        )?);
+    }
+    let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
+    Ok(expr_fun(
+        ArgLabel::Nolabel,
+        pat_var_dummy(arena, "v"),
+        match_expr,
+        Some(1),
+        arena,
+    ))
 }
 
 fn polyvars_generate_codecs(
@@ -3658,36 +3850,66 @@ fn polyvars_generate_codecs(
         .iter()
         .map(|r| polyvars_parse_decl(r, arena))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(serde_settings) = settings.serde {
+        if serde_settings.tag.is_some() {
+            return Err("@tag doesn't apply to polymorphic variants".to_string());
+        }
+        if unboxed {
+            return Err("@spice.serde can't be combined with @unboxed".to_string());
+        }
+        let cases = parsed
+            .iter()
+            .map(|field| serde::polyvariant_case(field, arena))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (encoder, decoder) = serde::generate_codecs(
+            settings,
+            serde_settings,
+            None,
+            |arena| serde::polyvariants_legacy_decoder(settings, &parsed, arena),
+            &cases,
+            arena,
+        )?;
+        let encoder = if serde_settings.legacy_write && settings.do_encode {
+            let legacy: Vec<ParsedPolyvariantField> = parsed
+                .iter()
+                .map(|field| ParsedPolyvariantField {
+                    alias: expr_constant(Constant::string(&field.name), arena),
+                    has_attr_as: false,
+                    ..field.clone()
+                })
+                .collect();
+            Some(polyvars_generate_encoder(
+                settings, false, false, &legacy, arena,
+            )?)
+        } else {
+            encoder
+        };
+        return Ok((encoder, decoder));
+    }
+    for row in row_fields {
+        if let RowField::Rtag(_, attrs, _, _) = row {
+            serde::reject_flags(attrs, arena)?;
+        }
+    }
     let count_has_attr = parsed.iter().filter(|v| v.has_attr_as).count();
     let has_attr_as = if count_has_attr > 0 {
         if count_has_attr == parsed.len() {
             true
         } else {
-            return Err(spice_error("Partial @spice.as usage is not allowed"));
+            return Err("Partial @spice.as usage is not allowed".to_string());
         }
     } else {
         false
     };
 
     let encoder = if settings.do_encode {
-        let mut cases = Vec::new();
-        for row in &parsed {
-            cases.push(polyvars_generate_encoder_case(
-                settings,
-                unboxed,
-                has_attr_as,
-                row,
-                arena,
-            )?);
-        }
-        let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
-        Some(expr_fun(
-            ArgLabel::Nolabel,
-            pat_var_dummy(arena, "v"),
-            match_expr,
-            Some(1),
+        Some(polyvars_generate_encoder(
+            settings,
+            unboxed,
+            has_attr_as,
+            &parsed,
             arena,
-        ))
+        )?)
     } else {
         None
     };
@@ -3696,7 +3918,7 @@ fn polyvars_generate_codecs(
         if unboxed {
             let first_row = row_fields
                 .first()
-                .ok_or_else(|| spice_error("Internal spice error: missing row field"))?;
+                .ok_or_else(|| "Internal spice error: missing row field".to_string())?;
             polyvars_generate_unboxed_decode(settings, first_row, arena)?
         } else if has_attr_as {
             let mut string_cases = Vec::new();
@@ -3960,6 +4182,22 @@ fn generate_codec_decls(
     vbs
 }
 
+/// utils.ml `get_default_option_inner_type`: the inner type of an
+/// `option<t>` without `@spice.codec`.
+fn default_option_inner_type(manifest: &CoreType, arena: &ParseArena) -> Option<CoreTypeIdx> {
+    if !matches!(
+        get_attribute_by_name(&manifest.ptyp_attributes, "spice.codec", arena),
+        Ok(None)
+    ) {
+        return None;
+    }
+    let CoreTypeDesc::Ptyp_constr(inner) = &*manifest.ptyp_desc else {
+        return None;
+    };
+    let (constructor, args) = &**inner;
+    (args.len() == 1 && longident_matches(arena, constructor.txt, &["option"])).then(|| args[0])
+}
+
 fn manifest_value_encoder(
     settings: GeneratorSettings,
     manifest: &CoreType,
@@ -3978,22 +4216,88 @@ fn manifest_value_encoder(
     Ok(codecs_generate_value_codecs(settings, manifest, arena)?.0)
 }
 
+/// structure.ml `with_fallback`: with `@spice.fallback(value)`, whatever the
+/// decoder rejects decodes to `value`; exceptions still propagate.
+fn with_fallback(
+    attributes: &[Attribute],
+    codecs: (Option<Expression>, Option<Expression>),
+    arena: &mut ParseArena,
+) -> SpiceResult<(Option<Expression>, Option<Expression>)> {
+    let Some(attribute) = get_attribute_by_name(attributes, "spice.fallback", arena)? else {
+        return Ok(codecs);
+    };
+    let fallback = get_expression_from_payload(attribute, arena)?;
+    let (encoder, decoder) = codecs;
+    let Some(decoder) = decoder else {
+        return Ok((encoder, None));
+    };
+    // fun v -> match decoder(v) with | Ok _ as ok -> ok | Error _ -> Ok(fallback)
+    let v_idx = arena.spice_runtime_v();
+    let v_loc = arena.dummy_loc();
+    let v_expr = expr_ident_from_str_idx(arena, v_idx, v_loc);
+    let decoded = expr_apply(
+        decoder,
+        vec![(ArgLabel::Nolabel, v_expr)],
+        false,
+        arena.dummy_loc(),
+        arena,
+    );
+    let ok_lid = {
+        let name = arena.intern_string("Ok");
+        arena.push_lident_from_idx(name)
+    };
+    let ok_any = {
+        let any = pat_any(arena);
+        let loc = arena.dummy_loc();
+        pat_construct_with_loc(ok_lid, Some(any), loc, arena)
+    };
+    let ok_name = arena.intern_string("ok");
+    let ok_alias = Pattern {
+        ppat_desc: Box::new(PatternDesc::Ppat_alias(
+            arena.push_pat(ok_any),
+            Located::new(ok_name, arena.dummy_loc()),
+        )),
+        ppat_loc: arena.dummy_loc(),
+        ppat_attributes: Attributes::new(),
+    };
+    let ok_expr = expr_ident_from_str_idx(arena, ok_name, arena.dummy_loc());
+    let error_any = {
+        let name = arena.intern_string("Error");
+        let lid = arena.push_lident_from_idx(name);
+        let any = pat_any(arena);
+        let loc = arena.dummy_loc();
+        pat_construct_with_loc(lid, Some(any), loc, arena)
+    };
+    let ok_fallback = {
+        let name = arena.intern_string("Ok");
+        let lid = arena.push_lident_from_idx(name);
+        let loc = arena.dummy_loc();
+        expr_construct_with_loc(lid, Some(fallback), loc, arena)
+    };
+    let cases = vec![
+        case(ok_alias, ok_expr, arena),
+        case(error_any, ok_fallback, arena),
+    ];
+    let body = expr_match(decoded, cases, arena);
+    let v_pat = pat_var_idx(arena, v_idx, v_loc);
+    Ok((
+        encoder,
+        Some(expr_fun(ArgLabel::Nolabel, v_pat, body, Some(1), arena)),
+    ))
+}
+
 fn map_type_decl_structure(
     decl: &TypeDeclaration,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<ValueBinding>> {
     let type_name = arena.get_string(decl.ptype_name.txt).to_string();
 
-    let is_unboxed = match get_attribute_by_name(&decl.ptype_attributes, "unboxed", arena) {
-        Ok(Some(_)) => true,
-        _ => false,
-    };
+    let is_unboxed = matches!(
+        get_attribute_by_name(&decl.ptype_attributes, "unboxed", arena),
+        Ok(Some(_))
+    );
 
-    let generator_settings =
-        match get_generator_settings_from_attributes(&decl.ptype_attributes, arena) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
+    let generator_settings = get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?;
 
     let settings = match generator_settings {
         None => return Ok(vec![]),
@@ -4004,7 +4308,7 @@ fn map_type_decl_structure(
 
     match (&decl.ptype_manifest, &decl.ptype_kind) {
         (None, TypeKind::Ptype_abstract) => {
-            Err(spice_error("Can't generate codecs for unspecified type"))
+            Err("Can't generate codecs for unspecified type".to_string())
         }
         (Some(manifest_idx), TypeKind::Ptype_abstract) => {
             let manifest = arena.get_core_type(*manifest_idx).clone();
@@ -4012,6 +4316,7 @@ fn map_type_decl_structure(
                 CoreTypeDesc::Ptyp_variant(inner) => {
                     let (ref row_fields, _, _) = **inner;
                     let codecs = polyvars_generate_codecs(settings, row_fields, is_unboxed, arena)?;
+                    let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
                     Ok(generate_codec_decls(
                         &type_name,
                         &param_names,
@@ -4023,6 +4328,7 @@ fn map_type_decl_structure(
                 _ => {
                     let value_encoder = manifest_value_encoder(settings, &manifest, arena)?;
                     let codecs = codecs_generate_codecs(settings, &manifest, arena)?;
+                    let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
                     Ok(generate_codec_decls(
                         &type_name,
                         &param_names,
@@ -4037,6 +4343,7 @@ fn map_type_decl_structure(
             let manifest = arena.get_core_type(*manifest_idx).clone();
             let value_encoder = manifest_value_encoder(settings, &manifest, arena)?;
             let codecs = codecs_generate_codecs(settings, &manifest, arena)?;
+            let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
             Ok(generate_codec_decls(
                 &type_name,
                 &param_names,
@@ -4047,6 +4354,7 @@ fn map_type_decl_structure(
         }
         (None, TypeKind::Ptype_variant(constructors)) => {
             let codecs = variants_generate_codecs(settings, constructors, is_unboxed, arena)?;
+            let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
             Ok(generate_codec_decls(
                 &type_name,
                 &param_names,
@@ -4057,6 +4365,7 @@ fn map_type_decl_structure(
         }
         (None, TypeKind::Ptype_record(labels)) => {
             let codecs = records_generate_codecs(settings, labels, is_unboxed, arena)?;
+            let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
             Ok(generate_codec_decls(
                 &type_name,
                 &param_names,
@@ -4065,7 +4374,7 @@ fn map_type_decl_structure(
                 arena,
             ))
         }
-        _ => Err(spice_error("This type is not handled by spice")),
+        _ => Err("This type is not handled by spice".to_string()),
     }
 }
 
@@ -4299,6 +4608,12 @@ impl<'a> LocCloner<'a> {
     }
 
     fn remove_res_async_attr(&mut self, attrs: &mut Attributes) {
+        if !attrs
+            .iter()
+            .any(|attr| self.arena.get_string(attr.0.txt) == "res.async")
+        {
+            return;
+        }
         *attrs = attrs
             .iter()
             .filter(|attr| self.arena.get_string(attr.0.txt) != "res.async")
@@ -4319,8 +4634,8 @@ impl<'a> LocCloner<'a> {
             return;
         }
 
-        let mut start = *self.arena.get_position(opening);
-        let mut end = *self.arena.get_position(closing);
+        let start = *self.arena.get_position(opening);
+        let end = *self.arena.get_position(closing);
         if start.cnum < start.bol || end.cnum < end.bol {
             return;
         }
@@ -4421,7 +4736,7 @@ impl<'a> LocCloner<'a> {
                 if args.len() > 1 {
                     self.arena.set_nary_arrow_args(arity, args.clone());
                 }
-                *arg = Box::new(args.remove(0));
+                **arg = args.remove(0);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
                 for typ in types.iter_mut() {
@@ -4602,13 +4917,6 @@ impl<'a> LocCloner<'a> {
             self.expression_idx(child);
         }
         self.pos(&mut fragment.closing);
-    }
-
-    fn jsx_unary_element(&mut self, element: &mut JsxUnaryElement) {
-        self.located(&mut element.tag_name);
-        for prop in element.props.iter_mut() {
-            self.jsx_prop(prop);
-        }
     }
 
     fn jsx_container_element(&mut self, element: &mut JsxContainerElement) {
@@ -5211,9 +5519,6 @@ fn map_structure_item_spice(
     arena: &mut ParseArena,
     mapper_active: bool,
 ) -> SpiceResult<Vec<StructureItem>> {
-    let mut mapped_item = item.clone();
-    let contains_spice_subtree = structure_item_contains_spice_type_decl(item, arena);
-
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
@@ -5224,11 +5529,12 @@ fn map_structure_item_spice(
 
             if vbs.is_empty() {
                 if mapper_active {
-                    mapped_item = clone_mapped_structure_item(item, arena)?;
+                    Ok(vec![clone_mapped_structure_item(item, arena)?])
+                } else {
+                    Ok(vec![item.clone()])
                 }
-                Ok(vec![mapped_item])
             } else {
-                mapped_item = clone_mapped_structure_item(item, arena)?;
+                let mapped_item = clone_mapped_structure_item(item, arena)?;
 
                 let value_item = StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((*rec_flag, vbs)))),
@@ -5238,10 +5544,11 @@ fn map_structure_item_spice(
             }
         }
         _ => {
-            if mapper_active || contains_spice_subtree {
-                mapped_item = clone_mapped_structure_item(item, arena)?;
+            if mapper_active || structure_item_contains_spice_type_decl(item, arena) {
+                Ok(vec![clone_mapped_structure_item(item, arena)?])
+            } else {
+                Ok(vec![item.clone()])
             }
-            Ok(vec![mapped_item])
         }
     }
 }
@@ -5305,6 +5612,7 @@ fn generate_sig_decls(
     settings: GeneratorSettings,
     type_name: &str,
     param_names: &[String],
+    optional_encoder: bool,
     arena: &mut ParseArena,
 ) -> Vec<SignatureItem> {
     let mut decls = Vec::new();
@@ -5318,7 +5626,20 @@ fn generate_sig_decls(
 
     if settings.do_encode {
         for suffix in [ENCODER_FUNC_SUFFIX, VALUE_ENCODER_FUNC_SUFFIX] {
-            let base = mk_type_arrow(value_type.clone(), ctyp_json_t(arena), arena);
+            // signature.ml `map_type_decl`: a top-level `option` type encodes
+            // to `option<JSON.t>` (`ctyp_optional_json_t`); its value
+            // encoder still gives `JSON.t`.
+            let result_type = if optional_encoder && suffix == ENCODER_FUNC_SUFFIX {
+                let option = {
+                    let name = arena.intern_string("option");
+                    arena.push_lident_from_idx(name)
+                };
+                let json = ctyp_json_t_const(arena);
+                mk_type_constr(option, vec![json], arena)
+            } else {
+                ctyp_json_t(arena)
+            };
+            let base = mk_type_arrow(value_type.clone(), result_type, arena);
             let ty = add_encoder_params(param_names, base, arena);
             let name = format!("{}{}", type_name, suffix);
             let name_idx = arena.push_string(name);
@@ -5366,49 +5687,51 @@ fn map_signature_item_spice(
     arena: &mut ParseArena,
     mapper_active: bool,
 ) -> SpiceResult<Vec<SignatureItem>> {
-    let mut mapped_item = item.clone();
-    let contains_spice_subtree = signature_item_contains_spice_type_decl(item, arena);
-
     match &*item.psig_desc {
         SignatureItemDesc::Psig_type(inner) => {
             let (_, ref decls) = **inner;
             let mut generated = Vec::new();
             for decl in decls {
                 let settings =
-                    match get_generator_settings_from_attributes(&decl.ptype_attributes, arena) {
-                        Ok(v) => v,
-                        Err(e) => return Err(e),
-                    };
+                    get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?;
                 if let Some(settings) = settings {
                     let param_names = get_param_names(&decl.ptype_params, arena)?;
                     let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+                    let optional_encoder = match decl.ptype_manifest {
+                        Some(manifest) => {
+                            let manifest = arena.get_core_type(manifest).clone();
+                            default_option_inner_type(&manifest, arena).is_some()
+                        }
+                        None => false,
+                    };
                     generated.extend(generate_sig_decls(
                         settings,
                         &type_name,
                         &param_names,
+                        optional_encoder,
                         arena,
                     ));
                 }
             }
             if generated.is_empty() {
                 if mapper_active {
-                    mapped_item = clone_mapped_signature_item(item, arena)?;
+                    Ok(vec![clone_mapped_signature_item(item, arena)?])
+                } else {
+                    Ok(vec![item.clone()])
                 }
-                Ok(vec![mapped_item])
             } else {
-                mapped_item = clone_mapped_signature_item(item, arena)?;
-
-                let mut out = Vec::new();
-                out.push(mapped_item);
+                let mut out = Vec::with_capacity(1 + generated.len());
+                out.push(clone_mapped_signature_item(item, arena)?);
                 out.extend(generated);
                 Ok(out)
             }
         }
         _ => {
-            if mapper_active || contains_spice_subtree {
-                mapped_item = clone_mapped_signature_item(item, arena)?;
+            if mapper_active || signature_item_contains_spice_type_decl(item, arena) {
+                Ok(vec![clone_mapped_signature_item(item, arena)?])
+            } else {
+                Ok(vec![item.clone()])
             }
-            Ok(vec![mapped_item])
         }
     }
 }
@@ -5446,17 +5769,6 @@ pub fn expand_structure_item_with_mapper(
     map_structure_item_spice(item, arena, mapper_active)
 }
 
-pub fn expand_structure_item(
-    item: &StructureItem,
-    arena: &mut ParseArena,
-) -> SpiceResult<Vec<StructureItem>> {
-    if !arena.builtin_spice_enabled() {
-        return Ok(vec![item.clone()]);
-    }
-    let mapper_active = structure_item_contains_spice_type_decl(item, arena);
-    map_structure_item_spice(item, arena, mapper_active)
-}
-
 fn map_structure_items_with_mapper(
     structure: &[StructureItem],
     arena: &mut ParseArena,
@@ -5469,17 +5781,6 @@ fn map_structure_items_with_mapper(
     Ok(expanded)
 }
 
-pub fn expand_structure(
-    structure: &[StructureItem],
-    arena: &mut ParseArena,
-) -> SpiceResult<Vec<StructureItem>> {
-    if !arena.builtin_spice_enabled() {
-        return Ok(structure.to_vec());
-    }
-    let mapper_active = structure_contains_spice_type_decl(structure, arena);
-    map_structure_items_with_mapper(structure, arena, mapper_active)
-}
-
 pub fn expand_signature_item_with_mapper(
     item: &SignatureItem,
     arena: &mut ParseArena,
@@ -5488,17 +5789,6 @@ pub fn expand_signature_item_with_mapper(
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_signature_item_spice(item, arena, mapper_active)
-}
-
-pub fn expand_signature_item(
-    item: &SignatureItem,
-    arena: &mut ParseArena,
-) -> SpiceResult<Vec<SignatureItem>> {
-    if !arena.builtin_spice_enabled() {
-        return Ok(vec![item.clone()]);
-    }
-    let mapper_active = signature_item_contains_spice_type_decl(item, arena);
     map_signature_item_spice(item, arena, mapper_active)
 }
 

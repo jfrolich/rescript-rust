@@ -157,7 +157,7 @@ struct JsMetadataReadyMsg {
 
 enum WorkerMsg {
     SignatureReady(SignatureReadyMsg),
-    PreJsReady(PreJsMsg),
+    PreJsReady(Box<PreJsMsg>),
     JsMetadataReady(JsMetadataReadyMsg),
     Completed(CompletionMsg),
 }
@@ -410,13 +410,14 @@ fn compute_module_costs(
     costs
 }
 
-/// Compute the weighted critical-path priority of every module in the universe:
-/// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
 struct CompileWarning {
     module_name: String,
     package_name: String,
     warning: String,
 }
+
+/// Compute the weighted critical-path priority of every module in the universe:
+/// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
 /// Runs a reverse-topological sweep from leaves to roots. Modules stuck in a
 /// cycle get priority 0, and the actual cycle is diagnosed later by
 /// `dependency_cycle::find` when the dispatcher detects a stall.
@@ -539,7 +540,7 @@ fn compile_one(
                     let is_clean_interface = interface_generation_before.is_some()
                         && interface_generation_before == interface_generation_after;
                     msg.is_clean = is_clean_interface;
-                    WorkerMsg::PreJsReady(msg)
+                    WorkerMsg::PreJsReady(Box::new(msg))
                 }
                 Err(err) => WorkerMsg::Completed(CompletionMsg {
                     module_name: module_name.to_string(),
@@ -675,8 +676,7 @@ pub fn compile(
     // modules are compiled. Source modules may use `-open Namespace`, so the
     // namespace signature must be available in the PersistentEnv first.
     crate::build::phase_mark("compile-start");
-    register_namespace_signatures(build_state);
-    register_source_fallback_paths(build_state);
+    prepare_registry_for_runtime_precompile(build_state);
 
     // Pre-compile all @rescript/runtime modules into the registry.
     // In in-process mode, the registry is the sole source of truth —
@@ -686,31 +686,14 @@ pub fn compile(
     // can require modules that the main build graph hasn't reached yet).
     let parent_span = compile_parent_span.clone();
     let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-        let handle = std::thread::Builder::new()
-            .name("rewatch-runtime-precompile".to_string())
-            .stack_size(256 * 1024 * 1024)
-            .spawn_scoped(scope, || {
-                let _parent = parent_span.enter();
-                pre_compile_runtime_modules(
-                    &build_state.module_registry,
-                    &build_state.build_state.compiler_info.runtime_path,
-                )
-            })
-            .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
-
-        match handle.join() {
-            Ok(result) => result,
-            Err(panic) => {
-                let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "unknown".to_string()
-                };
-                Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-            }
-        }
+        spawn_runtime_precompile(scope, || {
+            let _parent = parent_span.enter();
+            pre_compile_runtime_modules(
+                &build_state.module_registry,
+                &build_state.build_state.compiler_info.runtime_path,
+            )
+        })
+        .and_then(join_runtime_precompile)
     });
     pre_compile_result?;
     crate::build::phase_mark("runtime-precompile-end");
@@ -1041,6 +1024,7 @@ pub fn compile(
                             );
                         }
                         WorkerMsg::PreJsReady(msg) => {
+                            let msg = *msg;
                             if let Some(counters) = scheduler_counters.as_mut() {
                                 counters.pre_js_ready += 1;
                             }
@@ -1545,10 +1529,14 @@ pub fn compile(
     Ok((compile_errors, compile_warnings, num_compiled_modules))
 }
 
-static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();
+/// Resolved runtime path per project root. Keyed by root so a later project
+/// in the same process (watch reinit, tests, tooling) resolves its own.
+static RUNTIME_PATH_MEMO: OnceLock<Mutex<AHashMap<PathBuf, PathBuf>>> = OnceLock::new();
 
 pub fn get_runtime_path(package_config: &Config, project_context: &ProjectContext) -> Result<PathBuf> {
-    if let Some(p) = RUNTIME_PATH_MEMO.get() {
+    let memo = RUNTIME_PATH_MEMO.get_or_init(Default::default);
+    let root = project_context.get_root_path();
+    if let Some(p) = memo.lock().unwrap().get(root) {
         return Ok(p.clone());
     }
 
@@ -1562,8 +1550,12 @@ pub fn get_runtime_path(package_config: &Config, project_context: &ProjectContex
         },
     }?;
 
-    let _ = RUNTIME_PATH_MEMO.set(resolved.clone());
-    Ok(resolved)
+    Ok(memo
+        .lock()
+        .unwrap()
+        .entry(root.to_path_buf())
+        .or_insert(resolved)
+        .clone())
 }
 
 pub fn get_runtime_path_args(
@@ -1902,10 +1894,10 @@ pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessComp
                 }
             }
             "-enable-experimental" => {
-                if let Some(feature) = iter.next() {
-                    if feature == "LetUnwrap" {
-                        parsed.experimental_let_unwrap = true;
-                    }
+                if let Some(feature) = iter.next()
+                    && feature == "LetUnwrap"
+                {
+                    parsed.experimental_let_unwrap = true;
                 }
             }
             "-open" => {
@@ -2607,6 +2599,47 @@ pub(crate) fn prepare_registry_for_runtime_precompile(build_state: &BuildCommand
     register_source_fallback_paths(build_state);
 }
 
+/// Whether `RESCRIPT_MODULE_TIMINGS` is set; read once per process rather
+/// than on every module compile.
+fn module_timings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some())
+}
+
+/// Run the runtime pre-compilation `work` on a dedicated large-stack thread
+/// in `scope`; join it with [`join_runtime_precompile`].
+pub(crate) fn spawn_runtime_precompile<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    work: impl FnOnce() -> Result<()> + Send + 'scope,
+) -> Result<std::thread::ScopedJoinHandle<'scope, Result<()>>> {
+    std::thread::Builder::new()
+        .name("rewatch-runtime-precompile".to_string())
+        .stack_size(256 * 1024 * 1024)
+        .spawn_scoped(scope, work)
+        .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))
+}
+
+/// Wait for a [`spawn_runtime_precompile`] thread, turning a panic into an error.
+pub(crate) fn join_runtime_precompile(handle: std::thread::ScopedJoinHandle<'_, Result<()>>) -> Result<()> {
+    handle.join().unwrap_or_else(|panic| {
+        Err(anyhow!(
+            "runtime pre-compilation panicked: {}",
+            panic_message(panic.as_ref(), "unknown")
+        ))
+    })
+}
+
+/// The message of a caught panic payload, or `unknown` when it carries none.
+fn panic_message(panic: &(dyn std::any::Any + Send), unknown: &str) -> String {
+    if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        unknown.to_string()
+    }
+}
+
 /// The namespace of `package` and its `(short_name, internal_name)` module
 /// aliases, as `packages::parse_packages` generates the `.mlmap`.
 pub(crate) fn namespace_aliases(package: &packages::Package) -> Option<(String, Vec<(String, String)>)> {
@@ -2690,33 +2723,32 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
     if let Ok(entries) = std::fs::read_dir(runtime_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if ext == "res" || ext == "resi" {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        // Capitalize the module name (Pervasives, Js, etc.)
-                        let module_name = {
-                            let mut chars = stem.chars();
-                            match chars.next() {
-                                None => continue,
-                                Some(ch) => {
-                                    format!("{}{}", ch.to_uppercase(), chars.as_str())
-                                }
-                            }
-                        };
-
-                        // For .res files, check if a .resi exists and prefer it
-                        if ext == "res" {
-                            let resi_path = path.with_extension("resi");
-                            if resi_path.exists() {
-                                fallback_paths.insert(module_name, resi_path);
-                            } else {
-                                fallback_paths.entry(module_name).or_insert(path.clone());
-                            }
-                        } else {
-                            // .resi always takes precedence
-                            fallback_paths.insert(module_name, path.clone());
+            if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && (ext == "res" || ext == "resi")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                // Capitalize the module name (Pervasives, Js, etc.)
+                let module_name = {
+                    let mut chars = stem.chars();
+                    match chars.next() {
+                        None => continue,
+                        Some(ch) => {
+                            format!("{}{}", ch.to_uppercase(), chars.as_str())
                         }
                     }
+                };
+
+                // For .res files, check if a .resi exists and prefer it
+                if ext == "res" {
+                    let resi_path = path.with_extension("resi");
+                    if resi_path.exists() {
+                        fallback_paths.insert(module_name, resi_path);
+                    } else {
+                        fallback_paths.entry(module_name).or_insert(path.clone());
+                    }
+                } else {
+                    // .resi always takes precedence
+                    fallback_paths.insert(module_name, path.clone());
                 }
             }
         }
@@ -2799,8 +2831,8 @@ pub(crate) fn pre_compile_runtime_modules(
     runtime_root: &Path,
 ) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
-    let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
-        || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let runtime_timing_enabled =
+        std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some() || module_timings_enabled();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
     let runtime_config = packages::read_config(runtime_root)
@@ -3517,7 +3549,7 @@ fn compile_module_in_process_to_js_boundary(
         package = %package.name
     )
     .entered();
-    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_enabled = module_timings_enabled();
     let module_timing_start = module_timing_enabled.then(Instant::now);
     let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
     let _counter_guard = rescript_compiler::perf_counters::ModuleCounterGuard::start(module_name);
@@ -3593,14 +3625,18 @@ fn compile_module_in_process_to_js_boundary(
                     &local_registry,
                 )
             }
-            Some(StoredAst::Structure(_)) => panic!(
-                "in-process invariant violated: expected signature AST for {}, found structure AST",
-                intf_source_abs.display()
-            ),
-            None => panic!(
-                "in-process invariant violated: missing stored signature AST for {}",
-                intf_source_abs.display()
-            ),
+            Some(StoredAst::Structure(_)) => {
+                return Err(anyhow!(
+                    "in-process invariant violated: expected signature AST for {}, found structure AST",
+                    intf_source_abs.display()
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "in-process invariant violated: missing stored signature AST for {}",
+                    intf_source_abs.display()
+                ));
+            }
         }
         .map_err(
             |e| match e.downcast::<rescript_compiler::driver::UserDiagnostic>() {
@@ -3803,13 +3839,7 @@ fn compile_module_in_process_to_js_boundary(
             });
         }
         Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".to_string()
-            };
+            let msg = panic_message(panic.as_ref(), "unknown panic");
             return Err(anyhow!("Compilation panicked for {}: {}", module_name, msg));
         }
     };
@@ -3939,7 +3969,7 @@ fn finish_in_process_js_inner(
         is_clean: _,
         registry_only,
     } = pre_js_msg;
-    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_enabled = module_timings_enabled();
     let module_timing_start = module_timing_enabled.then(Instant::now);
     let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
     let module = build_state.get_module(&module_name).unwrap();
@@ -4003,20 +4033,13 @@ fn finish_in_process_js_inner(
             Some(&mut metadata_hook),
         )
     }));
-    drop(metadata_hook);
     let mut compile_result = match compile_result {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             return Err(anyhow!("JS compilation failed for {}: {}", module_name, e));
         }
         Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".to_string()
-            };
+            let msg = panic_message(panic.as_ref(), "unknown panic");
             return Err(anyhow!("JS compilation panicked for {}: {}", module_name, msg));
         }
     };
@@ -4152,7 +4175,7 @@ fn in_process_compile_error(module_name: &str, err: anyhow::Error) -> anyhow::Er
 }
 
 fn visible_compiler_warnings(stderr: &str, is_local_dep: bool) -> Option<String> {
-    if !helpers::contains_ascii_characters(stderr) {
+    if !helpers::has_ascii_alphanumeric(stderr) {
         return None;
     }
     if is_local_dep {

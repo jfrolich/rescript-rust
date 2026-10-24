@@ -167,9 +167,6 @@ pub enum ExternalFfi {
     FfiObjCreate(Vec<ObjParam>),
 }
 
-/// `External_ffi_types.inclusion_compatible impl intf`: can an
-/// implementation's spec satisfy an interface's spec during signature
-/// inclusion? Object-creation specs compare optional fields by name only.
 #[cfg(test)]
 impl ExternalDecl {
     /// A plain global `@val` call, for tests that need some FFI call.
@@ -186,6 +183,9 @@ impl ExternalDecl {
     }
 }
 
+/// `External_ffi_types.inclusion_compatible impl intf`: can an
+/// implementation's spec satisfy an interface's spec during signature
+/// inclusion? Object-creation specs compare optional fields by name only.
 pub fn inclusion_compatible(impl_: &ExternalFfi, intf: &ExternalFfi) -> bool {
     match (impl_, intf) {
         (ExternalFfi::FfiObjCreate(params1), ExternalFfi::FfiObjCreate(params2)) => {

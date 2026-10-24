@@ -6,39 +6,7 @@ use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_beta_reduce_indexed::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_pass_count::UsedInfo;
-
-#[derive(Default)]
-pub(crate) struct OccurrenceTable {
-    entries: AHashMap<Ident, usize>,
-    values: Vec<UsedInfo>,
-}
-
-impl OccurrenceTable {
-    pub(crate) fn get(&self, id: &Ident) -> UsedInfo {
-        self.entries
-            .get(id)
-            .map(|index| self.values[*index])
-            .unwrap_or_default()
-    }
-
-    fn bind(&mut self, id: &Ident) -> usize {
-        let index = self.values.len();
-        self.values.push(UsedInfo::default());
-        self.entries.insert(id.clone(), index);
-        index
-    }
-
-    fn used(&self, id: &Ident) -> bool {
-        self.get(id).times > 0
-    }
-
-    fn absorb(&mut self, index: usize, other: UsedInfo) {
-        let info = &mut self.values[index];
-        info.times = info.times.saturating_add(other.times);
-        info.captured |= other.captured;
-    }
-}
+use crate::lambda::lam_pass_count::{OccurrenceTable, UsedInfo};
 
 type LocalTable = AHashMap<Ident, usize>;
 
@@ -83,11 +51,11 @@ pub(crate) fn collect_occurs(
         f: impl FnOnce(&mut OccurrenceTable, &mut LocalTable),
     ) {
         let index = occ.bind(id);
-        let previous = local.insert(id.clone(), index);
+        let previous = local.insert(*id, index);
         f(occ, local);
         match previous {
             Some(previous) => {
-                local.insert(id.clone(), previous);
+                local.insert(*id, previous);
             }
             None => {
                 local.remove(id);
@@ -128,7 +96,7 @@ pub(crate) fn collect_occurs(
                 let NodeView::Var(source) = store.view(value) else {
                     unreachable!()
                 };
-                let source = source.clone();
+                let source = *source;
                 with_binding(occ, local, &id, |occ, local| {
                     count(store, occ, local, body, hash_capacity)
                 });
@@ -246,16 +214,16 @@ mod tests {
         let inner = id("value", 2);
         let input = Lambda::let_(
             LetKind::Strict,
-            outer.clone(),
+            outer,
             Lambda::const_(Constant::int(0)),
             Lambda::seq(
                 Lambda::let_(
                     LetKind::Strict,
-                    inner.clone(),
-                    Lambda::var(outer.clone()),
-                    Lambda::seq(Lambda::var(inner.clone()), Lambda::var(inner.clone())),
+                    inner,
+                    Lambda::var(outer),
+                    Lambda::seq(Lambda::var(inner), Lambda::var(inner)),
                 ),
-                Lambda::var(outer.clone()),
+                Lambda::var(outer),
             ),
         );
         let mut store = IndexedLambda::from_lambda(input);
@@ -273,15 +241,15 @@ mod tests {
         let value = id("value", 1);
         let input = Lambda::let_(
             LetKind::Strict,
-            value.clone(),
+            value,
             Lambda::const_(Constant::int(0)),
-            Lambda::var(value.clone()),
+            Lambda::var(value),
         );
         let mut store = IndexedLambda::from_lambda(input);
         let NodeView::Let(kind, id, init, body) = store.view(store.root()) else {
             panic!("expected let")
         };
-        let (kind, id, init, body) = (kind, id.clone(), init, body);
+        let (kind, id, init, body) = (kind, *id, init, body);
         let body = store.append_sequence(body, body);
         let root = store.append(NodeSnapshot::Let(kind, id, init, body));
         let mut capacity = 32;
@@ -294,7 +262,7 @@ mod tests {
         let value = id("value", 1);
         let input = Lambda::let_(
             LetKind::Strict,
-            value.clone(),
+            value,
             Lambda::const_(Constant::int(0)),
             Lambda::Lswitch(
                 Box::new(Lambda::const_(Constant::int(0))),
@@ -303,7 +271,7 @@ mod tests {
                     sw_consts: vec![],
                     sw_blocks_full: blocks_full,
                     sw_blocks: vec![],
-                    sw_failaction: Some(Box::new(Lambda::var(value.clone()))),
+                    sw_failaction: Some(Box::new(Lambda::var(value))),
                     sw_dispatch: SwitchDispatch::Direct,
                 }),
             ),
@@ -338,12 +306,12 @@ mod tests {
         let parameter = id("parameter", 3);
         let input = Lambda::let_(
             LetKind::Strict,
-            outer.clone(),
+            outer,
             Lambda::const_(Constant::int(0)),
             Lambda::let_(
                 LetKind::Alias,
-                alias.clone(),
-                Lambda::var(outer.clone()),
+                alias,
+                Lambda::var(outer),
                 Lambda::function_(
                     1,
                     vec![parameter],
@@ -354,11 +322,12 @@ mod tests {
                             sw_consts: vec![],
                             sw_blocks_full: false,
                             sw_blocks: vec![],
-                            sw_failaction: Some(Box::new(Lambda::var(alias.clone()))),
+                            sw_failaction: Some(Box::new(Lambda::var(alias))),
                             sw_dispatch: SwitchDispatch::Direct,
                         }),
                     ),
-                    FunctionAttribute::default(), crate::location::Location::none(),
+                    FunctionAttribute::default(),
+                    crate::location::Location::none(),
                 ),
             ),
         );

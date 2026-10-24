@@ -290,12 +290,7 @@ impl Hover<'_, '_> {
         let expanded = all
             .into_iter()
             // Don't produce duplicate type definitions for recursive types.
-            .filter(|t| {
-                let mut parts = vec![t.env.file_module_name.clone()];
-                parts.extend(t.env.path_rev.iter().rev().cloned());
-                parts.push(t.name.clone());
-                types_seen.insert(parts.join("."))
-            })
+            .filter(|t| types_seen.insert(format!("{}.{}", t.env, t.name)))
             .map(|t| {
                 let file = self.session.file(t.env.file);
                 let link = if self.supports_markdown_links

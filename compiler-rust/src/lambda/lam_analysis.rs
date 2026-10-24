@@ -260,7 +260,6 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         // Impure primitives
         Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
-        | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod
         | Primitive::PupdateMod
@@ -578,7 +577,8 @@ mod tests {
             1,
             vec![Ident::create_local("x")],
             Lambda::const_(Constant::int(1)),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         assert!(no_side_effects(&func));
     }
@@ -590,9 +590,9 @@ mod tests {
         // Pure let binding
         let pure_let = Lambda::let_(
             LetKind::Strict,
-            x.clone(),
+            x,
             Lambda::const_(Constant::int(1)),
-            Lambda::var(x.clone()),
+            Lambda::var(x),
         );
         assert!(no_side_effects(&pure_let));
     }
@@ -602,7 +602,7 @@ mod tests {
         let x = Ident::create_local("x");
 
         // Assignment is impure
-        let assign = Lambda::assign(x.clone(), Lambda::const_(Constant::int(1)));
+        let assign = Lambda::assign(x, Lambda::const_(Constant::int(1)));
         assert!(!no_side_effects(&assign));
 
         // While loop is impure
@@ -705,7 +705,7 @@ mod tests {
         // let x = 1 in x has size 3 (1 for let + 1 for arg + 1 for body)
         let let_expr = Lambda::let_(
             LetKind::Strict,
-            x.clone(),
+            x,
             Lambda::const_(Constant::int(1)),
             Lambda::var(x),
         );
@@ -716,10 +716,7 @@ mod tests {
     fn test_size_big() {
         // Letrec is too big
         let x = Ident::create_local("x");
-        let letrec = Lambda::letrec(
-            vec![(x.clone(), Lambda::const_(Constant::int(1)))],
-            Lambda::var(x),
-        );
+        let letrec = Lambda::letrec(vec![(x, Lambda::const_(Constant::int(1)))], Lambda::var(x));
         assert_eq!(size(&letrec), TOO_BIG_TO_INLINE);
 
         // Switch is too big
@@ -753,7 +750,8 @@ mod tests {
     #[test]
     fn test_lfunction_can_be_inlined() {
         // Normal function can be inlined
-        let func = LFunction { loc: crate::location::Location::none(),
+        let func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -762,7 +760,8 @@ mod tests {
         assert!(lfunction_can_be_inlined(&func));
 
         // Async function cannot be inlined
-        let async_func = LFunction { loc: crate::location::Location::none(),
+        let async_func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -774,7 +773,8 @@ mod tests {
         assert!(!lfunction_can_be_inlined(&async_func));
 
         // Function with directive cannot be inlined
-        let directive_func = LFunction { loc: crate::location::Location::none(),
+        let directive_func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -793,7 +793,8 @@ mod tests {
             1,
             vec![Ident::create_local("x")],
             Lambda::const_(Constant::int(1)),
-            FunctionAttribute::default(), crate::location::Location::none(),
+            FunctionAttribute::default(),
+            crate::location::Location::none(),
         );
         assert!(safe_to_inline(&func));
 
@@ -847,13 +848,14 @@ mod tests {
         let branch = || {
             Lambda::prim(
                 Primitive::Pdebugger,
-                vec![Lambda::var(value.clone())],
+                vec![Lambda::var(value)],
                 crate::location::Location::none(),
             )
         };
-        let func = LFunction { loc: crate::location::Location::none(),
+        let func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
-            params: vec![checked.clone()],
+            params: vec![checked],
             body: Box::new(Lambda::if_(Lambda::var(checked), branch(), branch())),
             attr: FunctionAttribute::default(),
         };
@@ -876,9 +878,10 @@ mod tests {
     #[test]
     fn test_ok_to_inline_fun_when_app_folds_switch_on_constant_scrutinee_like_ocaml() {
         let x = Ident::create_local("x");
-        let func = LFunction { loc: crate::location::Location::none(),
+        let func = LFunction {
+            loc: crate::location::Location::none(),
             arity: 1,
-            params: vec![x.clone()],
+            params: vec![x],
             body: Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(x)),
                 Box::new(LambdaSwitch {

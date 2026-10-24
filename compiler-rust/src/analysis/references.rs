@@ -43,11 +43,6 @@ fn normalize_external_reference_key(
     }
 }
 
-/// `Utils.is_uncurried_internal`.
-fn is_uncurried_internal(path: &Path) -> bool {
-    path.name().starts_with("Js.Fn.arity")
-}
-
 /// `get_loc_item`. `pos` is 0-based.
 pub fn get_loc_item(
     full: &Loaded,
@@ -66,19 +61,21 @@ pub fn get_loc_item(
         LocType::Typed(n, _, _) => n.clone(),
         _ => "NotFound".to_string(),
     };
-    let typed_name = |li: &LocItem| match &li.loc_type {
-        LocType::Typed(n, _, _) => Some(n.clone()),
-        _ => None,
-    };
-    let kind = |li: &LocItem| match &li.loc_type {
-        LocType::Typed(_, _, kind) => Some(kind.clone()),
-        _ => None,
-    };
-    let items: Vec<LocItem> = loc_items.into_iter().cloned().collect();
-    match items.as_slice() {
+    fn typed_name(li: &LocItem) -> Option<&str> {
+        match &li.loc_type {
+            LocType::Typed(n, _, _) => Some(n),
+            _ => None,
+        }
+    }
+    fn kind(li: &LocItem) -> Option<&LocKind> {
+        match &li.loc_type {
+            LocType::Typed(_, _, kind) => Some(kind),
+            _ => None,
+        }
+    }
+    let item = match loc_items.as_slice() {
         [li1, li2, li3, li4, ..]
-            if typed_name(li4).as_deref() == Some("makeProps")
-                && uri::is_interface(&full.file.uri) =>
+            if typed_name(li4) == Some("makeProps") && uri::is_interface(&full.file.uri) =>
         {
             log(out, 1, "heuristic for makeProps in interface files");
             if debug {
@@ -89,25 +86,24 @@ pub fn get_loc_item(
                     name_of(li3)
                 ));
             }
-            Some(li4.clone())
+            Some(*li4)
         }
         [li1, li2]
             if matches!(li1.loc_type, LocType::Constant(_))
-                && typed_name(li2).as_deref() == Some("createDOMElementVariadic") =>
+                && typed_name(li2) == Some("createDOMElementVariadic") =>
         {
             log(out, 3, "heuristic for <div>");
-            Some(li2.clone())
+            Some(*li2)
         }
         [li1, li2, ..]
-            if typed_name(li1).as_deref() == Some("makeProps")
-                && typed_name(li2).as_deref() == Some("make") =>
+            if typed_name(li1) == Some("makeProps") && typed_name(li2) == Some("make") =>
         {
             log(
                 out,
                 4,
                 "heuristic for </Comp> within fragments: take make as makeProps does not work\nthe type is not great but jump to definition works",
             );
-            Some(li2.clone())
+            Some(*li2)
         }
         [li1, li2]
             if matches!(kind(li1), Some(LocKind::LocalReference(..)))
@@ -122,13 +118,13 @@ pub fn get_loc_item(
             if debug {
                 out.print(&format!("n1:{} n2:{}\n", name_of(li1), name_of(li2)));
             }
-            Some(li2.clone())
+            Some(*li2)
         }
         [li1, li2, li3]
             if matches!(kind(li1), Some(LocKind::LocalReference(..)))
                 && matches!(
                     kind(li2),
-                    Some(LocKind::GlobalReference(ref m, ref p, _)) if m == "Js_OO" && p == &["unsafe_downgrade".to_string()]
+                    Some(LocKind::GlobalReference(m, p, _)) if m == "Js_OO" && *p == ["unsafe_downgrade"]
                 )
                 && li1.loc == li2.loc
                 && li2.loc == li3.loc =>
@@ -138,7 +134,7 @@ pub fn get_loc_item(
                 6,
                 "heuristic for JSX and compiler combined:\n~x becomes Js_OO.unsafe_downgrade(Props)#x\nheuristic for: [Props, unsafe_downgrade, x], give loc of `x`",
             );
-            Some(li3.clone())
+            Some(*li3)
         }
         [li1, li2]
             if matches!(kind(li1), Some(LocKind::LocalReference(_, Tip::Value)))
@@ -152,7 +148,7 @@ pub fn get_loc_item(
             if debug {
                 out.print(&format!("n1:{} n2:{}\n", name_of(li1), name_of(li2)));
             }
-            Some(li2.clone())
+            Some(*li2)
         }
         [li1, li2, li3] if li1.loc == li2.loc && li2.loc == li3.loc => {
             log(
@@ -160,7 +156,7 @@ pub fn get_loc_item(
                 8,
                 "heuristic for JSX with at most one child\nheuristic for: [makeProps, make, createElement], give the loc of `make` ",
             );
-            Some(li2.clone())
+            Some(*li2)
         }
         [li1, li2, li3, li4] if li1.loc == li2.loc && li2.loc == li3.loc && li3.loc == li4.loc => {
             log(
@@ -177,22 +173,23 @@ pub fn get_loc_item(
                     name_of(li4)
                 ));
             }
-            Some(li3.clone())
+            Some(*li3)
         }
         [li1, li, ..]
             if match &li1.loc_type {
                 LocType::Typed(_, t, _) => match &*full.source.typed.type_ctx.get_desc(*t) {
-                    TypeDesc::Tconstr { path, .. } => is_uncurried_internal(path),
+                    TypeDesc::Tconstr { path, .. } => super::shared::is_uncurried_internal(path),
                     _ => false,
                 },
                 _ => false,
             } =>
         {
-            Some(li.clone())
+            Some(*li)
         }
-        [li, ..] => Some(li.clone()),
+        [li, ..] => Some(*li),
         [] => None,
-    }
+    };
+    item.cloned()
 }
 
 /// `declared_for_tip`, with the item dropped.
@@ -379,15 +376,9 @@ pub fn resolve_module_reference<'s>(
 pub fn validate_loc(loc: Loc, backup: Loc) -> Loc {
     if loc.start.cnum == -1 {
         if backup.start.cnum == -1 {
-            let pos = Pos {
-                line: 1,
-                bol: 0,
-                cnum: 0,
-            };
             Loc {
                 ghost: true,
-                start: pos,
-                end: pos,
+                ..top_level_loc()
             }
         } else {
             backup
@@ -596,7 +587,7 @@ fn for_local_stamp(
                 && let Some(local) = local_stamp(&alt.file, alt_declared.stamp, tip)
                 && let Some(locs) = alt.extra.internal_references.find(&local)
             {
-                alternative_references.extend(locs.iter().map(|loc| Reference {
+                alternative_references.extend(locs.iter().rev().map(|loc| Reference {
                     uri: alt.file.uri.clone(),
                     loc: Some(*loc),
                 }));
@@ -616,7 +607,7 @@ fn for_local_stamp(
                         .external_references
                         .find(&normalized_module_name)
                     {
-                        for (p, t, loc) in refs {
+                        for (p, t, loc) in refs.iter().rev() {
                             if *p == normalized_path && t == tip {
                                 externals.push(Reference {
                                     uri: other.file.uri.clone(),
@@ -634,6 +625,7 @@ fn for_local_stamp(
     };
     let mut references: Vec<Reference> = locs
         .iter()
+        .rev()
         .map(|loc| Reference {
             uri: file.uri.clone(),
             loc: Some(*loc),

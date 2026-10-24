@@ -4,8 +4,6 @@
 //! like advancing tokens, error handling, lookahead, and breadcrumb tracking.
 //! It mirrors `res_parser.ml`.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use crate::intern::StrIdx;
 use crate::location::{Location, Position};
 use crate::parse_arena::{ArityIdx, CoreTypeIdx, LidentIdx, LocIdx, ParseArena, PosIdx};
@@ -17,6 +15,15 @@ use super::diagnostics::{DiagnosticCategory, ParserDiagnostic, ParserWarning, Pa
 use super::grammar::Grammar;
 use super::scanner::Scanner;
 use super::token::Token;
+
+/// An inline record type extracted while parsing a type declaration:
+/// its name, location, kind and type parameters.
+pub type InlineTypeEntry = (
+    StrIdx,
+    LocIdx,
+    super::ast::TypeKind,
+    Vec<(CoreTypeIdx, super::ast::Variance)>,
+);
 
 /// Region status for error reporting.
 ///
@@ -52,23 +59,11 @@ pub struct ParserSnapshot<'src> {
     comments_len: usize,
     in_external: bool,
     current_type_name_path: Option<Vec<String>>,
-    inline_types_found: Option<
-        Vec<(
-            StrIdx,
-            LocIdx,
-            super::ast::TypeKind,
-            Vec<(CoreTypeIdx, super::ast::Variance)>,
-        )>,
-    >,
+    inline_types_found: Option<Vec<InlineTypeEntry>>,
     inline_types_params: Vec<(CoreTypeIdx, super::ast::Variance)>,
     inline_types_collect_free_type_vars: bool,
     pending_structure_len: usize,
     pending_signature_len: usize,
-    location_id_counter: u32,
-    /// Arena position count at snapshot time (for truncation on restore).
-    arena_positions_len: usize,
-    /// Arena location count at snapshot time (for truncation on restore).
-    arena_locations_len: usize,
 }
 
 /// Parser state for ReScript.
@@ -113,10 +108,6 @@ pub struct Parser<'src> {
     comments: Vec<Comment>,
     /// Stack of region statuses for error deduplication.
     regions: Vec<RegionStatus>,
-    /// Counter for generating unique LocationIds (legacy, for Location-based code).
-    /// Each call to `mk_loc` gets a new ID, enabling identity-based sharing in Marshal.
-    /// Uses atomic to allow mk_loc to take &self (avoiding borrow conflicts).
-    location_id_counter: AtomicU32,
     /// Arena for interned positions and locations.
     /// Used for efficient location storage with LocIdx/PosIdx indices.
     arena: ParseArena,
@@ -131,14 +122,7 @@ pub struct Parser<'src> {
     pub current_type_name_path: Option<Vec<String>>,
     /// Collected inline types during type parsing.
     /// When Some, `{...}` in type positions will be extracted as inline record types.
-    pub inline_types_found: Option<
-        Vec<(
-            StrIdx,
-            LocIdx,
-            super::ast::TypeKind,
-            Vec<(CoreTypeIdx, super::ast::Variance)>,
-        )>,
-    >,
+    pub inline_types_found: Option<Vec<InlineTypeEntry>>,
     /// Type parameters from the outer type declaration for inline types.
     pub inline_types_params: Vec<(CoreTypeIdx, super::ast::Variance)>,
     /// Whether inline records should collect free type variables as parameters.
@@ -177,7 +161,6 @@ impl<'src> Parser<'src> {
             warnings: Vec::new(),
             comments: Vec::new(),
             regions: vec![RegionStatus::Report],
-            location_id_counter: AtomicU32::new(1), // Start at 1, 0 is reserved for default/uninitialized
             arena,
             in_external: false,
             lookahead_depth: 0,
@@ -198,14 +181,6 @@ impl<'src> Parser<'src> {
     pub fn mk_loc_current(&mut self) -> LocIdx {
         let start_idx = self.start_pos_idx;
         let end_idx = self.end_pos_idx;
-        self.arena.mk_loc(start_idx, end_idx)
-    }
-
-    /// Create a location from start_pos to prev_end_pos.
-    /// Uses stored position indices directly.
-    pub fn mk_loc_start_to_prev_end(&mut self) -> LocIdx {
-        let start_idx = self.start_pos_idx;
-        let end_idx = self.prev_end_pos_idx;
         self.arena.mk_loc(start_idx, end_idx)
     }
 
@@ -271,14 +246,6 @@ impl<'src> Parser<'src> {
         self.arena.static_arity_1()
     }
 
-    /// Get the STATIC arity index for `None`.
-    ///
-    /// Use this for LITERAL `~arity:None` paths that would be shared via CSE.
-    /// Note: Most `None` usages in OCaml are via parameters, so this is rarely used.
-    pub fn static_arity_none(&self) -> ArityIdx {
-        self.arena.static_arity_none()
-    }
-
     /// Get the pre-allocated `Lident "[]"` for pattern contexts (res_core.ml).
     pub fn pat_nil(&self) -> LidentIdx {
         self.arena.pat_nil()
@@ -307,7 +274,7 @@ impl<'src> Parser<'src> {
     /// Return the current start position index (no allocation).
     /// This enables sharing - multiple uses before `next()` return the same PosIdx,
     /// matching OCaml's reference semantics where `p.Parser.start_pos` is the same object.
-    pub fn start_pos_idx(&mut self) -> PosIdx {
+    pub fn start_pos_idx(&self) -> PosIdx {
         self.start_pos_idx
     }
 
@@ -325,20 +292,20 @@ impl<'src> Parser<'src> {
         self.arena.push_position(self.start_pos)
     }
 
-    /// Return the current end position index (no allocation).
-    /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
     /// OCaml `Scanner.peek_slash p.scanner`.
     pub fn peek_slash(&self) -> bool {
         self.scanner.peek_slash()
     }
 
-    pub fn end_pos_idx(&mut self) -> PosIdx {
+    /// Return the current end position index (no allocation).
+    /// This enables sharing - multiple uses of `p.end_pos` return the same PosIdx.
+    pub fn end_pos_idx(&self) -> PosIdx {
         self.end_pos_idx
     }
 
     /// Return the previous end position index (no allocation).
     /// This enables sharing - multiple uses of `p.prev_end_pos` return the same PosIdx.
-    pub fn prev_end_pos_idx(&mut self) -> PosIdx {
+    pub fn prev_end_pos_idx(&self) -> PosIdx {
         self.prev_end_pos_idx
     }
 
@@ -348,8 +315,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Create a location from a start PosIdx to prev_end_pos.
-    /// This is the PosIdx-based equivalent of mk_loc_to_prev_end.
-    /// Uses cached prev_end_pos PosIdx if available, otherwise pushes and caches.
+    /// Uses the stored prev_end_pos_idx for sharing.
     pub fn mk_loc_idx_to_prev_end(&mut self, start: PosIdx) -> LocIdx {
         let end = self.prev_end_pos_idx();
         self.arena.mk_loc(start, end)
@@ -368,29 +334,6 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start, end)
     }
 
-    /// Create a location from start and end PosIdx values.
-    /// Both positions are reused, enabling full position sharing.
-    pub fn mk_loc_idx_full(&mut self, start: PosIdx, end: PosIdx) -> LocIdx {
-        self.arena.mk_loc(start, end)
-    }
-
-    /// Push prev_end_pos and return both the location and the end PosIdx.
-    /// Useful when the end position needs to be reused by multiple locations.
-    /// Uses cache for sharing.
-    pub fn mk_loc_idx_to_prev_end_with_end(&mut self, start: PosIdx) -> (LocIdx, PosIdx) {
-        let end = self.prev_end_pos_idx();
-        let loc = self.arena.mk_loc(start, end);
-        (loc, end)
-    }
-
-    /// Create a location from a PosIdx start and a Position end.
-    /// This is useful when you have an identity-based start position (PosIdx)
-    /// and need to extend it to an end Position.
-    pub fn mk_loc_idx_to_pos(&mut self, start: PosIdx, end: &Position) -> LocIdx {
-        let end_idx = self.arena.push_position(*end);
-        self.arena.mk_loc(start, end_idx)
-    }
-
     /// Create a location with the start and ghost flag from an existing location,
     /// but with end set to prev_end_pos. This is equivalent to OCaml's
     /// `{loc with loc_end = p.prev_end_pos}`.
@@ -402,11 +345,6 @@ impl<'src> Parser<'src> {
         self.arena.push_loc(start_idx, end_idx, is_ghost)
     }
 
-    /// Create and push a location from raw positions.
-    pub fn mk_loc_from_positions(&mut self, start: &Position, end: &Position) -> LocIdx {
-        self.arena.mk_loc_from_positions(start, end)
-    }
-
     /// Get the "none" location index.
     pub fn none_loc(&self) -> LocIdx {
         self.arena.none_loc()
@@ -414,12 +352,12 @@ impl<'src> Parser<'src> {
 
     /// Get the start position of a location (cloned).
     pub fn loc_start(&self, loc: LocIdx) -> Position {
-        self.arena.loc_start(loc).clone()
+        *self.arena.loc_start(loc)
     }
 
     /// Get the end position of a location (cloned).
     pub fn loc_end(&self, loc: LocIdx) -> Position {
-        self.arena.loc_end(loc).clone()
+        *self.arena.loc_end(loc)
     }
 
     /// Get the start position index of a location.
@@ -469,15 +407,6 @@ impl<'src> Parser<'src> {
         self.arena.mk_loc(start_idx, end_idx)
     }
 
-    /// Create a location from another location's start to an end Position.
-    /// Useful pattern: `p.mk_loc_from_start_of(body.some_loc, &end_pos)`
-    /// Reuses the start location's PosIdx for position sharing.
-    pub fn mk_loc_from_start_of(&mut self, start_loc: LocIdx, end: &Position) -> LocIdx {
-        let start_idx = self.arena.loc_start_idx(start_loc);
-        let end_idx = self.arena.push_position(*end);
-        self.arena.mk_loc(start_idx, end_idx)
-    }
-
     // ========== Longident arena methods ==========
 
     /// Push a longident into the arena and return its index.
@@ -503,19 +432,6 @@ impl<'src> Parser<'src> {
         self.arena.push_lident_from_idx(str_idx)
     }
 
-    /// Push a dotted identifier (Ldot) into the arena.
-    /// Takes a Longident for the prefix (will be pushed first).
-    pub fn push_ldot(&mut self, prefix: Longident, name: &str) -> LidentIdx {
-        let str_idx = self.arena.push_interned_string(name);
-        let lid = Longident::ldot(prefix, str_idx);
-        self.arena.push_longident(lid)
-    }
-
-    /// Push a dotted identifier (Ldot) by extending an existing arena entry.
-    pub fn push_ldot_idx(&mut self, prefix: LidentIdx, name: &str) -> LidentIdx {
-        self.arena.push_ldot(prefix, name)
-    }
-
     /// Get a longident by index.
     pub fn get_longident(&self, idx: LidentIdx) -> &Longident {
         self.arena.get_longident(idx)
@@ -526,7 +442,7 @@ impl<'src> Parser<'src> {
     /// Errors are only recorded if the current region has `Report` status.
     /// After recording, the region is set to `Silent` to avoid duplicates.
     pub fn err(&mut self, category: DiagnosticCategory) {
-        self.err_at(self.start_pos.clone(), self.end_pos.clone(), category);
+        self.err_at(self.start_pos, self.end_pos, category);
     }
 
     /// Record a diagnostic error at specific positions.
@@ -561,22 +477,6 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Record a diagnostic error without silencing subsequent errors.
-    /// Use this for errors that should allow additional errors to be reported.
-    pub fn err_multiple(
-        &mut self,
-        start_pos: Position,
-        end_pos: Position,
-        category: DiagnosticCategory,
-    ) {
-        let diagnostic = ParserDiagnostic {
-            start_pos,
-            end_pos,
-            category,
-        };
-        self.diagnostics.push(diagnostic);
-    }
-
     /// Record a parser warning at specific positions.
     pub fn warn_at(&mut self, start_pos: Position, end_pos: Position, kind: ParserWarningKind) {
         self.warnings
@@ -607,7 +507,7 @@ impl<'src> Parser<'src> {
         let context: Vec<(Grammar, Position)> = self.breadcrumbs.clone();
         self.err_at(
             start_pos,
-            self.end_pos.clone(),
+            self.end_pos,
             DiagnosticCategory::Unexpected {
                 token: self.token.clone().into_owned(),
                 context,
@@ -632,23 +532,13 @@ impl<'src> Parser<'src> {
     /// Comments are collected in the parser's comment list.
     /// Note: Doc/module comments are currently treated as comments (not tokens).
     pub fn next(&mut self) {
-        self.next_with_prev_end(None);
-    }
-
-    /// Advance to the next token with a specific previous end position.
-    fn next_with_prev_end(&mut self, prev_end_pos: Option<Position>) {
         if self.token == Token::Eof {
             return;
         }
 
-        // Determine prev_end and whether to reuse the current end_pos_idx.
-        // When prev_end_pos is None, prev_end = current end_pos. In OCaml, this means
-        // the prev_end position is the SAME object as the current token's end position.
-        // We replicate this by reusing the end_pos_idx.
-        let (prev_end, reuse_end_pos_idx) = match prev_end_pos {
-            Some(pos) => (pos, false),
-            None => (self.end_pos.clone(), true),
-        };
+        // The new prev_end is the current token's end. In OCaml this is the
+        // SAME position object, so we reuse the current end_pos_idx.
+        let prev_end = self.end_pos;
         let old_end_pos_idx = self.end_pos_idx;
 
         // In lookahead mode, skip arena allocations to prevent affecting position indices
@@ -665,14 +555,13 @@ impl<'src> Parser<'src> {
             self.diagnostics.extend(scanner_diagnostics);
 
             match result.token {
-                Token::Comment(ref c) => {
+                Token::Comment(mut comment) => {
                     // Collect comment and continue scanning.
-                    let mut comment = c.clone();
-                    comment.set_prev_tok_end_pos(self.end_pos.clone());
+                    comment.set_prev_tok_end_pos(self.end_pos);
                     comment.set_prev_tok_is_question(preceding_is_question);
                     preceding_is_question = false;
                     self.comments.push(comment);
-                    self.prev_end_pos = self.end_pos.clone();
+                    self.prev_end_pos = self.end_pos;
                     self.prev_end_pos_idx = self.end_pos_idx;
                     self.end_pos = result.end_pos;
                     if !in_lookahead {
@@ -687,13 +576,7 @@ impl<'src> Parser<'src> {
                     self.end_pos = result.end_pos;
                     // Only push positions to arena when not in lookahead mode
                     if !in_lookahead {
-                        // Reuse end_pos_idx for prev_end when appropriate.
-                        // In OCaml, when prev_end equals the old end_pos, they share the same record.
-                        if reuse_end_pos_idx {
-                            self.prev_end_pos_idx = old_end_pos_idx;
-                        } else {
-                            self.prev_end_pos_idx = self.arena.push_position(prev_end);
-                        }
+                        self.prev_end_pos_idx = old_end_pos_idx;
                         self.start_pos_idx = self.arena.push_position(result.start_pos);
                         self.end_pos_idx = self.arena.push_position(result.end_pos);
                     }
@@ -719,7 +602,7 @@ impl<'src> Parser<'src> {
         self.diagnostics.extend(scanner_diagnostics);
 
         self.token = result.token;
-        self.prev_end_pos = self.end_pos.clone();
+        self.prev_end_pos = self.end_pos;
         self.prev_end_pos_idx = self.end_pos_idx;
         self.start_pos = result.start_pos;
         self.end_pos = result.end_pos;
@@ -740,9 +623,7 @@ impl<'src> Parser<'src> {
             Token::ForwardslashDot => 2,
             _ => unreachable!("next_regex_token on a non-slash token"),
         };
-        let result = self
-            .scanner
-            .scan_regex(self.start_pos.clone(), prefix_length);
+        let result = self.scanner.scan_regex(self.start_pos, prefix_length);
 
         // Propagate scanner diagnostics to parser
         let scanner_diagnostics = self.scanner.take_diagnostics();
@@ -788,18 +669,18 @@ impl<'src> Parser<'src> {
         } else {
             let category = DiagnosticCategory::Expected {
                 context: grammar,
-                pos: self.prev_end_pos.clone(),
+                pos: self.prev_end_pos,
                 token,
             };
             // OCaml uses prev_end_pos for start and end_pos (current token's end) for end.
             // This creates a span from where we expected the token to the current position.
-            self.err_at(self.prev_end_pos.clone(), self.end_pos.clone(), category);
+            self.err_at(self.prev_end_pos, self.end_pos, category);
         }
     }
 
     /// Push a breadcrumb for error recovery.
     pub fn leave_breadcrumb(&mut self, grammar: Grammar) {
-        self.breadcrumbs.push((grammar, self.start_pos.clone()));
+        self.breadcrumbs.push((grammar, self.start_pos));
     }
 
     /// Pop the most recent breadcrumb.
@@ -831,9 +712,9 @@ impl<'src> Parser<'src> {
 
         // Save parser state (including position indices for identity-based sharing)
         let token = self.token.clone();
-        let start_pos = self.start_pos.clone();
-        let end_pos = self.end_pos.clone();
-        let prev_end_pos = self.prev_end_pos.clone();
+        let start_pos = self.start_pos;
+        let end_pos = self.end_pos;
+        let prev_end_pos = self.prev_end_pos;
         let start_pos_idx = self.start_pos_idx;
         let end_pos_idx = self.end_pos_idx;
         let prev_end_pos_idx = self.prev_end_pos_idx;
@@ -908,9 +789,9 @@ impl<'src> Parser<'src> {
         ParserSnapshot {
             scanner_snapshot: self.scanner.snapshot(),
             token: self.token.clone(),
-            start_pos: self.start_pos.clone(),
-            end_pos: self.end_pos.clone(),
-            prev_end_pos: self.prev_end_pos.clone(),
+            start_pos: self.start_pos,
+            end_pos: self.end_pos,
+            prev_end_pos: self.prev_end_pos,
             start_pos_idx: self.start_pos_idx,
             end_pos_idx: self.end_pos_idx,
             prev_end_pos_idx: self.prev_end_pos_idx,
@@ -926,9 +807,6 @@ impl<'src> Parser<'src> {
             inline_types_collect_free_type_vars: self.inline_types_collect_free_type_vars,
             pending_structure_len: self.pending_structure_items.len(),
             pending_signature_len: self.pending_signature_items.len(),
-            location_id_counter: self.location_id_counter.load(Ordering::Relaxed),
-            arena_positions_len: self.arena.position_count(),
-            arena_locations_len: self.arena.location_count(),
         }
     }
 
@@ -962,22 +840,8 @@ impl<'src> Parser<'src> {
             .truncate(snapshot.pending_structure_len);
         self.pending_signature_items
             .truncate(snapshot.pending_signature_len);
-        self.location_id_counter
-            .store(snapshot.location_id_counter, Ordering::Relaxed);
-        // Note: We don't truncate arena allocations as it's harmless to keep them.
-        // The indices from speculative parsing won't be stored in the final AST.
-        let _ = (snapshot.arena_positions_len, snapshot.arena_locations_len);
-    }
-
-    /// Check if parsing made progress.
-    ///
-    /// Returns `Some(result)` if the end position changed, `None` otherwise.
-    pub fn check_progress<T>(&self, prev_end_pos: &Position, result: T) -> Option<T> {
-        if &self.end_pos == prev_end_pos {
-            None
-        } else {
-            Some(result)
-        }
+        // Arena allocations made while speculating are kept: it's harmless,
+        // since their indices won't be stored in the final AST.
     }
 
     /// Get collected diagnostics.
@@ -1039,7 +903,7 @@ impl<'src> Parser<'src> {
                 self.token = operator;
                 self.end_pos = self.scanner.position();
                 if self.lookahead_depth == 0 {
-                    self.end_pos_idx = self.arena.push_position(self.end_pos.clone());
+                    self.end_pos_idx = self.arena.push_position(self.end_pos);
                 }
             }
         }
@@ -1049,12 +913,6 @@ impl<'src> Parser<'src> {
     /// Get the filename index being parsed.
     pub fn filename(&self) -> StrIdx {
         self.scanner.filename
-    }
-
-    /// Get the filename string being parsed.
-    /// Looks up the StrIdx in the arena.
-    pub fn filename_str(&self) -> &str {
-        self.arena.get_string(self.scanner.filename)
     }
 }
 

@@ -247,7 +247,7 @@ fn get_unboxed_repr_rec(
         return None; // Recursive type
     }
     match &*ctx.get_desc(ty) {
-        TypeDesc::Tconstr { path, args, .. } => {
+        TypeDesc::Tconstr { path, args: _, .. } => {
             let decl = find_type_decl(ctx, env, path)?;
             if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
                 return Some(ty);
@@ -323,7 +323,10 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
         }
         match &*ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, args, .. } => {
-                if path.head_name() == name || path.last() == name {
+                // NOTE: OCaml `Typeopt.is_base_type` (typeopt.ml:99-101) tests
+                // `Path.same p Predef.path_*`; this last-component name test
+                // is broader and is kept as-is to preserve output.
+                if path.last() == name {
                     return true;
                 }
                 // Strengthening can give an expression a stamped owner path
@@ -408,55 +411,28 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     }
 }
 
-pub(crate) fn find_type_decl_pub<'a>(
+pub(crate) fn find_type_decl<'a>(
     ctx: &'a TypeContext,
     env: &'a Env,
     path: &Path,
 ) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
-    find_type_decl(ctx, env, path)
-}
-
-fn find_type_decl<'a>(
-    ctx: &'a TypeContext,
-    env: &'a Env,
-    path: &Path,
-) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
-    match path {
-        Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
-            crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
-                .or_else(|| {
-                    ctx.find_type_decl_by_stamp(id.stamp())
-                        .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
-                })
-                .or_else(|| {
-                    ctx.find_resolved_pdot_type_by_name(path)
-                        .map(crate::types::decl::TypeDeclarationRef::Shared)
-                })
-                .or_else(|| {
-                    ctx.find_type_decl_by_path(&path.name())
-                        .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
-                })
-                .or_else(|| {
-                    env.lookup_type(path)
-                        .ok()
-                        .map(crate::types::decl::TypeDeclarationRef::Borrowed)
-                })
-        }
-        _ => crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
-            .or_else(|| {
-                ctx.find_resolved_pdot_type_by_name(path)
-                    .map(crate::types::decl::TypeDeclarationRef::Shared)
-            })
-            .or_else(|| {
-                ctx.find_type_decl_by_path(&path.name())
-                    .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
-            })
-            .or_else(|| {
-                env.lookup_type(path)
-                    .ok()
-                    .map(crate::types::decl::TypeDeclarationRef::Borrowed)
-            }),
-    }
+    use crate::types::decl::TypeDeclarationRef;
+    crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
+        .or_else(|| match path {
+            Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => ctx
+                .find_type_decl_by_stamp(id.stamp())
+                .map(|decl| TypeDeclarationRef::owned(decl.clone())),
+            _ => None,
+        })
+        .or_else(|| {
+            ctx.find_resolved_pdot_type_by_name(path)
+                .map(TypeDeclarationRef::Shared)
+        })
+        .or_else(|| {
+            ctx.find_type_decl_by_path(&path.name())
+                .map(|decl| TypeDeclarationRef::owned(decl.clone()))
+        })
+        .or_else(|| env.lookup_type(path).ok().map(TypeDeclarationRef::Borrowed))
 }
 
 fn is_not_undefined_attr(attr: &Attribute) -> bool {
@@ -481,12 +457,44 @@ fn type_is_builtin_object_uncached(ctx: &TypeContext, env: &Env, ty: TypeExprRef
             if matches!(path, Path::Pident(id) if id.name() == "dict") && args.len() == 1 {
                 true
             } else {
-                let name = path.name();
-                name == JS_DICT_T || name == JS_DICT_T_LEGACY
+                path.name_eq(JS_DICT_T) || path.name_eq(JS_DICT_T_LEGACY)
             }
         }
         _ => false,
     }
+}
+
+fn is_option_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
+    matches!(
+        cdecls,
+        [
+            crate::types::decl::ConstructorDeclaration {
+                cd_id,
+                cd_args: ConstructorArguments::CstrTuple(args1),
+                ..
+            },
+            crate::types::decl::ConstructorDeclaration {
+                cd_id: cd_id2,
+                cd_args: ConstructorArguments::CstrTuple(args2),
+                ..
+            }
+        ] if (
+            cd_id.name() == "None" && args1.is_empty() && cd_id2.name() == "Some" && args2.len() == 1
+        ) || (
+            cd_id.name() == "Some" && args1.len() == 1 && cd_id2.name() == "None" && args2.is_empty()
+        )
+    )
+}
+
+fn is_unit_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
+    matches!(
+        cdecls,
+        [crate::types::decl::ConstructorDeclaration {
+            cd_id,
+            cd_args: ConstructorArguments::CstrTuple(args),
+            ..
+        }] if cd_id.name() == "()" && args.is_empty()
+    )
 }
 
 #[cfg(test)]
@@ -544,7 +552,7 @@ mod tests {
         let mut env = crate::types::env::initial_env(&ctx);
         let alias_id = Ident::create_local("private_string_alias");
         env.add_type(
-            alias_id.clone(),
+            alias_id,
             TypeDeclaration {
                 type_params: vec![],
                 type_arity: 0,
@@ -566,37 +574,4 @@ mod tests {
 
         assert!(is_base_type(&ctx, &env, alias_ty, "string"));
     }
-}
-
-fn is_option_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
-    matches!(
-        cdecls,
-        [
-            crate::types::decl::ConstructorDeclaration {
-                cd_id,
-                cd_args: ConstructorArguments::CstrTuple(args1),
-                ..
-            },
-            crate::types::decl::ConstructorDeclaration {
-                cd_id: cd_id2,
-                cd_args: ConstructorArguments::CstrTuple(args2),
-                ..
-            }
-        ] if (
-            cd_id.name() == "None" && args1.is_empty() && cd_id2.name() == "Some" && args2.len() == 1
-        ) || (
-            cd_id.name() == "Some" && args1.len() == 1 && cd_id2.name() == "None" && args2.is_empty()
-        )
-    )
-}
-
-fn is_unit_like_variant(cdecls: &[crate::types::decl::ConstructorDeclaration]) -> bool {
-    matches!(
-        cdecls,
-        [crate::types::decl::ConstructorDeclaration {
-            cd_id,
-            cd_args: ConstructorArguments::CstrTuple(args),
-            ..
-        }] if cd_id.name() == "()" && args.is_empty()
-    )
 }

@@ -9,12 +9,10 @@ use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_analysis::EXIT_INLINE_SIZE;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_indexed_helpers::{
     VariableSubstitution, append_rebuilt, map_children, substitute,
 };
 use crate::lambda::lam_pass_collect_indexed::indexed_size;
-use crate::lambda::lam_primitive::Primitive;
 
 pub(crate) type ExitCounts = AHashMap<i32, u32>;
 struct ExitSubstitutions {
@@ -36,19 +34,21 @@ impl ExitSubstitutions {
         self.entries.get(exit)
     }
 
-    fn insert(&mut self, store: &IndexedLambda, exit: i32, value: (Vec<Ident>, NodeId)) {
+    fn insert(&mut self, exit: i32, value: (Vec<Ident>, NodeId)) {
         self.entries.insert(exit, value);
-        #[cfg(test)]
-        {
-            let roots = self
-                .entries
-                .values()
-                .map(|(_, handler)| *handler)
-                .collect::<Vec<_>>();
-            self.peak_unique_nodes = self
-                .peak_unique_nodes
-                .max(store.reachable_unique_nodes(&roots));
-        }
+    }
+
+    /// Tests measure the largest set of handlers held at once.
+    #[cfg(test)]
+    fn record_peak(&mut self, store: &IndexedLambda) {
+        let roots = self
+            .entries
+            .values()
+            .map(|(_, handler)| *handler)
+            .collect::<Vec<_>>();
+        self.peak_unique_nodes = self
+            .peak_unique_nodes
+            .max(store.reachable_unique_nodes(&roots));
     }
 }
 
@@ -243,7 +243,9 @@ fn simplify(
                 || occurrences == 1 && exit >= 0
             {
                 let handler = simplify(store, counts, substitutions, id_gen, handler);
-                substitutions.insert(store, exit, (params, handler));
+                substitutions.insert(exit, (params, handler));
+                #[cfg(test)]
+                substitutions.record_peak(store);
                 return simplify(store, counts, substitutions, id_gen, body);
             }
             let handler = simplify(store, counts, substitutions, id_gen, handler);
@@ -252,7 +254,9 @@ fn simplify(
                 occurrences <= 2 && size < EXIT_INLINE_SIZE || size < 5
             };
             if inline {
-                substitutions.insert(store, exit, (params, handler));
+                substitutions.insert(exit, (params, handler));
+                #[cfg(test)]
+                substitutions.record_peak(store);
                 simplify(store, counts, substitutions, id_gen, body)
             } else {
                 let body = simplify(store, counts, substitutions, id_gen, body);
@@ -329,9 +333,11 @@ mod tests {
     use super::*;
     use crate::ident::IdentFlags;
     use crate::lambda::lam_compile_context::{IdKind, LamStats};
+    use crate::lambda::lam_constant::Constant;
     use crate::lambda::lam_pass_collect as tree_collect;
     use crate::lambda::lam_pass_collect_indexed::IndexedIdKind;
     use crate::lambda::lam_pass_exits as tree;
+    use crate::lambda::lam_primitive::Primitive;
     use crate::lambda::{DirectionFlag, Lambda, LambdaSwitch, SwitchDispatch, SwitchKey};
     use crate::location::Location;
 
@@ -362,7 +368,7 @@ mod tests {
     #[test]
     fn exit_count_and_bounded_analysis_match_tree_across_control_families() {
         let x = id("x", 1);
-        let raise = || Lambda::LstaticRaise(7, vec![Lambda::Lvar(x.clone())]);
+        let raise = || Lambda::LstaticRaise(7, vec![Lambda::Lvar(x)]);
         let switch = Lambda::Lswitch(
             Box::new(raise()),
             Box::new(LambdaSwitch {
@@ -386,19 +392,19 @@ mod tests {
                     Box::new(raise()),
                     Box::new(raise()),
                 )),
-                x.clone(),
+                x,
                 Box::new(Lambda::Lfor(
-                    x.clone(),
+                    x,
                     Box::new(raise()),
                     Box::new(raise()),
                     DirectionFlag::Upto,
                     Box::new(Lambda::Lfor_of(
-                        x.clone(),
+                        x,
                         Box::new(raise()),
                         Box::new(Lambda::Lfor_await_of(
-                            x.clone(),
+                            x,
                             Box::new(raise()),
-                            Box::new(Lambda::Lassign(x.clone(), Box::new(raise()))),
+                            Box::new(Lambda::Lassign(x, Box::new(raise()))),
                         )),
                     )),
                 )),
@@ -446,17 +452,17 @@ mod tests {
                     3,
                     vec![Lambda::Lconst(Constant::int(4))],
                 )),
-                (3, vec![x.clone()]),
-                Box::new(Lambda::Lvar(x.clone())),
+                (3, vec![x]),
+                Box::new(Lambda::Lvar(x)),
             ),
             Lambda::LstaticCatch(
                 Box::new(Lambda::Lsequence(
-                    Box::new(Lambda::LstaticRaise(4, vec![Lambda::Lvar(y.clone())])),
-                    Box::new(Lambda::LstaticRaise(4, vec![Lambda::Lvar(y.clone())])),
+                    Box::new(Lambda::LstaticRaise(4, vec![Lambda::Lvar(y)])),
+                    Box::new(Lambda::LstaticRaise(4, vec![Lambda::Lvar(y)])),
                 )),
-                (4, vec![x.clone()]),
+                (4, vec![x]),
                 Box::new(Lambda::Lsequence(
-                    Box::new(Lambda::Lvar(x.clone())),
+                    Box::new(Lambda::Lvar(x)),
                     Box::new(Lambda::Lconst(Constant::int(1))),
                 )),
             ),
@@ -488,9 +494,9 @@ mod tests {
                 (6, vec![]),
                 Box::new(Lambda::Llet(
                     LetKind::Strict,
-                    x.clone(),
+                    x,
                     Box::new(Lambda::unit()),
-                    Box::new(Lambda::Lvar(x.clone())),
+                    Box::new(Lambda::Lvar(x)),
                 )),
             ),
         ];
@@ -514,12 +520,12 @@ mod tests {
         assert_exit_parity(
             Lambda::LstaticCatch(
                 Box::new(Lambda::LstaticRaise(72, vec![Lambda::unit()])),
-                (72, vec![parameter.clone()]),
+                (72, vec![parameter]),
                 Box::new(Lambda::Lsequence(
                     Box::new(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pnot,
                         args: vec![Lambda::true_()],
-                        loc: loc.clone(),
+                        loc: loc,
                     }))),
                     Box::new(Lambda::Lvar(parameter)),
                 )),
@@ -531,7 +537,7 @@ mod tests {
             Box::new(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![Lambda::true_()],
-                loc: loc.clone(),
+                loc: loc,
             }))),
             Box::new(Lambda::LstaticCatch(
                 Box::new(Lambda::unit()),
@@ -554,7 +560,7 @@ mod tests {
                 Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::Pnot,
                     args: vec![raise()],
-                    loc: loc.clone(),
+                    loc: loc,
                 })),
                 Lambda::true_(),
             ),
@@ -589,7 +595,7 @@ mod tests {
                 Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                     primitive: Primitive::Pnot,
                     args: vec![Lambda::Lvar(id("boolean", 6))],
-                    loc: loc.clone(),
+                    loc: loc,
                 })),
             ),
             caught(
@@ -608,7 +614,7 @@ mod tests {
                     ap_func: Box::new(raise()),
                     ap_args: vec![Lambda::true_()],
                     ap_info: crate::lambda::ApInfo {
-                        loc: loc.clone(),
+                        loc: loc,
                         inlined: crate::lambda::InlineAttribute::Default,
                         status: crate::lambda::ApplyStatus::Na,
                     },
@@ -616,13 +622,14 @@ mod tests {
                 })),
                 Lambda::function_(
                     1,
-                    vec![eta_param.clone()],
+                    vec![eta_param],
                     Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pnot,
                         args: vec![Lambda::Lvar(eta_param)],
-                        loc: loc.clone(),
+                        loc: loc,
                     })),
-                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
+                    crate::lambda::FunctionAttribute::default(),
+                    crate::location::Location::none(),
                 ),
             ),
             caught(
@@ -630,7 +637,7 @@ mod tests {
                     ap_func: Box::new(raise()),
                     ap_args: vec![Lambda::true_()],
                     ap_info: crate::lambda::ApInfo {
-                        loc: loc.clone(),
+                        loc: loc,
                         inlined: crate::lambda::InlineAttribute::Default,
                         status: crate::lambda::ApplyStatus::Na,
                     },
@@ -644,11 +651,12 @@ mod tests {
                         args: vec![Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                             primitive: Primitive::Pnot,
                             args: vec![Lambda::Lvar(id("wrapped", 8))],
-                            loc: loc.clone(),
+                            loc: loc,
                         }))],
-                        loc: loc.clone(),
+                        loc: loc,
                     })),
-                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
+                    crate::lambda::FunctionAttribute::default(),
+                    crate::location::Location::none(),
                 ),
             ),
             caught(
@@ -674,16 +682,16 @@ mod tests {
             ap_func: Box::new(Lambda::Lvar(id("g", 181))),
             ap_args: vec![Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(Lambda::Lvar(id("h", 182))),
-                ap_args: vec![Lambda::Lvar(parameter.clone())],
+                ap_args: vec![Lambda::Lvar(parameter)],
                 ap_info: crate::lambda::ApInfo {
-                    loc: inner_loc.clone(),
+                    loc: inner_loc,
                     inlined: crate::lambda::InlineAttribute::Never,
                     status: crate::lambda::ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx: true,
             }))],
             ap_info: crate::lambda::ApInfo {
-                loc: outer_loc.clone(),
+                loc: outer_loc,
                 inlined: crate::lambda::InlineAttribute::Always,
                 status: crate::lambda::ApplyStatus::InferFull,
             },
@@ -757,16 +765,16 @@ mod tests {
                 let inner = if nested {
                     Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pidentity,
-                        args: vec![Lambda::Lvar(left.clone()), Lambda::Lvar(right.clone())],
-                        loc: body_loc.clone(),
+                        args: vec![Lambda::Lvar(left), Lambda::Lvar(right)],
+                        loc: body_loc,
                     }))
                 } else {
-                    Lambda::Lvar(left.clone())
+                    Lambda::Lvar(left)
                 };
                 let body_args = if nested {
                     vec![inner]
                 } else {
-                    vec![inner, Lambda::Lvar(right.clone())]
+                    vec![inner, Lambda::Lvar(right)]
                 };
                 let function = Lambda::function_(
                     2,
@@ -776,7 +784,8 @@ mod tests {
                         args: body_args,
                         loc: body_loc,
                     })),
-                    crate::lambda::FunctionAttribute::default(), crate::location::Location::none(),
+                    crate::lambda::FunctionAttribute::default(),
+                    crate::location::Location::none(),
                 );
                 let apply = Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(Lambda::LstaticRaise(91, vec![])),
@@ -785,7 +794,7 @@ mod tests {
                         Lambda::Lconst(Constant::int(2)),
                     ],
                     ap_info: crate::lambda::ApInfo {
-                        loc: apply_loc.clone(),
+                        loc: apply_loc,
                         inlined: crate::lambda::InlineAttribute::Never,
                         status: crate::lambda::ApplyStatus::Uncurry,
                     },
@@ -826,13 +835,14 @@ mod tests {
         };
         let function = Lambda::function_(
             7,
-            vec![parameter.clone()],
+            vec![parameter],
             Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Ptypeof,
                 args: vec![Lambda::Lconst(Constant::int(0))],
                 loc: Location::none(),
             })),
-            attr, crate::location::Location::none(),
+            attr,
+            crate::location::Location::none(),
         );
         let result = simplify_indexed(
             Lambda::LstaticCatch(
@@ -908,7 +918,7 @@ mod tests {
             Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![Lambda::true_()],
-                loc: loc.clone(),
+                loc: loc,
             }))
         };
         // `Lambda_traverse.shallow_map_sharing` keeps unchanged nodes, so
@@ -1034,32 +1044,24 @@ mod tests {
             (20, vec![]),
             Box::new(Lambda::LglobalModule(id("M", 0))),
         );
-        lambda = Lambda::Lassign(x.clone(), Box::new(lambda));
-        lambda = Lambda::Lfor_await_of(
-            x.clone(),
-            Box::new(Lambda::Lvar(x.clone())),
-            Box::new(lambda),
-        );
-        lambda = Lambda::Lfor_of(
-            x.clone(),
-            Box::new(Lambda::Lvar(x.clone())),
-            Box::new(lambda),
-        );
+        lambda = Lambda::Lassign(x, Box::new(lambda));
+        lambda = Lambda::Lfor_await_of(x, Box::new(Lambda::Lvar(x)), Box::new(lambda));
+        lambda = Lambda::Lfor_of(x, Box::new(Lambda::Lvar(x)), Box::new(lambda));
         lambda = Lambda::Lfor(
-            x.clone(),
-            Box::new(Lambda::Lvar(x.clone())),
+            x,
+            Box::new(Lambda::Lvar(x)),
             Box::new(Lambda::Lconst(Constant::int(3))),
             DirectionFlag::Upto,
             Box::new(lambda),
         );
         lambda = Lambda::LifThenElse(
-            Box::new(Lambda::Lvar(x.clone())),
+            Box::new(Lambda::Lvar(x)),
             Box::new(lambda),
             Box::new(Lambda::unit()),
         );
         lambda = Lambda::LtryWith(Box::new(lambda), id("exn", 2), Box::new(Lambda::unit()));
         lambda = Lambda::LstringSwitch(
-            Box::new(Lambda::Lvar(x.clone())),
+            Box::new(Lambda::Lvar(x)),
             vec![("case".into(), lambda)],
             Some(Box::new(Lambda::unit())),
         );
@@ -1083,7 +1085,7 @@ mod tests {
         let mut store = IndexedLambda::from_lambda(Lambda::LstaticRaise(30, vec![Lambda::unit()]));
         let shared_raise = store.root();
         let body = store.append(NodeSnapshot::Sequence(shared_raise, shared_raise));
-        let handler = store.append(NodeSnapshot::Var(x.clone()));
+        let handler = store.append(NodeSnapshot::Var(x));
         let root = store.append(NodeSnapshot::StaticCatch(body, 30, vec![x], handler));
         store.set_root(root);
         let mut context = IndexedLambdaContext::from_store(store, []);
@@ -1126,7 +1128,7 @@ mod tests {
                     Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                         primitive: Primitive::Pmakearray,
                         args,
-                        loc: loc.clone(),
+                        loc: loc,
                     })),
                 )
             })
@@ -1166,28 +1168,29 @@ mod tests {
         let f = id("f", 2);
         let lambda = Lambda::Llet(
             LetKind::Strict,
-            f.clone(),
+            f,
             Box::new(Lambda::function_(
                 1,
-                vec![x.clone()],
+                vec![x],
                 Lambda::LstaticCatch(
                     Box::new(Lambda::LstaticRaise(12, vec![Lambda::unit()])),
-                    (12, vec![x.clone()]),
+                    (12, vec![x]),
                     Box::new(Lambda::Lvar(x)),
                 ),
                 crate::lambda::FunctionAttribute {
                     inline: crate::lambda::InlineAttribute::Always,
                     ..crate::lambda::FunctionAttribute::default()
-                }, crate::location::Location::none(),
+                },
+                crate::location::Location::none(),
             )),
-            Box::new(Lambda::Lvar(f.clone())),
+            Box::new(Lambda::Lvar(f)),
         );
-        let mut tree_meta = LamStats::new(vec![f.clone()]);
+        let mut tree_meta = LamStats::new(vec![f]);
         tree_collect::collect_info(&mut tree_meta, &lambda);
         let tree_gen = IdGenerator::with_start_stamp(50);
         let expected = tree::simplify_exits(&lambda, &tree_gen);
         tree_collect::collect_info(&mut tree_meta, &expected);
-        let mut context = IndexedLambdaContext::from_lambda(lambda, [f.clone()]);
+        let mut context = IndexedLambdaContext::from_lambda(lambda, [f]);
         context.collect_info();
         let retained_before = context
             .metadata()

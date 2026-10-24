@@ -79,20 +79,18 @@ fn decode(s: &str) -> String {
 /// `Lsp.Uri.of_string` (`Uri_lexer.uri`), without query and fragment, which
 /// analysis URIs never carry.
 pub fn of_string(s: &str) -> LspUri {
-    let (scheme, rest) = match s.find(|c| matches!(c, ':' | '/' | '?' | '#')) {
+    let (scheme, rest) = match s.find([':', '/', '?', '#']) {
         Some(i) if i > 0 && s.as_bytes()[i] == b':' => (s[..i].to_string(), &s[i + 1..]),
         _ => ("file".to_string(), s),
     };
     let (authority, rest) = match rest.strip_prefix("//") {
         Some(after) => {
-            let end = after
-                .find(|c| matches!(c, '/' | '?' | '#'))
-                .unwrap_or(after.len());
+            let end = after.find(['/', '?', '#']).unwrap_or(after.len());
             (decode(&after[..end]), &after[end..])
         }
         None => (String::new(), rest),
     };
-    let end = rest.find(|c| matches!(c, '?' | '#')).unwrap_or(rest.len());
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
     let mut path = decode(&rest[..end]);
     if matches!(scheme.as_str(), "http" | "https" | "file") && !path.starts_with('/') {
         path.insert(0, '/');
@@ -227,9 +225,10 @@ impl UriStyle {
 /// `Uri.is_interface`. OCaml writes `uri |> Lsp.Uri.to_string |>
 /// Filename.check_suffix "i"`, which asks whether `"i"` ends with the URI:
 /// false for every file. Interface handling across the analysis (and its
-/// expected test output) follows from that, so it is kept.
-pub fn is_interface(path: &str) -> bool {
-    "i".ends_with(to_lsp_string(&of_path(path)).as_str())
+/// expected test output) follows from that, so it is kept. `of_path`
+/// always gives a `file:` URI, so the answer is computed without building it.
+pub fn is_interface(_path: &str) -> bool {
+    false
 }
 
 #[cfg(test)]

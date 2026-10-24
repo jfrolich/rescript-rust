@@ -12,6 +12,7 @@ use std::time::Duration;
 
 /// Compiler phase buckets reported by the in-process build.
 #[derive(Clone, Copy)]
+#[repr(usize)]
 pub enum Phase {
     /// Source read, parsing, PPX rewriting, and dependency extraction.
     Parse,
@@ -31,6 +32,30 @@ pub enum Phase {
     Gentype,
     /// JavaScript IR generation and JavaScript text rendering.
     Codegen,
+}
+
+impl Phase {
+    const COUNT: usize = Phase::Codegen as usize + 1;
+}
+
+/// Nanoseconds per phase, indexed by `Phase as usize`.
+type PhaseNanos = [u64; Phase::COUNT];
+
+impl PhaseTimingSnapshot {
+    fn from_nanos(total: Duration, nanos: PhaseNanos) -> Self {
+        let phase = |phase: Phase| Duration::from_nanos(nanos[phase as usize]);
+        PhaseTimingSnapshot {
+            total,
+            parse: phase(Phase::Parse),
+            env_setup: phase(Phase::EnvSetup),
+            typecheck: phase(Phase::Typecheck),
+            signature_publish: phase(Phase::SignaturePublish),
+            lambda: phase(Phase::Lambda),
+            lambda_optimization: phase(Phase::LambdaOptimization),
+            gentype: phase(Phase::Gentype),
+            codegen: phase(Phase::Codegen),
+        }
+    }
 }
 
 /// Snapshot of aggregate phase timings.
@@ -76,61 +101,24 @@ impl PhaseTimingSnapshot {
 }
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
-static PARSE_NS: AtomicU64 = AtomicU64::new(0);
-static ENV_SETUP_NS: AtomicU64 = AtomicU64::new(0);
-static TYPECHECK_NS: AtomicU64 = AtomicU64::new(0);
-static SIGNATURE_PUBLISH_NS: AtomicU64 = AtomicU64::new(0);
-static LAMBDA_NS: AtomicU64 = AtomicU64::new(0);
-static LAMBDA_OPT_NS: AtomicU64 = AtomicU64::new(0);
-static GENTYPE_NS: AtomicU64 = AtomicU64::new(0);
-static CODEGEN_NS: AtomicU64 = AtomicU64::new(0);
+/// Aggregate nanoseconds per phase, indexed by `Phase as usize`.
+static PHASE_NS: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
 
 thread_local! {
     static THREAD_TIMINGS: RefCell<Option<ThreadPhaseCounters>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct ThreadPhaseCounters {
-    parse_ns: u64,
-    env_setup_ns: u64,
-    typecheck_ns: u64,
-    signature_publish_ns: u64,
-    lambda_ns: u64,
-    lambda_optimization_ns: u64,
-    gentype_ns: u64,
-    codegen_ns: u64,
-}
+struct ThreadPhaseCounters(PhaseNanos);
 
 impl ThreadPhaseCounters {
     fn record(&mut self, phase: Phase, nanos: u64) {
-        match phase {
-            Phase::Parse => self.parse_ns = self.parse_ns.saturating_add(nanos),
-            Phase::EnvSetup => self.env_setup_ns = self.env_setup_ns.saturating_add(nanos),
-            Phase::Typecheck => self.typecheck_ns = self.typecheck_ns.saturating_add(nanos),
-            Phase::SignaturePublish => {
-                self.signature_publish_ns = self.signature_publish_ns.saturating_add(nanos);
-            }
-            Phase::Lambda => self.lambda_ns = self.lambda_ns.saturating_add(nanos),
-            Phase::LambdaOptimization => {
-                self.lambda_optimization_ns = self.lambda_optimization_ns.saturating_add(nanos);
-            }
-            Phase::Gentype => self.gentype_ns = self.gentype_ns.saturating_add(nanos),
-            Phase::Codegen => self.codegen_ns = self.codegen_ns.saturating_add(nanos),
-        }
+        let slot = &mut self.0[phase as usize];
+        *slot = slot.saturating_add(nanos);
     }
 
     fn snapshot(self) -> PhaseTimingSnapshot {
-        PhaseTimingSnapshot {
-            total: Duration::default(),
-            parse: Duration::from_nanos(self.parse_ns),
-            env_setup: Duration::from_nanos(self.env_setup_ns),
-            typecheck: Duration::from_nanos(self.typecheck_ns),
-            signature_publish: Duration::from_nanos(self.signature_publish_ns),
-            lambda: Duration::from_nanos(self.lambda_ns),
-            lambda_optimization: Duration::from_nanos(self.lambda_optimization_ns),
-            gentype: Duration::from_nanos(self.gentype_ns),
-            codegen: Duration::from_nanos(self.codegen_ns),
-        }
+        PhaseTimingSnapshot::from_nanos(Duration::default(), self.0)
     }
 }
 
@@ -225,14 +213,9 @@ pub fn reset() {
         return;
     }
 
-    PARSE_NS.store(0, Ordering::Relaxed);
-    ENV_SETUP_NS.store(0, Ordering::Relaxed);
-    TYPECHECK_NS.store(0, Ordering::Relaxed);
-    SIGNATURE_PUBLISH_NS.store(0, Ordering::Relaxed);
-    LAMBDA_NS.store(0, Ordering::Relaxed);
-    LAMBDA_OPT_NS.store(0, Ordering::Relaxed);
-    GENTYPE_NS.store(0, Ordering::Relaxed);
-    CODEGEN_NS.store(0, Ordering::Relaxed);
+    for counter in &PHASE_NS {
+        counter.store(0, Ordering::Relaxed);
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     clock::reset_start();
@@ -246,16 +229,7 @@ pub fn record(phase: Phase, duration: Duration) {
     }
 
     let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
-    match phase {
-        Phase::Parse => PARSE_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::EnvSetup => ENV_SETUP_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::Typecheck => TYPECHECK_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::SignaturePublish => SIGNATURE_PUBLISH_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::Lambda => LAMBDA_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::LambdaOptimization => LAMBDA_OPT_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::Gentype => GENTYPE_NS.fetch_add(nanos, Ordering::Relaxed),
-        Phase::Codegen => CODEGEN_NS.fetch_add(nanos, Ordering::Relaxed),
-    };
+    PHASE_NS[phase as usize].fetch_add(nanos, Ordering::Relaxed);
     THREAD_TIMINGS.with(|timings| {
         if let Some(thread_timings) = timings.borrow_mut().as_mut() {
             thread_timings.record(phase, nanos);
@@ -266,16 +240,17 @@ pub fn record(phase: Phase, duration: Duration) {
 /// Measure a closure and add its elapsed time to the selected phase.
 #[inline]
 pub fn measure<T>(phase: Phase, f: impl FnOnce() -> T) -> T {
-    if !enabled() {
-        return f();
-    }
-
     #[cfg(target_arch = "wasm32")]
     {
+        // Timing is never enabled on wasm.
+        let _ = phase;
         f()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if !enabled() {
+            return f();
+        }
         let start = clock::now();
         let result = f();
         record(phase, start.elapsed());
@@ -289,26 +264,20 @@ pub fn snapshot() -> PhaseTimingSnapshot {
         return PhaseTimingSnapshot::default();
     }
 
-    PhaseTimingSnapshot {
-        total: {
-            #[cfg(target_arch = "wasm32")]
-            {
-                Duration::default()
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                clock::elapsed()
-            }
-        },
-        parse: Duration::from_nanos(PARSE_NS.load(Ordering::Relaxed)),
-        env_setup: Duration::from_nanos(ENV_SETUP_NS.load(Ordering::Relaxed)),
-        typecheck: Duration::from_nanos(TYPECHECK_NS.load(Ordering::Relaxed)),
-        signature_publish: Duration::from_nanos(SIGNATURE_PUBLISH_NS.load(Ordering::Relaxed)),
-        lambda: Duration::from_nanos(LAMBDA_NS.load(Ordering::Relaxed)),
-        lambda_optimization: Duration::from_nanos(LAMBDA_OPT_NS.load(Ordering::Relaxed)),
-        gentype: Duration::from_nanos(GENTYPE_NS.load(Ordering::Relaxed)),
-        codegen: Duration::from_nanos(CODEGEN_NS.load(Ordering::Relaxed)),
-    }
+    let total = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Duration::default()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            clock::elapsed()
+        }
+    };
+    PhaseTimingSnapshot::from_nanos(
+        total,
+        std::array::from_fn(|index| PHASE_NS[index].load(Ordering::Relaxed)),
+    )
 }
 
 /// Print aggregate phase timings to stderr.

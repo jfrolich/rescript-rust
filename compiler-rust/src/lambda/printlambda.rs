@@ -8,11 +8,11 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, LetKind};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{ImportSource, Primitive};
-use crate::parser::ast::MutableFlag;
 use crate::lambda::{
     DirectionFlag, FieldDbgInfo, FunctionAttribute, InlineAttribute, Lambda, LambdaSwitch,
     SwitchKey, TagInfo,
 };
+use crate::parser::ast::MutableFlag;
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::types::VariantConstructorCase;
 
@@ -329,7 +329,6 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::Pignore => s(f, "#ignore"),
         Primitive::PextensionSlotEq => s(f, "#extension_slot_eq"),
         Primitive::PjsApply => s(f, "#apply"),
-        Primitive::PjsRuntimeApply => s(f, "#runtime_apply"),
         Primitive::PfnArity => s(f, "#fn_arity"),
     }
 }
@@ -664,9 +663,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
             f.string(")");
             f.close_box();
         }
-        Lambda::Lfor_of(param, iterable, body) => {
-            for_of(f, "for_of", param, iterable, body)
-        }
+        Lambda::Lfor_of(param, iterable, body) => for_of(f, "for_of", param, iterable, body),
         Lambda::Lfor_await_of(param, iterable, body) => {
             for_of(f, "for_await_of", param, iterable, body)
         }
@@ -683,7 +680,13 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
     }
 }
 
-fn for_of<W: Write>(f: &mut Formatter<W>, head: &str, param: &Ident, iterable: &Lambda, body: &Lambda) {
+fn for_of<W: Write>(
+    f: &mut Formatter<W>,
+    head: &str,
+    param: &Ident,
+    iterable: &Lambda,
+    body: &Lambda,
+) {
     f.open_box(BoxKind::Box, 2);
     f.print(format_args!("({head} "));
     ident(f, param);

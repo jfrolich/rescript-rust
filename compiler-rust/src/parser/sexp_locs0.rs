@@ -6,10 +6,11 @@
 //! Used for debugging position parity between the Rust and OCaml parsers.
 
 use crate::binary_ast::parsetree0::*;
-use crate::location::{Located, Location};
+use crate::location::Location;
 use crate::parse_arena::ParseArena;
-use crate::parser::longident::Longident;
-use crate::parser::sexp::{Sexp, string_to_latin1_bytes};
+use crate::parser::sexp::{
+    Sexp, longident, map_empty, quote_string, quote_string_literal, string_to_latin1_bytes,
+};
 use std::io::Write;
 
 // ============================================================================
@@ -36,31 +37,9 @@ fn location(loc: &Location) -> Sexp {
 // String quoting
 // ============================================================================
 
-fn quote_string(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 2);
-    result.push('"');
-    result.push_str(s);
-    result.push('"');
-    result
-}
-
-fn quote_string_tagged(s: &str) -> String {
-    quote_string(s)
-}
-
 /// `string`: `Ext_ident.unwrap_uppercase_exotic`, then quoted.
 fn string(s: &str) -> Sexp {
-    let bytes = s.as_bytes();
-    let unwrapped = if bytes.len() >= 3
-        && bytes[0] == b'\\'
-        && bytes[1] == b'"'
-        && bytes[bytes.len() - 1] == b'"'
-    {
-        &s[2..s.len() - 1]
-    } else {
-        s
-    };
-    Sexp::atom(&quote_string(unwrapped))
+    Sexp::atom(&quote_string(s))
 }
 
 fn some_or_none(value: Option<Sexp>) -> Sexp {
@@ -68,44 +47,6 @@ fn some_or_none(value: Option<Sexp>) -> Sexp {
         Some(v) => Sexp::list(vec![Sexp::atom("Some"), v]),
         None => Sexp::atom("None"),
     }
-}
-
-fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
-where
-    F: Fn(&T) -> Sexp,
-{
-    if items.is_empty() {
-        vec![Sexp::list(vec![])]
-    } else {
-        items.iter().map(f).collect()
-    }
-}
-
-// ============================================================================
-// Longident
-// ============================================================================
-
-fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
-    match lid {
-        Longident::Lident(name_idx) => Sexp::list(vec![
-            Sexp::atom("Lident"),
-            string(arena.get_string(*name_idx)),
-        ]),
-        Longident::Ldot(prefix, name_idx) => Sexp::list(vec![
-            Sexp::atom("Ldot"),
-            longident_inner(arena, prefix),
-            string(arena.get_string(*name_idx)),
-        ]),
-        Longident::Lapply(l1, l2) => Sexp::list(vec![
-            Sexp::atom("Lapply"),
-            longident_inner(arena, l1),
-            longident_inner(arena, l2),
-        ]),
-    }
-}
-
-fn longident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
-    Sexp::list(vec![Sexp::atom("longident"), longident_inner(arena, lid)])
 }
 
 // ============================================================================
@@ -168,11 +109,11 @@ fn arg_label(arena: &ParseArena, lbl: &ArgLabel) -> Sexp {
         ArgLabel::Nolabel => Sexp::atom("Nolabel"),
         ArgLabel::Labelled(s) => Sexp::list(vec![
             Sexp::atom("Labelled"),
-            Sexp::atom(&quote_string(arena.get_string(*s))),
+            Sexp::atom(&quote_string_literal(arena.get_string(*s))),
         ]),
         ArgLabel::Optional(s) => Sexp::list(vec![
             Sexp::atom("Optional"),
-            Sexp::atom(&quote_string(arena.get_string(*s))),
+            Sexp::atom(&quote_string_literal(arena.get_string(*s))),
         ]),
     }
 }
@@ -192,7 +133,7 @@ fn constant_inner(c: &Constant) -> Sexp {
     match c {
         Constant::Integer(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_integer"),
-            Sexp::atom(&quote_string(txt)),
+            Sexp::atom(&quote_string_literal(txt)),
             opt_char(tag),
         ]),
         Constant::Char(_) => Sexp::list(vec![Sexp::atom("Pconst_char")]),
@@ -200,18 +141,15 @@ fn constant_inner(c: &Constant) -> Sexp {
             if tag.as_ref().map(|t| t.as_str()) == Some("INTERNAL_RES_CHAR_CONTENTS") {
                 Sexp::list(vec![Sexp::atom("Pconst_char")])
             } else {
-                let quoted = if tag.is_some() {
-                    quote_string_tagged(txt)
-                } else {
-                    quote_string(txt)
-                };
+                let quoted = quote_string_literal(txt);
                 Sexp::list(vec![
                     Sexp::atom("Pconst_string"),
                     Sexp::atom(&quoted),
                     match tag {
-                        Some(t) => {
-                            Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&quote_string(t))])
-                        }
+                        Some(t) => Sexp::list(vec![
+                            Sexp::atom("Some"),
+                            Sexp::atom(&quote_string_literal(t)),
+                        ]),
                         None => Sexp::atom("None"),
                     },
                 ])
@@ -219,7 +157,7 @@ fn constant_inner(c: &Constant) -> Sexp {
         }
         Constant::Float(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_float"),
-            Sexp::atom(&quote_string(txt)),
+            Sexp::atom(&quote_string_literal(txt)),
             opt_char(tag),
         ]),
     }

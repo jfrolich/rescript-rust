@@ -14,13 +14,14 @@ use std::io::Write;
 const WIDTH: i32 = 80;
 
 /// Document type matching OCaml's Res_doc.t
+/// Text borrows from the `Sexp` being printed.
 #[derive(Clone)]
-enum Doc {
-    Text(String),
-    Concat(Vec<Doc>),
-    Indent(Box<Doc>),
+enum Doc<'a> {
+    Text(&'a str),
+    Concat(Vec<Doc<'a>>),
+    Indent(Box<Doc<'a>>),
     Line, // Becomes space if group fits, newline otherwise
-    Group(Box<Doc>),
+    Group(Box<Doc<'a>>),
 }
 
 /// Mode for rendering: Flat (lines become spaces) or Break (lines become newlines)
@@ -30,24 +31,24 @@ enum Mode {
     Break,
 }
 
-impl Doc {
-    fn text(s: &str) -> Doc {
-        Doc::Text(s.to_string())
+impl<'a> Doc<'a> {
+    fn text(s: &'a str) -> Doc<'a> {
+        Doc::Text(s)
     }
 
-    fn concat(docs: Vec<Doc>) -> Doc {
+    fn concat(docs: Vec<Doc<'a>>) -> Doc<'a> {
         Doc::Concat(docs)
     }
 
-    fn indent(doc: Doc) -> Doc {
+    fn indent(doc: Doc<'a>) -> Doc<'a> {
         Doc::Indent(Box::new(doc))
     }
 
-    fn group(doc: Doc) -> Doc {
+    fn group(doc: Doc<'a>) -> Doc<'a> {
         Doc::Group(Box::new(doc))
     }
 
-    fn join(sep: Doc, docs: Vec<Doc>) -> Doc {
+    fn join(sep: Doc<'a>, docs: Vec<Doc<'a>>) -> Doc<'a> {
         let mut result = Vec::new();
         for (i, doc) in docs.into_iter().enumerate() {
             if i > 0 {
@@ -58,23 +59,16 @@ impl Doc {
         Doc::Concat(result)
     }
 
-    /// Check if the documents on the stack fit within the remaining width
-    /// This matches OCaml's fits function behavior exactly
-    fn fits(mut width: i32, stack: &[(i32, Mode, &Doc)]) -> bool {
-        // Use a work stack to process docs in order (like OCaml's recursive approach)
-        // Key difference from naive iterative: we process Concat children in-order,
-        // and continue with the outer stack AFTER all children are done.
+    /// Check whether `first`, followed by the pending render `stack` (top
+    /// first), fits within the remaining width. Matches OCaml's `fits`.
+    /// The stack is read lazily from the top, so a group check never copies it.
+    fn fits(mut width: i32, first: (i32, Mode, &Doc<'a>), stack: &[(i32, Mode, &Doc<'a>)]) -> bool {
+        // Work stack processed in order: children of a Concat are pushed in
+        // reverse, and the outer stack is only consulted once it is empty.
+        let mut work: Vec<(i32, Mode, &Doc<'a>)> = vec![first];
+        let mut pending = stack.iter().rev();
 
-        // Work items: (indent, mode, doc, continuation_stack_idx)
-        // When a doc is fully processed, we continue with continuation_stack_idx
-        let mut work: Vec<(i32, Mode, &Doc)> = Vec::new();
-
-        // Initialize with stack items in reverse order (so first is processed first)
-        for item in stack.iter().rev() {
-            work.push(*item);
-        }
-
-        while let Some((indent, mode, doc)) = work.pop() {
+        while let Some((indent, mode, doc)) = work.pop().or_else(|| pending.next().copied()) {
             if width < 0 {
                 return false;
             }
@@ -113,12 +107,12 @@ impl Doc {
 
     /// Convert to string with pretty printing using stack-based algorithm
     /// This matches OCaml's Res_doc.to_string algorithm
-    fn to_string(&self) -> String {
+    fn render(&self) -> String {
         let mut out = String::new();
         let mut col: i32 = 0;
 
         // Stack of (indent, mode, doc)
-        let mut stack: Vec<(i32, Mode, &Doc)> = vec![(0, Mode::Break, self)];
+        let mut stack: Vec<(i32, Mode, &Doc<'a>)> = vec![(0, Mode::Break, self)];
 
         while let Some((indent, mode, doc)) = stack.pop() {
             match doc {
@@ -155,18 +149,9 @@ impl Doc {
                     }
                 },
                 Doc::Group(d) => {
-                    // Check if the group fits WITH the rest of the stack
-                    // Build check stack: this group in flat mode, plus remaining stack (in top-to-bottom order)
-                    let mut check_stack: Vec<(i32, Mode, &Doc)> =
-                        vec![(indent, Mode::Flat, d.as_ref())];
-                    // Stack items are added from top (last index) to bottom (first index)
-                    // so they're processed in the correct order after we reverse in fits
-                    for item in stack.iter().rev() {
-                        check_stack.push(*item);
-                    }
-
+                    // Check if the group, in flat mode, fits WITH the rest of the stack.
                     let remaining = WIDTH - col;
-                    let does_fit = Self::fits(remaining, &check_stack);
+                    let does_fit = Self::fits(remaining, (indent, Mode::Flat, d.as_ref()), &stack);
 
                     if does_fit {
                         // Fits: render in flat mode
@@ -200,11 +185,11 @@ impl Sexp {
     }
 
     pub fn to_string(&self) -> String {
-        self.to_doc().to_string()
+        self.to_doc().render()
     }
 
     /// Convert Sexp to Doc, matching OCaml's res_ast_debugger to_doc function
-    fn to_doc(&self) -> Doc {
+    fn to_doc(&self) -> Doc<'_> {
         match self {
             Sexp::Atom(s) => Doc::text(s),
             Sexp::List(items) if items.is_empty() => Doc::text("()"),
@@ -213,7 +198,7 @@ impl Sexp {
             }
             Sexp::List(items) => {
                 let head = items[0].to_doc();
-                let tail: Vec<Doc> = items[1..].iter().map(|s| s.to_doc()).collect();
+                let tail: Vec<Doc<'_>> = items[1..].iter().map(|s| s.to_doc()).collect();
                 Doc::group(Doc::concat(vec![
                     Doc::text("("),
                     head,
@@ -228,7 +213,7 @@ impl Sexp {
 /// Unwrap an uppercase exotic identifier encoding.
 /// `\"Uident"` becomes `Uident`; other strings pass through unchanged.
 /// Matches OCaml's `Ext_ident.unwrap_uppercase_exotic`.
-fn unwrap_uppercase_exotic(s: &str) -> &str {
+pub(crate) fn unwrap_uppercase_exotic(s: &str) -> &str {
     let bytes = s.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' && bytes[bytes.len() - 1] == b'"' {
         &s[2..s.len() - 1]
@@ -237,7 +222,7 @@ fn unwrap_uppercase_exotic(s: &str) -> &str {
     }
 }
 
-fn quote_string_literal(s: &str) -> String {
+pub(crate) fn quote_string_literal(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 2);
     result.push('"');
     result.push_str(s);
@@ -245,11 +230,11 @@ fn quote_string_literal(s: &str) -> String {
     result
 }
 
-fn quote_string(s: &str) -> String {
+pub(crate) fn quote_string(s: &str) -> String {
     quote_string_literal(unwrap_uppercase_exotic(s))
 }
 
-fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
+pub(crate) fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
 where
     F: Fn(&T) -> Sexp,
 {
@@ -264,7 +249,7 @@ where
 // Longident
 // ============================================================================
 
-fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
+pub(crate) fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
     match lid {
         Longident::Lident(name_idx) => {
             let name = arena.get_string(*name_idx);
@@ -286,11 +271,11 @@ fn longident_inner(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> S
     }
 }
 
-fn longident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
+pub(crate) fn longident(arena: &crate::parse_arena::ParseArena, lid: &Longident) -> Sexp {
     Sexp::list(vec![Sexp::atom("longident"), longident_inner(arena, lid)])
 }
 
-fn longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp {
+pub(crate) fn longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp {
     longident(arena, arena.get_longident(idx))
 }
 
@@ -298,49 +283,49 @@ fn longident_idx(arena: &ParseArena, idx: crate::parse_arena::LidentIdx) -> Sexp
 // Flags
 // ============================================================================
 
-fn rec_flag(flag: &RecFlag) -> Sexp {
+pub(crate) fn rec_flag(flag: &RecFlag) -> Sexp {
     Sexp::atom(match flag {
         RecFlag::Recursive => "Recursive",
         RecFlag::Nonrecursive => "Nonrecursive",
     })
 }
 
-fn closed_flag(flag: &ClosedFlag) -> Sexp {
+pub(crate) fn closed_flag(flag: &ClosedFlag) -> Sexp {
     Sexp::atom(match flag {
         ClosedFlag::Closed => "Closed",
         ClosedFlag::Open => "Open",
     })
 }
 
-fn direction_flag(flag: &DirectionFlag) -> Sexp {
+pub(crate) fn direction_flag(flag: &DirectionFlag) -> Sexp {
     Sexp::atom(match flag {
         DirectionFlag::Upto => "Upto",
         DirectionFlag::Downto => "Downto",
     })
 }
 
-fn override_flag(flag: &OverrideFlag) -> Sexp {
+pub(crate) fn override_flag(flag: &OverrideFlag) -> Sexp {
     Sexp::atom(match flag {
         OverrideFlag::Override => "Override",
         OverrideFlag::Fresh => "Fresh",
     })
 }
 
-fn private_flag(flag: &PrivateFlag) -> Sexp {
+pub(crate) fn private_flag(flag: &PrivateFlag) -> Sexp {
     Sexp::atom(match flag {
         PrivateFlag::Private => "Private",
         PrivateFlag::Public => "Public",
     })
 }
 
-fn mutable_flag(flag: &MutableFlag) -> Sexp {
+pub(crate) fn mutable_flag(flag: &MutableFlag) -> Sexp {
     Sexp::atom(match flag {
         MutableFlag::Mutable => "Mutable",
         MutableFlag::Immutable => "Immutable",
     })
 }
 
-fn variance(v: &Variance) -> Sexp {
+pub(crate) fn variance(v: &Variance) -> Sexp {
     Sexp::atom(match v {
         Variance::Covariant => "Covariant",
         Variance::Contravariant => "Contravariant",

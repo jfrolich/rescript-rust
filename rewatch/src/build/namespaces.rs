@@ -1,5 +1,6 @@
 use crate::build::packages;
 use ahash::AHashSet;
+use anyhow::{Result, anyhow};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -21,28 +22,24 @@ pub fn gen_mlmap(
     package: &packages::Package,
     namespace: &str,
     depending_modules: &AHashSet<String>,
-) -> PathBuf {
+) -> Result<PathBuf> {
     let build_path_abs = package.get_build_path();
     // we don't really need to create a digest, because we track if we need to
     // recompile in a different way but we need to put it in the file for it to
     // be readable.
 
     let path = build_path_abs.join(format!("{namespace}.mlmap"));
-    let mut file = File::create(&path).expect("Unable to create mlmap");
-
-    file.write_all(b"randjbuildsystem\n")
-        .expect("Unable to write mlmap");
-
-    let mut modules = Vec::from_iter(depending_modules.to_owned());
+    let mut modules: Vec<&String> = depending_modules.iter().collect();
     modules.sort();
+    let mut contents = String::from("randjbuildsystem\n");
     for module in modules {
-        // check if the module names is referencible in code (no exotic module names)
-        // (only contains A-Z a-z 0-9 and _ and only starts with a capital letter)
-        // if not, it does not make sense to export as part of the name space
-        // this helps compile times of exotic modules such as MyModule.test
-        file.write_all(module.as_bytes()).unwrap();
-        file.write_all(b"\n").unwrap();
+        contents.push_str(module);
+        contents.push('\n');
     }
+    let mut file =
+        File::create(&path).map_err(|e| anyhow!("Unable to create mlmap {}: {e}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|e| anyhow!("Unable to write mlmap {}: {e}", path.display()))?;
 
-    path
+    Ok(path)
 }

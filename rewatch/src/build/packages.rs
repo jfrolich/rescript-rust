@@ -14,7 +14,6 @@ use log::debug;
 use rayon::prelude::*;
 use std::collections::hash_map::Entry;
 use std::fs::{self};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::{info_span, instrument};
@@ -112,11 +111,6 @@ impl PartialEq for Package {
     }
 }
 impl Eq for Package {}
-impl Hash for Package {
-    fn hash<H: Hasher>(&self, _state: &mut H) {
-        blake3::hash(self.name.as_bytes());
-    }
-}
 
 fn matches_filter(filter: &Option<regex::Regex>, path: &str) -> bool {
     match filter {
@@ -418,10 +412,10 @@ fn is_local_dependency(project_context: &ProjectContext, package_name: &str, can
 
 fn flatten_dependencies(dependencies: Vec<Dependency>) -> Vec<Dependency> {
     let mut flattened: Vec<Dependency> = Vec::new();
-    for dep in dependencies {
-        flattened.push(dep.clone());
-        let nested_flattened = flatten_dependencies(dep.dependencies);
-        flattened.extend(nested_flattened);
+    for mut dep in dependencies {
+        let children = std::mem::take(&mut dep.dependencies);
+        flattened.push(dep);
+        flattened.extend(flatten_dependencies(children));
     }
     flattened
 }
@@ -888,19 +882,31 @@ pub fn make(
 
 #[instrument(name = "packages.parse_packages", skip_all)]
 pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
-    let packages = build_state.packages.clone();
+    // Nothing below reads `build_state.packages`, so take the map out instead
+    // of cloning every package, and put it back afterwards.
+    let packages = std::mem::take(&mut build_state.packages);
+    let result = parse_packages_inner(build_state, &packages);
+    build_state.packages = packages;
+    result
+}
+
+fn create_dir(path: &Path) -> Result<()> {
+    helpers::create_path(path).map_err(|e| anyhow!("Could not create {}: {e}", path.display()))
+}
+
+fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String, Package>) -> Result<()> {
+    let package_specs = build_state.get_root_config().get_package_specs();
     for (package_name, package) in packages.iter() {
         debug!("Parsing package: {package_name}");
-        if let Some(package_modules) = package.modules.to_owned() {
-            build_state.module_names.extend(package_modules)
+        if let Some(package_modules) = &package.modules {
+            build_state.module_names.extend(package_modules.iter().cloned())
         }
         let build_path_abs = package.get_build_path();
         let bs_build_path = package.get_ocaml_build_path();
-        helpers::create_path(&build_path_abs);
-        helpers::create_path(&bs_build_path);
-        let root_config = build_state.get_root_config();
+        create_dir(&build_path_abs)?;
+        create_dir(&bs_build_path)?;
 
-        root_config.get_package_specs().iter().for_each(|spec| {
+        for spec in package_specs.iter() {
             if !spec.in_source {
                 // we don't want to calculate this if we don't have out of source specs
                 // we do this twice, but we almost never have multiple package specs
@@ -917,27 +923,22 @@ pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
                         .collect(),
                     _ => AHashSet::new(),
                 };
-                if spec.is_common_js() {
-                    helpers::create_path(&package.get_js_path());
-                    relative_dirs.iter().for_each(|path_buf| {
-                        helpers::create_path_for_path(&Path::join(&package.get_js_path(), path_buf))
-                    })
+                let output_root = if spec.is_common_js() {
+                    package.get_js_path()
                 } else {
-                    helpers::create_path(&package.get_esmodule_path());
-                    relative_dirs.iter().for_each(|path_buf| {
-                        helpers::create_path_for_path(&Path::join(&package.get_esmodule_path(), path_buf))
-                    })
+                    package.get_esmodule_path()
+                };
+                create_dir(&output_root)?;
+                for path_buf in relative_dirs.iter() {
+                    create_dir(&output_root.join(path_buf))?;
                 }
             }
-        });
+        }
 
-        package.namespace.to_suffix().iter().for_each(|namespace| {
+        if let Some(namespace) = package.namespace.to_suffix() {
             // generate the mlmap "AST" file for modules that have a namespace configured
-            let source_files = match package.source_files.to_owned() {
-                Some(source_files) => source_files
-                    .keys()
-                    .map(|key| key.to_owned())
-                    .collect::<Vec<PathBuf>>(),
+            let source_files = match &package.source_files {
+                Some(source_files) => source_files.keys().collect::<Vec<&PathBuf>>(),
                 None => unreachable!(),
             };
             let entry = match &package.namespace {
@@ -958,7 +959,7 @@ pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
                 .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
                 .collect::<AHashSet<String>>();
 
-            let mlmap = namespaces::gen_mlmap(package, namespace, &depending_modules);
+            let mlmap = namespaces::gen_mlmap(package, &namespace, &depending_modules)?;
 
             // mlmap will be compiled in the AST generation step
             // compile_mlmap(&package, namespace, &project_root);
@@ -981,7 +982,7 @@ pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
                 .collect::<AHashSet<String>>();
 
             build_state.insert_module(
-                &helpers::file_path_to_module_name(&mlmap.to_owned(), &packages::Namespace::NoNamespace),
+                &helpers::file_path_to_module_name(&mlmap, &packages::Namespace::NoNamespace),
                 Module {
                     deps_dirty: false,
                     source_type: SourceType::MlMap(MlMap { parse_dirty: false }),
@@ -993,7 +994,7 @@ pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
                     is_type_dev: false,
                 },
             );
-        });
+        }
 
         debug!("Building source file-tree for package: {}", package.name);
         if let Some(source_files) = &package.source_files {

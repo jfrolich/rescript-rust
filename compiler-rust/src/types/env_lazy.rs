@@ -377,7 +377,7 @@ fn build_type_constructors(
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
                             for arg in &args {
-                                crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix_pub(
+                                crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     *arg,
                                     &old_prefix,
                                     &new_prefix,
@@ -643,13 +643,17 @@ struct StructureComponentTables {
     /// compilations on this worker, so entries are forced as store builds and
     /// carry the replay record of their forcing.
     in_store: std::cell::Cell<bool>,
-    store_pieces: RefCell<HashMap<(ForcedKind, String), Arc<super::context::StorePiece>>>,
+    /// Store pieces per forced entry, one table per `ForcedKind` so lookups
+    /// can borrow the entry name.
+    store_pieces: RefCell<[HashMap<String, Arc<super::context::StorePiece>>; FORCED_KIND_COUNT]>,
     /// The layer tables `open` adds for this view, built on first open.
     opened_layers: OnceCell<(
         Arc<super::env::OpenedLayers>,
         Option<Arc<super::context::StorePiece>>,
     )>,
 }
+
+const FORCED_KIND_COUNT: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ForcedKind {
@@ -659,6 +663,8 @@ enum ForcedKind {
     ChildComponents,
     QualifiedModule,
 }
+
+const _: () = assert!(ForcedKind::QualifiedModule as usize + 1 == FORCED_KIND_COUNT);
 
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
@@ -727,7 +733,7 @@ fn scan_child_component_from_signature(
                 }
             }
             SignatureItem::SigType(id, decl, _) => {
-                state.working_env_mut().add_type(id.clone(), decl.clone());
+                state.working_env_mut().add_type(*id, decl.clone());
             }
             SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
                 state.runtime_pos += 1;
@@ -739,14 +745,14 @@ fn scan_child_component_from_signature(
                 let stored = {
                     let working_env = state.working_env_mut();
                     working_env.add_module_with_component_context(
-                        id.clone(),
+                        *id,
                         md.clone(),
                         md.clone(),
                         child_access_path,
                         Some((access_path.clone(), signature.clone())),
                     );
                     working_env
-                        .local_module_components_arc(&Path::pident(id.clone()))
+                        .local_module_components_arc(&Path::pident(*id))
                         .map(|stored| (runtime_pos, stored))
                 };
                 if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
@@ -766,7 +772,7 @@ fn scan_child_component_from_signature(
                 state.runtime_pos += 1;
             }
             SignatureItem::SigModtype(id, mtd) => {
-                state.working_env_mut().add_modtype(id.clone(), mtd.clone());
+                state.working_env_mut().add_modtype(*id, mtd.clone());
             }
             SignatureItem::SigClassType => {}
         }
@@ -790,15 +796,6 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc(access_path, Arc::new(signature), HashMap::new(), ctx)
-    }
-
-    pub(crate) fn new_with_child_components(
-        access_path: Path,
-        signature: Signature,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        ctx: &super::context::TypeContext,
-    ) -> Self {
-        Self::new_with_child_components_arc(access_path, Arc::new(signature), child_components, ctx)
     }
 
     pub(crate) fn new_with_child_components_arc(
@@ -960,7 +957,7 @@ impl QualifiedModuleComponents {
                         &access_path,
                         ctx,
                     );
-                    component_modtypes.insert(id.name().to_string(), (id.clone(), component_mtd));
+                    component_modtypes.insert(id.name().to_string(), (*id, component_mtd));
                 }
             }
         }
@@ -989,7 +986,7 @@ impl QualifiedModuleComponents {
                 }),
                 value_subst_maps: RefCell::new(None),
                 in_store: std::cell::Cell::new(super::thread_store::store_build_active()),
-                store_pieces: RefCell::new(HashMap::new()),
+                store_pieces: RefCell::new(Default::default()),
                 opened_layers: OnceCell::new(),
             }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
@@ -1024,11 +1021,8 @@ impl QualifiedModuleComponents {
         if !self.tables.in_store.get() {
             return force();
         }
-        let known = self
-            .tables
-            .store_pieces
-            .borrow()
-            .get(&(kind, name.to_string()))
+        let known = self.tables.store_pieces.borrow()[kind as usize]
+            .get(name)
             .cloned();
         if let Some(piece) = known {
             ctx.touch_store_piece(&piece);
@@ -1044,10 +1038,8 @@ impl QualifiedModuleComponents {
         let (result, piece) = ctx.build_in_store(force);
         match piece {
             Some(piece) => {
-                self.tables
-                    .store_pieces
-                    .borrow_mut()
-                    .insert((kind, name.to_string()), piece);
+                self.tables.store_pieces.borrow_mut()[kind as usize]
+                    .insert(name.to_string(), piece);
             }
             None => self.forget_entry(kind, name),
         }
@@ -1117,10 +1109,6 @@ impl QualifiedModuleComponents {
         self.signature.clone()
     }
 
-    pub(crate) fn cloned_signature(&self) -> Signature {
-        self.signature.as_ref().clone()
-    }
-
     fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
@@ -1178,7 +1166,7 @@ impl QualifiedModuleComponents {
         // `new_with_child_components_arc_and_value_source_prefix_inner`).
         if let Some(source) = self.rerooted_value_source() {
             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                &[SignatureItem::SigValue(id.clone(), desc.clone())],
+                &[SignatureItem::SigValue(*id, desc.clone())],
                 source,
                 self.access_path(),
                 ctx,
@@ -1215,7 +1203,7 @@ impl QualifiedModuleComponents {
         // per-name Rust value view so repeated qualified value lookups reuse
         // the same substituted type nodes instead of rerunning the Rust-side
         // scan/copy/substitution path.
-        let result = Some((runtime_pos, id.clone(), desc));
+        let result = Some((runtime_pos, *id, desc));
         self.tables
             .component_values
             .borrow_mut()
@@ -1436,7 +1424,7 @@ impl QualifiedModuleComponents {
                     self.tables
                         .qualified_modules
                         .borrow_mut()
-                        .insert(name.to_string(), (id.clone(), md.clone()));
+                        .insert(name.to_string(), (id, md.clone()));
                     return Some((runtime_pos, id, md));
                 }
                 // Same OCaml env.ml:865-882 / subst.ml:351-364 force boundary as
@@ -1465,11 +1453,11 @@ impl QualifiedModuleComponents {
                     self.tables
                         .qualified_modules
                         .borrow_mut()
-                        .insert(name.to_string(), (id.clone(), md.clone()));
+                        .insert(name.to_string(), (id, md.clone()));
                     ctx.register_qualified_module_decl(
                         self.access_path.as_ref(),
                         name,
-                        id.clone(),
+                        id,
                         md.clone(),
                     );
                     return Some((runtime_pos, id, md));
@@ -1491,11 +1479,11 @@ impl QualifiedModuleComponents {
                     self.tables
                         .qualified_modules
                         .borrow_mut()
-                        .insert(name.to_string(), (id.clone(), md.clone()));
+                        .insert(name.to_string(), (id, md.clone()));
                     ctx.register_qualified_module_decl(
                         self.access_path.as_ref(),
                         name,
-                        id.clone(),
+                        id,
                         md.clone(),
                     );
                     return Some((runtime_pos, id, md));
@@ -1509,7 +1497,7 @@ impl QualifiedModuleComponents {
         }
 
         let (id, md) = match &self.signature[idx] {
-            SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
+            SignatureItem::SigModule(id, md, _) => (*id, md.clone()),
             _ => return None,
         };
         if let Some((raw_id, raw_md, raw_parent_sig, raw_parent_path)) =
@@ -1533,7 +1521,7 @@ impl QualifiedModuleComponents {
             self.tables
                 .qualified_modules
                 .borrow_mut()
-                .insert(name.to_string(), (raw_id.clone(), md.clone()));
+                .insert(name.to_string(), (raw_id, md.clone()));
             // OCaml compiler/ml/env.ml:1568 stores one lazy module-declaration
             // thunk for the raw component item, and env.ml:1517-1519 can reach
             // that same thunk through a strengthened alias path after
@@ -1543,12 +1531,7 @@ impl QualifiedModuleComponents {
             // raw lookup observes the already-forced OCaml thunk instead of
             // running compiler/ml/subst.ml:351-400 a second time.
             if !raw_parent_path.same(self.access_path.as_ref()) {
-                ctx.register_qualified_module_decl(
-                    &raw_parent_path,
-                    name,
-                    raw_id.clone(),
-                    md.clone(),
-                );
+                ctx.register_qualified_module_decl(&raw_parent_path, name, raw_id, md.clone());
             }
             return Some((runtime_pos, raw_id, md));
         }
@@ -1569,7 +1552,7 @@ impl QualifiedModuleComponents {
         self.tables
             .qualified_modules
             .borrow_mut()
-            .insert(name.to_string(), (id.clone(), md.clone()));
+            .insert(name.to_string(), (id, md.clone()));
         Some((runtime_pos, id, md))
     }
 
@@ -1608,7 +1591,7 @@ impl QualifiedModuleComponents {
         self.tables
             .qualified_modtypes
             .borrow_mut()
-            .insert(name.to_string(), (id.clone(), mtd.clone()));
+            .insert(name.to_string(), (id, mtd.clone()));
         Some((id, mtd))
     }
 }
@@ -1664,7 +1647,7 @@ pub(crate) fn force_component_module_declaration_thunk(
         ctx,
     );
     let md = Arc::new(md);
-    ctx.register_qualified_module_decl(cache_parent_path, child_name, id.clone(), md.clone());
+    ctx.register_qualified_module_decl(cache_parent_path, child_name, id, md.clone());
     (id, md)
 }
 
@@ -1695,7 +1678,7 @@ fn raw_sig_candidate_paths_for_access_path(
     for alias_source in ctx.alias_sources_for_component_path(access_path) {
         push_path_unique(&mut candidates, alias_source);
     }
-    push_path_unique(&mut candidates, Path::pident(head.clone()));
+    push_path_unique(&mut candidates, Path::pident(*head));
     candidates
 }
 
@@ -1732,9 +1715,9 @@ fn self_alias_raw_parent_module_item(
         .find_map(|(raw_parent_sig, raw_parent_path)| {
             raw_parent_sig.iter().find_map(|item| match item {
                 SignatureItem::SigModule(id, raw_md, _) if id.name() == module_name => Some((
-                    id.clone(),
+                    *id,
                     raw_md.clone(),
-                    raw_parent_sig.clone(),
+                    (*raw_parent_sig).clone(),
                     raw_parent_path.clone(),
                 )),
                 _ => None,
@@ -1772,14 +1755,14 @@ fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &P
         && env.path_starts_with_opened_component(access_path)
 }
 
-fn build_local_module_components<'a>(
+fn build_local_module_components(
     env: &super::env::Env,
     access_path: &Path,
     md: &ModuleDeclaration,
     parent_substitution_context: Option<(&Path, &[SignatureItem])>,
     source_prefix: Option<&Path>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a super::context::TypeContext,
+    ctx: &super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
     if ctx.persistent_env_is_in_process()
@@ -2056,7 +2039,7 @@ fn build_local_module_components<'a>(
                     } else {
                         decl.clone()
                     };
-                    working_env.add_type(id.clone(), env_decl);
+                    working_env.add_type(*id, env_decl);
                 }
                 ctx.register_type_decl(qualified_id.name(), qualified_decl.clone());
                 if qualified_id.stamp() != 0 {
@@ -2087,7 +2070,7 @@ fn build_local_module_components<'a>(
                         child_md.clone()
                     };
                     working_env.add_module_with_component_context(
-                        id.clone(),
+                        *id,
                         env_decl,
                         component_decl,
                         child_access_path,
@@ -2097,7 +2080,7 @@ fn build_local_module_components<'a>(
                 crate::cmi::persistent_env::register_types_by_stamp_recursive(&qmd.md_type, ctx);
                 if let Some(working_env) = working_env.as_ref()
                     && let Some(stored) =
-                        working_env.local_module_components_arc(&Path::pident(id.clone()))
+                        working_env.local_module_components_arc(&Path::pident(*id))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
@@ -2113,7 +2096,7 @@ fn build_local_module_components<'a>(
                     } else {
                         mtd.clone()
                     };
-                    working_env.add_modtype(id.clone(), env_mtd);
+                    working_env.add_modtype(*id, env_mtd);
                 }
             }
             (SignatureItem::SigClassType, SignatureItem::SigClassType) => {}
@@ -2187,10 +2170,10 @@ impl StoredModuleComponents {
         }
     }
 
-    pub(crate) fn with_components<'a, R>(
+    pub(crate) fn with_components<R>(
         &self,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a super::context::TypeContext,
+        ctx: &super::context::TypeContext,
         cache_mode: super::typecore::ComponentLookupApi,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
@@ -2230,12 +2213,11 @@ impl StoredModuleComponents {
         }
 
         let components = Arc::new(self.build_components(pers_env, ctx, cache_mode)?);
-        if cache_mode.publishes() {
-            if self.cached.set(components.clone()).is_err()
-                && let Some(cached) = self.cached.get().cloned()
-            {
-                return Some(f(cached.as_ref()));
-            }
+        if cache_mode.publishes()
+            && self.cached.set(components.clone()).is_err()
+            && let Some(cached) = self.cached.get().cloned()
+        {
+            return Some(f(cached.as_ref()));
         }
         Some(f(components.as_ref()))
     }
@@ -2263,10 +2245,7 @@ impl StoredModuleComponents {
             cache_mode,
         )?;
         if ctx.compiler_counters_enabled() {
-            crate::perf_counters::record_stored_component_build(
-                cache_mode.counter_name(),
-                cache_mode.publishes(),
-            );
+            crate::perf_counters::record_stored_component_build(cache_mode, cache_mode.publishes());
         }
         Some(components)
     }

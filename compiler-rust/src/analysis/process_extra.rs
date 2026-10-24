@@ -20,13 +20,14 @@ fn add_loc_item(extra: &mut Extra, loc: Loc, loc_type: LocType) {
     }
 }
 
-/// `add_reference`.
+/// `add_reference`. The locations are kept oldest first (the reverse of
+/// OCaml's consed list); readers iterate them reversed. `Hashtbl.replace` on
+/// a missing key is `Hashtbl.add`, so the bucket order is unchanged.
 fn add_reference(extra: &mut Extra, stamp: i32, loc: Loc) {
-    let mut locs = vec![loc];
-    if let Some(old) = extra.internal_references.find(&stamp) {
-        locs.extend(old.iter().copied());
+    match extra.internal_references.find_mut(&stamp) {
+        Some(locs) => locs.push(loc),
+        None => extra.internal_references.add(stamp, vec![loc]),
     }
-    extra.internal_references.replace(stamp, locs);
 }
 
 /// `extra_for_file`.
@@ -119,24 +120,26 @@ fn add_external_reference(
     tip: Tip,
     loc: Loc,
 ) {
-    let key = module_name.to_string();
-    let mut refs = vec![(path, tip, loc)];
-    if let Some(old) = extra.external_references.find(&key) {
-        refs.extend(old.iter().cloned());
+    // Oldest first, like `add_reference`.
+    match extra.external_references.find_mut(module_name) {
+        Some(refs) => refs.push((path, tip, loc)),
+        None => extra
+            .external_references
+            .add(module_name.to_string(), vec![(path, tip, loc)]),
     }
-    extra.external_references.replace(key, refs);
 }
 
 /// `add_file_reference`.
 fn add_file_reference(extra: &mut Extra, module_name: &str, loc: Loc) {
-    let key = module_name.to_string();
-    let mut locs = extra
-        .file_references
-        .find(&key)
-        .cloned()
-        .unwrap_or_default();
-    locs.insert(std::cmp::Reverse(loc));
-    extra.file_references.replace(key, locs);
+    match extra.file_references.find_mut(module_name) {
+        Some(locs) => {
+            locs.insert(std::cmp::Reverse(loc));
+        }
+        None => extra.file_references.add(
+            module_name.to_string(),
+            LocationSet::from([std::cmp::Reverse(loc)]),
+        ),
+    }
 }
 
 /// `Longident.flatten`; `None` for a functor application, where OCaml
@@ -161,7 +164,8 @@ fn last(ctx: &Ctx<'_>, lid: &Longident) -> String {
 enum TypeAtPath {
     NotFound,
     Global(String, ModulePathList),
-    Local(Declared<Type>),
+    /// The key of a type in the file's stamps.
+    Local(i32),
 }
 
 /// The fields of a `Texp_record` that `add_for_record` reads.
@@ -272,7 +276,7 @@ impl ExtraIterator<'_, '_> {
     /// `get_type_at_path`.
     fn get_type_at_path(&self, path: &Path) -> TypeAtPath {
         let find = |stamp: i32| match self.file.stamps.find_type(stamp) {
-            Some(declared) => TypeAtPath::Local(declared.clone()),
+            Some(_) => TypeAtPath::Local(stamp),
             None => TypeAtPath::NotFound,
         };
         match self.resolve(path) {
@@ -287,29 +291,29 @@ impl ExtraIterator<'_, '_> {
     }
 
     fn constr_path(&self, t: TypeExprRef) -> Option<Path> {
-        match &*self.ctx.types.get_desc(dig(self.ctx.types, t)) {
-            TypeDesc::Tconstr { path, .. } => Some(path.clone()),
-            _ => None,
-        }
+        super::shared::dig_constructor(self.ctx.types, t)
     }
 
     /// The field named `name` of a record type, as a reference.
     fn field_reference(&mut self, t: &TypeAtPath, name: &str, name_loc: Loc) -> LocKind {
         match t {
-            TypeAtPath::Local(Declared {
-                stamp,
-                item:
-                    Type {
-                        kind: TypeKind::Record(fields),
-                        ..
-                    },
-                ..
-            }) => match fields.iter().find(|f| f.fname.txt == name) {
-                Some(field) => {
-                    add_reference(&mut self.extra, field.stamp, name_loc);
-                    LocKind::LocalReference(*stamp, Tip::Field(name.to_string()))
-                }
-                None => LocKind::NotFound,
+            TypeAtPath::Local(key) => match self.file.stamps.find_type(*key) {
+                Some(Declared {
+                    stamp,
+                    item:
+                        Type {
+                            kind: TypeKind::Record(fields),
+                            ..
+                        },
+                    ..
+                }) => match fields.iter().find(|f| f.fname.txt == name) {
+                    Some(field) => {
+                        add_reference(&mut self.extra, field.stamp, name_loc);
+                        LocKind::LocalReference(*stamp, Tip::Field(name.to_string()))
+                    }
+                    None => LocKind::NotFound,
+                },
+                _ => LocKind::NotFound,
             },
             TypeAtPath::Global(module_name, path) => {
                 let tip = Tip::Field(name.to_string());
@@ -379,23 +383,26 @@ impl ExtraIterator<'_, '_> {
         let name_loc = self.loc(lid.loc).end_of_location(name.len() as i32);
         let t = self.get_type_at_path(&path);
         let loc_type = match &t {
-            TypeAtPath::Local(Declared {
-                stamp,
-                item:
-                    Type {
-                        kind: TypeKind::Variant(constructors),
-                        ..
-                    },
-                ..
-            }) => match constructors
-                .iter()
-                .find(|c| c.cname.txt == constructor.cstr_name)
-            {
-                Some(c) => {
-                    add_reference(&mut self.extra, c.stamp, name_loc);
-                    LocKind::LocalReference(*stamp, Tip::Constructor(name.clone()))
-                }
-                None => LocKind::NotFound,
+            TypeAtPath::Local(key) => match self.file.stamps.find_type(*key) {
+                Some(Declared {
+                    stamp,
+                    item:
+                        Type {
+                            kind: TypeKind::Variant(constructors),
+                            ..
+                        },
+                    ..
+                }) => match constructors
+                    .iter()
+                    .find(|c| c.cname.txt == constructor.cstr_name)
+                {
+                    Some(c) => {
+                        add_reference(&mut self.extra, c.stamp, name_loc);
+                        LocKind::LocalReference(*stamp, Tip::Constructor(name.clone()))
+                    }
+                    None => LocKind::NotFound,
+                },
+                _ => LocKind::NotFound,
             },
             TypeAtPath::Global(module_name, path) => {
                 let tip = Tip::Constructor(name.clone());
@@ -432,7 +439,8 @@ impl ExtraIterator<'_, '_> {
         let Some(flat) = flatten(&self.ctx, txt) else {
             return;
         };
-        let id_length = flat.join(".").len() as i32;
+        // The length of `String.concat "." flat`.
+        let id_length = (flat.iter().map(String::len).sum::<usize>() + flat.len() - 1) as i32;
         let reported_length = loc.end.cnum - loc.start.cnum;
         let is_ppx = id_length != reported_length;
         if is_ppx {
@@ -459,9 +467,10 @@ impl ExtraIterator<'_, '_> {
         path: &Path,
         lid: &tt::Loc<LidentIdx>,
     ) {
-        let txt = self.ctx.arena.get_longident(lid.txt).clone();
+        let arena = self.ctx.arena;
+        let txt = arena.get_longident(lid.txt);
         let loc = self.loc(lid.loc);
-        self.add_for_longident(top, path, &txt, loc);
+        self.add_for_longident(top, path, txt, loc);
     }
 
     /// `handle_module_expr`.

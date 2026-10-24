@@ -1,7 +1,6 @@
 //! Closed function and loop continuations for the mutable indexed owner.
 use super::*;
 use crate::lambda::DirectionFlag;
-use crate::lambda::js_exp_make::int32_add;
 use crate::lambda::lam_compile_input::{LambdaInput, LambdaInputView};
 use crate::lambda::lam_compile_main_indexed::has_free_variable;
 
@@ -83,11 +82,11 @@ impl IndexedJsConsumer<'_> {
         };
         let condition = value(self, condition);
         let condition = block_with_return_expr_iife(condition.prelude, condition.expr);
-        let frame = self.compiler.push_loop();
+        self.compiler.push_loop();
         let body = effect(self, body);
-        self.compiler.pop_loop();
+        let label = self.compiler.pop_loop();
         Compiled {
-            prelude: vec![Statement::while_with_label(frame.label(), condition, body)],
+            prelude: vec![Statement::while_with_label(label, condition, body)],
             expr: Expression::undefined(true),
         }
     }
@@ -100,7 +99,7 @@ impl IndexedJsConsumer<'_> {
     ) -> Compiled {
         let (id, start, mut finish, direction, body) = match self.context.store().view(node) {
             NodeView::For(id, start, finish, direction, body) => {
-                (id.clone(), start, finish, direction, body)
+                (*id, start, finish, direction, body)
             }
             _ => panic!("for lowering requires a for node"),
         };
@@ -132,9 +131,9 @@ impl IndexedJsConsumer<'_> {
         // finish before start. Emitted effects below are still start/finish.
         let finish = value(self, finish);
         let start = value(self, start);
-        let frame = self.compiler.push_loop();
+        self.compiler.push_loop();
         let body = effect(self, body);
-        self.compiler.pop_loop();
+        let label = self.compiler.pop_loop();
         let mut prelude = start.prelude;
         let init = if finish.prelude.is_empty() {
             Some(start.expr)
@@ -143,7 +142,7 @@ impl IndexedJsConsumer<'_> {
             Some(start.expr)
         } else {
             prelude.push(Statement::variable(VariableDeclaration {
-                ident: id.clone(),
+                ident: id,
                 value: Some(start.expr),
                 property: LetKind::Variable,
                 ident_info: IdentInfo::default(),
@@ -152,7 +151,7 @@ impl IndexedJsConsumer<'_> {
             None
         };
         prelude.push(Statement::for_range(
-            frame.label(),
+            label,
             init,
             finish.expr,
             id,
@@ -172,8 +171,8 @@ impl IndexedJsConsumer<'_> {
         effect: &mut impl FnMut(&mut Self, NodeId) -> Block,
     ) -> Compiled {
         let (id, iterable, body, await_) = match self.context.store().view(node) {
-            NodeView::ForOf(id, iterable, body) => (id.clone(), iterable, body, false),
-            NodeView::ForAwaitOf(id, iterable, body) => (id.clone(), iterable, body, true),
+            NodeView::ForOf(id, iterable, body) => (*id, iterable, body, false),
+            NodeView::ForAwaitOf(id, iterable, body) => (*id, iterable, body, true),
             _ => panic!("for-of lowering requires a for-of node"),
         };
         // compiler/core/lam_compile.ml:1311-1316 / 1334-1339: allocate the
@@ -186,13 +185,13 @@ impl IndexedJsConsumer<'_> {
                 .fresh_ident(if await_ { "_for_await_of" } else { "_for_of" })
         };
         let iterable = value(self, iterable);
-        let frame = self.compiler.push_loop();
+        self.compiler.push_loop();
         let body = effect(self, body);
-        self.compiler.pop_loop();
+        let label = self.compiler.pop_loop();
         let statement = if await_ {
-            Statement::for_await_of(frame.label(), id, iterable.expr, body)
+            Statement::for_await_of(label, id, iterable.expr, body)
         } else {
-            Statement::for_of(frame.label(), id, iterable.expr, body)
+            Statement::for_of(label, id, iterable.expr, body)
         };
         let mut prelude = iterable.prelude;
         prelude.push(statement);
@@ -208,14 +207,12 @@ impl IndexedJsConsumer<'_> {
             NodeView::Continue => false,
             _ => panic!("loop exit lowering requires break or continue"),
         };
-        let frame = self
-            .compiler
-            .loop_stack
-            .first()
-            .cloned()
-            .expect("loop exit outside loop");
+        assert!(
+            !self.compiler.loop_stack.is_empty(),
+            "loop exit outside loop"
+        );
         let label =
-            (self.compiler.switch_depth > 0).then(|| self.compiler.ensure_loop_label(&frame));
+            (self.compiler.switch_depth > 0).then(|| self.compiler.ensure_current_loop_label());
         let statement = if is_break {
             Statement::break_label(label)
         } else {
@@ -233,7 +230,7 @@ impl IndexedJsConsumer<'_> {
         value: &mut impl FnMut(&mut Self, NodeId) -> Compiled,
     ) -> Compiled {
         let (id, child) = match self.context.store().view(node) {
-            NodeView::Assign(id, child) => (id.clone(), child),
+            NodeView::Assign(id, child) => (*id, child),
             _ => panic!("assignment lowering requires an assign node"),
         };
         let compiled = value(self, child);
