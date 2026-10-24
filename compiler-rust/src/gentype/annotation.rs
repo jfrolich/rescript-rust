@@ -580,14 +580,20 @@ pub fn has_decl_attribute(
 pub fn get_decl_attribute_import_renaming(
     attributes: &[crate::types::decl::Attribute],
 ) -> (Option<String>, Option<String>) {
-    // Mirrors compiler/gentype/Annotation.ml:136-148. The Rust decl attribute
-    // payload currently preserves the common string import payload; tuple import
-    // payloads need a typedtree payload-preservation pass before final parity.
+    // Mirrors compiler/gentype/Annotation.ml:136-148.
     let attribute_import = get_decl_attribute_payload(tag_is_gentype_import, attributes);
     let gentype_as_renaming = get_decl_gentype_as_renaming(attributes);
-    match attribute_import.and_then(decl_attribute_payload_as_string) {
-        Some(import_string) => (Some(import_string), gentype_as_renaming),
-        None => (None, gentype_as_renaming),
+    match attribute_import {
+        Some(crate::types::decl::AttributePayload::Str(import_string)) => {
+            (Some(import_string.clone()), gentype_as_renaming)
+        }
+        Some(crate::types::decl::AttributePayload::StrTuple(strings)) => match strings.as_slice() {
+            [import_string, rename_string] => {
+                (Some(import_string.clone()), Some(rename_string.clone()))
+            }
+            _ => (None, gentype_as_renaming),
+        },
+        _ => (None, gentype_as_renaming),
     }
 }
 

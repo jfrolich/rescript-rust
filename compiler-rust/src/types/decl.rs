@@ -670,6 +670,10 @@ pub enum AttributePayload {
     },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),
+    /// A tuple of string constants, such as the `("./module", "Name")` of
+    /// `@genType.import`, which genType reads back from a stored signature
+    /// (compiler/gentype/annotation.ml:136-148).
+    StrTuple(Vec<String>),
 }
 
 /// Visitor over the locations of a signature (see [`walk_signature_locations`]).

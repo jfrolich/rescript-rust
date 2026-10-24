@@ -637,6 +637,26 @@ fn parser_attr_to_decl_attr(
                             "false" => crate::types::decl::AttributePayload::Bool(false),
                             _ => crate::types::decl::AttributePayload::Ident(name.to_string()),
                         }
+                    } else if let crate::parser::ast::ExpressionDesc::Pexp_tuple(elements) =
+                        expr.pexp_desc.as_ref()
+                        && let Some(strings) = elements
+                            .iter()
+                            .map(
+                                |element| match arena.get_expr(*element).pexp_desc.as_ref() {
+                                    crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
+                                        match c.as_ref() {
+                                            crate::parser::ast::Constant::String(value) => {
+                                                Some(value.semantic().to_string())
+                                            }
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                },
+                            )
+                            .collect::<Option<Vec<_>>>()
+                    {
+                        crate::types::decl::AttributePayload::StrTuple(strings)
                     } else if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args) =
                         expr.pexp_desc.as_ref()
                         && args.txt.is_empty()
