@@ -23,6 +23,8 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
+mod serde;
+
 const ANNOTATION_NAME: &str = "spice";
 const ENCODER_FUNC_SUFFIX: &str = "_encode";
 const VALUE_ENCODER_FUNC_SUFFIX: &str = "_encodeJson";
@@ -34,6 +36,8 @@ const DECODER_VAR_PREFIX: &str = "decoder_";
 struct GeneratorSettings {
     do_encode: bool,
     do_decode: bool,
+    /// utils.ml `generator_settings.serde`: `@spice.serde` on the type.
+    serde: Option<serde::Serde>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +74,14 @@ struct ParsedPolyvariantField {
 }
 
 type SpiceResult<T> = Result<T, String>;
+
+/// utils.ml `field_var`: the variable a record field's value is bound to in
+/// generated code; the prefix keeps field names such as `v` or `dict` from
+/// shadowing the generated code's own variables.
+fn field_var(arena: &mut ParseArena, name: StrIdx) -> StrIdx {
+    let var = format!("spice_field_{}", arena.get_string(name));
+    arena.intern_string(&var)
+}
 
 fn require_codec(codec: Option<Expression>, what: &str) -> SpiceResult<Expression> {
     codec.ok_or_else(|| format!("Internal spice error: missing {what}"))
@@ -780,31 +792,29 @@ fn get_attribute_by_name<'a>(
     Ok(found)
 }
 
+/// utils.ml `get_generator_settings_from_attributes`.
 fn get_generator_settings_from_attributes(
     attrs: &[Attribute],
-    arena: &ParseArena,
+    arena: &mut ParseArena,
 ) -> Result<Option<GeneratorSettings>, String> {
+    let serde = serde::get_serde_from_attributes(attrs, arena)?;
+    let make = |do_encode, do_decode| {
+        Ok(Some(GeneratorSettings {
+            do_encode,
+            do_decode,
+            serde,
+        }))
+    };
     match get_attribute_by_name(attrs, ANNOTATION_NAME, arena)? {
-        Some(_) => Ok(Some(GeneratorSettings {
-            do_encode: true,
-            do_decode: true,
-        })),
+        Some(_) => make(true, true),
         None => {
             let decode = get_attribute_by_name(attrs, "spice.decode", arena)?;
             let encode = get_attribute_by_name(attrs, "spice.encode", arena)?;
             match (decode, encode) {
-                (Some(_), Some(_)) => Ok(Some(GeneratorSettings {
-                    do_encode: true,
-                    do_decode: true,
-                })),
-                (Some(_), None) => Ok(Some(GeneratorSettings {
-                    do_encode: false,
-                    do_decode: true,
-                })),
-                (None, Some(_)) => Ok(Some(GeneratorSettings {
-                    do_encode: true,
-                    do_decode: false,
-                })),
+                (Some(_), Some(_)) => make(true, true),
+                (Some(_), None) => make(false, true),
+                (None, Some(_)) => make(true, false),
+                (None, None) if serde.is_some() => make(true, true),
                 (None, None) => Ok(None),
             }
         }
@@ -845,24 +855,42 @@ fn get_param_names(
     Ok(names)
 }
 
-fn get_string_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
+/// The constant a `@spice.as` payload denotes. The external PPX reads the
+/// Parsetree0 form, where a backquoted string without interpolations is a
+/// `Pconst_string (source, Some "js")` constant (ast_mapper_to0.ml
+/// `Pexp_template`), which `ast_mapper_from0.ml` `map_constant` reads back as
+/// a string constant.
+fn alias_constant(expr: &Expression, arena: &ParseArena) -> Option<Constant> {
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_) => Ok(Some((**constant).clone())),
-            Constant::Float(_, _) => Ok(None),
-            _ => Err("cannot find a name??".to_string()),
-        },
+        ExpressionDesc::Pexp_constant(constant) => Some((**constant).clone()),
+        ExpressionDesc::Pexp_template(template)
+            if template.values.is_empty() && template.source_segments.len() == 1 =>
+        {
+            let source = arena.get_string(template.source_segments[0].txt);
+            crate::string_literal::string_from_source(source).map(Constant::String)
+        }
+        _ => None,
+    }
+}
+
+fn get_string_from_expression(
+    expr: &Expression,
+    arena: &ParseArena,
+) -> Result<Option<Constant>, String> {
+    match alias_constant(expr, arena) {
+        Some(constant @ Constant::String(_)) => Ok(Some(constant)),
+        Some(Constant::Float(_, _)) => Ok(None),
         _ => Err("cannot find a name??".to_string()),
     }
 }
 
-fn get_float_from_expression(expr: &Expression) -> Result<Option<Constant>, String> {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
-            Constant::String(_) => Ok(None),
-            Constant::Float(_, _) => Ok(Some((**constant).clone())),
-            _ => Err("cannot find a name??".to_string()),
-        },
+fn get_float_from_expression(
+    expr: &Expression,
+    arena: &ParseArena,
+) -> Result<Option<Constant>, String> {
+    match alias_constant(expr, arena) {
+        Some(Constant::String(_)) => Ok(None),
+        Some(constant @ Constant::Float(_, _)) => Ok(Some(constant)),
         _ => Err("cannot find a name??".to_string()),
     }
 }
@@ -1537,6 +1565,68 @@ fn codecs_generate_constr_codecs(
     (encode, decode)
 }
 
+/// codecs.ml `is_dict_identifier`.
+fn is_dict_identifier(lid_idx: LidentIdx, arena: &ParseArena) -> bool {
+    longident_matches(arena, lid_idx, &["dict"])
+        || longident_matches(arena, lid_idx, &["Js", "Dict", "t"])
+        || longident_matches(arena, lid_idx, &["Dict", "t"])
+}
+
+/// codecs.ml `generate_dict_codecs`: a dict of options leaves out the
+/// entries that are `None`.
+fn codecs_generate_dict_codecs(
+    settings: GeneratorSettings,
+    value_type: &CoreType,
+    arena: &mut ParseArena,
+) -> SpiceResult<(Option<Expression>, Option<Expression>)> {
+    let Some(inner) = default_option_inner_type(value_type, arena) else {
+        let encoder = settings
+            .do_encode
+            .then(|| expr_ident_path(arena, &["Spice", "dictToJson"]));
+        let decoder = settings
+            .do_decode
+            .then(|| expr_ident_path(arena, &["Spice", "dictFromJson"]));
+        let value_type_idx = arena.push_core_type(value_type.clone());
+        return codecs_parameterize_codecs(&[value_type_idx], encoder, decoder, settings, arena);
+    };
+    let inner_type = arena.get_core_type(inner).clone();
+    let (inner_encode, inner_decode) =
+        codecs_generate_codecs_for(EncodeContext::Value, settings, &inner_type, arena)?;
+    let partial = |func: &str, arg: Expression, arena: &mut ParseArena| {
+        let func = expr_ident_path(arena, &["Spice", func]);
+        expr_apply(
+            func,
+            vec![(ArgLabel::Nolabel, arg)],
+            true,
+            arena.dummy_loc(),
+            arena,
+        )
+    };
+    // OCaml builds both inner codecs before checking the settings
+    // (`Option.get` on the one that is not generated never runs).
+    let optional_value_encoder = inner_encode.map(|e| partial("optionToJson", e, arena));
+    let value_decoder = inner_decode.map(|d| partial("optionFromJson", d, arena));
+    let encoder = if settings.do_encode {
+        Some(partial(
+            "dictOptionalToJson",
+            require_encoder(optional_value_encoder)?,
+            arena,
+        ))
+    } else {
+        None
+    };
+    let decoder = if settings.do_decode {
+        Some(partial(
+            "dictFromJson",
+            require_decoder(value_decoder)?,
+            arena,
+        ))
+    } else {
+        None
+    };
+    Ok((encoder, decoder))
+}
+
 fn codecs_parameterize_codecs(
     type_args: &[CoreTypeIdx],
     encoder_func: Option<Expression>,
@@ -1649,6 +1739,13 @@ fn codecs_generate_codecs_for(
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref constr, ref type_args) = **inner;
             let custom_codec = get_attribute_by_name(&typ.ptyp_attributes, "spice.codec", arena);
+            if matches!(custom_codec, Ok(None))
+                && type_args.len() == 1
+                && is_dict_identifier(constr.txt, arena)
+            {
+                let value_type = arena.get_core_type(type_args[0]).clone();
+                return codecs_generate_dict_codecs(settings, &value_type, arena);
+            }
             let (encode, decode) = match custom_codec {
                 Ok(Some(attr)) => {
                     let expr = get_expression_from_payload(attr, arena)?;
@@ -2073,7 +2170,9 @@ fn records_generate_flat_decoder_expr(
         let name_str = arena.get_string(field.name).to_string();
         let name_slice = [name_str.as_str()];
         let lid = lident_path_parse(arena, &name_slice);
-        let expr = expr_ident_path_dynamic_mknoloc(arena, &name_slice);
+        let var = field_var(arena, field.name);
+        let var_str = arena.get_string(var).to_string();
+        let expr = expr_ident_path_dynamic_mknoloc(arena, &[var_str.as_str()]);
         record_fields.push(ExpressionRecordField {
             lid: Located::new(lid, arena.none_loc()),
             expr: arena.push_expr(expr),
@@ -2101,7 +2200,10 @@ fn records_generate_flat_decoder_expr(
                 let lident_name = arena.intern_string("Ok");
                 arena.push_lident_from_idx(lident_name)
             },
-            Some(pat_var_idx(arena, field.name, arena.none_loc())),
+            Some({
+                let var = field_var(arena, field.name);
+                pat_var_idx(arena, var, arena.none_loc())
+            }),
             arena.none_loc(),
             arena,
         );
@@ -2283,19 +2385,23 @@ fn records_generate_codecs(
     Ok((encoder, decoder))
 }
 
+/// records.ml `generate_inline_record_encoder_expr ?leading_entries`.
 fn records_generate_inline_encoder_expr(
     settings: GeneratorSettings,
     decls: &[LabelDeclaration],
+    leading_entries: Vec<Expression>,
     arena: &mut ParseArena,
 ) -> SpiceResult<Expression> {
     let fields = decls
         .iter()
         .map(|decl| records_parse_decl(settings, decl, arena))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut arr_items = Vec::with_capacity(fields.len());
+    let mut arr_items = leading_entries;
+    arr_items.reserve(fields.len());
     for field in &fields {
         let encoder = require_encoder(field.codecs.0.clone())?;
-        let field_expr = expr_ident_from_str_idx(arena, field.name, arena.dummy_loc());
+        let var = field_var(arena, field.name);
+        let field_expr = expr_ident_from_str_idx(arena, var, arena.none_loc());
         let encoded = expr_apply(
             encoder,
             vec![(ArgLabel::Nolabel, field_expr)],
@@ -2362,6 +2468,18 @@ fn records_generate_inline_decoder_expr(
 }
 
 fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseArena) -> Expression {
+    arena.register_shareable_literal("[1]");
+    let index = expr_constant(Constant::string("[1]"), arena);
+    prefix_decode_error_path(decoded, index, arena)
+}
+
+/// `match decoded with Ok v -> Ok v | Error (e : Spice.decodeError) ->
+/// Error {...e, path: prefix ++ e.path}`.
+fn prefix_decode_error_path(
+    decoded: Expression,
+    prefix: Expression,
+    arena: &mut ParseArena,
+) -> Expression {
     let ok_pattern = pat_construct_with_loc(
         {
             let name = arena.intern_string("Ok");
@@ -2383,11 +2501,12 @@ fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseAr
 
     let error_pattern = pat_constraint(
         pat_var_dummy(arena, "e"),
-        mk_type_constr(
-            lident_path_parse(arena, &["Spice", "decodeError"]),
-            vec![],
-            arena,
-        ),
+        {
+            // `[%expr ...]`: every location is the quotation's.
+            let lid = lident_path_parse(arena, &["Spice", "decodeError"]);
+            let loc = arena.dummy_loc();
+            mk_type_constr_with_lid_loc(lid, loc, vec![], arena)
+        },
         arena,
     );
     let error_pattern = pat_construct_with_loc(
@@ -2409,16 +2528,14 @@ fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseAr
         arena.dummy_loc(),
         arena,
     );
-    arena.register_shareable_literal("[1]");
-    let index = expr_constant(Constant::string("[1]"), arena);
-    let path = expr_concat(arena, index, previous_path);
+    let path = expr_concat(arena, prefix, previous_path);
     let path_lid = {
         let name = arena.intern_string("path");
         arena.push_lident_from_idx(name)
     };
     let error_record = expr_record(
         vec![ExpressionRecordField {
-            lid: Located::new(path_lid, arena.none_loc()),
+            lid: Located::new(path_lid, arena.dummy_loc()),
             expr: arena.push_expr(path),
             opt: false,
         }],
@@ -2470,6 +2587,37 @@ fn variants_parse_decl(
     })
 }
 
+/// variants.ml `generate_inline_record_payload_pattern`.
+fn variants_inline_record_payload_pattern(
+    fields: &[LabelDeclaration],
+    loc: LocIdx,
+    arena: &mut ParseArena,
+) -> Pattern {
+    let mut pattern_fields = Vec::with_capacity(fields.len());
+    for field in fields {
+        let field_name = field.pld_name.txt;
+        let var = field_var(arena, field_name);
+        let variable = pat_var_idx_with_loc(arena, var, field.pld_name.loc);
+        pattern_fields.push(PatternRecordField {
+            // `lid txt`: no location.
+            lid: Located::new(arena.push_lident_from_idx(field_name), arena.none_loc()),
+            pat: arena.push_pat(variable),
+            opt: field.pld_optional,
+        });
+    }
+    // `Pat.record` at the default location.
+    let _ = loc;
+    Pattern {
+        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
+            pattern_fields,
+            ClosedFlag::Closed,
+            None,
+        )))),
+        ppat_loc: arena.dummy_loc(),
+        ppat_attributes: Attributes::new(),
+    }
+}
+
 fn variants_generate_encoder_case(
     settings: GeneratorSettings,
     unboxed: bool,
@@ -2479,8 +2627,8 @@ fn variants_generate_encoder_case(
 ) -> SpiceResult<Case> {
     let pcd_loc = arena.clone_loc(decl.constr_decl.pcd_loc);
 
-    let json_expr = match &*decl.alias.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &**constant {
+    let json_expr = match alias_constant(&decl.alias, arena) {
+        Some(constant) => match constant {
             Constant::String(_) => expr_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(decl.alias.clone()),
@@ -2551,26 +2699,8 @@ fn variants_generate_encoder_case(
             (lhs_vars, rhs)
         }
         crate::parser::ast::ConstructorArguments::Pcstr_record(fields) => {
-            let mut pattern_fields = Vec::with_capacity(fields.len());
-            for field in fields {
-                let field_name = field.pld_name.txt;
-                let variable = pat_var_idx(arena, field_name, field.pld_name.loc);
-                pattern_fields.push(PatternRecordField {
-                    lid: Located::new(arena.push_lident_from_idx(field_name), field.pld_name.loc),
-                    pat: arena.push_pat(variable),
-                    opt: field.pld_optional,
-                });
-            }
-            let payload_pattern = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
-                    pattern_fields,
-                    ClosedFlag::Closed,
-                    None,
-                )))),
-                ppat_loc: pcd_loc,
-                ppat_attributes: Attributes::new(),
-            };
-            let payload = records_generate_inline_encoder_expr(settings, fields, arena)?;
+            let payload_pattern = variants_inline_record_payload_pattern(fields, pcd_loc, arena);
+            let payload = records_generate_inline_encoder_expr(settings, fields, vec![], arena)?;
             let rhs = if unboxed {
                 payload.clone()
             } else if has_attr_as {
@@ -2862,9 +2992,9 @@ fn variants_generate_decoder_case_attr(
     match &decl.constr_decl.pcd_args {
         crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
             let const_opt = if is_string {
-                get_string_from_expression(&decl.alias)?
+                get_string_from_expression(&decl.alias, arena)?
             } else {
-                get_float_from_expression(&decl.alias)?
+                get_float_from_expression(&decl.alias, arena)?
             };
             let const_value = match const_opt {
                 Some(c) => c,
@@ -2959,10 +3089,67 @@ fn variants_generate_unboxed_decode(
                 arena,
             )))
         }
-        crate::parser::ast::ConstructorArguments::Pcstr_record(_) => {
-            Err("This syntax is not yet implemented by spice".to_string())
+        // variants.ml `generate_unboxed_inline_record_decoder`.
+        crate::parser::ast::ConstructorArguments::Pcstr_record(fields) => {
+            let record =
+                records_generate_inline_decoder_expr(settings, fields, decl.pcd_name.txt, arena)?;
+            let object_pat = pat_construct_with_loc(
+                lident_path_static(arena, &["JSON", "Object"]),
+                Some(pat_var_dummy(arena, "dict")),
+                arena.dummy_loc(),
+                arena,
+            );
+            let v = expr_ident_path(arena, &["v"]);
+            let not_object = expr_constant_literal(arena, "Not an object");
+            let error = expr_spice_error_variants(arena, not_object, v, None);
+            let v = expr_ident_path(arena, &["v"]);
+            let scrutinee = expr_constraint(v, ctyp_json_t(arena), arena);
+            let match_expr = expr_match(
+                scrutinee,
+                vec![
+                    case(object_pat, record, arena),
+                    case(pat_any(arena), error, arena),
+                ],
+                arena,
+            );
+            Ok(Some(expr_fun(
+                ArgLabel::Nolabel,
+                pat_var_dummy(arena, "v"),
+                match_expr,
+                Some(1),
+                arena,
+            )))
         }
     }
+}
+
+/// variants.ml `generate_encoder`.
+fn variants_generate_encoder(
+    settings: GeneratorSettings,
+    unboxed: bool,
+    has_attr_as: bool,
+    parsed: &[ParsedVariantDecl],
+    arena: &mut ParseArena,
+) -> SpiceResult<Expression> {
+    let mut cases = Vec::new();
+    for decl in parsed {
+        cases.push(variants_generate_encoder_case(
+            settings,
+            unboxed,
+            has_attr_as,
+            decl,
+            arena,
+        )?);
+    }
+    let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
+    let constrained = expr_constraint(match_expr, ctyp_json_t_const(arena), arena);
+    Ok(expr_fun(
+        ArgLabel::Nolabel,
+        pat_var_dummy(arena, "v"),
+        constrained,
+        Some(1),
+        arena,
+    ))
 }
 
 fn variants_generate_codecs(
@@ -2975,6 +3162,47 @@ fn variants_generate_codecs(
         .iter()
         .map(|d| variants_parse_decl(d, arena))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(serde_settings) = settings.serde {
+        if unboxed {
+            return Err("@spice.serde can't be combined with @unboxed".to_string());
+        }
+        let cases = parsed
+            .iter()
+            .map(|decl| serde::variant_case(decl, arena))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (encoder, decoder) = serde::generate_codecs(
+            settings,
+            serde_settings,
+            serde_settings.tag,
+            |arena| serde::variants_legacy_decoder(settings, &parsed, arena),
+            &cases,
+            arena,
+        )?;
+        let encoder = if serde_settings.legacy_write && settings.do_encode {
+            // A constructor as the default spice encoding writes it: an array
+            // led by the constructor's own name.
+            let legacy: Vec<ParsedVariantDecl> = parsed
+                .iter()
+                .map(|decl| {
+                    let name = arena.get_string(decl.name).to_string();
+                    ParsedVariantDecl {
+                        alias: expr_constant(Constant::string(&name), arena),
+                        has_attr_as: false,
+                        ..decl.clone()
+                    }
+                })
+                .collect();
+            Some(variants_generate_encoder(
+                settings, false, false, &legacy, arena,
+            )?)
+        } else {
+            encoder
+        };
+        return Ok((encoder, decoder));
+    }
+    for decl in constr_decls {
+        serde::reject_flags(&decl.pcd_attributes, arena)?;
+    }
     let count_has_attr = parsed.iter().filter(|v| v.has_attr_as).count();
     let has_attr_as = if count_has_attr > 0 {
         if count_has_attr == parsed.len() {
@@ -2987,25 +3215,13 @@ fn variants_generate_codecs(
     };
 
     let encoder = if settings.do_encode {
-        let mut cases = Vec::new();
-        for decl in &parsed {
-            cases.push(variants_generate_encoder_case(
-                settings,
-                unboxed,
-                has_attr_as,
-                decl,
-                arena,
-            )?);
-        }
-        let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
-        let constrained = expr_constraint(match_expr, ctyp_json_t_const(arena), arena);
-        Some(expr_fun(
-            ArgLabel::Nolabel,
-            pat_var_dummy(arena, "v"),
-            constrained,
-            Some(1),
+        Some(variants_generate_encoder(
+            settings,
+            unboxed,
+            has_attr_as,
+            &parsed,
             arena,
-        ))
+        )?)
     } else {
         None
     };
@@ -3245,8 +3461,8 @@ fn polyvars_generate_encoder_case(
 ) -> SpiceResult<Case> {
     let (json_expr, args) = match &row.row_field {
         RowField::Rtag(_, _, _, core_types) => {
-            let json_expr = match &*row.alias.pexp_desc {
-                ExpressionDesc::Pexp_constant(constant) => match &**constant {
+            let json_expr = match alias_constant(&row.alias, arena) {
+                Some(constant) => match constant {
                     Constant::String(_) => expr_construct_with_loc(
                         lident_path_static(arena, &["JSON", "String"]),
                         Some(row.alias.clone()),
@@ -3500,9 +3716,9 @@ fn polyvars_generate_decoder_case_attr(
         RowField::Rtag(tag, _, _, core_types) => {
             let args = polyvars_get_args(arena.dummy_loc(), core_types, arena)?;
             let const_opt = if is_string {
-                get_string_from_expression(&row.alias)?
+                get_string_from_expression(&row.alias, arena)?
             } else {
-                get_float_from_expression(&row.alias)?
+                get_float_from_expression(&row.alias, arena)?
             };
             let const_value = match const_opt {
                 Some(c) => c,
@@ -3596,6 +3812,34 @@ fn polyvars_generate_unboxed_decode(
     }
 }
 
+/// polyvariants.ml `generate_encoder`.
+fn polyvars_generate_encoder(
+    settings: GeneratorSettings,
+    unboxed: bool,
+    has_attr_as: bool,
+    parsed: &[ParsedPolyvariantField],
+    arena: &mut ParseArena,
+) -> SpiceResult<Expression> {
+    let mut cases = Vec::new();
+    for row in parsed {
+        cases.push(polyvars_generate_encoder_case(
+            settings,
+            unboxed,
+            has_attr_as,
+            row,
+            arena,
+        )?);
+    }
+    let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
+    Ok(expr_fun(
+        ArgLabel::Nolabel,
+        pat_var_dummy(arena, "v"),
+        match_expr,
+        Some(1),
+        arena,
+    ))
+}
+
 fn polyvars_generate_codecs(
     settings: GeneratorSettings,
     row_fields: &[RowField],
@@ -3606,6 +3850,47 @@ fn polyvars_generate_codecs(
         .iter()
         .map(|r| polyvars_parse_decl(r, arena))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(serde_settings) = settings.serde {
+        if serde_settings.tag.is_some() {
+            return Err("@tag doesn't apply to polymorphic variants".to_string());
+        }
+        if unboxed {
+            return Err("@spice.serde can't be combined with @unboxed".to_string());
+        }
+        let cases = parsed
+            .iter()
+            .map(|field| serde::polyvariant_case(field, arena))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (encoder, decoder) = serde::generate_codecs(
+            settings,
+            serde_settings,
+            None,
+            |arena| serde::polyvariants_legacy_decoder(settings, &parsed, arena),
+            &cases,
+            arena,
+        )?;
+        let encoder = if serde_settings.legacy_write && settings.do_encode {
+            let legacy: Vec<ParsedPolyvariantField> = parsed
+                .iter()
+                .map(|field| ParsedPolyvariantField {
+                    alias: expr_constant(Constant::string(&field.name), arena),
+                    has_attr_as: false,
+                    ..field.clone()
+                })
+                .collect();
+            Some(polyvars_generate_encoder(
+                settings, false, false, &legacy, arena,
+            )?)
+        } else {
+            encoder
+        };
+        return Ok((encoder, decoder));
+    }
+    for row in row_fields {
+        if let RowField::Rtag(_, attrs, _, _) = row {
+            serde::reject_flags(attrs, arena)?;
+        }
+    }
     let count_has_attr = parsed.iter().filter(|v| v.has_attr_as).count();
     let has_attr_as = if count_has_attr > 0 {
         if count_has_attr == parsed.len() {
@@ -3618,24 +3903,13 @@ fn polyvars_generate_codecs(
     };
 
     let encoder = if settings.do_encode {
-        let mut cases = Vec::new();
-        for row in &parsed {
-            cases.push(polyvars_generate_encoder_case(
-                settings,
-                unboxed,
-                has_attr_as,
-                row,
-                arena,
-            )?);
-        }
-        let match_expr = expr_match(expr_ident_path(arena, &["v"]), cases, arena);
-        Some(expr_fun(
-            ArgLabel::Nolabel,
-            pat_var_dummy(arena, "v"),
-            match_expr,
-            Some(1),
+        Some(polyvars_generate_encoder(
+            settings,
+            unboxed,
+            has_attr_as,
+            &parsed,
             arena,
-        ))
+        )?)
     } else {
         None
     };
@@ -3908,6 +4182,22 @@ fn generate_codec_decls(
     vbs
 }
 
+/// utils.ml `get_default_option_inner_type`: the inner type of an
+/// `option<t>` without `@spice.codec`.
+fn default_option_inner_type(manifest: &CoreType, arena: &ParseArena) -> Option<CoreTypeIdx> {
+    if !matches!(
+        get_attribute_by_name(&manifest.ptyp_attributes, "spice.codec", arena),
+        Ok(None)
+    ) {
+        return None;
+    }
+    let CoreTypeDesc::Ptyp_constr(inner) = &*manifest.ptyp_desc else {
+        return None;
+    };
+    let (constructor, args) = &**inner;
+    (args.len() == 1 && longident_matches(arena, constructor.txt, &["option"])).then(|| args[0])
+}
+
 fn manifest_value_encoder(
     settings: GeneratorSettings,
     manifest: &CoreType,
@@ -3924,6 +4214,76 @@ fn manifest_value_encoder(
         return Ok(None);
     }
     Ok(codecs_generate_value_codecs(settings, manifest, arena)?.0)
+}
+
+/// structure.ml `with_fallback`: with `@spice.fallback(value)`, whatever the
+/// decoder rejects decodes to `value`; exceptions still propagate.
+fn with_fallback(
+    attributes: &[Attribute],
+    codecs: (Option<Expression>, Option<Expression>),
+    arena: &mut ParseArena,
+) -> SpiceResult<(Option<Expression>, Option<Expression>)> {
+    let Some(attribute) = get_attribute_by_name(attributes, "spice.fallback", arena)? else {
+        return Ok(codecs);
+    };
+    let fallback = get_expression_from_payload(attribute, arena)?;
+    let (encoder, decoder) = codecs;
+    let Some(decoder) = decoder else {
+        return Ok((encoder, None));
+    };
+    // fun v -> match decoder(v) with | Ok _ as ok -> ok | Error _ -> Ok(fallback)
+    let v_idx = arena.spice_runtime_v();
+    let v_loc = arena.dummy_loc();
+    let v_expr = expr_ident_from_str_idx(arena, v_idx, v_loc);
+    let decoded = expr_apply(
+        decoder,
+        vec![(ArgLabel::Nolabel, v_expr)],
+        false,
+        arena.dummy_loc(),
+        arena,
+    );
+    let ok_lid = {
+        let name = arena.intern_string("Ok");
+        arena.push_lident_from_idx(name)
+    };
+    let ok_any = {
+        let any = pat_any(arena);
+        let loc = arena.dummy_loc();
+        pat_construct_with_loc(ok_lid, Some(any), loc, arena)
+    };
+    let ok_name = arena.intern_string("ok");
+    let ok_alias = Pattern {
+        ppat_desc: Box::new(PatternDesc::Ppat_alias(
+            arena.push_pat(ok_any),
+            Located::new(ok_name, arena.dummy_loc()),
+        )),
+        ppat_loc: arena.dummy_loc(),
+        ppat_attributes: Attributes::new(),
+    };
+    let ok_expr = expr_ident_from_str_idx(arena, ok_name, arena.dummy_loc());
+    let error_any = {
+        let name = arena.intern_string("Error");
+        let lid = arena.push_lident_from_idx(name);
+        let any = pat_any(arena);
+        let loc = arena.dummy_loc();
+        pat_construct_with_loc(lid, Some(any), loc, arena)
+    };
+    let ok_fallback = {
+        let name = arena.intern_string("Ok");
+        let lid = arena.push_lident_from_idx(name);
+        let loc = arena.dummy_loc();
+        expr_construct_with_loc(lid, Some(fallback), loc, arena)
+    };
+    let cases = vec![
+        case(ok_alias, ok_expr, arena),
+        case(error_any, ok_fallback, arena),
+    ];
+    let body = expr_match(decoded, cases, arena);
+    let v_pat = pat_var_idx(arena, v_idx, v_loc);
+    Ok((
+        encoder,
+        Some(expr_fun(ArgLabel::Nolabel, v_pat, body, Some(1), arena)),
+    ))
 }
 
 fn map_type_decl_structure(
@@ -3956,6 +4316,7 @@ fn map_type_decl_structure(
                 CoreTypeDesc::Ptyp_variant(inner) => {
                     let (ref row_fields, _, _) = **inner;
                     let codecs = polyvars_generate_codecs(settings, row_fields, is_unboxed, arena)?;
+                    let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
                     Ok(generate_codec_decls(
                         &type_name,
                         &param_names,
@@ -3967,6 +4328,7 @@ fn map_type_decl_structure(
                 _ => {
                     let value_encoder = manifest_value_encoder(settings, &manifest, arena)?;
                     let codecs = codecs_generate_codecs(settings, &manifest, arena)?;
+                    let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
                     Ok(generate_codec_decls(
                         &type_name,
                         &param_names,
@@ -3981,6 +4343,7 @@ fn map_type_decl_structure(
             let manifest = arena.get_core_type(*manifest_idx).clone();
             let value_encoder = manifest_value_encoder(settings, &manifest, arena)?;
             let codecs = codecs_generate_codecs(settings, &manifest, arena)?;
+            let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
             Ok(generate_codec_decls(
                 &type_name,
                 &param_names,
@@ -3991,6 +4354,7 @@ fn map_type_decl_structure(
         }
         (None, TypeKind::Ptype_variant(constructors)) => {
             let codecs = variants_generate_codecs(settings, constructors, is_unboxed, arena)?;
+            let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
             Ok(generate_codec_decls(
                 &type_name,
                 &param_names,
@@ -4001,6 +4365,7 @@ fn map_type_decl_structure(
         }
         (None, TypeKind::Ptype_record(labels)) => {
             let codecs = records_generate_codecs(settings, labels, is_unboxed, arena)?;
+            let codecs = with_fallback(&decl.ptype_attributes, codecs, arena)?;
             Ok(generate_codec_decls(
                 &type_name,
                 &param_names,
@@ -5287,6 +5652,7 @@ fn generate_sig_decls(
     settings: GeneratorSettings,
     type_name: &str,
     param_names: &[String],
+    optional_encoder: bool,
     arena: &mut ParseArena,
 ) -> Vec<SignatureItem> {
     let mut decls = Vec::new();
@@ -5300,7 +5666,20 @@ fn generate_sig_decls(
 
     if settings.do_encode {
         for suffix in [ENCODER_FUNC_SUFFIX, VALUE_ENCODER_FUNC_SUFFIX] {
-            let base = mk_type_arrow(value_type.clone(), ctyp_json_t(arena), arena);
+            // signature.ml `map_type_decl`: a top-level `option` type encodes
+            // to `option<JSON.t>` (`ctyp_optional_json_t`); its value
+            // encoder still gives `JSON.t`.
+            let result_type = if optional_encoder && suffix == ENCODER_FUNC_SUFFIX {
+                let option = {
+                    let name = arena.intern_string("option");
+                    arena.push_lident_from_idx(name)
+                };
+                let json = ctyp_json_t_const(arena);
+                mk_type_constr(option, vec![json], arena)
+            } else {
+                ctyp_json_t(arena)
+            };
+            let base = mk_type_arrow(value_type.clone(), result_type, arena);
             let ty = add_encoder_params(param_names, base, arena);
             let name = format!("{}{}", type_name, suffix);
             let name_idx = arena.push_string(name);
@@ -5358,10 +5737,18 @@ fn map_signature_item_spice(
                 if let Some(settings) = settings {
                     let param_names = get_param_names(&decl.ptype_params, arena)?;
                     let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+                    let optional_encoder = match decl.ptype_manifest {
+                        Some(manifest) => {
+                            let manifest = arena.get_core_type(manifest).clone();
+                            default_option_inner_type(&manifest, arena).is_some()
+                        }
+                        None => false,
+                    };
                     generated.extend(generate_sig_decls(
                         settings,
                         &type_name,
                         &param_names,
+                        optional_encoder,
                         arena,
                     ));
                 }

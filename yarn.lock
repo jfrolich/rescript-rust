@@ -165,10 +165,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@jfrolich/ppx-spice@npm:0.3.6":
-  version: 0.3.6
-  resolution: "@jfrolich/ppx-spice@npm:0.3.6"
-  checksum: 10c0/17642cfcb9f13496c04ff92679fb3a36ce39b0d8c9187a43901eb49c834e9530e5b42d02a8a6c1a1d7b6f5438d9fcadcf9fcbdbbc07a387f74546fd55c34d1da
+"@jfrolich/ppx-spice@npm:0.9.0":
+  version: 0.9.0
+  resolution: "@jfrolich/ppx-spice@npm:0.9.0"
+  checksum: 10c0/f6465126de2778aa5e1841f99dbc0bfbd8f03777192bb30b5c4997e7655130ce3e7e2a0120124d77a57848e94fd8fc52d8cb79ebd702e31fca9ea6fb225eca15
   languageName: node
   linkType: hard
 
@@ -2033,7 +2033,7 @@ __metadata:
   resolution: "rescript@workspace:."
   dependencies:
     "@biomejs/biome": "npm:2.5.5"
-    "@jfrolich/ppx-spice": "npm:0.3.6"
+    "@jfrolich/ppx-spice": "npm:0.9.0"
     "@rescript/darwin-arm64": "workspace:packages/@rescript/darwin-arm64"
     "@rescript/darwin-x64": "workspace:packages/@rescript/darwin-x64"
     "@rescript/linux-arm64": "workspace:packages/@rescript/linux-arm64"

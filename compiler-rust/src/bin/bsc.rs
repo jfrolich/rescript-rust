@@ -428,6 +428,7 @@ fn run() -> Result<()> {
                 experimental_let_unwrap: opts.experimental_let_unwrap,
                 jsx_preserve: opts.jsx_preserve,
                 no_builtin_ppx: opts.no_builtin_ppx,
+                spice_ppx: opts.builtin_spice_ppx,
                 external_ppxs: opts.external_ppxs.clone(),
                 ..CompilerOptions::default()
             },
