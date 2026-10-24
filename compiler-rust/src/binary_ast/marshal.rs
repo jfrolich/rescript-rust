@@ -872,11 +872,20 @@ impl<'a> MarshalWriter<'a> {
         // Check if this position index was already written
         if let Some(&obj_idx) = self.position_idx_table.get(&idx) {
             let d = self.obj_counter - obj_idx;
+            // DEBUG
+            if self.debug_marshal {
+                let pos = self.get_arena().get_position(idx);
+                eprintln!(
+                    "SHARE PosIdx({}) at obj_counter={}, obj_idx={}, dist={}, pos=({},{},{})",
+                    idx.0, self.obj_counter, obj_idx, d, pos.line, pos.bol, pos.cnum
+                );
+            }
             self.write_shared_ref(d);
             return false;
         }
 
-        let pos = self.get_arena().get_position(idx);
+        // Look up the position in the arena and copy it to end the borrow
+        let pos = *self.get_arena().get_position(idx);
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
@@ -890,6 +899,13 @@ impl<'a> MarshalWriter<'a> {
         self.write_int(pos.cnum as i64);
 
         // Record for future sharing
+        // DEBUG
+        if self.debug_marshal {
+            eprintln!(
+                "WRITE PosIdx({}) at obj_idx={}, pos=({},{},{})",
+                idx.0, obj_idx, pos.line, pos.bol, pos.cnum
+            );
+        }
         self.position_idx_table.insert(idx, obj_idx);
 
         true
@@ -912,13 +928,23 @@ impl<'a> MarshalWriter<'a> {
             return;
         }
 
-        let loc = self.get_arena().get_location(idx);
+        // Look up the location in the arena and clone it to end the borrow
+        let loc = self.get_arena().get_location(idx).clone();
 
         // Record the object index BEFORE writing
         let obj_idx = self.obj_counter;
 
         // Write the Location block
         self.write_block_header(0, 3);
+        // DEBUG
+        if self.debug_marshal {
+            let start = self.get_arena().get_position(loc.loc_start);
+            let end = self.get_arena().get_position(loc.loc_end);
+            eprintln!(
+                "WRITE LocIdx({}) at obj_idx={}, start_pos=({},{},{}), end_pos=({},{},{})",
+                idx.0, obj_idx, start.line, start.bol, start.cnum, end.line, end.bol, end.cnum
+            );
+        }
         // Write start and end positions (with sharing by their indices)
         self.write_pos_idx(loc.loc_start);
         self.write_pos_idx(loc.loc_end);
