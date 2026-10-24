@@ -3820,13 +3820,14 @@ fn type_exprs_equal_for_inclusion(
 
 pub(crate) fn type_exprs_equal_for_type_declaration(
     type_ctx: &TypeContext,
+    env: &Env,
     expected_params: &[TypeExprRef],
     actual_params: &[TypeExprRef],
     expected_ty: TypeExprRef,
     actual_ty: TypeExprRef,
 ) -> bool {
     let param_map = build_type_param_map(type_ctx, expected_params, actual_params);
-    type_exprs_equal_for_inclusion(type_ctx, None, &param_map, expected_ty, actual_ty)
+    type_exprs_equal_for_inclusion(type_ctx, Some(env), &param_map, expected_ty, actual_ty)
 }
 
 fn type_exprs_equal_for_inclusion_inner(

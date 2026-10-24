@@ -4378,6 +4378,7 @@ fn type_kind_needs_coherence_check(kind: &crate::types::decl::TypeKind) -> bool 
 
 fn compare_definition_record_labels(
     ctx: &crate::types::context::TypeContext,
+    env: &Env,
     expected_params: &[TypeExprRef],
     actual_params: &[TypeExprRef],
     expected: &[crate::types::decl::LabelDeclaration],
@@ -4421,6 +4422,7 @@ fn compare_definition_record_labels(
         }
         if !crate::types::includemod::type_exprs_equal_for_type_declaration(
             ctx,
+            env,
             expected_params,
             actual_params,
             expected_label.ld_type,
@@ -4451,6 +4453,7 @@ fn compare_definition_record_labels(
 
 fn compare_definition_constructors(
     ctx: &crate::types::context::TypeContext,
+    env: &Env,
     expected_params: &[TypeExprRef],
     actual_params: &[TypeExprRef],
     expected: &[crate::types::decl::ConstructorDeclaration],
@@ -4477,6 +4480,7 @@ fn compare_definition_constructors(
             ) => {
                 if let Some(detail) = compare_definition_record_labels(
                     ctx,
+                    env,
                     expected_params,
                     actual_params,
                     expected_labels,
@@ -4501,6 +4505,7 @@ fn compare_definition_constructors(
                 for (expected_arg, actual_arg) in expected_args.iter().zip(actual_args.iter()) {
                     if !crate::types::includemod::type_exprs_equal_for_type_declaration(
                         ctx,
+                        env,
                         expected_params,
                         actual_params,
                         *expected_arg,
@@ -4559,6 +4564,7 @@ fn compare_definition_constructors(
 
 fn definition_mismatch_detail(
     ctx: &crate::types::context::TypeContext,
+    env: &Env,
     expected: &crate::types::decl::TypeDeclaration,
     actual: &crate::types::decl::TypeDeclaration,
 ) -> Option<String> {
@@ -4568,6 +4574,7 @@ fn definition_mismatch_detail(
             crate::types::decl::TypeKind::TypeRecord(actual_labels, _),
         ) => compare_definition_record_labels(
             ctx,
+            env,
             &expected.type_params,
             &actual.type_params,
             expected_labels,
@@ -4578,6 +4585,7 @@ fn definition_mismatch_detail(
             crate::types::decl::TypeKind::TypeVariant(actual_constructors, actual_layout),
         ) => compare_definition_constructors(
             ctx,
+            env,
             &expected.type_params,
             &actual.type_params,
             expected_constructors,
@@ -4691,6 +4699,7 @@ fn coherence_variance_detail(
 
 fn coherence_definition_mismatch_detail(
     ctx: &crate::types::context::TypeContext,
+    env: &Env,
     expected: &crate::types::decl::TypeDeclaration,
     actual: &crate::types::decl::TypeDeclaration,
 ) -> Option<String> {
@@ -4728,7 +4737,7 @@ fn coherence_definition_mismatch_detail(
             crate::types::decl::TypeKind::TypeRecord(_, expected_rep),
             crate::types::decl::TypeKind::TypeRecord(_, actual_rep),
         ) => {
-            if let Some(detail) = definition_mismatch_detail(ctx, expected, actual) {
+            if let Some(detail) = definition_mismatch_detail(ctx, env, expected, actual) {
                 return Some(detail);
             }
             if expected_rep != actual_rep {
@@ -4739,7 +4748,7 @@ fn coherence_definition_mismatch_detail(
             crate::types::decl::TypeKind::TypeVariant(_, _),
             crate::types::decl::TypeKind::TypeVariant(_, _),
         ) => {
-            if let Some(detail) = definition_mismatch_detail(ctx, expected, actual) {
+            if let Some(detail) = definition_mismatch_detail(ctx, env, expected, actual) {
                 return Some(detail);
             }
         }
@@ -4853,7 +4862,7 @@ fn check_type_declaration_coherence(
         }
     }
     if let Some(detail) =
-        coherence_definition_mismatch_detail(ctx, &expected_decl, &substituted_decl)
+        coherence_definition_mismatch_detail(ctx, env, &expected_decl, &substituted_decl)
     {
         return Err(TypeModError::DefinitionMismatch {
             loc,
