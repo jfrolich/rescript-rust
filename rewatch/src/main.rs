@@ -138,7 +138,13 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                 };
                 ppx_overrides.push((name.to_string(), std::fs::canonicalize(executable)?));
             }
-            if !build::plan::build_reference(Path::new(&folder), Path::new(&bsc), prod, &ppx_overrides)? {
+            // The plan parses and prepares every module in process, like
+            // `build`: give its Rayon workers and this thread the same stack.
+            configure_rayon_for_in_process();
+            let built = run_with_in_process_stack(|| {
+                build::plan::build_reference(Path::new(&folder), Path::new(&bsc), prod, &ppx_overrides)
+            })?;
+            if !built {
                 std::process::exit(1);
             }
             Ok(())
