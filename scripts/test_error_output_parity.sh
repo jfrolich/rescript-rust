@@ -87,9 +87,11 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 RUST_TARGET="${RUST_TARGET:-debug}"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/rescript}"
+"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
-RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust}"
+RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust}"
 
 PARSER_MATRIX="$PROJECT_ROOT/tests/syntax_tests/data/parsing/diagnostics_numbers.csv"
 COMPILER_CASES_FILE="$PROJECT_ROOT/tests/error_output_parity/compiler/cases.tsv"
@@ -127,9 +129,9 @@ if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  eval \$(opam env --shell=sh) && make lib"
     if [[ "$RUST_TARGET" == "release" ]]; then
-        echo "  cargo build --release --manifest-path compiler-rust/Cargo.toml"
+        echo "  cargo build --release --manifest-path rewatch/Cargo.toml"
     else
-        echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
+        echo "  cargo build --manifest-path rewatch/Cargo.toml"
     fi
     exit 2
 fi
@@ -140,6 +142,11 @@ if [[ "$RUN_PARSER" == "true" && ! -f "$PARSER_MATRIX" ]]; then
 fi
 
 cd "$PROJECT_ROOT"
+
+# Compiler cases run from the repository root without -bs-package-output, so
+# the default JS output lands in ./src. The package_* cases reach their
+# diagnostic only after that write succeeds.
+mkdir -p "$PROJECT_ROOT/src"
 
 safe_name() {
     printf '%s' "$1" | tr '/ ' '__' | tr -c 'A-Za-z0-9_.-' '_'
@@ -173,6 +180,7 @@ total=0
 pass=0
 fail=0
 failed_files=""
+built_packages=" "
 
 record_failure() {
     local file="$1"
@@ -222,17 +230,54 @@ compare_outputs() {
     return 0
 }
 
-prebuild_ocaml_dependency() {
+# A case compiled against a fixture package passes `-I <package>/lib/ocaml`.
+# The OCaml compiler reads that package's compiled files, so build it once
+# with the OCaml compiler (`rescript build-reference`); `rescript bsc` compiles
+# the package in memory itself.
+prebuild_ocaml_packages() {
+    local previous="" flag package prep_out
+    for flag in "$@"; do
+        if [[ "$previous" == "-I" && "$flag" == tests/error_output_parity/*/lib/ocaml ]]; then
+            package=${flag%/lib/ocaml}
+            if [[ "$built_packages" != *" $package "* ]]; then
+                prep_out="$CACHE_DIR/compiler/$(safe_name "prebuild_${package}").out"
+                if ! RESCRIPT_RUNTIME="$PROJECT_ROOT/packages/@rescript/runtime" \
+                    "$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" "$package" > "$prep_out" 2>&1; then
+                    echo -e "${RED}Failed to build fixture package with OCaml:${RESET} $package"
+                    cat "$prep_out"
+                    return 1
+                fi
+                built_packages="$built_packages$package "
+            fi
+        fi
+        previous="$flag"
+    done
+}
+
+# A case under the cache directory is a copy of the same-named case (and its
+# interface) in tests/error_output_parity/compiler/cases. With `-bs-read-cmi`
+# the OCaml compiler reads the interface's .cmi, so compile the interface with
+# it first; `rescript bsc -bs-read-cmi` types the interface itself.
+prepare_cached_case() {
     local source_file="$1"
     shift
-    local safe prep_out
-    safe=$(safe_name "prebuild_${source_file}")
-    prep_out="$CACHE_DIR/compiler/${safe}.out"
-
-    if ! timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" "$@" "$source_file" > "$prep_out.stdout" 2> "$prep_out"; then
-        echo -e "${RED}Failed to prepare OCaml dependency:${RESET} $source_file"
-        cat "$prep_out"
-        return 1
+    local name interface flag read_cmi=false
+    name=$(basename "$source_file" .res)
+    cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/$name.res" "$source_file"
+    interface="${source_file}i"
+    if [[ -f "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/$name.resi" ]]; then
+        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/$name.resi" "$interface"
+    fi
+    for flag in "$@"; do
+        [[ "$flag" == "-bs-read-cmi" ]] && read_cmi=true
+    done
+    if [[ "$read_cmi" == "true" && -f "$interface" ]]; then
+        rm -f "${source_file%.res}.cmi"
+        if ! timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -w -A -color never "$interface" \
+            > "$CACHE_DIR/compiler/$(safe_name "prebuild_${interface}").out" 2>&1; then
+            echo -e "${RED}Failed to compile the interface with OCaml:${RESET} $interface"
+            return 1
+        fi
     fi
 }
 
@@ -272,61 +317,12 @@ run_compiler_case() {
     rust_out="$CACHE_DIR/compiler/rust_${safe}.out"
     diff_out="$CACHE_DIR/diffs/${safe}.diff"
 
-    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/gentype_stale_cmti.res" ]]; then
-        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/Bar.cmi" \
-            "$CACHE_DIR/compiler/gentype_stale_cmti.cmti"
+    prebuild_ocaml_packages "${flags[@]}" || return 1
+    if [[ "$source_file" == .parity-cache/error-output/compiler/* ]]; then
+        prepare_cached_case "$source_file" "${flags[@]}" || return 1
     fi
-
-    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/package_script_dependency.res" ]]; then
-        prebuild_ocaml_dependency \
-            "tests/error_output_parity/compiler/cases/package_script_dependency_dep.res" \
-            -w -A -bs-jsx 4 -color never || return 1
-    fi
-
-    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res" ]]; then
-        prebuild_ocaml_dependency \
-            "tests/error_output_parity/compiler/cases/package_missing_ml_dependency_dep.res" \
-            -w -A -bs-jsx 4 -color never \
-            -bs-project-root . \
-            -bs-package-name dep_pkg \
-            -bs-package-output commonjs:.parity-cache/error-output/compiler:.js || return 1
-    fi
-
-    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/cmj_not_found.res" ]]; then
-        prebuild_ocaml_dependency \
-            "tests/error_output_parity/compiler/cases/cmj_not_found_dep.res" \
-            -w -A -bs-jsx 4 -color never || return 1
-        rm -f tests/error_output_parity/compiler/cases/cmj_not_found_dep.cmj
-    fi
-
-    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/js_not_found.res" ]]; then
-        prebuild_ocaml_dependency \
-            "tests/error_output_parity/compiler/cases/js_not_found_dep.res" \
-            -w -A -bs-jsx 4 -color never || return 1
-        rm -f tests/error_output_parity/compiler/cases/js_not_found_dep.js
-        rm -f tests/error_output_parity/compiler/cases/Js_not_found_dep.js
-    fi
-
-    if [[ "$source_file" == ".parity-cache/error-output/compiler/gentype_bad_magic.res" ]]; then
-        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/gentype_stale_cmti.res" \
-            "$CACHE_DIR/compiler/gentype_bad_magic.res"
-        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/cmi_not_an_interface.cmi" \
-            "$CACHE_DIR/compiler/gentype_bad_magic.cmti"
-        run_capture "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
-        run_capture "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
-    elif [[ "$source_file" == ".parity-cache/error-output/compiler/compunit_deprecated_inclusion.res" ]]; then
-        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.res" \
-            "$CACHE_DIR/compiler/compunit_deprecated_inclusion.res"
-        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.reference.cmi" \
-            "$CACHE_DIR/compiler/compunit_deprecated_inclusion.cmi"
-        run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
-        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.reference.cmi" \
-            "$CACHE_DIR/compiler/compunit_deprecated_inclusion.cmi"
-        run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
-    else
-        run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
-        run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
-    fi
+    run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
+    run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
     compare_outputs "compiler" "$source_file" "$ocaml_out" "$rust_out" "$diff_out"
 }
 

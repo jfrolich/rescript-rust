@@ -10,13 +10,15 @@
 //   node input.js --ocaml    check with the OCaml reference compiler
 //   node input.js update     regenerate snapshots with the OCaml reference
 //
-// The OCaml reference build runs `bsc` per file (RESCRIPT_SUBPROCESS_BUILD)
-// with $RESCRIPT_BSC_EXE, defaulting to the dune build of the compiler.
+// The OCaml reference build is the hidden `rescript build-reference`, which
+// runs $RESCRIPT_BSC_EXE (default: the dune build of the compiler) per file
+// and writes the same `.compiler.log`.
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { rescript_exe } from "#cli/bins";
 import { setup } from "#dev/process";
 import { normalizeNewlines } from "#dev/utils";
 
@@ -37,8 +39,10 @@ const buildEnv = {
   RESCRIPT_RUNTIME: path.join(repoRoot, "packages", "@rescript", "runtime"),
   ...process.env,
 };
+/** @type {string | undefined} */
+let ocamlBsc;
 if (useOcaml) {
-  const ocamlBsc =
+  ocamlBsc =
     process.env.RESCRIPT_BSC_EXE ??
     path.join(repoRoot, "_build", "install", "default", "bin", "bsc");
   if (!existsSync(ocamlBsc)) {
@@ -47,8 +51,21 @@ if (useOcaml) {
     );
     process.exit(1);
   }
-  buildEnv.RESCRIPT_SUBPROCESS_BUILD = "1";
-  buildEnv.RESCRIPT_BSC_EXE = ocamlBsc;
+  // The OCaml compiles read the runtime's .cmi files: build it with the
+  // OCaml bsc, after the in-process build that provides its lib/ocaml sources.
+  const runtime = setup(repoRoot);
+  await runtime.execBin(rescript_exe, ["build", buildEnv.RESCRIPT_RUNTIME ?? ""], {
+    env: buildEnv,
+  });
+  const reference = await runtime.execBin(
+    rescript_exe,
+    ["build-reference", "--bsc", ocamlBsc, buildEnv.RESCRIPT_RUNTIME ?? ""],
+    { env: buildEnv },
+  );
+  if (reference.status !== 0) {
+    console.error(`OCaml reference build of the runtime failed:\n${reference.stderr}`);
+    process.exit(1);
+  }
 }
 
 const projectConfig = {
@@ -103,8 +120,12 @@ async function runFixture(fixtureName) {
       `${JSON.stringify(projectConfig, null, 2)}\n`,
     );
 
-    const { execBuild } = setup(projectDir);
-    const { stdout, stderr } = await execBuild([], { env: buildEnv });
+    const { execBuild, execBin } = setup(projectDir);
+    const { stdout, stderr } = ocamlBsc
+      ? await execBin(rescript_exe, ["build-reference", "--bsc", ocamlBsc, projectDir], {
+          env: buildEnv,
+        })
+      : await execBuild([], { env: buildEnv });
     let log;
     try {
       log = await fs.readFile(

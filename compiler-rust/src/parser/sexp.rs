@@ -137,6 +137,10 @@ impl<'a> Doc<'a> {
                         col += 1;
                     }
                     Mode::Break => {
+                        // res_minibuffer.ml `flush_newline`: drop the spaces
+                        // before the newline (an atom such as `" ~ "` can end
+                        // in one).
+                        out.truncate(out.trim_end_matches(' ').len());
                         out.push('\n');
                         for _ in 0..indent {
                             out.push(' ');
@@ -1074,71 +1078,6 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             expression(arena, arena.get_expr(*e)),
         ]),
         ExpressionDesc::Pexp_jsx_element(jsx) => jsx_element(arena, jsx),
-        ExpressionDesc::Pexp_inline_for(inner) => {
-            let (ref pat, ref collection, ref body) = **inner;
-            Sexp::list(vec![
-                Sexp::atom("Pexp_inline_for"),
-                pattern(arena, arena.get_pat(*pat)),
-                expression(arena, arena.get_expr(*collection)),
-                expression(arena, arena.get_expr(*body)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(ct) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_typeinfo"),
-            core_type(arena, arena.get_core_type(*ct)),
-        ]),
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (ref value, ref field) = **inner;
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_field"),
-                expression(arena, arena.get_expr(*value)),
-                expression(arena, arena.get_expr(*field)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_compile_error(e) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_compile_error"),
-            expression(arena, arena.get_expr(*e)),
-        ]),
-        ExpressionDesc::Pexp_comptime_typename(ct) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_typename"),
-            core_type(arena, arena.get_core_type(*ct)),
-        ]),
-        ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (ref ct, ref fields_expr) = **inner;
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_record"),
-                core_type(arena, arena.get_core_type(*ct)),
-                expression(arena, arena.get_expr(*fields_expr)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (ref ct, ref expr_idx, ref opt_expr_idx) = **inner;
-            let mut items = vec![
-                Sexp::atom("Pexp_comptime_variant"),
-                core_type(arena, arena.get_core_type(*ct)),
-                expression(arena, arena.get_expr(*expr_idx)),
-            ];
-            if let Some(e) = opt_expr_idx {
-                items.push(expression(arena, arena.get_expr(*e)));
-            }
-            Sexp::list(items)
-        }
-        ExpressionDesc::Pexp_comptime_build_variant(e) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_build_variant"),
-            expression(arena, arena.get_expr(*e)),
-        ]),
-        ExpressionDesc::Pexp_comptime_variant_case(e) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_variant_case"),
-            expression(arena, arena.get_expr(*e)),
-        ]),
-        ExpressionDesc::Pexp_comptime_build_record(e) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_build_record"),
-            expression(arena, arena.get_expr(*e)),
-        ]),
-        ExpressionDesc::Pexp_comptime_record_field(e) => Sexp::list(vec![
-            Sexp::atom("Pexp_comptime_record_field"),
-            expression(arena, arena.get_expr(*e)),
-        ]),
     };
     Sexp::list(vec![Sexp::atom("expression"), desc])
 }
@@ -1408,18 +1347,22 @@ fn value_description(arena: &ParseArena, vd: &ValueDescription) -> Sexp {
         Sexp::atom("value_description"),
         Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
         core_type(arena, arena.get_core_type(vd.pval_type)),
-        // res_ast_debugger.ml `Sexp_ast.value_description`.
-        Sexp::list(map_empty(
-            &match &vd.pval_prim {
+        // res_ast_debugger.ml `Sexp_ast.value_description` (lines 412-422):
+        // a plain list, so a non-external prints `()`. Only the parsetree0
+        // printer (line 1491) uses `map_empty`.
+        Sexp::list(
+            match &vd.pval_prim {
                 None => vec![],
                 Some(PrimitiveRepr::PrimName(s)) => vec![arena.get_string(*s).to_string()],
                 Some(PrimitiveRepr::PrimFfi { name, .. }) => {
                     vec![name.clone(), "<ffi spec>".to_string()]
                 }
                 Some(PrimitiveRepr::PrimInlineConst(_)) => vec!["<inline const>".to_string()],
-            },
-            |s| Sexp::atom(&quote_string(s)),
-        )),
+            }
+            .iter()
+            .map(|s| Sexp::atom(&quote_string(s)))
+            .collect(),
+        ),
         attributes(arena, &vd.pval_attributes),
     ])
 }

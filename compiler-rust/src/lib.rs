@@ -27,6 +27,8 @@ pub mod ast_helper_type;
 pub mod ast_payload;
 pub mod binary_ast;
 pub mod binser;
+#[cfg(feature = "native")]
+pub mod cli;
 /// CMI file loading infrastructure.
 pub mod cmi;
 pub mod context;

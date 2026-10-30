@@ -132,13 +132,16 @@ clean-compiler:
 # Rust Compiler
 
 RUST_COMPILER_SOURCES = $(shell find compiler-rust/src -name '*.rs') compiler-rust/Cargo.toml compiler-rust/Cargo.lock
-RUST_BSC := compiler-rust/target/release/bsc
-RUST_PARSER := compiler-rust/target/release/res_parser_rust
+RUST_BSC := rewatch/target/release/bsc
+RUST_PARSER := rewatch/target/release/res_parser_rust
 
+# bsc and res_parser_rust link to the rescript executable, which runs the
+# linked compiler file by file when invoked under those names.
 rust-compiler: $(RUST_BSC) $(RUST_PARSER)
 
-$(RUST_BSC) $(RUST_PARSER): $(RUST_COMPILER_SOURCES)
-	cargo build --manifest-path compiler-rust/Cargo.toml --release
+$(RUST_BSC) $(RUST_PARSER): $(RUST_COMPILER_SOURCES) $(REWATCH_SOURCES)
+	cargo build --manifest-path rewatch/Cargo.toml --release
+	./scripts/rust_compiler_shims.sh release
 
 rust-test: lib rust-compiler
 	cd tests/tests && ../../$(RESCRIPT_EXE) build

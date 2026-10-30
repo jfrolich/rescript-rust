@@ -1575,45 +1575,6 @@ pub fn print_expression(
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             print_jsx_element(state, jsx, e.pexp_loc, cmt_tbl, arena)
         }
-        ExpressionDesc::Pexp_inline_for(inner) => {
-            let (ref pat, ref collection, ref body) = **inner;
-            Doc::concat(vec![
-                Doc::text("for "),
-                print_pattern(state, arena.get_pat(*pat), cmt_tbl, arena),
-                Doc::text(" in "),
-                print_expression_with_comments(state, arena.get_expr(*collection), cmt_tbl, arena),
-                Doc::text(" {"),
-                Doc::indent(Doc::concat(vec![
-                    Doc::line(),
-                    print_expression_with_comments(state, arena.get_expr(*body), cmt_tbl, arena),
-                ])),
-                Doc::line(),
-                Doc::text("}"),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_typeinfo(_) => Doc::text("@typeInfo(...)"),
-        ExpressionDesc::Pexp_comptime_field(inner) => {
-            let (ref value, ref field) = **inner;
-            Doc::concat(vec![
-                Doc::text("@field("),
-                print_expression_with_comments(state, arena.get_expr(*value), cmt_tbl, arena),
-                Doc::text(", "),
-                print_expression_with_comments(state, arena.get_expr(*field), cmt_tbl, arena),
-                Doc::text(")"),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => Doc::concat(vec![
-            Doc::text("@compileError("),
-            print_expression_with_comments(state, arena.get_expr(*expr_idx), cmt_tbl, arena),
-            Doc::text(")"),
-        ]),
-        ExpressionDesc::Pexp_comptime_typename(_) => Doc::text("@typeName(...)"),
-        ExpressionDesc::Pexp_comptime_record(_) => Doc::text("@record(...)"),
-        ExpressionDesc::Pexp_comptime_variant(_) => Doc::text("@variant(...)"),
-        ExpressionDesc::Pexp_comptime_build_variant(_) => Doc::text("@buildVariant(...)"),
-        ExpressionDesc::Pexp_comptime_variant_case(_) => Doc::text("@variantCase(...)"),
-        ExpressionDesc::Pexp_comptime_build_record(_) => Doc::text("@buildRecord(...)"),
-        ExpressionDesc::Pexp_comptime_record_field(_) => Doc::text("@recordField(...)"),
         ExpressionDesc::Pexp_object_get(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;
             print_object_get_doc(

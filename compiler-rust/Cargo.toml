@@ -11,15 +11,6 @@ repository = "https://github.com/rescript-lang/rescript"
 name = "rescript_compiler"
 path = "src/lib.rs"
 
-# Parser CLI for testing (matches OCaml res_parser interface)
-[[bin]]
-name = "res_parser_rust"
-path = "src/bin/res_parser.rs"
-
-[[bin]]
-name = "bsc"
-path = "src/bin/bsc.rs"
-
 [dependencies]
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -59,9 +50,6 @@ oxc_span = "0.49"
 # WASM support
 wasm-bindgen = { version = "0.2", optional = true }
 
-# JavaScript engine for @comptime.inline evaluation
-boa_engine = { version = "0.21", optional = true }
-
 [dev-dependencies]
 proptest = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -69,10 +57,9 @@ insta = { version = "1.40", features = ["json"] }
 tempfile = "3"
 
 [features]
-default = ["native", "comptime-inline"]
+default = ["native"]
 native = ["rayon", "env_logger", "clap"]
-wasm = ["wasm-bindgen", "comptime-inline"]
-comptime-inline = ["boa_engine"]
+wasm = ["wasm-bindgen"]
 
 [profile.release]
 lto = true

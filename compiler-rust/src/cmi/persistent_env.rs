@@ -213,13 +213,13 @@ pub enum CmjPackageName {
     Normal(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CmjPackageModuleSystem {
     CommonJs,
     EsModule,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CmjPackageInfo {
     pub module_system: CmjPackageModuleSystem,
     pub path: String,
@@ -286,6 +286,10 @@ pub struct InMemoryModuleInfo {
     pub package_root: Option<Arc<PathBuf>>,
     /// JS suffix for this package's emitted output.
     pub js_output_suffix: Option<Arc<str>>,
+    /// Where the module's JavaScript goes, per module system, as its `.cmj`
+    /// records it (`Js_packages_info`, from `-bs-package-output`): the output
+    /// directory relative to the package root and the suffix.
+    pub package_outputs: Arc<Vec<CmjPackageInfo>>,
 }
 
 impl InMemoryModuleInfo {
@@ -306,7 +310,13 @@ impl InMemoryModuleInfo {
             package_name: None,
             package_root: None,
             js_output_suffix: None,
+            package_outputs: Arc::new(Vec::new()),
         }
+    }
+
+    pub fn with_package_outputs(mut self, package_outputs: Vec<CmjPackageInfo>) -> Self {
+        self.package_outputs = Arc::new(package_outputs);
+        self
     }
 
     pub fn with_cmj_export_lambdas(mut self, cmj_export_lambdas: HashMap<String, Lambda>) -> Self {
@@ -1773,8 +1783,27 @@ impl PersistentEnv {
     /// `Lam_compile_env.get_package_path_from_cmj`.
     pub fn module_cmj_import_info(&self, name: &str) -> Option<CmjModuleImportInfo> {
         if let Some(info) = self.in_memory_info(name) {
-            if info.package_name.is_some() {
-                return None;
+            if let Some(package_name) = &info.package_name {
+                // The package info the module's `.cmj` would hold
+                // (`Js_cmj_format.package_spec`, `case`).
+                let lowercase = info
+                    .source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.chars().next())
+                    .is_some_and(|c| c.is_ascii_lowercase());
+                return Some(CmjModuleImportInfo {
+                    package_path: info.package_root.as_deref().cloned().unwrap_or_default(),
+                    package_spec: CmjPackageSpec {
+                        name: CmjPackageName::Normal(package_name.to_string()),
+                        module_systems: info.package_outputs.as_ref().clone(),
+                    },
+                    file_case: if lowercase {
+                        CmjFileCase::Little
+                    } else {
+                        CmjFileCase::Upper
+                    },
+                });
             }
             return Some(CmjModuleImportInfo {
                 package_path: PathBuf::new(),

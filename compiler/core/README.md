@@ -86,8 +86,8 @@ focused OUnit coverage for an isolated analysis or transformation. Use the
 compiler flags below to compare intermediate forms for a small source file:
 
 ```sh
-./cli/bsc.js -dtypedtree example.res
-./cli/bsc.js -drawlambda example.res
+./packages/@rescript/<platform>/bin/bsc.exe -dtypedtree example.res
+./packages/@rescript/<platform>/bin/bsc.exe -drawlambda example.res
 ```
 
 For backend debugging, use [`lam_print.ml`](lam_print.ml) at the relevant

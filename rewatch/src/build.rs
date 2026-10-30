@@ -8,13 +8,13 @@ pub mod logs;
 pub mod namespaces;
 pub mod packages;
 pub mod parse;
+pub mod plan;
 pub mod qos;
-pub mod read_compile_state;
 pub mod state_db;
 pub mod tooling;
 
 use self::parse::parser_args;
-use crate::build::compile::{mark_modules_with_deleted_deps_dirty, mark_modules_with_expired_deps_dirty};
+use crate::build::compile::mark_modules_with_deleted_deps_dirty;
 use crate::build::compiler_info::{CompilerCheckResult, verify_compiler_info, write_compiler_info};
 use crate::config::SourceMapCommand;
 use crate::helpers::emojis::*;
@@ -53,14 +53,10 @@ fn is_dirty(module: &Module) -> bool {
     }
 }
 
-fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
-    mark_modules_dirty(build_state, true);
-}
-
-/// Mark every module for parsing and compilation. Namespace maps are only
-/// reparsed when `namespaces` is set: they are not source files, and a build
-/// that has to compile every module does not otherwise report them as parsed.
-fn mark_modules_dirty(build_state: &mut BuildCommandState, namespaces: bool) {
+/// Mark every module for parsing and compilation. Namespace maps are not
+/// reparsed: they are not source files, and a build that has to compile every
+/// module does not otherwise report them as parsed.
+fn mark_modules_dirty(build_state: &mut BuildCommandState) {
     for module in build_state.modules.values_mut() {
         module.compile_dirty = true;
         match &mut module.source_type {
@@ -70,11 +66,7 @@ fn mark_modules_dirty(build_state: &mut BuildCommandState, namespaces: bool) {
                     interface.parse_dirty = true;
                 }
             }
-            SourceType::MlMap(mlmap) => {
-                if namespaces {
-                    mlmap.parse_dirty = true;
-                }
-            }
+            SourceType::MlMap(_) => {}
         }
     }
 }
@@ -188,17 +180,12 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
-pub fn get_compiler_info(project_context: &ProjectContext, build_mode: BuildMode) -> Result<CompilerInfo> {
-    // In-process builds compile with the compiler linked into this
-    // executable, so its identity invalidates previous builds; only the bsc
-    // subprocess modes need an external bsc.
-    let bsc_path = if build_mode.is_in_process() {
-        std::env::current_exe()
-            .and_then(|path| path.canonicalize())
-            .context("Could not resolve the rescript executable")?
-    } else {
-        helpers::get_bsc()
-    };
+pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
+    // Builds compile with the compiler linked into this executable, so its
+    // identity invalidates previous builds.
+    let bsc_path = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .context("Could not resolve the rescript executable")?;
     let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
@@ -220,8 +207,6 @@ pub fn initialize_build(
     path: &Path,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: BuildMode,
-    dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
     source_map_command: SourceMapCommand,
@@ -229,7 +214,6 @@ pub fn initialize_build(
     let _span = info_span!(
         "build.initialize",
         working_dir = %path.display(),
-        in_process = build_mode.is_in_process(),
         prod
     )
     .entered();
@@ -238,7 +222,7 @@ pub fn initialize_build(
     // Hashing the compiler binary is independent of package discovery, so
     // overlap the two.
     let (compiler, packages) = std::thread::scope(|scope| {
-        let compiler = scope.spawn(|| get_compiler_info(&project_context, build_mode));
+        let compiler = scope.spawn(|| get_compiler_info(&project_context));
         let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref());
         let compiler = compiler
             .join()
@@ -266,8 +250,6 @@ pub fn initialize_build(
         packages,
         compiler,
         warn_error,
-        build_mode,
-        dump_typed_sexp,
         features,
         source_map_command,
     );
@@ -276,12 +258,7 @@ pub fn initialize_build(
     packages::parse_packages(&mut build_state)?;
     phase_mark("init:parse-packages");
 
-    let (diff_cleanup, total_cleanup) = if build_state.build_mode().is_in_process() {
-        clean::cleanup_previous_in_process_build(&mut build_state)
-    } else {
-        let compile_assets_state = read_compile_state::read(&mut build_state)?;
-        clean::cleanup_previous_build(&mut build_state, compile_assets_state)
-    };
+    let (diff_cleanup, total_cleanup) = clean::cleanup_previous_in_process_build(&mut build_state);
     phase_mark("init:read-compile-state");
     phase_mark("init:cleanup-previous");
     let timing_clean_total = timing_clean_start.elapsed();
@@ -427,16 +404,9 @@ pub fn incremental_build_without_lock(
     build_state.stopped_at_parse = false;
     build_state.invalidated_modules.clear();
 
-    // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
-    // so every file gets re-parsed (to store AST) and sexp-dumped
-    if build_state.dump_typed_sexp() {
-        mark_all_modules_dirty(build_state);
-    }
-
     // A fresh in-process build has nothing compiled in memory, so every
     // module compiles (in-process builds keep no artifacts on disk).
-    let fresh_in_process =
-        build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
+    let fresh_in_process = build_state.module_registry.lock().unwrap().is_empty();
     // A fresh in-process build compiles only what changed since the JavaScript
     // was written (see `incremental`). It still parses every module: the
     // dependency graph comes from the parse.
@@ -497,7 +467,7 @@ pub fn incremental_build_without_lock(
     if incremental {
         incremental::seed_recorded_deps(build_state);
     } else if fresh_in_process {
-        mark_modules_dirty(build_state, false);
+        mark_modules_dirty(build_state);
     }
 
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
@@ -628,9 +598,6 @@ pub fn incremental_build_without_lock(
         eprintln!("{}", &parse_warnings);
     }
 
-    if !build_state.build_mode().is_in_process() {
-        mark_modules_with_expired_deps_dirty(build_state);
-    }
     mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     current_step += 1;
 
@@ -854,15 +821,13 @@ pub fn build(
     no_timing: bool,
     plain_output: bool,
     warn_error: Option<String>,
-    build_mode: BuildMode,
-    dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
+    dump: Option<DumpRequest>,
 ) -> Result<BuildCommandState> {
     let _span = info_span!(
         "rewatch.build",
         working_dir = %path.display(),
-        in_process = build_mode.is_in_process(),
         prod
     )
     .entered();
@@ -881,13 +846,12 @@ pub fn build(
             path,
             plain_output,
             warn_error,
-            build_mode,
-            dump_typed_sexp,
             prod,
             features,
             crate::config::SourceMapCommand::Build,
         )
         .with_context(|| "Could not initialize build")?;
+        build_state.dump = dump;
 
         match incremental_build_without_lock(
             &mut build_state,
@@ -999,9 +963,8 @@ mod tests {
                 true,
                 true,
                 None,
-                BuildMode::ExternalBsc,
                 false,
-                false,
+                None,
                 None,
             );
             sender.send(result.is_err()).expect("result should be sent");

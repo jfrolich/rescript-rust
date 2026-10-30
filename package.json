@@ -43,7 +43,6 @@
     "node": ">=22"
   },
   "bin": {
-    "bsc": "cli/bsc.js",
     "rescript": "cli/rescript.js",
     "rescript-tools": "cli/rescript-tools.js"
   },

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class PackageOutputFilenames(unittest.TestCase):
     def test_package_filenames_match_native_in_normal_and_dump_modes(self):
         compilers = [Path(os.environ.get("OCAML_BSC", ROOT / "_build/install/default/bin/bsc")),
-                     Path(os.environ.get("RUST_BSC", ROOT / "compiler-rust/target/release/bsc"))]
+                     Path(os.environ.get("RUST_BSC", ROOT / "rewatch/target/release/bsc"))]
         for stem in ("lower_case", "mixedCase", "UpperCase"):
             for dump in (False, True):
                 with self.subTest(stem=stem, dump=dump), tempfile.TemporaryDirectory() as tmp:

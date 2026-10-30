@@ -16,7 +16,65 @@ use rescript::{
     telemetry, watcher,
 };
 
+/// The registry `rescript bsc` compiles against. The file compile finds
+/// other units' `.cmi` files in its `-I` directories; in process, an `-I`
+/// directory that is a package's `lib/ocaml` compiles that package (with its
+/// dependencies) into memory instead, leaving its files alone, and the
+/// runtime is compiled otherwise.
+fn bsc_registry(
+    runtime_path: &Path,
+    include_dirs: &[std::path::PathBuf],
+) -> anyhow::Result<rescript_compiler::cmi::persistent_env::ModuleRegistry> {
+    let runtime = std::fs::canonicalize(runtime_path).ok();
+    let mut packages = Vec::new();
+    for dir in include_dirs {
+        // `lib/ocaml` need not exist yet: the build writes it.
+        if !dir.ends_with("lib/ocaml") {
+            continue;
+        }
+        let Some(Ok(package)) = dir.parent().and_then(Path::parent).map(std::fs::canonicalize) else {
+            continue;
+        };
+        if Some(&package) != runtime.as_ref()
+            && (package.join("rescript.json").exists() || package.join("bsconfig.json").exists())
+        {
+            packages.push(package);
+        }
+    }
+    match packages.as_slice() {
+        [] => rescript::build::compile::runtime_registry(runtime_path),
+        [package] => build::plan::build_in_memory(package)
+            .map_err(|err| anyhow::anyhow!("bsc: building {} failed:\n{err:#}", package.display())),
+        _ => Err(anyhow::anyhow!(
+            "bsc: at most one package's lib/ocaml can be an -I directory in process"
+        )),
+    }
+}
+
 fn main() {
+    // Hidden test commands: run the linked compiler one file at a time, as
+    // the parity scripts compare it against the OCaml reference compiler.
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("bsc") => {
+            configure_rayon_for_in_process();
+            rescript_compiler::cli::bsc::main(
+                args.collect(),
+                Some(Box::new(|runtime_path, include_dirs| {
+                    let runtime_path = runtime_path
+                        .or_else(|| std::env::var_os("RESCRIPT_RUNTIME").map(Into::into))
+                        .ok_or_else(|| anyhow::anyhow!("bsc: pass -runtime-path or set RESCRIPT_RUNTIME"))?;
+                    bsc_registry(&runtime_path, &include_dirs)
+                })),
+            );
+            std::process::exit(0);
+        }
+        Some("res-parser") => {
+            rescript_compiler::cli::res_parser::main(args.collect());
+            std::process::exit(0);
+        }
+        _ => {}
+    }
     rescript::build::phase_mark("main");
     rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     let telemetry_guard = telemetry::init_telemetry();
@@ -67,15 +125,32 @@ fn run_main(otel_enabled: bool) -> Result<()> {
     let show_progress = log_level_filter >= LevelFilter::Info;
 
     match cli.command {
+        cli::Command::BuildReference {
+            folder,
+            bsc,
+            prod,
+            ppx,
+        } => {
+            let mut ppx_overrides = Vec::new();
+            for spec in ppx {
+                let Some((name, executable)) = spec.split_once('=') else {
+                    anyhow::bail!("--ppx expects SPEC=EXECUTABLE, got {spec}");
+                };
+                ppx_overrides.push((name.to_string(), std::fs::canonicalize(executable)?));
+            }
+            if !build::plan::build_reference(Path::new(&folder), Path::new(&bsc), prod, &ppx_overrides)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         cli::Command::CompilerArgs { path } => {
             println!("{}", build::get_compiler_args(Path::new(&path))?);
             Ok(())
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
-            let build_mode = cli::resolve_build_mode(build_args.in_process.in_process);
-            configure_rayon_for_in_process(build_mode);
-            let build_result = run_with_in_process_stack(build_mode, || {
+            configure_rayon_for_in_process();
+            let build_result = run_with_in_process_stack(|| {
                 build::build(
                     &build_args.filter,
                     Path::new(&build_args.folder as &str),
@@ -83,10 +158,15 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     build_args.no_timing,
                     plain_output,
                     (*build_args.warn_error).clone(),
-                    build_mode,
-                    build_args.dump_typed_sexp_arg.dump_typed_sexp,
                     build_args.prod,
                     features,
+                    build_args
+                        .dump_dir
+                        .clone()
+                        .map(|dir| rescript::build::build_types::DumpRequest {
+                            kinds: build_args.dump.clone(),
+                            dir,
+                        }),
                 )
             });
             match build_result {
@@ -108,10 +188,9 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Watch(watch_args) => {
             let features = watch_args.features.parsed();
-            let build_mode = cli::resolve_build_mode(watch_args.in_process.in_process);
-            configure_rayon_for_in_process(build_mode);
+            configure_rayon_for_in_process();
             let _lock = get_lock_or_exit(LockKind::Watch, &watch_args.folder);
-            let watch_result = run_with_in_process_stack(build_mode, || {
+            let watch_result = run_with_in_process_stack(|| {
                 watcher::start(
                     &watch_args.filter,
                     show_progress,
@@ -119,8 +198,6 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     (*watch_args.after_build).clone(),
                     plain_output,
                     (*watch_args.warn_error).clone(),
-                    build_mode,
-                    watch_args.dump_typed_sexp_arg.dump_typed_sexp,
                     watch_args.clear_screen,
                     watch_args.prod,
                     features,
@@ -146,18 +223,16 @@ fn run_main(otel_enabled: bool) -> Result<()> {
     }
 }
 
-fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::BuildMode) {
-    if build_mode.is_in_process() {
-        let mut builder = rayon::ThreadPoolBuilder::new();
-        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-            builder = builder.num_threads(default_in_process_threads());
-        }
-        builder
-            .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
-            .stack_size(IN_PROCESS_STACK_SIZE)
-            .build_global()
-            .expect("failed to configure in-process Rayon worker pool");
+fn configure_rayon_for_in_process() {
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        builder = builder.num_threads(default_in_process_threads());
     }
+    builder
+        .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
+        .stack_size(IN_PROCESS_STACK_SIZE)
+        .build_global()
+        .expect("failed to configure in-process Rayon worker pool");
 }
 
 fn default_in_process_threads() -> usize {
@@ -175,15 +250,11 @@ fn default_in_process_threads() -> usize {
 
 const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
 
-fn run_with_in_process_stack<T, F>(build_mode: rescript::build::build_types::BuildMode, f: F) -> T
+fn run_with_in_process_stack<T, F>(f: F) -> T
 where
     T: Send,
     F: FnOnce() -> T + Send,
 {
-    if !build_mode.is_in_process() {
-        return f();
-    }
-
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("rewatch-in-process-main".to_string())

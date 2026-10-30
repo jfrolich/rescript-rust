@@ -55,6 +55,7 @@ pub mod lam_hit;
 pub(crate) mod lam_indexed_helpers;
 pub mod lam_pass_alpha_conversion;
 pub(crate) mod lam_pass_alpha_conversion_indexed;
+pub mod lam_pass_collapse_var_aliases;
 pub mod lam_pass_collect;
 pub mod lam_pass_collect_indexed;
 pub mod lam_pass_count;
@@ -76,6 +77,7 @@ pub mod lam_subst;
 pub mod lam_tag_info;
 pub mod lam_util;
 pub mod lambda_traverse;
+pub mod printlambda;
 pub mod sexp_lambda;
 
 use crate::ident::Ident;

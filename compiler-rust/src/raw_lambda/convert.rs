@@ -784,6 +784,27 @@ impl<'a> RawLambdaConverter<'a> {
         self.id_gen.set_current_stamp(shared_stamp);
     }
 
+    /// `Translcore.pack_trywith_exn` (translcore.ml:956-959): when the
+    /// handler takes the caught value apart, catch it as `raw_<id>` and bind
+    /// `id` to it converted with `Primitive_exceptions.internalToException`.
+    /// Called where OCaml calls it, so `raw_<id>` takes the next stamp.
+    fn pack_trywith_exn(&mut self, id: Ident, handler: RawLambda) -> (Ident, RawLambda) {
+        if !crate::raw_lambda::lower::exception_id_destructed_raw(&handler, &id) {
+            return (id, handler);
+        }
+        let raw_id = self.fresh_ident(&format!("raw_{}", id.name()));
+        let wrapped = RawLambda::let_(
+            crate::lambda::lam_compat::LetKind::StrictOpt,
+            id,
+            crate::raw_lambda::lower::wrap_exn_raw(
+                Location::none(),
+                RawLambda::var(raw_id.clone()),
+            ),
+            handler,
+        );
+        (raw_id, wrapped)
+    }
+
     fn fresh_ident(&mut self, name: &str) -> Ident {
         // OCaml uses one global `Ident.currentstamp` for both Translcore and
         // Translmod (`compiler/ml/translcore.ml:1250-1271`,
@@ -3948,22 +3969,54 @@ impl<'a> RawLambdaConverter<'a> {
         result
     }
 
+    /// `Env.normalize_path` (env.ml:903-914) as used by `transl_module_path`.
     fn normalize_module_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
         path: &crate::types::Path,
     ) -> crate::types::Path {
+        self.normalize_module_path_with_root_force(env, path, true)
+    }
+
+    /// The same alias resolution for Rust-side bookkeeping that has no
+    /// OCaml counterpart (required-module notes): it must not force a
+    /// persistent root's `ps_sig`, which only `Env.normalize_path` does.
+    fn resolve_module_path_aliases(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+    ) -> crate::types::Path {
+        self.normalize_module_path_with_root_force(env, path, false)
+    }
+
+    fn normalize_module_path_with_root_force(
+        &mut self,
+        env: &crate::types::env::Env,
+        path: &crate::types::Path,
+        force_root: bool,
+    ) -> crate::types::Path {
         let path = match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                std::sync::Arc::new(self.normalize_module_path_in_env(env, prefix)),
-                *name,
+                std::sync::Arc::new(
+                    self.normalize_module_path_with_root_force(env, prefix, force_root),
+                ),
+                name.clone(),
                 *pos,
             ),
             crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                std::sync::Arc::new(self.normalize_module_path_in_env(env, left)),
-                std::sync::Arc::new(self.normalize_module_path_in_env(env, right)),
+                std::sync::Arc::new(
+                    self.normalize_module_path_with_root_force(env, left, force_root),
+                ),
+                std::sync::Arc::new(
+                    self.normalize_module_path_with_root_force(env, right, force_root),
+                ),
             ),
-            crate::types::Path::Pident(_) => path.clone(),
+            crate::types::Path::Pident(id) => {
+                if force_root {
+                    self.force_persistent_normalized_prefix(env, id);
+                }
+                path.clone()
+            }
         };
 
         if let crate::types::Path::Pdot(parent, name, _) = &path
@@ -3971,7 +4024,7 @@ impl<'a> RawLambdaConverter<'a> {
             && let crate::types::decl::ModuleType::MtyAlias(_, alias_target) = &md.md_type
             && !alias_target.same(&path)
         {
-            return self.normalize_module_path_in_env(env, alias_target);
+            return self.normalize_module_path_with_root_force(env, alias_target, force_root);
         }
 
         if matches!(&path, crate::types::Path::Pdot(..))
@@ -3987,14 +4040,15 @@ impl<'a> RawLambdaConverter<'a> {
             // `find_module_descr` component tables before following the alias
             // at compiler/ml/env.ml:903-914. A direct Rust env lookup can still
             // see the un-prefixed local alias stored in the source signature.
-            return self.normalize_module_path_in_env(env, &alias_target);
+            return self.normalize_module_path_with_root_force(env, &alias_target, force_root);
         }
 
         if let Some(md) = Self::module_declaration_for_path_normalization(env, &path) {
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, alias_path) => {
                     if !alias_path.same(&path) {
-                        return self.normalize_module_path_in_env(env, alias_path);
+                        return self
+                            .normalize_module_path_with_root_force(env, alias_path, force_root);
                     }
                 }
                 crate::types::decl::ModuleType::MtyIdent(alias_path)
@@ -4002,7 +4056,7 @@ impl<'a> RawLambdaConverter<'a> {
                         && !alias_path.same(&path)
                         && self.module_path_resolves_to_runtime_module(env, alias_path) =>
                 {
-                    return self.normalize_module_path_in_env(env, alias_path);
+                    return self.normalize_module_path_with_root_force(env, alias_path, force_root);
                 }
                 _ => {}
             }
@@ -4020,7 +4074,11 @@ impl<'a> RawLambdaConverter<'a> {
                     // (compiler/ml/lambda.ml:648-649), whose Pdot case delegates
                     // to `find_module ~alias:true` (compiler/ml/env.ml:876-880)
                     // before following `Mty_alias` (compiler/ml/env.ml:903-914).
-                    return self.normalize_module_path_in_env(env, &alias_target);
+                    return self.normalize_module_path_with_root_force(
+                        env,
+                        &alias_target,
+                        force_root,
+                    );
                 }
             }
         }
@@ -4035,7 +4093,11 @@ impl<'a> RawLambdaConverter<'a> {
                 if !alias_target.same(&path)
                     && self.module_path_resolves_to_runtime_module(env, &alias_target)
                 {
-                    return self.normalize_module_path_in_env(env, &alias_target);
+                    return self.normalize_module_path_with_root_force(
+                        env,
+                        &alias_target,
+                        force_root,
+                    );
                 }
             }
         }
@@ -4228,7 +4290,7 @@ impl<'a> RawLambdaConverter<'a> {
             env: &crate::types::env::Env,
             path: &crate::types::Path,
         ) {
-            let normalized = this.normalize_module_path_in_env(env, path);
+            let normalized = this.resolve_module_path_aliases(env, path);
             if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
                 &normalized,
                 env,
@@ -5685,6 +5747,7 @@ impl<'a> RawLambdaConverter<'a> {
                     Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 let inline = self.get_inline_attribute_from(&expr.exp_attributes);
                 self.convert_nary_function_raw(
+                    Some(expr),
                     params,
                     body,
                     *async_,
@@ -5782,6 +5845,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let _loc = self.loc(expr.exp_loc);
                 let exn_id = self.name_pattern_ident("exn", cases);
                 let handler = self.compile_trywith_handler_raw(&exn_id, cases);
+                let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
                 let body_lam = self.convert_expr_raw(body);
                 RawLambda::LtryWith(Box::new(body_lam), exn_id, Box::new(handler))
             }
@@ -6105,6 +6169,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         // Compile the exception handler: matching on the exception.
         let exn_handler = self.compile_trywith_handler_raw(&exn_id, exn_cases);
+        let (exn_id, exn_handler) = self.pack_trywith_exn(exn_id, exn_handler);
 
         // Compile normal cases with val_id as the scrutinee
         let normal_handler = {
@@ -6892,8 +6957,10 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// Mirrors compiler/ml/translcore.ml:615-637 and `transl_function` for the
     /// upstream n-ary Typedtree representation.
+    #[allow(clippy::too_many_arguments)]
     fn convert_nary_function_raw(
         &mut self,
+        function: Option<&Expression>,
         params: &[FunctionParam],
         body: &Expression,
         async_: bool,
@@ -6925,10 +6992,13 @@ impl<'a> RawLambdaConverter<'a> {
             .iter()
             .map(|param| param.fp_param)
             .collect::<Vec<_>>();
-        let one_unit_arg = matches!(params, [param]
-            if !pattern_binds_value(&param.fp_pat)
-                && self.is_base_type(param.fp_pat.pat_type, "unit"));
-        let return_unit = self.is_base_type(body.exp_type, "unit");
+        // `transl_function` (translcore.ml:1395-1409) evaluates its result
+        // tuple right to left: `is_base_type body.exp_env body.exp_type
+        // Predef.path_unit` runs before the body is translated.
+        let return_unit = match self.env_for_expr(body) {
+            Some(env) => self.is_base_type_with_env(body.exp_type, "unit", &env),
+            None => self.is_base_type(body.exp_type, "unit"),
+        };
         let mut lambda_body = self.convert_expr_raw(body);
         for param in params.iter().rev() {
             let pat = &param.fp_pat;
@@ -6944,6 +7014,14 @@ impl<'a> RawLambdaConverter<'a> {
                 ),
             };
         }
+        // `one_unit_arg` (translcore.ml:1015-1022) is computed after
+        // `transl_function`, from the function's own type in `e.exp_env`.
+        let one_unit_arg = match params {
+            [param] if !pattern_binds_value(&param.fp_pat) => {
+                function.is_some_and(|function| self.function_takes_one_unit_arg(function))
+            }
+            _ => false,
+        };
         RawLambda::function_(
             param_ids.len() as i32,
             param_ids,
@@ -6957,6 +7035,36 @@ impl<'a> RawLambdaConverter<'a> {
                 is_a_functor: false,
             },
             loc,
+        )
+    }
+
+    /// The `one_unit_arg` test of `Texp_function` (translcore.ml:1015-1022):
+    /// the expanded function type takes one unlabelled argument whose
+    /// expanded type is a `Pident` named `unit`.
+    fn function_takes_one_unit_arg(&self, function: &Expression) -> bool {
+        use crate::types::Path;
+        use crate::types::asttypes::ArgLabel;
+        use crate::types::type_expr::TypeDesc;
+        let env = self.env_for_expr(function);
+        let env = env.as_deref().unwrap_or(self.env);
+        let ctx = self.type_ctx;
+        let fn_type = ctx.repr(crate::types::ctype::expand_head(
+            ctx,
+            env,
+            function.exp_type,
+        ));
+        let arg_type = match &*ctx.get_desc(fn_type) {
+            TypeDesc::Tarrow { args, .. } => match args.as_slice() {
+                [arg] if matches!(arg.label(), ArgLabel::Nolabel) => arg.typ,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let arg_type = ctx.repr(crate::types::ctype::expand_head(ctx, env, arg_type));
+        matches!(
+            &*ctx.get_desc(arg_type),
+            TypeDesc::Tconstr { path: Path::Pident(id), args, .. }
+                if id.name() == "unit" && args.is_empty()
         )
     }
 
@@ -7319,12 +7427,19 @@ impl<'a> RawLambdaConverter<'a> {
             };
         }
         // translcore.ml `erased_builtins`: `Constant` entries become
-        // constants at translation.
-        if matches!(raw_name, "%null" | "#null") && prim.prim_arity == 0 {
-            return RawLambda::const_(Constant::JsNull);
-        }
-        if matches!(raw_name, "%undefined" | "#undefined") && prim.prim_arity == 0 {
-            return RawLambda::const_(Constant::JsUndefined { is_unit: false });
+        // constants at translation. They are found by `specialize_primitive`
+        // (translcore.ml:423-438), which first scrapes the type with
+        // `is_function_type`; neither unified ops nor comparisons know these
+        // names, so `find_builtin` returns the constant.
+        if matches!(raw_name, "%null" | "#null" | "%undefined" | "#undefined")
+            && prim.prim_arity == 0
+        {
+            self.is_function_type_with_env(ty, env);
+            return RawLambda::const_(if matches!(raw_name, "%null" | "#null") {
+                Constant::JsNull
+            } else {
+                Constant::JsUndefined { is_unit: false }
+            });
         }
         let Some(primitive) = self.specialize_primitive_raw_with_env(prim, ty, env) else {
             if raw_name == "%import" || raw_name == "#import" {
@@ -7556,7 +7671,12 @@ mod tests {
         let RawLambda::LtryWith(_, _, handler) = raw else {
             return None;
         };
-        let RawLambda::LstaticCatch(_, (id, params), _) = handler.as_ref() else {
+        // `pack_trywith_exn` binds the caught value around the handler.
+        let handler = match handler.as_ref() {
+            RawLambda::Llet(_, _, _, body) => body.as_ref(),
+            handler => handler,
+        };
+        let RawLambda::LstaticCatch(_, (id, params), _) = handler else {
             return None;
         };
         if params.is_empty() { Some(*id) } else { None }
@@ -7772,14 +7892,14 @@ mod tests {
                 result.exports()[0].stamp(),
                 result.exports()[0].flags()
             ),
-            ("value", 104, crate::ident::IdentFlags::NONE)
+            ("value", 103, crate::ident::IdentFlags::NONE)
         );
         let consumer = result.generator().create("consumer");
         assert_eq!(
             (consumer.name(), consumer.stamp(), consumer.flags()),
-            ("consumer", 105, crate::ident::IdentFlags::NONE)
+            ("consumer", 104, crate::ident::IdentFlags::NONE)
         );
-        assert_eq!(generator.current_stamp(), 105);
+        assert_eq!(generator.current_stamp(), 104);
     }
 
     #[test]

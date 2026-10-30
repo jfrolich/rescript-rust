@@ -5178,46 +5178,6 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
             ExpressionDesc::Pexp_await(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_jsx_element(element) => self.jsx_element(element),
-            ExpressionDesc::Pexp_inline_for(inner) => {
-                let (ref mut _pat, ref mut collection, ref mut body) = **inner;
-                self.expression_idx(collection);
-                self.expression_idx(body);
-            }
-            ExpressionDesc::Pexp_comptime_typeinfo(_)
-            | ExpressionDesc::Pexp_comptime_typename(_) => {
-                // No sub-expressions to walk
-            }
-            ExpressionDesc::Pexp_comptime_field(inner) => {
-                let (ref mut value, ref mut field) = **inner;
-                self.expression_idx(value);
-                self.expression_idx(field);
-            }
-            ExpressionDesc::Pexp_comptime_compile_error(expr) => {
-                self.expression_idx(expr);
-            }
-            ExpressionDesc::Pexp_comptime_record(inner) => {
-                let (ref _ct, ref mut fields_expr) = **inner;
-                self.expression_idx(fields_expr);
-            }
-            ExpressionDesc::Pexp_comptime_variant(inner) => {
-                let (ref _ct, ref mut expr, ref mut opt_expr) = **inner;
-                self.expression_idx(expr);
-                if let Some(e) = opt_expr {
-                    self.expression_idx(e);
-                }
-            }
-            ExpressionDesc::Pexp_comptime_build_variant(e) => {
-                self.expression_idx(e);
-            }
-            ExpressionDesc::Pexp_comptime_variant_case(e) => {
-                self.expression_idx(e);
-            }
-            ExpressionDesc::Pexp_comptime_build_record(e) => {
-                self.expression_idx(e);
-            }
-            ExpressionDesc::Pexp_comptime_record_field(e) => {
-                self.expression_idx(e);
-            }
         }
     }
 

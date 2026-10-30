@@ -1,0 +1,6 @@
+{
+  "name": "missing-module-pkg",
+  "sources": ["src"],
+  "package-specs": {"module": "esmodule", "in-source": false},
+  "compiler-flags": ["-no-alias-deps"]
+}

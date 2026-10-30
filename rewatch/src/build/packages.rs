@@ -103,22 +103,6 @@ impl Package {
     fn get_esmodule_path(&self) -> PathBuf {
         get_esmodule_path(&self.path)
     }
-
-    pub fn get_mlmap_path(&self) -> PathBuf {
-        let suffix = self
-            .namespace
-            .to_suffix()
-            .expect("namespace should be set for mlmap module");
-        self.get_build_path().join(format!("{suffix}.mlmap"))
-    }
-
-    pub fn get_mlmap_compile_path(&self) -> PathBuf {
-        let suffix = self
-            .namespace
-            .to_suffix()
-            .expect("namespace should be set for mlmap module");
-        self.get_build_path().join(format!("{suffix}.cmi"))
-    }
 }
 
 impl PartialEq for Package {
@@ -1006,8 +990,6 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                     dependents: AHashSet::new(),
                     package_name: package.name.to_owned(),
                     compile_dirty: false,
-                    last_compiled_cmt: None,
-                    last_compiled_cmi: None,
                     // Not sure if this is correct
                     is_type_dev: false,
                 },
@@ -1058,8 +1040,6 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                                 dependents: AHashSet::new(),
                                 package_name: package.name.to_owned(),
                                 compile_dirty: true,
-                                last_compiled_cmt: None,
-                                last_compiled_cmi: None,
                                 is_type_dev: metadata.is_type_dev,
                             });
                         }
@@ -1151,8 +1131,6 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                                     dependents: AHashSet::new(),
                                     package_name: package.name.to_owned(),
                                     compile_dirty: true,
-                                    last_compiled_cmt: None,
-                                    last_compiled_cmi: None,
                                     is_type_dev: metadata.is_type_dev,
                                 });
                         }

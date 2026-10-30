@@ -1,0 +1,5 @@
+{
+  "name": "dep_pkg",
+  "sources": ["src"],
+  "package-specs": {"module": "commonjs", "in-source": false}
+}

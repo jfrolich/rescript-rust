@@ -12,36 +12,43 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
-/// How rewatch compiles.
-///
-/// - `InProcess`: the Rust compiler linked into rewatch. This is the build.
-/// - `ExternalBsc`: test-only, file-backed builds with an external compiler
-///   executable, selected by `RESCRIPT_SUBPROCESS_BUILD` so parity scripts can
-///   produce OCaml reference outputs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BuildMode {
-    /// External compiler executable, file-backed (test-only)
-    ExternalBsc,
-    /// Rust compiler fully in-process
-    InProcess,
+/// Intermediate representations a build writes for every module it compiles
+/// (the hidden `--dump` option of `rescript build`), for comparing them with
+/// the OCaml compiler's `-dtyped-sexp`/`-drawlambda`/`-dlambda-sexp` output.
+#[derive(Debug, Clone)]
+pub struct DumpRequest {
+    pub kinds: Vec<rescript_compiler::driver::DumpKind>,
+    /// Each dump is written to `<dir>/<package>/<source path>.<kind>`.
+    pub dir: PathBuf,
 }
 
-impl BuildMode {
-    /// Whether parsing runs in this process with the Rust parser.
-    pub fn use_rust_parser(&self) -> bool {
-        matches!(self, BuildMode::InProcess)
-    }
-
-    /// Whether this mode uses in-process compilation with no disk artifacts
-    pub fn is_in_process(&self) -> bool {
-        matches!(self, BuildMode::InProcess)
+impl DumpRequest {
+    pub fn write(
+        &self,
+        package_name: &str,
+        source_path: &std::path::Path,
+        dumps: &[(rescript_compiler::driver::DumpKind, String)],
+    ) {
+        for (kind, text) in dumps {
+            let mut path = self.dir.join(package_name).join(source_path).into_os_string();
+            path.push(".");
+            path.push(kind.name());
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Dumps are Latin-1 text: one byte per char.
+            let bytes: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
+            if let Err(err) = std::fs::write(&path, bytes) {
+                log::warn!("Could not write {}: {err}", path.display());
+            }
+        }
     }
 }
 
-/// Per-module in-memory compilation state for `--in-process` builds.
+/// Per-module in-memory compilation state.
 ///
-/// Stores a generation number that replaces timestamp-based invalidation
-/// (`last_compiled_cmi`/`last_compiled_cmt`).
+/// Stores a generation number for invalidation.
 /// When a module is recompiled and its interface changes, the generation is
 /// bumped so downstream dependents know to recompile.
 pub struct InMemoryModuleState {
@@ -175,8 +182,6 @@ pub struct Module {
     pub dependents: AHashSet<String>,
     pub package_name: String,
     pub compile_dirty: bool,
-    pub last_compiled_cmi: Option<SystemTime>,
-    pub last_compiled_cmt: Option<SystemTime>,
     pub deps_dirty: bool,
     pub is_type_dev: bool,
 }
@@ -235,10 +240,8 @@ pub struct BuildCommandState {
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
-    // The build mode (in-process, or the test-only external compiler)
-    pub build_mode: BuildMode,
-    // Command-line --dump-typed-sexp flag: add -dtyped-sexp to bsc invocations.
-    pub dump_typed_sexp: bool,
+    // Hidden `--dump`: intermediate representations to write for every module.
+    pub dump: Option<DumpRequest>,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
@@ -298,6 +301,10 @@ pub struct BuildCommandState {
     // What the previous in-process build recorded (see `incremental`). Read
     // during initialization, in-process builds only.
     pub previous_in_process: Option<super::incremental::PreviousInProcessBuild>,
+    // Compile into the module registry only, writing nothing to disk (no
+    // JavaScript, source copies or compiler log): `rescript bsc` builds an
+    // `-I` package this way without touching its files.
+    pub in_memory_only: bool,
     // The incremental plan of a fresh in-process build, consumed by `compile`.
     pub incremental_plan: Option<super::incremental::IncrementalPlan>,
     // When the latest build started, and whether it finished without errors;
@@ -322,8 +329,6 @@ impl std::fmt::Debug for BuildCommandState {
             .field("root_folder", &self.root_folder)
             .field("build_state", &self.build_state)
             .field("warn_error_override", &self.warn_error_override)
-            .field("build_mode", &self.build_mode)
-            .field("dump_typed_sexp", &self.dump_typed_sexp)
             .field("stored_asts", &"<Mutex<..>>")
             .field("in_memory_interfaces", &"<Mutex<..>>")
             .field(
@@ -390,8 +395,6 @@ impl BuildCommandState {
         packages: AHashMap<String, Package>,
         compiler: CompilerInfo,
         warn_error_override: Option<String>,
-        build_mode: BuildMode,
-        dump_typed_sexp: bool,
         features: Option<Vec<String>>,
         source_map_command: SourceMapCommand,
     ) -> Self {
@@ -399,8 +402,7 @@ impl BuildCommandState {
             root_folder,
             build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
-            build_mode,
-            dump_typed_sexp,
+            dump: None,
             stored_asts: Mutex::new(AHashMap::new()),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
@@ -420,6 +422,7 @@ impl BuildCommandState {
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
             previous_in_process: None,
+            in_memory_only: false,
             incremental_plan: None,
             build_started_at: None,
             last_build_ok: false,
@@ -456,18 +459,6 @@ impl BuildCommandState {
 
     pub fn get_warn_error_override(&self) -> Option<String> {
         self.warn_error_override.clone()
-    }
-
-    pub fn build_mode(&self) -> BuildMode {
-        self.build_mode
-    }
-
-    pub fn use_rust_parser(&self) -> bool {
-        self.build_mode.use_rust_parser()
-    }
-
-    pub fn dump_typed_sexp(&self) -> bool {
-        self.dump_typed_sexp
     }
 
     pub fn get_features(&self) -> Option<Vec<String>> {
@@ -683,24 +674,6 @@ impl std::ops::DerefMut for BuildCommandState {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.build_state
     }
-}
-
-#[derive(Debug)]
-pub struct AstModule {
-    pub module_name: String,
-    pub package_name: String,
-    pub last_modified: SystemTime,
-    pub ast_file_path: PathBuf,
-    pub suffix: String,
-}
-
-#[derive(Debug)]
-pub struct CompileAssetsState {
-    pub ast_modules: AHashMap<PathBuf, AstModule>,
-    pub cmi_modules: AHashMap<String, SystemTime>,
-    pub cmt_modules: AHashMap<String, SystemTime>,
-    pub ast_rescript_file_locations: AHashSet<PathBuf>,
-    pub rescript_file_locations: AHashSet<PathBuf>,
 }
 
 /// What a compile read of other units: the item keys read through the

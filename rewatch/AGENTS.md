@@ -86,7 +86,6 @@ make test-rewatch     # Run integration tests
 cd rewatch/tests
 export REWATCH_EXECUTABLE="$(realpath ../target/debug/rescript)"
 eval $(node ./get_bin_paths.js)
-export RESCRIPT_BSC_EXE
 export RESCRIPT_RUNTIME
 source ./utils.sh
 bash ./watch/06-watch-missing-source-folder.sh
@@ -136,12 +135,9 @@ Rewatch follows the OTEL spec for configuration — no rewatch-specific knobs ex
 
 #### Running Rewatch Directly
 
-When running the rewatch binary directly (via `cargo run` or the compiled binary) during development, you need to set environment variables to point to the local compiler and runtime. Otherwise, rewatch will try to use the installed versions:
+When running the rewatch binary directly (via `cargo run` or the compiled binary) during development, point it at the local runtime. Otherwise, rewatch will try to use the installed version. The compiler is linked into rewatch, so no compiler executable is needed:
 
 ```bash
-# Set the compiler executable path
-export RESCRIPT_BSC_EXE=$(realpath _build/default/compiler/bsc/rescript_compiler_main.exe)
-
 # Set the runtime path
 export RESCRIPT_RUNTIME=$(realpath packages/@rescript/runtime)
 

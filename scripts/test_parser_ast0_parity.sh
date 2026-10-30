@@ -6,7 +6,8 @@
 #
 # Parsetree0 conversion parity (frozen PPX-compatible format):
 # 1. sexp0-locs parity - parsetree->parsetree0->sexp output matches
-# 2. binary0 parity - Marshalled parsetree0 is byte-identical (critical for PPX tools!)
+# 2. binary0 parity - Marshalled parsetree0 holds the same values (critical for
+#    PPX tools!); marshal sharing of repeated strings may differ
 #
 # Roundtrip tests (parsetree->parsetree0->parsetree):
 # 3. Roundtrip structure parity - After roundtrip, AST structure matches
@@ -90,7 +91,7 @@ This tests parsetree0 format parity - the frozen AST format used for PPX tools.
 WHAT IT TESTS:
 
   1. sexp0-locs    Parsetree0 sexp output (readable diffs for debugging)
-  2. binary0       Marshalled parsetree0 (byte-identical for PPX tools)
+  2. binary0       Marshalled parsetree0 (same values for PPX tools)
   3. roundtrip     parsetree -> parsetree0 -> parsetree conversion
 
 QUICK START:
@@ -152,7 +153,8 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 # Parser executables
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
+RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+"$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 
 # Colors for output
@@ -181,7 +183,7 @@ fi
 
 if [[ ! -x "$RUST_PARSER" ]]; then
     echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first."
     echo "This parity script expects debug artifacts for iteration."
     exit 1
 fi
@@ -288,7 +290,8 @@ mkdir -p "$TEMP_DIR/roundtrip_locs_parity_diffs"
 mkdir -p "$TEMP_DIR/binary0_parity_diffs"
 
 # Export variables for parallel execution
-export OCAML_PARSER RUST_PARSER TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE
+INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
+export OCAML_PARSER RUST_PARSER TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE INSPECT_SCRIPT
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -369,9 +372,13 @@ test_single_file() {
         # Test binary0 parity (parsetree0 format - PPX compatible)
         if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print binary0 "$file" > "$file_temp/ocaml.binary0" 2>/dev/null && \
            timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print binary0 "$file" > "$file_temp/rust.binary0" 2>/dev/null; then
-            if ! diff -q "$file_temp/ocaml.binary0" "$file_temp/rust.binary0" > /dev/null 2>&1; then
+            # Compare decoded values: the encoders may share repeated strings
+            # differently, which a PPX reading the AST cannot observe.
+            if ! python3 "$INSPECT_SCRIPT" same-values "$file_temp/ocaml.binary0" "$file_temp/rust.binary0" > "$file_temp/binary0.values" 2>&1; then
                 binary0_diff=1
                 {
+                    cat "$file_temp/binary0.values"
+                    echo ""
                     echo "OCaml binary0 size: $(wc -c < "$file_temp/ocaml.binary0") bytes"
                     echo "Rust binary0 size:  $(wc -c < "$file_temp/rust.binary0") bytes"
                     echo ""

@@ -466,9 +466,7 @@ impl ModulePathResolver {
     /// dependency of a script unit is imported from the `.js` file found on
     /// the load path, relative to the output directory.
     fn script_module_path(&self, module_name: &str) -> Option<String> {
-        if self.is_in_process_mode()
-            || !matches!(self.current_package_query(), PackageInfoQuery::Script)
-        {
+        if !matches!(self.current_package_query(), PackageInfoQuery::Script) {
             return None;
         }
         let env = self.persistent_env.as_ref()?;
@@ -491,6 +489,11 @@ impl ModulePathResolver {
                 &filename_concat(package_name, &info.path),
                 &js_file,
             ));
+        }
+        // In process, the build has scanned the sources already: no probing
+        // the load path for a script-mode dependency's JavaScript.
+        if self.is_in_process_mode() {
+            return None;
         }
         let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
         let found = normalize_absolute_path(FsPath::new(&env.find_in_load_path_uncap(&js_file)?));

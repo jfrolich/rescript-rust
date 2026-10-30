@@ -1175,7 +1175,6 @@ impl<'a> Mapper<'a> {
         let is_jsx = matches!(
             &*expr.pexp_desc,
             current::ExpressionDesc::Pexp_jsx_element(_)
-                | current::ExpressionDesc::Pexp_inline_for(_)
         );
         let mut attrs = self.map_attributes(&expr.pexp_attributes);
         if is_jsx {
@@ -1813,19 +1812,6 @@ impl<'a> Mapper<'a> {
                         )
                     }
                 }
-            }
-            current::ExpressionDesc::Pexp_inline_for(_)
-            | current::ExpressionDesc::Pexp_comptime_typeinfo(_)
-            | current::ExpressionDesc::Pexp_comptime_field(_)
-            | current::ExpressionDesc::Pexp_comptime_compile_error(_)
-            | current::ExpressionDesc::Pexp_comptime_typename(_)
-            | current::ExpressionDesc::Pexp_comptime_record(_)
-            | current::ExpressionDesc::Pexp_comptime_variant(_)
-            | current::ExpressionDesc::Pexp_comptime_build_variant(_)
-            | current::ExpressionDesc::Pexp_comptime_variant_case(_)
-            | current::ExpressionDesc::Pexp_comptime_build_record(_)
-            | current::ExpressionDesc::Pexp_comptime_record_field(_) => {
-                unreachable!("comptime builtins eliminated before mapping to pt0")
             }
         }
     }

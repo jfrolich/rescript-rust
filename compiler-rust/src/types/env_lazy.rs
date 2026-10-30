@@ -232,6 +232,23 @@ fn build_matching_type_constructors(
 /// `fst (Env.find_type_descrs path env)` for a variant declaration whose
 /// descriptors live at `type_path` (compiler/ml/datarepr.ml:111-172 via
 /// compiler/ml/env.ml:1542-1547), in declaration order.
+/// `Datarepr.constructor_existentials` (datarepr.ml:48-61): the type
+/// variables of the declared arguments (label types for an inline record)
+/// that do not occur in the GADT result.
+fn declared_constructor_existentials(
+    ctx: &super::context::TypeContext,
+    args: &super::decl::ConstructorArguments,
+    res: Option<crate::types::TypeExprRef>,
+) -> Vec<crate::types::TypeExprRef> {
+    let tyl: Vec<crate::types::TypeExprRef> = match args {
+        super::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
+        super::decl::ConstructorArguments::CstrRecord(labels) => {
+            labels.iter().map(|label| label.ld_type).collect()
+        }
+    };
+    super::env::constructor_existentials(ctx, &tyl, res)
+}
+
 pub(crate) fn constructors_of_type_path(
     type_path: &Path,
     decl: &TypeDeclaration,
@@ -384,13 +401,7 @@ fn build_type_constructors(
             ConstructorDescription {
                 cstr_name: cd.cd_id.name().to_string(),
                 cstr_res,
-                // datarepr.ml:62-75: the variables of the arguments that the
-                // GADT result type does not mention.
-                cstr_existentials: super::env::constructor_existentials(
-                    ctx,
-                    &cstr_args,
-                    cd.cd_res.map(|_| cstr_res),
-                ),
+                cstr_existentials: declared_constructor_existentials(ctx, &cd.cd_args, cd.cd_res),
                 cstr_args,
                 cstr_arity,
                 cstr_kind: ConstructorKind::Ordinary(
@@ -529,10 +540,9 @@ fn build_constructors_for_name(
                     ConstructorDescription {
                         cstr_name: id.name().to_string(),
                         cstr_res,
-                        // datarepr.ml:62-75, extension_descr.
-                        cstr_existentials: super::env::constructor_existentials(
+                        cstr_existentials: declared_constructor_existentials(
                             ctx,
-                            &cstr_args,
+                            &ext.ext_args,
                             ext.ext_ret_type,
                         ),
                         cstr_args,
@@ -663,6 +673,37 @@ pub(crate) struct QualifiedModuleComponents {
     tables: Arc<StructureComponentTables>,
     compiler_counters_enabled: bool,
     value_source_prefix: Option<Arc<Path>>,
+}
+
+/// The types and module types of an alias view of `source` (an in-process
+/// unit or its child), as `scrape_alias` strengthens them: `Mtype.strengthen
+/// ~aliasable:true env mty source` (env.ml:1440-1446, mtype.ml:41-91) gives a
+/// type without a public manifest the manifest `source.t`, and an abstract
+/// module type `source.T`. Child modules become aliases of `source`'s children
+/// there; their views take `source` as their own source prefix.
+fn strengthen_view_types(
+    sig: &mut [SignatureItem],
+    source: &Path,
+    ctx: &super::context::TypeContext,
+) {
+    for item in sig.iter_mut() {
+        match item {
+            SignatureItem::SigType(id, decl, _) => {
+                *decl = Arc::new(
+                    super::typecore::strengthen_type_decl_for_module_access_path(
+                        ctx, source, id, decl,
+                    ),
+                );
+            }
+            SignatureItem::SigModtype(id, mtd) if mtd.mtd_type.is_none() => {
+                mtd.mtd_type = Some(super::decl::ModuleType::MtyIdent(Path::pdot(
+                    source.clone(),
+                    id.name(),
+                )));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn scan_child_component_from_signature(
@@ -864,6 +905,7 @@ impl QualifiedModuleComponents {
                     source,
                     &access_path,
                 );
+                strengthen_view_types(&mut rerooted, source, ctx);
                 Arc::new(rerooted)
             }
             _ => signature,
@@ -1731,7 +1773,15 @@ fn build_local_module_components(
     {
         let ps = {
             let pers = pers_env.as_mut()?;
-            pers.find_pers_struct(alias_id.name(), ctx)
+            let ps = pers.find_pers_struct(alias_id.name(), ctx);
+            // env.ml:872-875 forces `ps_sig = Subst.signature identity sign`
+            // here, freshening the unit's bound identifiers. Reserve those
+            // stamps (the rename itself stays deferred) so later identifiers
+            // get OCaml's stamps.
+            if ps.is_some() {
+                ctx.trigger_module_sig_rename(alias_id.name());
+            }
+            ps
         };
         if let Some(ps) = ps {
             let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
@@ -1742,9 +1792,7 @@ fn build_local_module_components(
             // mode the portable signature has already been internalized into
             // the worker store, so share that component signature and let the
             // view apply the selected access path lazily to forced items
-            // instead of renaming and copying the unit's signature. This skips
-            // the rename's stamp consumption, so in-process ident stamps can
-            // differ from OCaml's; in-process builds write no `.cmt` files.
+            // instead of renaming and copying the unit's signature.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),
@@ -1755,6 +1803,27 @@ fn build_local_module_components(
                 ),
             );
         }
+    }
+
+    // A child of an in-process unit's alias view. OCaml builds that view from
+    // `scrape_alias`, which strengthens the unit's signature with
+    // `~aliasable:true` (env.ml:1440-1446, mtype.ml:96-100): this module is
+    // `Mty_alias (Unit.Child)` there, so building its components reaches
+    // `find_module` (env.ml:876-881), which forces the unit's `comp_modules`
+    // thunk for it, `Subst.modtype` freshening its bound identifiers
+    // (env.ml:475-477).
+    if cache_mode.forces_alias_sig()
+        && !matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
+        && let Some(source @ Path::Pdot(parent, name, _)) = source_prefix
+        && !source.same(access_path)
+    {
+        let _ = crate::types::typecore::lookup_module_in_resolved_path(
+            parent,
+            name.as_str(),
+            env,
+            pers_env,
+            ctx,
+        );
     }
 
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
@@ -1935,6 +2004,7 @@ fn build_local_module_components(
             source,
             access_path,
         );
+        strengthen_view_types(&mut qualified_sig, source, ctx);
     }
 
     let qualified_sig = Arc::new(qualified_sig);
