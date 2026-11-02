@@ -288,12 +288,6 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
         Lambda::Lapply(apply) => {
             write!(f, "(apply")?;
-            if matches!(
-                apply.ap_info.inlined,
-                crate::lambda::InlineAttribute::Always
-            ) {
-                write!(f, "%inlined")?;
-            }
             write!(f, " ")?;
             format_lambda(&apply.ap_func, f)?;
             for arg in &apply.ap_args {

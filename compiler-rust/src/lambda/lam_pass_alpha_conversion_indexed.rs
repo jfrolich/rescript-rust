@@ -319,7 +319,6 @@ mod tests {
     fn info(status: ApplyStatus) -> ApInfo {
         ApInfo {
             loc: Location::none(),
-            inlined: crate::lambda::InlineAttribute::Default,
             status,
         }
     }
@@ -357,7 +356,6 @@ mod tests {
                 ap_args: vec![Lambda::const_(Constant::int(argument))],
                 ap_info: ApInfo {
                     loc: location,
-                    inlined: crate::lambda::InlineAttribute::Default,
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: jsx,

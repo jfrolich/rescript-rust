@@ -614,18 +614,6 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 // Special Attributes
 // ============================================================================
 
-/// Create the if-let attribute `@res.iflet`.
-pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.iflet");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-/// Create the await attribute `@res.await` with location.
-pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
-    let str_idx = arena.intern("res.await");
-    (with_loc(str_idx, loc), Payload::PStr(Box::default()))
-}
-
 /// Create the spread attribute `@res.spread`.
 pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.spread");
@@ -635,12 +623,6 @@ pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
 /// Create the dict-spread attribute `@res.dictSpread` (upstream #8369).
 pub fn dict_spread_attr(arena: &mut ParseArena) -> Attribute {
     let str_idx = arena.intern("res.dictSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-/// Create the pattern variant spread attribute.
-pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.patVariantSpread");
     (mknoloc(str_idx), Payload::PStr(Box::default()))
 }
 

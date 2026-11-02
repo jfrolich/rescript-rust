@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
 
 use super::ast::*;
-use super::core::{ExprContext, ast_helper, if_let_attr, mknoloc, recover, with_loc};
+use super::core::{ExprContext, ast_helper, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
@@ -3889,7 +3889,7 @@ fn parse_if_or_if_let_expression(p: &mut Parser<'_>) -> Expression {
 
     let expr = match &p.token {
         Token::Let { .. } => {
-            // if-let expression: parse as match with @res.iflet attribute
+            // if-let expression: parse as a match
             p.next(); // consume `let`
             parse_if_let_expr(p, start_pos_idx)
         }
@@ -3903,8 +3903,7 @@ fn parse_if_or_if_let_expression(p: &mut Parser<'_>) -> Expression {
 /// Parse an if-let expression (after `if` and `let` are consumed).
 /// OCaml: parse_if_let_expr
 ///
-/// Produces a Pexp_match with @res.iflet and @warning "-4" attributes,
-/// and emits an experimental if-let error message.
+/// Produces a Pexp_match and emits an experimental if-let error message.
 fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     let pattern = super::pattern::parse_pattern(p);
     p.expect(Token::Equal);
@@ -3967,10 +3966,7 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             ],
         )))),
         pexp_loc: loc,
-        pexp_attributes: Attributes::from_vec(vec![
-            if_let_attr(p.arena_mut()),
-            suppress_fragile_match_warning_attr(p),
-        ]),
+        pexp_attributes: Attributes::new(),
     };
 
     // Emit the experimental if-let error message using ResPrinter
@@ -3978,12 +3974,6 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
         use super::comment_table::CommentTable;
         use super::doc::Doc;
         use super::printer;
-
-        // Create a copy without attributes for printing
-        let switch_expr = Expression {
-            pexp_attributes: Attributes::new(),
-            ..if_let_expr.clone()
-        };
 
         let state = printer::PrinterState::init();
         let mut cmt_tbl = CommentTable::new();
@@ -3994,7 +3984,7 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             Doc::concat(vec![
                 Doc::hard_line(),
                 Doc::hard_line(),
-                printer::print_expression(&state, &switch_expr, &mut cmt_tbl, p.arena()),
+                printer::print_expression(&state, &if_let_expr, &mut cmt_tbl, p.arena()),
             ]),
         ])
         .to_string(80);
@@ -4007,33 +3997,6 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     }
 
     if_let_expr
-}
-
-/// Create the @warning "-4" attribute to suppress fragile match warnings.
-/// OCaml `suppress_fragile_match_warning_attr` (res_core.ml:269-275) is built
-/// once with `Location.mknoloc` and default-location helpers.
-fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
-    use super::ast::*;
-    let loc = LocIdx::none();
-    let warning_str_idx = p.arena_mut().intern("warning");
-    let warning_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-            "-4",
-        )))),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-    let warning_expr_idx = p.arena_mut().push_expr(warning_expr);
-    (
-        mknoloc(warning_str_idx),
-        Payload::PStr(Box::new(vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                warning_expr_idx,
-                Attributes::new(),
-            )))),
-            pstr_loc: loc,
-        }])),
-    )
 }
 
 /// Legacy entry point for if expressions - wraps parse_if_or_if_let_expression.

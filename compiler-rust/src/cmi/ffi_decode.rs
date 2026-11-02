@@ -231,8 +231,8 @@ pub fn inline_const(value: &OcamlValue) -> Option<InlineConst> {
         (0, [s]) => Some(InlineConst::ConstString(string(s)?)),
         (1, [b]) => Some(InlineConst::ConstBool(int(b)? != 0)),
         (2, [i]) => Some(InlineConst::ConstInt(int(i)? as i32)),
-        (3, [negative, digits]) => Some(InlineConst::ConstBigint {
-            negative: int(negative)? != 0,
+        (3, [positive, digits]) => Some(InlineConst::ConstBigint {
+            positive: int(positive)? != 0,
             digits: string(digits)?,
         }),
         (4, [f]) => Some(InlineConst::ConstFloat(string(f)?)),

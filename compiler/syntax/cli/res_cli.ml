@@ -39,7 +39,7 @@ end = struct
       ("-recover", Arg.Unit (fun () -> recover := true), "Emit partial ast");
       ( "-print",
         Arg.String (fun txt -> print := txt),
-        "Print either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens or res. Default: \
+        "Print either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens, doc or res. Default: \
          res" );
       ( "-width",
         Arg.Int (fun w -> width := w),
@@ -85,9 +85,10 @@ module Cli_arg_processor = struct
       | "comments" -> Res_ast_debugger.comments_print_engine
       | "tokens" -> Res_token_debugger.token_print_engine
       | "res" -> Res_driver.print_engine
+      | "doc" -> Res_ast_debugger.doc_print_engine
       | target ->
         print_endline
-          ("-print needs to be either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens \
+          ("-print needs to be either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens, doc \
             or res. You provided " ^ target);
         exit 1
     in

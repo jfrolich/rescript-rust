@@ -1060,10 +1060,7 @@ impl LambdaCompiler {
         if apply.ap_info.status == ApplyStatus::Na {
             if let Lambda::Lapply(inner) = apply.ap_func.as_ref() {
                 if inner.ap_info.status == ApplyStatus::Na {
-                    let mut ap_info = apply.ap_info.clone();
-                    if ap_info.inlined != inner.ap_info.inlined {
-                        ap_info.inlined = inner.ap_info.inlined;
-                    }
+                    let ap_info = apply.ap_info.clone();
 
                     let mut args = inner.ap_args.clone();
                     args.extend(apply.ap_args.iter().cloned());

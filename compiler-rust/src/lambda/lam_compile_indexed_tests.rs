@@ -2,7 +2,7 @@ use super::*;
 use crate::ident::IdentFlags;
 use crate::js_ir::printer::{print_block, print_expression};
 use crate::lambda::FieldDbgInfo;
-use crate::lambda::{FunctionAttribute, InlineAttribute};
+use crate::lambda::FunctionAttribute;
 
 // A closed test continuation for the families moved so far. There is no
 // production catch-all or compatibility fallback. Every recursive edge in
@@ -66,7 +66,6 @@ fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> La
         ap_args: args,
         ap_info: ApInfo {
             loc: Location::new_for_error("caller.res", 10, 20),
-            inlined: InlineAttribute::Default,
             status,
         },
         ap_transformed_jsx: jsx,
@@ -266,7 +265,6 @@ fn normal_calls_visit_arguments_then_function_rtl_but_emit_source_order() {
             ap_info: ApInfo {
                 loc: Location::none(),
                 status: ApplyStatus::Uncurry,
-                inlined: InlineAttribute::Default,
             },
             ap_transformed_jsx: false,
         })),

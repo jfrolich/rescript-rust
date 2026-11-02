@@ -388,8 +388,6 @@ let primitive ~with_locs (prim : Lambda.primitive) =
   | Parrayrefu -> Sexp.atom "Parrayrefu"
   | Parraysetu -> Sexp.atom "Parraysetu"
   | Parrayrefs -> Sexp.atom "Parrayrefs"
-  | Parraysets -> Sexp.atom "Parraysets"
-  | Pisint -> Sexp.atom "Pisint"
   | Pis_poly_var_block -> Sexp.atom "Pis_poly_var_block"
   | Pawait -> Sexp.atom "Pawait"
   | Ptagged_template raw_sources ->
@@ -432,12 +430,12 @@ let rec lambda ~with_locs (lam : Lambda.t) =
   | Lglobal_module id -> Sexp.list [Sexp.atom "Lglobal_module"; ident id]
   | Lconst c ->
     Sexp.list [Sexp.atom "Lconst"; constant c]
-  | Lapply {ap_func; ap_args; ap_info; ap_transformed_jsx} ->
+  | Lapply {ap_func; ap_args; ap_loc; ap_transformed_jsx} ->
     Sexp.list [
       Sexp.atom "Lapply";
       lambda ~with_locs ap_func;
       Sexp.list (List.map (lambda ~with_locs) ap_args);
-      ap_info_sexp ~with_locs ap_info;
+      ap_info_sexp ~with_locs ap_loc;
       bool ap_transformed_jsx;
     ]
   | Lfunction {params; body; attr} ->
@@ -545,12 +543,9 @@ let rec lambda ~with_locs (lam : Lambda.t) =
   | Lfor_of _ -> Sexp.list [Sexp.atom "Lfor_of"]
   | Lfor_await_of _ -> Sexp.list [Sexp.atom "Lfor_await_of"]
 
-and ap_info_sexp ~with_locs (info : Lambda.ap_info) =
-  let loc_sexp = if with_locs then [location ~with_locs info.ap_loc] else [] in
-  Sexp.list ([
-    Sexp.atom "ap_info";
-    inline_attribute info.ap_inlined;
-  ] @ loc_sexp)
+and ap_info_sexp ~with_locs ap_loc =
+  let loc_sexp = if with_locs then [location ~with_locs ap_loc] else [] in
+  Sexp.list (Sexp.atom "ap_info" :: loc_sexp)
 
 and switch_key_sexp = function
   | Lambda.Switch_int value -> Sexp.list [Sexp.atom "Switch_int"; int value]

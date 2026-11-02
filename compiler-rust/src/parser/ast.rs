@@ -590,6 +590,8 @@ pub enum PatternDesc {
     Ppat_constraint(Box<(PatIdx, CoreTypeIdx)>),
     /// Type pattern: `#tconstr`.
     Ppat_type(Loc<LidentIdx>),
+    /// Variant spread: `...t`.
+    Ppat_variant_spread(Loc<LidentIdx>),
     /// Unpack: `module(P)`.
     Ppat_unpack(StringLoc),
     /// Exception: `exception P`.
@@ -964,6 +966,9 @@ pub enum ModuleExprDesc {
     Pmod_unpack(ExprIdx),
     /// Extension: `[%id]`.
     Pmod_extension(Box<Extension>),
+    /// `await ME`: a dynamic import when ME is a module path, possibly
+    /// constrained; elsewhere it has no effect.
+    Pmod_await(ModExprIdx),
 }
 
 /// A module type.

@@ -229,8 +229,8 @@ impl<'a> Mapper<'a> {
 
     // ========== Helper functions ==========
 
-    fn mk_await_attr(&mut self) -> pt0::Attribute {
-        let loc = self.arena.none_loc();
+    /// The `res.await` marker, carrying the await node's location.
+    fn mk_await_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
         (
             OldLocated::new("res.await".to_string(), self.loc(loc)),
             pt0::Payload::PStr(vec![]),
@@ -734,6 +734,18 @@ impl<'a> Mapper<'a> {
 
     pub fn map_pattern(&mut self, pat: &current::Pattern) -> pt0::Pattern {
         let mut attrs = self.map_attributes(&pat.ppat_attributes);
+        // ast_mapper_to0.ml P.map Ppat_variant_spread: v0 has no variant
+        // spread pattern, it is `#...t` with a `res.patVariantSpread` marker.
+        if let current::PatternDesc::Ppat_variant_spread(_) = &*pat.ppat_desc {
+            let noloc = self.noloc();
+            attrs.insert(
+                0,
+                (
+                    OldLocated::new("res.patVariantSpread".to_string(), noloc),
+                    pt0::Payload::PStr(vec![]),
+                ),
+            );
+        }
         // ast_mapper_to0.ml P.map Ppat_record: the rest row travels as an
         // internal `_res.record_rest` attribute carrying `rest` or
         // `(rest: t)`.
@@ -1109,6 +1121,11 @@ impl<'a> Mapper<'a> {
             current::PatternDesc::Ppat_type(lid) => {
                 pt0::PatternDesc::Type(self.map_longident_loc(lid))
             }
+            // v0 has no variant spread pattern: it's `#...t` with a
+            // `res.patVariantSpread` marker, added by `map_pattern`.
+            current::PatternDesc::Ppat_variant_spread(lid) => {
+                pt0::PatternDesc::Type(self.map_longident_loc(lid))
+            }
             current::PatternDesc::Ppat_unpack(s) => {
                 pt0::PatternDesc::Unpack(self.map_string_loc(s))
             }
@@ -1135,10 +1152,11 @@ impl<'a> Mapper<'a> {
         if let current::ExpressionDesc::Pexp_await(inner_idx) = &*expr.pexp_desc {
             // ast_mapper_to0.ml Pexp_await: one v0 attribute slot for two
             // nodes, the await node's own attributes in front of the
-            // `res.await` marker and the inner expression's after it.
+            // `res.await` marker and the inner expression's after it. The
+            // marker carries the await node's location.
             let mut attrs = self.map_attributes(&expr.pexp_attributes);
             let mut inner = self.map_expr_idx(*inner_idx);
-            attrs.push(self.mk_await_attr());
+            attrs.push(self.mk_await_attr(expr.pexp_loc));
             attrs.append(&mut inner.pexp_attributes);
             inner.pexp_attributes = attrs;
             return inner;
@@ -2082,6 +2100,17 @@ impl<'a> Mapper<'a> {
     // ========== Module expressions ==========
 
     fn map_module_expr(&mut self, me: &current::ModuleExpr) -> pt0::ModuleExpr {
+        if let current::ModuleExprDesc::Pmod_await(inner_idx) = &*me.pmod_desc {
+            // ast_mapper_to0.ml Pmod_await: one v0 attribute slot for two
+            // nodes, in the order of the legacy attribute encoding: the inner
+            // module's attributes, the `res.await` marker (carrying the await
+            // node's location), then the await node's own attributes.
+            let attrs = self.map_attributes(&me.pmod_attributes);
+            let mut inner = self.map_mod_expr_idx(*inner_idx);
+            inner.pmod_attributes.push(self.mk_await_attr(me.pmod_loc));
+            inner.pmod_attributes.extend(attrs);
+            return inner;
+        }
         pt0::ModuleExpr {
             pmod_desc: self.map_module_expr_desc(&me.pmod_desc),
             pmod_loc: self.loc(me.pmod_loc),
@@ -2122,6 +2151,9 @@ impl<'a> Mapper<'a> {
             }
             current::ModuleExprDesc::Pmod_extension(ext) => {
                 pt0::ModuleExprDesc::Extension(self.map_extension(ext))
+            }
+            current::ModuleExprDesc::Pmod_await(_) => {
+                unreachable!("Pmod_await is folded into its operand by map_module_expr")
             }
         }
     }

@@ -132,8 +132,6 @@ pub enum InlineAttribute {
 pub struct ApInfo {
     /// Source location
     pub loc: Location,
-    /// Inline hint
-    pub inlined: InlineAttribute,
     /// Application status
     pub status: ApplyStatus,
 }

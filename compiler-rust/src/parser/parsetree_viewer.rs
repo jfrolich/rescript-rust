@@ -80,36 +80,13 @@ pub fn is_if_then_else_expr(expr: &Expression) -> bool {
     matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(_))
 }
 
-/// Check if attributes contain the "res.iflet" marker.
-pub fn has_if_let_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.iflet")
-}
-
-/// Check if an expression is an "if let" expression.
-/// This is a `Pexp_match` with the `res.iflet` attribute.
-pub fn is_if_let_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_match(_))
-        && has_if_let_attribute(arena, &expr.pexp_attributes)
-}
-
-/// Represents the kind of condition in an if-chain.
-#[derive(Debug)]
-pub enum IfConditionKind<'a> {
-    /// Regular if condition: `if expr { ... }`
-    If(&'a Expression),
-    /// If-let pattern matching: `if let pattern = expr { ... }`
-    IfLet(&'a Pattern, &'a Expression),
-}
-
 /// Collect all the branches of an if-expression chain.
-/// Returns a list of (location, condition_kind, then_expr) tuples and the final else expression.
+/// Returns a list of (location, condition, then_expr) tuples and the final else expression.
 pub fn collect_if_expressions<'a>(
     arena: &'a crate::parse_arena::ParseArena,
     expr: &'a Expression,
 ) -> (
-    Vec<(&'a LocIdx, IfConditionKind<'a>, &'a Expression)>,
+    Vec<(&'a LocIdx, &'a Expression, &'a Expression)>,
     Option<&'a Expression>,
 ) {
     let mut acc = Vec::new();
@@ -123,50 +100,11 @@ pub fn collect_if_expressions<'a>(
                 let (ref if_idx, ref then_idx, ref opt_else) = **inner;
                 let if_expr: &Expression = arena.get_expr(*if_idx);
                 let then_expr: &Expression = arena.get_expr(*then_idx);
-                acc.push((expr_loc, IfConditionKind::If(if_expr), then_expr));
+                acc.push((expr_loc, if_expr, then_expr));
                 match opt_else {
                     Some(else_idx) => current = arena.get_expr(*else_idx),
                     None => return (acc, None),
                 }
-            }
-            // if let with no else (pattern matches unit constructor in else branch)
-            ExpressionDesc::Pexp_match(inner)
-                if is_if_let_expr(arena, current)
-                    && inner.1.len() == 2
-                    && inner.1[0].pc_guard.is_none()
-                    && matches!(
-                        &*arena.get_expr(inner.1[1].pc_rhs).pexp_desc,
-                        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
-                    ) =>
-            {
-                let (ref condition_idx, ref cases) = **inner;
-                let pattern: &Pattern = arena.get_pat(cases[0].pc_lhs);
-                let then_expr: &Expression = arena.get_expr(cases[0].pc_rhs);
-                let condition: &Expression = arena.get_expr(*condition_idx);
-                acc.push((
-                    expr_loc,
-                    IfConditionKind::IfLet(pattern, condition),
-                    then_expr,
-                ));
-                return (acc, None);
-            }
-            // if let with else branch
-            ExpressionDesc::Pexp_match(inner)
-                if is_if_let_expr(arena, current)
-                    && inner.1.len() == 2
-                    && inner.1[0].pc_guard.is_none() =>
-            {
-                let (ref condition_idx, ref cases) = **inner;
-                let pattern: &Pattern = arena.get_pat(cases[0].pc_lhs);
-                let then_expr: &Expression = arena.get_expr(cases[0].pc_rhs);
-                let else_expr: &Expression = arena.get_expr(cases[1].pc_rhs);
-                let condition: &Expression = arena.get_expr(*condition_idx);
-                acc.push((
-                    expr_loc,
-                    IfConditionKind::IfLet(pattern, condition),
-                    then_expr,
-                ));
-                current = else_expr;
             }
             // End of chain
             _ => {
@@ -902,37 +840,6 @@ pub fn fun_expr<'a>(
 // Attribute Processing
 // ============================================================================
 
-/// `Res_parsetree_viewer.filter_fragile_match_attributes`
-/// (res_parsetree_viewer.ml:506-521): drop the `@warning("-4")` that the
-/// parser attaches to if-let matches.
-pub fn filter_fragile_match_attributes<'a>(
-    arena: &ParseArena,
-    attrs: &'a Attributes,
-) -> Vec<&'a Attribute> {
-    attrs
-        .iter()
-        .filter(|attr| {
-            if arena.get_string(attr.0.txt) != "warning" {
-                return true;
-            }
-            let Payload::PStr(items) = &attr.1 else {
-                return true;
-            };
-            let [item] = items.as_slice() else {
-                return true;
-            };
-            let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
-                return true;
-            };
-            !matches!(
-                &*arena.get_expr(inner.0).pexp_desc,
-                ExpressionDesc::Pexp_constant(constant)
-                    if matches!(&**constant, Constant::String(s) if s.semantic() == "-4")
-            )
-        })
-        .collect()
-}
-
 /// Check if expression has spread attribute (...).
 pub fn has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
     attrs
@@ -970,7 +877,8 @@ fn is_primitive_spread(arena: &ParseArena, expr: &Expression, module_name: &str)
         && has_spread_attr(arena, &expr.pexp_attributes)
 }
 
-/// Filter out parsing-only attributes (res.braces, res.ternary, res.await, etc.)
+/// Filter out the attributes the parser adds to encode syntax; they are
+/// never printed.
 pub fn filter_parsing_attrs<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
     filter_parsing_attrs_slice(arena, attrs.as_slice())
 }
@@ -991,12 +899,7 @@ pub fn filter_parsing_attrs_slice<'a>(
 pub fn is_parsing_attr(arena: &ParseArena, attr: &Attribute) -> bool {
     matches!(
         arena.get_string(attr.0.txt),
-        "res.iflet"
-            | "res.ternary"
-            | "res.await"
-            | "res.patVariantSpread"
-            | "res.dictPattern"
-            | "res.dictSpread"
+        "res.dictPattern" | "res.dictSpread"
     )
 }
 
@@ -1005,51 +908,15 @@ pub fn has_non_parsing_attrs(arena: &ParseArena, attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| !is_parsing_attr(arena, attr))
 }
 
-/// Check if an attribute is printable (not an internal parsing attribute).
-pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
-    !matches!(
-        arena.get_string(attr.0.txt),
-        "res.iflet" | "res.await" | "res.ternary" | "res.dictPattern"
-    )
-}
-
 /// Check if attributes contain any printable attributes.
 pub fn has_printable_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs.iter().any(|a| is_printable_attribute(arena, a))
+    has_non_parsing_attrs(arena, attrs.as_slice())
 }
 
-/// Check if expression has any attributes (excluding internal parsing ones).
-pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs.iter().any(|attr| {
-        let name = arena.get_string(attr.0.txt);
-        if matches!(name, "res.iflet" | "res.ternary" | "res.await") {
-            return false;
-        }
-        // res_parsetree_viewer.ml:395-405: the fragile-match warning of an
-        // if-let does not count.
-        if name == "warning" && is_fragile_match_warning_payload(arena, &attr.1) {
-            return !has_if_let_attribute(arena, attrs);
-        }
-        true
-    })
-}
-
-/// `PStr [Pstr_eval (Pexp_constant (Pconst_string ("-4", None)), _)]`.
-fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bool {
-    let Payload::PStr(items) = payload else {
-        return false;
-    };
-    let [item] = items.as_slice() else {
-        return false;
-    };
-    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
-        return false;
-    };
-    matches!(
-        &*arena.get_expr(inner.0).pexp_desc,
-        ExpressionDesc::Pexp_constant(constant)
-            if matches!(&**constant, Constant::String(s) if s.semantic() == "-4")
-    )
+/// Attributes on a module expression print before it and bind less tightly
+/// than an application or a constraint.
+pub fn mod_expr_has_attributes(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
+    has_printable_attributes(arena, &mod_expr.pmod_attributes)
 }
 
 // ============================================================================
@@ -1291,7 +1158,11 @@ pub fn mod_expr_apply<'a>(
         mod_expr: &'a ModuleExpr,
     ) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
         match &*mod_expr.pmod_desc {
-            ModuleExprDesc::Pmod_apply(next_idx, arg_idx) => {
+            // An inner application with attributes is kept as the callee, so
+            // the printer can parenthesize it with its attributes.
+            ModuleExprDesc::Pmod_apply(next_idx, arg_idx)
+                if acc.is_empty() || !mod_expr_has_attributes(arena, mod_expr) =>
+            {
                 let arg: &ModuleExpr = arena.get_mod_expr(*arg_idx);
                 let next: &ModuleExpr = arena.get_mod_expr(*next_idx);
                 let mut new_acc = vec![arg];
@@ -1347,13 +1218,6 @@ pub fn mod_expr_functor<'a>(
     }
     let (params, body) = loop_functor(arena, Vec::new(), mod_expr);
     (params, body)
-}
-
-/// Check if attributes contain the await attribute.
-pub fn has_await_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.await")
 }
 
 // ============================================================================

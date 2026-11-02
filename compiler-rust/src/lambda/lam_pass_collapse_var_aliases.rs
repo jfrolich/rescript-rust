@@ -4,9 +4,9 @@
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
+use crate::lambda::Lambda;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lambda_traverse::{Mapped, shallow_map_sharing};
-use crate::lambda::Lambda;
 
 fn resolve(tbl: &HashMap<Ident, Ident>, id: &Ident) -> Ident {
     let mut id = id;

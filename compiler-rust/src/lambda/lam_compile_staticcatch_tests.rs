@@ -12,7 +12,6 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
             vec![Lambda::var(message)],
             ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             false,
@@ -93,7 +92,6 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -108,7 +106,6 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -203,7 +200,6 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                                 ap_args: vec![Lambda::var(acc)],
                                 ap_info: ApInfo {
                                     loc: Location::none(),
-                                    inlined: InlineAttribute::Default,
                                     status: ApplyStatus::Na,
                                 },
                                 ap_transformed_jsx: false,
@@ -218,7 +214,6 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                         ap_args: vec![Lambda::var(next_acc)],
                         ap_info: ApInfo {
                             loc: Location::none(),
-                            inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
@@ -318,7 +313,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                     ap_args: vec![Lambda::var(inc)],
                                                     ap_info: ApInfo {
                                                         loc: Location::none(),
-                                                        inlined: InlineAttribute::Default,
                                                         status: ApplyStatus::Na,
                                                     },
                                                     ap_transformed_jsx: false,
@@ -362,8 +356,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                             )],
                                                             ap_info: ApInfo {
                                                                 loc: Location::none(),
-                                                                inlined:
-                                                                    InlineAttribute::Default,
                                                                 status: ApplyStatus::Na,
                                                             },
                                                             ap_transformed_jsx: false,
@@ -385,7 +377,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                             ap_args: vec![cons],
                                             ap_info: ApInfo {
                                                 loc: Location::none(),
-                                                inlined: InlineAttribute::Default,
                                                 status: ApplyStatus::Na,
                                             },
                                             ap_transformed_jsx: false,
@@ -399,7 +390,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                             ap_args: vec![Lambda::const_(Constant::int(0))],
                             ap_info: ApInfo {
                                 loc: Location::none(),
-                                inlined: InlineAttribute::Default,
                                 status: ApplyStatus::Na,
                             },
                             ap_transformed_jsx: false,
@@ -688,7 +678,6 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                 vec![Lambda::const_(Constant::int(0))],
                 ApInfo {
                     loc: Location::none(),
-                    inlined: InlineAttribute::Default,
                     status: ApplyStatus::Uncurry,
                 },
                 false,
@@ -823,7 +812,6 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
             vec![Lambda::var(kind)],
             ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             false,

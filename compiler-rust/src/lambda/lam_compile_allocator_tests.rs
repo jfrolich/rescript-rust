@@ -1,5 +1,5 @@
 use super::*;
-use crate::lambda::{FunctionAttribute, InlineAttribute};
+use crate::lambda::FunctionAttribute;
 
 #[test]
 fn shared_generator_is_the_actual_js_temporary_allocator() {
@@ -117,7 +117,6 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
         vec![argument],
         ApInfo {
             loc: Location::new_for_error("caller.res", 10, 20),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         true,
@@ -178,7 +177,6 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
         vec![Lambda::unit()],
         ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         false,

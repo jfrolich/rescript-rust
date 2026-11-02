@@ -125,7 +125,6 @@ impl LoweringContext {
             lowered_args,
             ApInfo {
                 loc: ap_info.loc,
-                inlined: ap_info.inlined,
                 status: ApplyStatus::Uncurry,
             },
             ap_transformed_jsx,
@@ -305,7 +304,6 @@ pub(crate) fn wrap_exn_raw(loc: Location, arg: RawLambda) -> RawLambda {
         ap_args: vec![arg],
         ap_info: ApInfo {
             loc,
-            inlined: crate::lambda::InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,
@@ -332,7 +330,6 @@ pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
         vec![arg],
         ApInfo {
             loc,
-            inlined: crate::lambda::InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
         false,
@@ -1115,7 +1112,6 @@ pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
 mod tests {
     use super::*;
 
-    use crate::lambda::InlineAttribute;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
     use crate::lambda::lam_primitive::{JsRawInfo, Mutable};
@@ -1147,7 +1143,6 @@ mod tests {
             ap_args: vec![RawLambda::var(arg)],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -1181,7 +1176,6 @@ mod tests {
             ap_args: vec![RawLambda::var(lhs), RawLambda::var(rhs)],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,

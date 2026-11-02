@@ -1958,8 +1958,9 @@ fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> 
         InlineConst::ConstString(s) => print_string_literal_doc(s),
         InlineConst::ConstBool(b) => Doc::text(if *b { "true" } else { "false" }),
         InlineConst::ConstInt(i) => Doc::text(i.to_string()),
-        InlineConst::ConstBigint { negative, digits } => {
-            Doc::text(format!("{}{}n", if *negative { "-" } else { "" }, digits))
+        // res_outcome_printer.ml: `(if positive then "" else "-") ^ digits ^ "n"`.
+        InlineConst::ConstBigint { positive, digits } => {
+            Doc::text(format!("{}{}n", if *positive { "" } else { "-" }, digits))
         }
         InlineConst::ConstFloat(f) => Doc::text(f.clone()),
     }

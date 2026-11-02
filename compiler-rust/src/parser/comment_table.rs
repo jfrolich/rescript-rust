@@ -3130,7 +3130,7 @@ fn walk_pattern(
             walk_core_type(&typ, t, inside, arena);
             t.attach_trailing(typ_loc, after, arena);
         }
-        PatternDesc::Ppat_type(lid) => {
+        PatternDesc::Ppat_type(lid) | PatternDesc::Ppat_variant_spread(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
             t.attach_trailing(lid.loc, trailing, arena);
@@ -3612,6 +3612,10 @@ fn walk_module_expr(
         }
         ModuleExprDesc::Pmod_extension(ext) => {
             walk_extension(ext, t, comments, arena);
+        }
+        ModuleExprDesc::Pmod_await(inner) => {
+            let inner = arena.get_mod_expr(*inner).clone();
+            walk_module_expr(&inner, t, comments, arena);
         }
     }
 }

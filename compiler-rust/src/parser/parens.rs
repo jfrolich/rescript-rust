@@ -134,9 +134,7 @@ pub fn structure_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(_) => ParenKind::Nothing,
-        _ if parsetree_viewer::has_attributes(arena, &expr.pexp_attributes) => {
-            ParenKind::Parenthesized
-        }
+        _ if !expr.pexp_attributes.is_empty() => ParenKind::Parenthesized,
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
         ExpressionDesc::Pexp_constraint(_) | ExpressionDesc::Pexp_coerce(_) => {
             ParenKind::Parenthesized
@@ -721,9 +719,27 @@ pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
     }
 }
 
-/// Check if include module expression needs parentheses.
-pub fn include_mod_expr(mod_expr: &ModuleExpr) -> bool {
+/// A constraint that needs parens where `M: S` would not parse or would mean
+/// something else, e.g. after `include` or `module type of`. With attributes
+/// it prints its own.
+pub fn mod_constraint(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
     matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(_, _))
+        && !parsetree_viewer::mod_expr_has_attributes(arena, mod_expr)
+}
+
+/// An applied module expression that needs parens: `(M: S)(X)`,
+/// `((Y) => M)(X)`, `(%ext)(X)`, `(await M)(X)`, and with attributes, which
+/// would otherwise apply to the whole application.
+pub fn mod_apply_callee(arena: &ParseArena, callee: &ModuleExpr) -> bool {
+    match &*callee.pmod_desc {
+        ModuleExprDesc::Pmod_constraint(..)
+        | ModuleExprDesc::Pmod_functor(..)
+        | ModuleExprDesc::Pmod_await(..) => true,
+        ModuleExprDesc::Pmod_extension(ext) if matches!(&ext.1, Payload::PStr(items) if items.is_empty()) => {
+            true
+        }
+        _ => parsetree_viewer::mod_expr_has_attributes(arena, callee),
+    }
 }
 
 /// Check if module expression needs parentheses.

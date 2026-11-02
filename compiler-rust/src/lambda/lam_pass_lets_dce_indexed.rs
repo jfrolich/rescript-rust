@@ -499,7 +499,6 @@ mod tests {
                 vec![int(2)],
                 crate::lambda::ApInfo {
                     loc: Location::new_for_error("lets.res", 3, 4),
-                    inlined: crate::lambda::InlineAttribute::Default,
                     status: crate::lambda::ApplyStatus::Na,
                 },
                 true,
@@ -537,7 +536,6 @@ mod tests {
             (0..65).map(int).collect(),
             crate::lambda::ApInfo {
                 loc: Location::none(),
-                inlined: crate::lambda::InlineAttribute::Default,
                 status: crate::lambda::ApplyStatus::Na,
             },
             false,
@@ -669,7 +667,6 @@ mod tests {
                 vec![int(1)],
                 crate::lambda::ApInfo {
                     loc: Location::new_for_error("pipeline.res", 10, 20),
-                    inlined: crate::lambda::InlineAttribute::Default,
                     status: crate::lambda::ApplyStatus::Na,
                 },
                 true,
@@ -707,7 +704,6 @@ mod tests {
                     vec![int(1), Lambda::var(expected_param)],
                     crate::lambda::ApInfo {
                         loc: Location::new_for_error("pipeline.res", 10, 20),
-                        inlined: crate::lambda::InlineAttribute::Default,
                         status: crate::lambda::ApplyStatus::InferFull,
                     },
                     false,

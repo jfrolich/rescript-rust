@@ -920,7 +920,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_pat_idx_inner(pat_idx, unpack_names);
                 self.add_core_type_idx(*ty);
             }
-            PatternDesc::Ppat_type(lid) => {
+            PatternDesc::Ppat_type(lid) | PatternDesc::Ppat_variant_spread(lid) => {
                 self.add_lident_idx(lid.txt);
             }
             PatternDesc::Ppat_unpack(name) => {
@@ -1079,6 +1079,10 @@ impl<'a> DependencyCollector<'a> {
             }
             ModuleExprDesc::Pmod_extension(ext) => {
                 self.handle_extension(ext);
+            }
+            ModuleExprDesc::Pmod_await(me) => {
+                let me = *me;
+                self.add_mod_expr_idx(me);
             }
         }
     }

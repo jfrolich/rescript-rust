@@ -69,8 +69,7 @@ impl<'a> IndexedJsConsumer<'a> {
                 NodeView::Apply(inner, inner_args, inner_info, _)
                     if inner_info.status == ApplyStatus::Na =>
                 {
-                    let mut merged_info = info.clone();
-                    merged_info.inlined = inner_info.inlined;
+                    let merged_info = info.clone();
                     let mut args = inner_args.to_vec();
                     let NodeView::Apply(_, outer_args, _, _) =
                         self.context.store().view(application)

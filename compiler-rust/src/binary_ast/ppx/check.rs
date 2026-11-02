@@ -469,6 +469,7 @@ impl<'a> Checker<'a> {
             }
             ModuleExprDesc::Pmod_unpack(expr) => self.expr(*expr),
             ModuleExprDesc::Pmod_extension(extension) => self.extension(extension),
+            ModuleExprDesc::Pmod_await(inner) => self.module_expr(*inner),
         }
     }
 
@@ -612,6 +613,7 @@ impl<'a> Checker<'a> {
             | PatternDesc::Ppat_constant(_)
             | PatternDesc::Ppat_interval(_)
             | PatternDesc::Ppat_type(_)
+            | PatternDesc::Ppat_variant_spread(_)
             | PatternDesc::Ppat_unpack(_) => Ok(()),
             PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
                 self.pat(*inner)

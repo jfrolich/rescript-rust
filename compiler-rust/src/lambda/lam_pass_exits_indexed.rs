@@ -615,7 +615,6 @@ mod tests {
                     ap_args: vec![Lambda::true_()],
                     ap_info: crate::lambda::ApInfo {
                         loc: loc,
-                        inlined: crate::lambda::InlineAttribute::Default,
                         status: crate::lambda::ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -638,7 +637,6 @@ mod tests {
                     ap_args: vec![Lambda::true_()],
                     ap_info: crate::lambda::ApInfo {
                         loc: loc,
-                        inlined: crate::lambda::InlineAttribute::Default,
                         status: crate::lambda::ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -685,14 +683,12 @@ mod tests {
                 ap_args: vec![Lambda::Lvar(parameter)],
                 ap_info: crate::lambda::ApInfo {
                     loc: inner_loc,
-                    inlined: crate::lambda::InlineAttribute::Never,
                     status: crate::lambda::ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx: true,
             }))],
             ap_info: crate::lambda::ApInfo {
                 loc: outer_loc,
-                inlined: crate::lambda::InlineAttribute::Always,
                 status: crate::lambda::ApplyStatus::InferFull,
             },
             ap_transformed_jsx: true,
@@ -734,7 +730,6 @@ mod tests {
                 ap_args: vec![],
                 ap_info: crate::lambda::ApInfo {
                     loc: Location::none(),
-                    inlined: crate::lambda::InlineAttribute::Default,
                     status: crate::lambda::ApplyStatus::Na,
                 },
                 ap_transformed_jsx: true,
@@ -795,7 +790,6 @@ mod tests {
                     ],
                     ap_info: crate::lambda::ApInfo {
                         loc: apply_loc,
-                        inlined: crate::lambda::InlineAttribute::Never,
                         status: crate::lambda::ApplyStatus::Uncurry,
                     },
                     ap_transformed_jsx: true,
@@ -851,7 +845,6 @@ mod tests {
                     ap_args: vec![Lambda::Lvar(parameter)],
                     ap_info: crate::lambda::ApInfo {
                         loc: Location::none(),
-                        inlined: crate::lambda::InlineAttribute::Always,
                         status: crate::lambda::ApplyStatus::InferFull,
                     },
                     ap_transformed_jsx: true,

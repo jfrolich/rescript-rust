@@ -10,24 +10,22 @@ type action =
   | Rename(string)
   | Pair((int, string))
 
-@deriving(abstract)
 type config = {
   name: string,
   count: int,
-  @optional transform: int => int,
+  transform?: int => int,
 }
 
-@deriving({abstract: light})
 type lightConfig = {
   enabled: bool,
-  @optional label: string,
+  label?: string,
 }
 
 let pointValue = {x: 2, y: 3}
 
-let configValue = config(~name="root", ~count=4, ~transform=value => value + 1, ())
+let configValue = {name: "root", count: 4, transform: value => value + 1}
 
-let lightValue = lightConfig(~enabled=true, ~label="visible", ())
+let lightValue = {enabled: true, label: "visible"}
 
 let actionValue = Pair((5, "five"))
 
@@ -37,12 +35,12 @@ let allValues = (
   rename("next"),
   pair((1, "one")),
   actionValue,
-  nameGet(configValue),
-  countGet(configValue),
-  switch transformGet(configValue) {
+  configValue.name,
+  configValue.count,
+  switch configValue.transform {
   | Some(transform) => transform(9)
   | None => 0
   },
-  enabled(lightValue),
-  label(lightValue),
+  lightValue.enabled,
+  lightValue.label,
 )

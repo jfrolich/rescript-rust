@@ -356,15 +356,6 @@ fn function_attribute<W: Write>(f: &mut Formatter<W>, attr: &FunctionAttribute) 
     }
 }
 
-/// `apply_inlined_attribute`.
-fn apply_inlined_attribute<W: Write>(f: &mut Formatter<W>, attr: InlineAttribute) {
-    match attr {
-        InlineAttribute::Default => {}
-        InlineAttribute::Always => f.string(" always_inline"),
-        InlineAttribute::Never => f.string(" never_inline"),
-    }
-}
-
 fn let_kind(kind: LetKind) -> &'static str {
     match kind {
         LetKind::Alias => "a",
@@ -459,7 +450,6 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
                 f.space();
                 lam(f, arg);
             }
-            apply_inlined_attribute(f, ap.ap_info.inlined);
             f.string(")");
             f.close_box();
         }

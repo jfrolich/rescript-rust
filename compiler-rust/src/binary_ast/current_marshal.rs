@@ -1168,9 +1168,10 @@ impl Marshal for PatternDesc {
         // Ppat_or = tag 9
         // Ppat_constraint = tag 10
         // Ppat_type = tag 11
-        // Ppat_unpack = tag 12
-        // Ppat_exception = tag 13
-        // Ppat_extension = tag 14
+        // Ppat_variant_spread = tag 12
+        // Ppat_unpack = tag 13
+        // Ppat_exception = tag 14
+        // Ppat_extension = tag 15
         match self {
             PatternDesc::Ppat_any => w.write_int(0),
             PatternDesc::Ppat_var(s) => {
@@ -1233,16 +1234,20 @@ impl Marshal for PatternDesc {
                 w.write_block_header(11, 1);
                 lid.marshal(w);
             }
-            PatternDesc::Ppat_unpack(s) => {
+            PatternDesc::Ppat_variant_spread(lid) => {
                 w.write_block_header(12, 1);
+                lid.marshal(w);
+            }
+            PatternDesc::Ppat_unpack(s) => {
+                w.write_block_header(13, 1);
                 s.marshal(w);
             }
             PatternDesc::Ppat_exception(p) => {
-                w.write_block_header(13, 1);
+                w.write_block_header(14, 1);
                 p.marshal(w);
             }
             PatternDesc::Ppat_extension(ext) => {
-                w.write_block_header(14, 1);
+                w.write_block_header(15, 1);
                 ext.marshal(w);
             }
         }
@@ -1937,6 +1942,10 @@ impl Marshal for ModuleExprDesc {
             ModuleExprDesc::Pmod_extension(ext) => {
                 w.write_block_header(6, 1);
                 ext.marshal(w);
+            }
+            ModuleExprDesc::Pmod_await(me) => {
+                w.write_block_header(7, 1);
+                me.marshal(w);
             }
         }
     }

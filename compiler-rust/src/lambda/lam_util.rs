@@ -306,7 +306,6 @@ mod tests {
             ap_args: vec![Lambda::Lvar(x)],
             ap_info: crate::lambda::ApInfo {
                 loc: Location::none(),
-                inlined: crate::lambda::InlineAttribute::Default,
                 status: crate::lambda::ApplyStatus::Na,
             },
             ap_transformed_jsx: false,

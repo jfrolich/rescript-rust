@@ -570,7 +570,6 @@ pub struct RawLambdaConverter<'a> {
     diagnostic: Option<RawLambdaDiagnostic>,
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
-    suppress_inlined_attribute_check: usize,
     preserve_expanded_sparse_records: bool,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     hoisted_exports: Vec<crate::lambda::HoistedExport>,
@@ -598,7 +597,6 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -627,7 +625,6 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -657,7 +654,6 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -688,7 +684,6 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
@@ -1504,21 +1499,6 @@ impl<'a> RawLambdaConverter<'a> {
         self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
     }
 
-    fn get_inlined_attribute_from(
-        &mut self,
-        attrs: &crate::parser::ast::Attributes,
-    ) -> InlineAttribute {
-        let idx = self.find_inline_attribute_index(attrs, "inlined");
-        self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
-    }
-
-    fn with_inlined_attribute_check_suppressed<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.suppress_inlined_attribute_check += 1;
-        let result = f(self);
-        self.suppress_inlined_attribute_check -= 1;
-        result
-    }
-
     /// Mirrors `Translattribute.check_attribute` for expression attributes.
     fn check_expr_attribute(&mut self, expr: &Expression) {
         for (located_name, _) in expr.exp_attributes.iter() {
@@ -1534,10 +1514,8 @@ impl<'a> RawLambdaConverter<'a> {
                         );
                     }
                 }
+                // Call-site inlining hints are not supported.
                 "inlined" => {
-                    if self.suppress_inlined_attribute_check > 0 {
-                        continue;
-                    }
                     self.report_warning(
                         located_name.loc,
                         Warning::MisplacedAttribute {
@@ -1565,10 +1543,8 @@ impl<'a> RawLambdaConverter<'a> {
                         );
                     }
                 }
+                // Call-site inlining hints are not supported.
                 "inlined" => {
-                    if self.suppress_inlined_attribute_check > 0 {
-                        continue;
-                    }
                     self.report_warning(
                         located_name.loc,
                         Warning::MisplacedAttribute {
@@ -2447,10 +2423,9 @@ impl<'a> RawLambdaConverter<'a> {
                 i: *i,
                 comment: None,
             },
-            // The `negative` field holds `Bigint_utils.parse_bigint`'s sign
-            // flag, true for a positive literal (ast_external_mk.ml).
-            InlineConst::ConstBigint { negative, digits } => Constant::BigInt {
-                negative: !*negative,
+            // translcore.ml: `Const_bigint {positive; digits}`.
+            InlineConst::ConstBigint { positive, digits } => Constant::BigInt {
+                negative: !*positive,
                 value: digits.clone(),
             },
             InlineConst::ConstFloat(f) => Constant::Float(f.clone()),
@@ -4503,7 +4478,6 @@ impl<'a> RawLambdaConverter<'a> {
                     ap_args: vec![arg],
                     ap_info: ApInfo {
                         loc,
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -4745,14 +4719,26 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// `Translmod.transl_module`: check the attributes and translate in
+    /// their warning scope, like `convert_expr_raw` does for expressions.
     fn convert_module_expr_raw_with_coercion(
         &mut self,
         module_expr: &ModuleExpr,
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        self.check_module_attribute(module_expr);
+        self.with_warning_scope(&module_expr.mod_attributes, |this| {
+            this.check_module_attribute(module_expr);
+            this.convert_module_expr_raw0(module_expr, rootpath, cc)
+        })
+    }
 
+    fn convert_module_expr_raw0(
+        &mut self,
+        module_expr: &ModuleExpr,
+        rootpath: &Option<crate::types::Path>,
+        cc: &ModuleCoercion,
+    ) -> RawLambda {
         if matches!(
             module_expr.mod_type,
             crate::types::decl::ModuleType::MtyAlias(_, _)
@@ -4841,20 +4827,16 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
                 let loc = self.loc(module_expr.mod_loc);
-                let inlined = self.get_inlined_attribute_from(&funct.mod_attributes);
-                let funct_lam = self.with_inlined_attribute_check_suppressed(|this| {
-                    this.convert_module_expr_raw_with_coercion(
-                        funct,
-                        &None,
-                        &ModuleCoercion::Tcoerce_none,
-                    )
-                });
+                let funct_lam = self.convert_module_expr_raw_with_coercion(
+                    funct,
+                    &None,
+                    &ModuleCoercion::Tcoerce_none,
+                );
                 let apply = RawLambda::Lapply(Box::new(crate::raw_lambda::RawApply {
                     ap_func: Box::new(funct_lam),
                     ap_args: vec![self.convert_module_expr_raw_with_coercion(arg, &None, ccarg)],
                     ap_info: ApInfo {
                         loc,
-                        inlined,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -7087,6 +7069,12 @@ impl<'a> RawLambdaConverter<'a> {
                         .take(prim_arity)
                         .all(|arg| arg.expression.is_some())
                 {
+                    // `funct` is not translated with `convert_expr_raw`, so
+                    // check its attributes here, in the warning scope it
+                    // would use (translcore.ml `Texp_apply` primitive case).
+                    self.with_warning_scope(&funct.exp_attributes, |this| {
+                        this.check_expr_attribute(funct)
+                    });
                     let (applied, rest) = args.split_at(prim_arity);
                     let applied_exprs = applied
                         .iter()
@@ -7111,8 +7099,7 @@ impl<'a> RawLambdaConverter<'a> {
                         return if rest.is_empty() {
                             base
                         } else {
-                            let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
-                            self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
+                            self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
                         };
                     }
                     let base = if matches!(raw_name, "%import" | "#import")
@@ -7175,16 +7162,13 @@ impl<'a> RawLambdaConverter<'a> {
                     return if rest.is_empty() {
                         base
                     } else {
-                        let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
-                        self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
+                        self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
                     };
                 }
             }
         }
 
-        let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
-        let funct_lam =
-            self.with_inlined_attribute_check_suppressed(|this| this.convert_expr_raw(funct));
+        let funct_lam = self.convert_expr_raw(funct);
         let uncurried_partial_application = if partial {
             self.env_for_expr(funct).and_then(|env| {
                 self.get_function_arity_from_type(env.as_ref(), funct.exp_type)
@@ -7203,7 +7187,6 @@ impl<'a> RawLambdaConverter<'a> {
             loc,
             transformed_jsx,
             uncurried_partial_application,
-            inlined,
         )
     }
 
@@ -7214,21 +7197,18 @@ impl<'a> RawLambdaConverter<'a> {
         loc: Location,
         transformed_jsx: bool,
         uncurried_partial_application: Option<i32>,
-        inlined: InlineAttribute,
     ) -> RawLambda {
         fn lapply(
             loc: Location,
             func: RawLambda,
             args: Vec<RawLambda>,
             transformed_jsx: bool,
-            inlined: InlineAttribute,
         ) -> RawLambda {
             RawLambda::Lapply(Box::new(crate::raw_lambda::RawApply {
                 ap_func: Box::new(func),
                 ap_args: args,
                 ap_info: ApInfo {
                     loc,
-                    inlined,
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: transformed_jsx,
@@ -7246,7 +7226,6 @@ impl<'a> RawLambdaConverter<'a> {
             mut pending: std::collections::VecDeque<(Option<RawLambda>, bool)>,
             loc: Location,
             transformed_jsx: bool,
-            inlined: InlineAttribute,
         ) -> RawLambda {
             match pending.pop_front() {
                 Some((None, optional)) => {
@@ -7279,7 +7258,6 @@ impl<'a> RawLambdaConverter<'a> {
                             lam,
                             args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
                             transformed_jsx,
-                            InlineAttribute::Default,
                         )
                     };
                     let handle = protect(conv, "func", applied, &mut defs);
@@ -7303,7 +7281,6 @@ impl<'a> RawLambdaConverter<'a> {
                         protected_tail,
                         loc,
                         transformed_jsx,
-                        inlined,
                     ) {
                         RawLambda::Lfunction(func) => {
                             RawLambda::Lfunction(Box::new(crate::raw_lambda::RawLFunction {
@@ -7328,14 +7305,13 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 Some((Some(arg), optional)) => {
                     args_rev.insert(0, (arg, optional));
-                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx, inlined)
+                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx)
                 }
                 None => lapply(
                     loc,
                     lam,
                     args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
                     transformed_jsx,
-                    inlined,
                 ),
             }
         }
@@ -7360,7 +7336,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
-                let body = lapply(loc, lam, ap_args, transformed_jsx, inlined);
+                let body = lapply(loc, lam, ap_args, transformed_jsx);
                 RawLambda::function_(
                     (none_ids.len() + extra_ids.len()) as i32,
                     none_ids.into_iter().chain(extra_ids).collect(),
@@ -7381,15 +7357,7 @@ impl<'a> RawLambdaConverter<'a> {
                         )
                     })
                     .collect::<Vec<_>>();
-                build_apply(
-                    self,
-                    lam,
-                    Vec::new(),
-                    pending.into(),
-                    loc,
-                    transformed_jsx,
-                    inlined,
-                )
+                build_apply(self, lam, Vec::new(), pending.into(), loc, transformed_jsx)
             }
         }
     }

@@ -504,6 +504,11 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             longident_idx(arena, lid.txt),
             location(lid.loc, arena),
         ]),
+        PatternDesc::Ppat_variant_spread(lid) => Sexp::list(vec![
+            Sexp::atom("Ppat_variant_spread"),
+            longident_idx(arena, lid.txt),
+            location(lid.loc, arena),
+        ]),
         PatternDesc::Ppat_unpack(name) => Sexp::list(vec![
             Sexp::atom("Ppat_unpack"),
             Sexp::atom(&quote_string(arena.get_string(name.txt))),
@@ -1306,6 +1311,10 @@ fn module_expression(me: &ModuleExpr, arena: &ParseArena) -> Sexp {
         ModuleExprDesc::Pmod_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Pmod_extension"), extension(ext, arena)])
         }
+        ModuleExprDesc::Pmod_await(m) => Sexp::list(vec![
+            Sexp::atom("Pmod_await"),
+            module_expression(arena.get_mod_expr(*m), arena),
+        ]),
     };
     Sexp::list(vec![
         Sexp::atom("module_expr"),

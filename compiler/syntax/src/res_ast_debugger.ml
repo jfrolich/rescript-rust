@@ -261,6 +261,8 @@ module Sexp_ast = struct
       | Pmod_unpack expr -> Sexp.list [Sexp.atom "Pmod_unpack"; expression expr]
       | Pmod_extension ext ->
         Sexp.list [Sexp.atom "Pmod_extension"; extension ext]
+      | Pmod_await mod_expr ->
+        Sexp.list [Sexp.atom "Pmod_await"; module_expression mod_expr]
     in
     Sexp.list [Sexp.atom "module_expr"; desc; attributes me.pmod_attributes]
 
@@ -742,7 +744,7 @@ module Sexp_ast = struct
       | Pexp_constraint (expr, typexpr) ->
         Sexp.list
           [Sexp.atom "Pexp_constraint"; expression expr; core_type typexpr]
-      | Pexp_coerce (expr, (), typexpr) ->
+      | Pexp_coerce (expr, typexpr) ->
         Sexp.list [Sexp.atom "Pexp_coerce"; expression expr; core_type typexpr]
       | Pexp_object_get (expr, {txt = name; _}) ->
         Sexp.list [Sexp.atom "Pexp_object_get"; string name; expression expr]
@@ -917,6 +919,11 @@ module Sexp_ast = struct
         Sexp.list [Sexp.atom "Ppat_constraint"; pattern p; core_type typexpr]
       | Ppat_type longident_loc ->
         Sexp.list [Sexp.atom "Ppat_type"; longident longident_loc.Location.txt]
+      | Ppat_variant_spread longident_loc ->
+        Sexp.list
+          [
+            Sexp.atom "Ppat_variant_spread"; longident longident_loc.Location.txt;
+          ]
       | Ppat_unpack string_loc ->
         Sexp.list [Sexp.atom "Ppat_unpack"; string string_loc.Location.txt]
       | Ppat_exception p -> Sexp.list [Sexp.atom "Ppat_exception"; pattern p]
@@ -1322,6 +1329,8 @@ module SexpAstWithLocs = struct
       | Pmod_unpack expr -> Sexp.list [Sexp.atom "Pmod_unpack"; expression expr]
       | Pmod_extension ext ->
         Sexp.list [Sexp.atom "Pmod_extension"; extension ext]
+      | Pmod_await mod_expr ->
+        Sexp.list [Sexp.atom "Pmod_await"; module_expression mod_expr]
     in
     Sexp.list [Sexp.atom "module_expr"; location me.pmod_loc; desc; attributes me.pmod_attributes]
 
@@ -1810,7 +1819,7 @@ module SexpAstWithLocs = struct
       | Pexp_constraint (expr, typexpr) ->
         Sexp.list
           [Sexp.atom "Pexp_constraint"; expression expr; core_type typexpr]
-      | Pexp_coerce (expr, (), typexpr) ->
+      | Pexp_coerce (expr, typexpr) ->
         Sexp.list [Sexp.atom "Pexp_coerce"; expression expr; core_type typexpr]
       | Pexp_object_get (expr, {txt = name; loc}) ->
         Sexp.list
@@ -2002,6 +2011,8 @@ module SexpAstWithLocs = struct
         Sexp.list [Sexp.atom "Ppat_constraint"; pattern p; core_type typexpr]
       | Ppat_type longident_loc ->
         Sexp.list [Sexp.atom "Ppat_type"; longident longident_loc.Location.txt; location longident_loc.Location.loc]
+      | Ppat_variant_spread longident_loc ->
+        Sexp.list [Sexp.atom "Ppat_variant_spread"; longident longident_loc.Location.txt; location longident_loc.Location.loc]
       | Ppat_unpack string_loc ->
         Sexp.list [Sexp.atom "Ppat_unpack"; string string_loc.Location.txt; location string_loc.Location.loc]
       | Ppat_exception p -> Sexp.list [Sexp.atom "Ppat_exception"; pattern p]
@@ -3133,4 +3144,14 @@ let comments_print_engine =
         let cmt_tbl = Comment_table.make () in
         Comment_table.walk_signature s cmt_tbl comments;
         Comment_table.log cmt_tbl);
+  }
+
+let doc_print_engine =
+  {
+    Res_driver.print_implementation =
+      (fun ~width:_ ~filename:_ ~comments s ->
+        Res_doc.debug (Res_printer.implementation_doc s ~comments));
+    Res_driver.print_interface =
+      (fun ~width:_ ~filename:_ ~comments s ->
+        Res_doc.debug (Res_printer.interface_doc s ~comments));
   }

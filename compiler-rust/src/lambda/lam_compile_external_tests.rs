@@ -222,7 +222,6 @@ fn lowers_pjs_object_get_to_method_calls() {
         ],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,

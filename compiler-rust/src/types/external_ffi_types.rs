@@ -154,7 +154,7 @@ pub enum InlineConst {
     ConstBool(bool),
     ConstInt(i32),
     ConstBigint {
-        negative: bool,
+        positive: bool,
         digits: String,
     },
     ConstFloat(String),
@@ -372,8 +372,8 @@ pub mod debug {
             InlineConst::ConstString(s) => format!("Const_string({})", quote(s)),
             InlineConst::ConstBool(b) => format!("Const_bool({})", bool_(*b)),
             InlineConst::ConstInt(i) => format!("Const_int({i})"),
-            InlineConst::ConstBigint { negative, digits } => {
-                format!("Const_bigint({},{})", bool_(*negative), quote(digits))
+            InlineConst::ConstBigint { positive, digits } => {
+                format!("Const_bigint({},{})", bool_(*positive), quote(digits))
             }
             InlineConst::ConstFloat(f) => format!("Const_float({})", quote(f)),
         }

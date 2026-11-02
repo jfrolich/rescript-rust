@@ -1434,7 +1434,7 @@ impl IndexedLambdaContext {
 mod tests {
     use super::*;
     use crate::ident::IdentFlags;
-    use crate::lambda::{ApplyStatus, InlineAttribute};
+    use crate::lambda::ApplyStatus;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -1477,7 +1477,6 @@ mod tests {
         }
         let info = ApInfo {
             loc,
-            inlined: InlineAttribute::Always,
             status: ApplyStatus::InferFull,
         };
         let samples = vec![

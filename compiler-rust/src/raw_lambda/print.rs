@@ -90,14 +90,6 @@ fn print_function_attribute<W: Write>(f: &mut Formatter<W>, attr: &FunctionAttri
     }
 }
 
-fn print_apply_inline_attribute<W: Write>(f: &mut Formatter<W>, attr: InlineAttribute) {
-    match attr {
-        InlineAttribute::Default => {}
-        InlineAttribute::Always => f.string(" always_inline"),
-        InlineAttribute::Never => f.string(" never_inline"),
-    }
-}
-
 fn let_kind_suffix(kind: LetKind) -> &'static str {
     match kind {
         LetKind::Alias => "a",
@@ -271,7 +263,6 @@ fn print_apply<W: Write>(f: &mut Formatter<W>, apply: &RawApply, reraise_exn: Op
         f.space();
         lam(f, arg, reraise_exn);
     }
-    print_apply_inline_attribute(f, apply.ap_info.inlined);
     f.string(")");
     f.close_box();
 }

@@ -15512,6 +15512,24 @@ fn type_module_expr_with_alias_inner<'a>(
         ParsedModuleExprDesc::Pmod_extension(ext) => Err(TypeModError::CoreError(
             crate::types::typecore::builtin_extension_error(arena, ext),
         )),
+
+        // typemod.ml `Pmod_await`: the builtin ppx turns the dynamic import
+        // forms into `unpack` and removes any other `await`, which has no
+        // effect; this only types a tree that bypassed it.
+        ParsedModuleExprDesc::Pmod_await(inner) => {
+            let mut arg = type_module_expr_with_alias(
+                tctx,
+                env,
+                arena,
+                arena.get_mod_expr(*inner),
+                alias,
+                sttn,
+            )?;
+            arg.mod_loc = loc;
+            arg.mod_attributes
+                .extend(mod_expr.pmod_attributes.iter().cloned());
+            Ok(arg)
+        }
     }
 }
 
@@ -15750,7 +15768,27 @@ fn type_module_type_of_expr_raw<'a>(
     mod_expr: &ParsedModuleExpr,
 ) -> TypeModResult<ModuleExpr> {
     match &*mod_expr.pmod_desc {
+        // typemod.ml `type_module_type_of`: turn off strengthening, and look
+        // the module up in the warning scope of its attributes, as
+        // `type_module` does.
         ParsedModuleExprDesc::Pmod_ident(lid) => {
+            with_warning_scope(tctx, arena, &mod_expr.pmod_attributes, true, |tctx| {
+                type_module_type_of_ident(tctx, env, arena, mod_expr, lid)
+            })
+        }
+        _ => type_module_expr(tctx, env, arena, mod_expr),
+    }
+}
+
+fn type_module_type_of_ident<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+    lid: &crate::parser::ast::Loc<crate::parse_arena::LidentIdx>,
+) -> TypeModResult<ModuleExpr> {
+    {
+        {
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(
                 tctx.type_ctx,
@@ -15813,7 +15851,6 @@ fn type_module_type_of_expr_raw<'a>(
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             })
         }
-        _ => type_module_expr(tctx, env, arena, mod_expr),
     }
 }
 

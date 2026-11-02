@@ -20,12 +20,6 @@ use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx};
 // Main Pattern Parsing (OCaml res_core.ml:1210-1830)
 // ============================================================================
 
-/// OCaml `make_pat_variant_spread_attr` (res_core.ml:278-279).
-fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
-    let name = p.arena_mut().intern("res.patVariantSpread");
-    (mknoloc(name), Payload::PStr(Box::default()))
-}
-
 fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
     Pattern {
         ppat_desc: Box::new(desc),
@@ -243,12 +237,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
             let lid = p.push_longident(lid_unloc);
             let loc = p.mk_loc_idx_to_end_of(start_pos_idx, lid_loc);
-            let mut spread_attrs = vec![make_pat_variant_spread_attr(p)];
-            spread_attrs.extend(attrs.iter().cloned());
             pat(
-                PatternDesc::Ppat_type(with_loc(lid, lid_loc)),
+                PatternDesc::Ppat_variant_spread(with_loc(lid, lid_loc)),
                 loc,
-                Attributes::from_vec(spread_attrs),
+                attrs.clone(),
             )
         }
         Token::Hash => {

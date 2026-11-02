@@ -933,12 +933,26 @@ impl<'a> Mapper<'a> {
 
     fn map_pattern(&mut self, pat: &pt0::Pattern) -> current::Pattern {
         let loc = self.loc(&pat.ppat_loc);
-        let attrs: Vec<pt0::Attribute> = pat
+        let mut attrs: Vec<pt0::Attribute> = pat
             .ppat_attributes
             .iter()
             .filter(|(name, _)| name.txt != "_res.record_rest")
             .cloned()
             .collect();
+        // ast_mapper_from0.ml `extract_variant_spread_attr`: the
+        // `res.patVariantSpread` marker that `Ast_mapper_to0` puts on a
+        // variant spread pattern, with any payload.
+        let variant_spread = matches!(pat.ppat_desc, pt0::PatternDesc::Type(_))
+            && match attrs
+                .iter()
+                .position(|(name, _)| name.txt == "res.patVariantSpread")
+            {
+                Some(at) => {
+                    attrs.remove(at);
+                    true
+                }
+                None => false,
+            };
         let mut attrs = self.map_attributes(&attrs);
         // ast_mapper_from0.ml Ppat_constant drops the template marker.
         if matches!(pat.ppat_desc, pt0::PatternDesc::Constant(_))
@@ -1041,6 +1055,9 @@ impl<'a> Mapper<'a> {
             pt0::PatternDesc::Constraint(p, t) => current::PatternDesc::Ppat_constraint(Box::new(
                 (self.push_pat(p), self.push_core_type(t)),
             )),
+            pt0::PatternDesc::Type(lid) if variant_spread => {
+                current::PatternDesc::Ppat_variant_spread(self.map_longident_loc(lid))
+            }
             pt0::PatternDesc::Type(lid) => {
                 current::PatternDesc::Ppat_type(self.map_longident_loc(lid))
             }
@@ -2462,6 +2479,37 @@ impl<'a> Mapper<'a> {
     // ========== Module expressions ==========
 
     fn map_module_expr(&mut self, me: &pt0::ModuleExpr) -> current::ModuleExpr {
+        // ast_mapper_from0.ml M.map: `Ast_mapper_to0` puts the inner module's
+        // attributes before the `res.await` marker and the await node's after
+        // it. The last marker belongs to the outermost await.
+        if let Some(at) = me
+            .pmod_attributes
+            .iter()
+            .rposition(|(name, _)| name.txt == "res.await")
+        {
+            let marker_loc = me.pmod_attributes[at].0.loc;
+            // `await_marker_loc`: a marker without a location falls back to
+            // the node's.
+            let none = self.arena.to_location(self.arena.none_loc());
+            let await_loc = if marker_loc == none {
+                me.pmod_loc
+            } else {
+                marker_loc
+            };
+            let inner = pt0::ModuleExpr {
+                pmod_desc: me.pmod_desc.clone(),
+                pmod_loc: me.pmod_loc,
+                pmod_attributes: me.pmod_attributes[..at].to_vec(),
+            };
+            let inner_idx = self.push_mod_expr(&inner);
+            let loc = self.loc(&await_loc);
+            let attrs = self.map_attributes(&me.pmod_attributes[at + 1..]);
+            return current::ModuleExpr {
+                pmod_desc: Box::new(current::ModuleExprDesc::Pmod_await(inner_idx)),
+                pmod_loc: loc,
+                pmod_attributes: attrs,
+            };
+        }
         let loc = self.loc(&me.pmod_loc);
         let attrs = self.map_attributes(&me.pmod_attributes);
 

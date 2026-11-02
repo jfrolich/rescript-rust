@@ -2183,12 +2183,7 @@ impl MakeKeyWriter {
                 self.write_raw(&ap.ap_func, out)?;
                 out.push_str(",[");
                 self.write_raw_list(&ap.ap_args, out)?;
-                write!(
-                    out,
-                    "],{:?},{:?},{})",
-                    ap.ap_info.inlined, ap.ap_info.status, ap.ap_transformed_jsx
-                )
-                .ok()?;
+                write!(out, "],{:?},{})", ap.ap_info.status, ap.ap_transformed_jsx).ok()?;
                 Some(())
             }
             RawLambda::Llet(kind, x, ex, body) => {

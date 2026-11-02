@@ -18,8 +18,7 @@ pub(super) use crate::lambda::lam_primitive::{
     LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 pub(super) use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
-    Lambda,
+    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, Lambda,
 };
 pub(super) use crate::location::Location;
 use std::fs;
@@ -176,7 +175,6 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
 fn test_apply_info() -> ApInfo {
     ApInfo {
         loc: Location::none(),
-        inlined: InlineAttribute::Default,
         status: ApplyStatus::Na,
     }
 }
@@ -1219,7 +1217,6 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
             ap_args: vec![Lambda::var(none), Lambda::var(icmp)],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Uncurry,
             },
             ap_transformed_jsx: false,
@@ -1272,7 +1269,6 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                 ap_args: vec![Lambda::var(a), Lambda::var(b), Lambda::var(extra)],
                 ap_info: ApInfo {
                     loc: Location::none(),
-                    inlined: InlineAttribute::Default,
                     status: ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx: false,
@@ -1347,7 +1343,6 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
             ap_args: vec![starj_empty.clone()],
             ap_info: ApInfo {
                 loc: loc,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Uncurry,
             },
             ap_transformed_jsx: false,
@@ -1355,7 +1350,6 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
         ap_args: vec![starj_empty],
         ap_info: ApInfo {
             loc: loc,
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
         ap_transformed_jsx: false,
@@ -1774,7 +1768,6 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                     ap_args: vec![Lambda::var(v)],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Uncurry,
                     },
                     ap_transformed_jsx: false,
@@ -2283,7 +2276,6 @@ fn compile_return_block_lowers_trywith_in_return_position() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -2399,7 +2391,6 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
                             loc: Location::none(),
-                            inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
@@ -2445,7 +2436,6 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
         ap_args: vec![Lambda::var(acc)],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -2462,7 +2452,6 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
                             loc: Location::none(),
-                            inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
@@ -2533,7 +2522,6 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -2597,7 +2585,6 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
         ap_args: vec![],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -3239,7 +3226,6 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
             vec![],
             ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             false,
@@ -3861,7 +3847,6 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
                 vec![],
                 ApInfo {
                     loc: Location::none(),
-                    inlined: InlineAttribute::Default,
                     status: ApplyStatus::Na,
                 },
                 false,
@@ -4764,7 +4749,6 @@ fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -4812,7 +4796,6 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -4825,7 +4808,6 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -4836,7 +4818,6 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -4863,7 +4844,6 @@ fn value_context_direct_calls_stay_as_call_expressions() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -4947,7 +4927,6 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                     ],
                     ap_info: ApInfo {
                         loc: loc,
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -4955,7 +4934,6 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                 ap_args: vec![Lambda::const_(Constant::int(6))],
                 ap_info: ApInfo {
                     loc: loc,
-                    inlined: InlineAttribute::Default,
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: false,
@@ -5046,7 +5024,6 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                         ],
                         ap_info: ApInfo {
                             loc: loc,
-                            inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
                         ap_transformed_jsx: false,
@@ -5054,7 +5031,6 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                     ap_args: vec![Lambda::const_(Constant::int(6)), Lambda::var(extra)],
                     ap_info: ApInfo {
                         loc: loc,
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -5093,7 +5069,6 @@ fn let_bound_direct_calls_skip_intermediate_call_aliases() {
             ap_args: vec![Lambda::const_(Constant::int(1))],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -5158,7 +5133,6 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -5171,7 +5145,6 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -5182,7 +5155,6 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -5221,7 +5193,6 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -5234,7 +5205,6 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: Location::none(),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
@@ -5245,7 +5215,6 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -5278,7 +5247,6 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -5357,7 +5325,6 @@ fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -8125,7 +8092,6 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                                 vec![Lambda::var(props)],
                                 ApInfo {
                                     loc: Location::none(),
-                                    inlined: InlineAttribute::Default,
                                     status: ApplyStatus::Na,
                                 },
                                 false,
@@ -8307,7 +8273,6 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
         ],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8354,7 +8319,6 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
         ap_args: vec![Lambda::var(next), Lambda::var(next)],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8416,7 +8380,6 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
         ap_args: vec![Lambda::var(next), Lambda::var(next)],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8465,7 +8428,6 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8515,7 +8477,6 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8573,7 +8534,6 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
         ],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8639,7 +8599,6 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
             ],
             ap_info: ApInfo {
                 loc: Location::none(),
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
             ap_transformed_jsx: false,
@@ -8708,7 +8667,6 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
         ],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,
@@ -8759,7 +8717,6 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
         ap_args: vec![Lambda::var(value)],
         ap_info: ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
         ap_transformed_jsx: false,

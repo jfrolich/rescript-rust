@@ -362,6 +362,7 @@ pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx:
         }
         ModuleExprDesc::Pmod_unpack(e) => v.expr(arena, *e),
         ModuleExprDesc::Pmod_extension(ext) => v.extension(arena, ext),
+        ModuleExprDesc::Pmod_await(m) => v.module_expr(arena, *m),
     }
 }
 
@@ -605,6 +606,7 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
         | PatternDesc::Ppat_constant(_)
         | PatternDesc::Ppat_interval(_)
         | PatternDesc::Ppat_type(_)
+        | PatternDesc::Ppat_variant_spread(_)
         | PatternDesc::Ppat_unpack(_) => {}
         PatternDesc::Ppat_alias(p, _) | PatternDesc::Ppat_exception(p) => v.pat(arena, *p),
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {

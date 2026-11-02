@@ -51,7 +51,6 @@ use std::sync::Arc;
 
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
 const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
-const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
 
 #[derive(Debug, Clone)]
@@ -3868,15 +3867,6 @@ fn transl_type_inner(
     }
 }
 
-fn has_res_pat_variant_spread_attribute(
-    arena: &ParseArena,
-    attrs: &[crate::parser::ast::Attribute],
-) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == PAT_VARIANT_SPREAD_ATTRIBUTE)
-}
-
 /// Reuse the newest `Lident name` in the arena, or push a fresh one.
 fn existing_or_new_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
     find_existing_lident_idx(arena, name).unwrap_or_else(|| arena.push_typecheck_lident(name))
@@ -4147,12 +4137,9 @@ fn build_ppat_or_for_variant_spread(
     pat: &ParsedPattern,
     expected_ty: TypeExprRef,
 ) -> TypeCoreResult<Option<(ParsedPattern, TypeExprRef)>> {
-    let crate::parser::ast::PatternDesc::Ppat_type(lident) = &*pat.ppat_desc else {
+    let crate::parser::ast::PatternDesc::Ppat_variant_spread(lident) = &*pat.ppat_desc else {
         return Ok(None);
     };
-    if !has_res_pat_variant_spread_attribute(tctx.arena, &pat.ppat_attributes) {
-        return Ok(None);
-    }
 
     let (_path, constructors, spread_ty) =
         extract_type_from_pat_variant_spread(tctx, env, lident, expected_ty)?;
@@ -4198,17 +4185,26 @@ fn build_ppat_or_for_variant_spread(
     }
 
     synthetic_pattern_idxs.reverse();
+    // typecore.ml `build_ppat_or_for_variant_spread`: the constructors and the
+    // or-patterns grouping them are marked, so that the ones earlier cases
+    // already match aren't reported as unused. The root stands for the spread
+    // the user wrote: it's reported, at the spread, when all of it is unused.
     let expanded_pattern = match synthetic_pattern_idxs.into_iter().reduce(|lhs, rhs| {
         push_synthetic_pat(
             tctx.arena,
             ParsedPattern {
                 ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_or(lhs, rhs)),
-                ppat_loc: LocIdx::none(),
-                ppat_attributes: Attributes::new(),
+                ppat_loc: lident.loc,
+                ppat_attributes: vec![pat_from_variant_spread_attr.clone()].into(),
             },
         )
     }) {
-        Some(pattern) => tctx.arena.get_pat(pattern).clone(),
+        Some(pattern) => {
+            let mut root = tctx.arena.get_pat(pattern).clone();
+            root.ppat_loc = pat.ppat_loc;
+            root.ppat_attributes = Attributes::new();
+            root
+        }
         None => pat.clone(),
     };
 
@@ -4223,11 +4219,8 @@ fn maybe_expand_variant_spread_in_pattern(
 ) -> TypeCoreResult<Option<ParsedPattern>> {
     if !matches!(
         &*pat.ppat_desc,
-        crate::parser::ast::PatternDesc::Ppat_type(_)
+        crate::parser::ast::PatternDesc::Ppat_variant_spread(_)
     ) {
-        return Ok(None);
-    }
-    if !has_res_pat_variant_spread_attribute(tctx.arena, &pat.ppat_attributes) {
         return Ok(None);
     }
 
@@ -4519,9 +4512,7 @@ fn type_pattern_inner(
             // Alias pattern: P as x
             let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
             let (expanded_inner, override_type_from_variant_spread) =
-                if matches!(&*inner_pat.ppat_desc, PD::Ppat_type(_))
-                    && has_res_pat_variant_spread_attribute(tctx.arena, &inner_pat.ppat_attributes)
-                {
+                if matches!(&*inner_pat.ppat_desc, PD::Ppat_variant_spread(_)) {
                     match build_ppat_or_for_variant_spread(tctx, env, inner_pat, expected_ty)? {
                         Some((expanded, spread_ty)) => (Some(expanded), Some(spread_ty)),
                         None => (None, None),
@@ -4911,7 +4902,9 @@ fn type_pattern_inner(
             ))
         }
 
-        PD::Ppat_type(lid) => {
+        // `Ppat_variant_spread` is expanded above, except for a variant
+        // without constructors, which is typed (and rejected) like `#...t`.
+        PD::Ppat_type(lid) | PD::Ppat_variant_spread(lid) => {
             // Poly variant type pattern: #type or used for #...spread
             // OCaml typecore.ml:1663-1671: build_or_pat expands into Tpat_variant or-patterns
             let (path, or_pat, ty) = build_or_pat(tctx, env, loc, lid)?;
@@ -11718,7 +11711,7 @@ fn collect_lident_idents_in_module_expr(
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*lhs), out);
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*rhs), out);
         }
-        MED::Pmod_constraint(inner, _) => {
+        MED::Pmod_constraint(inner, _) | MED::Pmod_await(inner) => {
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*inner), out);
         }
         MED::Pmod_unpack(expr) => {
@@ -12002,6 +11995,7 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
         | crate::parser::ast::PatternDesc::Ppat_var(_)
         | crate::parser::ast::PatternDesc::Ppat_constant(_)
         | crate::parser::ast::PatternDesc::Ppat_interval(_)
+        | crate::parser::ast::PatternDesc::Ppat_variant_spread(_)
         | crate::parser::ast::PatternDesc::Ppat_unpack(_)
         | crate::parser::ast::PatternDesc::Ppat_extension(_) => false,
     }
@@ -18655,6 +18649,13 @@ fn type_pack(
             },
         ))
     })?;
+    // typemod.ml `type_package`: `wrap_constraint env` builds the constraint
+    // in the package environment (the original one, or the one with `%M`).
+    let wrapped_env = if packed_module_path.is_some() {
+        typed_module.mod_env
+    } else {
+        ctx.store_typed_env(&package_env)
+    };
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
@@ -18664,7 +18665,7 @@ fn type_pack(
         ),
         mod_loc: typed_module_loc,
         mod_type: decl_package_mty,
-        mod_env: EnvRef(0),
+        mod_env: wrapped_env,
         mod_attributes: Attributes::new(),
     };
     let packed_type = ctx.new_type(TypeDesc::Tpackage {

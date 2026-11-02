@@ -104,6 +104,7 @@ fn pattern_is_simple(pat: &Pattern, arena: &ParseArena) -> bool {
         PatternDesc::Ppat_array(_) => true,
         PatternDesc::Ppat_unpack(_) => true,
         PatternDesc::Ppat_type(_) => true,
+        PatternDesc::Ppat_variant_spread(_) => true,
         PatternDesc::Ppat_record(_) => true,
         PatternDesc::Ppat_tuple(_) => true,
         PatternDesc::Ppat_constant(_) => true,
@@ -2730,6 +2731,10 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.string("#");
             print_longident_idx(f, arena, lid.txt);
         }
+        PatternDesc::Ppat_variant_spread(lid) => {
+            f.string("...");
+            print_longident_idx(f, arena, lid.txt);
+        }
         PatternDesc::Ppat_unpack(name) => {
             // OCaml: pp f "(module@ %s)@ " s.txt
             f.string("(module");
@@ -3736,6 +3741,12 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             print_payload(f, arena, payload);
             f.string("]");
             f.close_box();
+        }
+        ModuleExprDesc::Pmod_await(m) => {
+            // OCaml: await@ %a
+            f.string("await");
+            f.space();
+            print_module_expr(f, arena, arena.get_mod_expr(*m));
         }
     }
 }

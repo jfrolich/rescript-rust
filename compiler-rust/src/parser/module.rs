@@ -892,37 +892,18 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
 
 /// Parse a module expression.
 pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
-    // Handle await keyword
-    // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
-    // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
-    let await_loc = if p.token == Token::Await {
+    // res_core.ml `parse_module_expr`: an optional `await`, whose start is
+    // the start of the await node.
+    let await_start = if p.token == Token::Await {
         let await_start_idx = p.start_pos_idx();
         p.next();
-        // OCaml: let end_pos = p.end_pos in - this is the end of the token AFTER await
-        let await_end_idx = p.end_pos_idx();
-        Some(p.mk_loc_idx(await_start_idx, await_end_idx))
+        Some(await_start_idx)
     } else {
         None
     };
 
     // Parse attributes (e.g., @functorAttr)
-    let mut attrs = parse_attributes(p);
-
-    // Add await attribute if present
-    // OCaml line 6632: make_await_attr loc_await
-    if let Some(loc) = await_loc {
-        let await_idx = p.arena_mut().intern("res.await");
-        attrs.insert(
-            0,
-            (
-                Located {
-                    txt: await_idx,
-                    loc,
-                },
-                Payload::PStr(Box::default()),
-            ),
-        );
-    }
+    let attrs = parse_attributes(p);
 
     // Check if this is a functor: (args) => body or (args) : type => body
     // For primary expressions, capture start_pos for location override (OCaml line 6503)
@@ -940,6 +921,19 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     // Override the outermost location after module application processing
     if let Some(primary_start_idx) = primary_start_pos_idx {
         expr.pmod_loc = p.mk_loc_idx_to_prev_end(primary_start_idx);
+    }
+
+    // The attributes after `await` belong to the await, like those of
+    // `@attr (await M)`, and the module keeps its own: `await @b (@a M)`.
+    if let Some(await_start_idx) = await_start {
+        let end_idx = p.arena().loc_end_idx(expr.pmod_loc);
+        let loc = p.mk_loc_idx(await_start_idx, end_idx);
+        let inner = p.arena_mut().push_mod_expr(expr);
+        return ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_await(inner)),
+            pmod_loc: loc,
+            pmod_attributes: attrs,
+        };
     }
 
     // Attach attributes to the module expression
@@ -987,37 +981,18 @@ fn parse_constrained_mod_expr_region(p: &mut Parser<'_>) -> Option<ModuleExpr> {
 pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
     let _start_pos_idx = p.start_pos_idx();
 
-    // Handle await keyword
-    // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
-    // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
-    let await_loc = if p.token == Token::Await {
+    // res_core.ml `parse_module_expr`: an optional `await`, whose start is
+    // the start of the await node.
+    let await_start = if p.token == Token::Await {
         let await_start_idx = p.start_pos_idx();
         p.next();
-        // OCaml: let end_pos = p.end_pos in - this is the end of the token AFTER await
-        let await_end_idx = p.end_pos_idx();
-        Some(p.mk_loc_idx(await_start_idx, await_end_idx))
+        Some(await_start_idx)
     } else {
         None
     };
 
     // Parse attributes (e.g., @functorAttr)
-    let mut attrs = parse_attributes(p);
-
-    // Add await attribute if present
-    // OCaml line 6632: make_await_attr loc_await
-    if let Some(loc) = await_loc {
-        let await_idx = p.arena_mut().intern("res.await");
-        attrs.insert(
-            0,
-            (
-                Located {
-                    txt: await_idx,
-                    loc,
-                },
-                Payload::PStr(Box::default()),
-            ),
-        );
-    }
+    let attrs = parse_attributes(p);
 
     // Check if this is a functor: (args) => body or (args) : type => body
     // For primary expressions, capture start_pos for location override (OCaml line 6503)
@@ -1038,6 +1013,19 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
     }
 
     // NOTE: We intentionally DON'T handle `: type` constraint here
+
+    // The attributes after `await` belong to the await, like those of
+    // `@attr (await M)`, and the module keeps its own: `await @b (@a M)`.
+    if let Some(await_start_idx) = await_start {
+        let end_idx = p.arena().loc_end_idx(expr.pmod_loc);
+        let loc = p.mk_loc_idx(await_start_idx, end_idx);
+        let inner = p.arena_mut().push_mod_expr(expr);
+        return ModuleExpr {
+            pmod_desc: Box::new(ModuleExprDesc::Pmod_await(inner)),
+            pmod_loc: loc,
+            pmod_attributes: attrs,
+        };
+    }
 
     // Attach attributes to the module expression
     if attrs.is_empty() {

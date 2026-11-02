@@ -960,7 +960,6 @@ mod tests {
         }
         let apply_info = crate::lambda::ApInfo {
             loc: Location::none(),
-            inlined: crate::lambda::InlineAttribute::Default,
             status: crate::lambda::ApplyStatus::Na,
         };
         for sample in [

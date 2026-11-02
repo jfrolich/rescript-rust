@@ -602,30 +602,6 @@ fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
 }
 
 #[test]
-fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
-    let output = compile_checked_in_test_file_to_js("gpr_3142_test");
-    assert!(
-        output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 20, characters 7-14\", tToJs(\"a\"), \"x\")")
-            && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 27, characters 7-14\", tFromJs(\"x\"), \"a\")"),
-        "expected gpr_3142_test to inline the exported aliases back to direct converter calls at the checked internal sites, got:\n{output}"
-    );
-    assert!(
-        output.contains("let v = tToJs;\n\nlet u = tFromJs;"),
-        "expected gpr_3142_test to keep the exported alias bindings materialized for the final export payload, got:\n{output}"
-    );
-    assert!(
-        output.contains("export {\n  tToJs,\n  tFromJs,\n  v,\n  u,\n}")
-            && output.contains("Mocha.describe(\"Gpr_3142_test\"")
-            && output.contains("let v = tToJs;")
-            && output.find("Mocha.describe(\"Gpr_3142_test\"").unwrap()
-                < output.find("let v = tToJs;").unwrap()
-            && !output.contains("v$1 as v")
-            && !output.contains("u$1 as u"),
-        "expected gpr_3142_test to keep the aliases only as late export bindings with no rebound export aliases, got:\n{output}"
-    );
-}
-
-#[test]
 fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("string_set");
     assert!(

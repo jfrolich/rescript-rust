@@ -753,10 +753,9 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
     }
 }
 
-fn ap_info_sexp(info: &ApInfo, _with_locs: bool) -> Sexp {
+fn ap_info_sexp(_info: &ApInfo, _with_locs: bool) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("ap_info"),
-        inline_attribute(&info.inlined),
         // TODO: add location if with_locs
     ])
 }

@@ -82,8 +82,8 @@ let inline_const = function
   | Const_string s -> "Const_string(" ^ quote s ^ ")"
   | Const_bool b -> "Const_bool(" ^ bool b ^ ")"
   | Const_int i -> "Const_int(" ^ Int32.to_string i ^ ")"
-  | Const_bigint {negative; digits} ->
-    "Const_bigint(" ^ bool negative ^ "," ^ quote digits ^ ")"
+  | Const_bigint {positive; digits} ->
+    "Const_bigint(" ^ bool positive ^ "," ^ quote digits ^ ")"
   | Const_float f -> "Const_float(" ^ quote f ^ ")"
 
 (* The strings a primitive representation prints as. *)

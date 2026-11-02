@@ -4447,6 +4447,9 @@ fn module_expr_contains_spice_type_decl(mod_expr: &ModuleExpr, arena: &ParseAren
             module_expr_contains_spice_type_decl(arena.get_mod_expr(*lhs), arena)
                 || module_type_contains_spice_type_decl(arena.get_mod_type(*mty), arena)
         }
+        ModuleExprDesc::Pmod_await(inner) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(*inner), arena)
+        }
         ModuleExprDesc::Pmod_ident(_)
         | ModuleExprDesc::Pmod_unpack(_)
         | ModuleExprDesc::Pmod_extension(_) => false,
@@ -4843,7 +4846,9 @@ impl<'a> LocCloner<'a> {
                 self.pattern_idx(pat);
                 self.core_type_idx(typ);
             }
-            PatternDesc::Ppat_type(lid) => self.located(lid),
+            PatternDesc::Ppat_type(lid) | PatternDesc::Ppat_variant_spread(lid) => {
+                self.located(lid)
+            }
             PatternDesc::Ppat_unpack(name) => self.located(name),
             PatternDesc::Ppat_exception(pat) => self.pattern_idx(pat),
             PatternDesc::Ppat_extension(ext) => self.extension(ext),
@@ -5218,6 +5223,7 @@ impl<'a> LocCloner<'a> {
             }
             ModuleExprDesc::Pmod_unpack(expr) => self.expression_idx(expr),
             ModuleExprDesc::Pmod_extension(ext) => self.extension(ext),
+            ModuleExprDesc::Pmod_await(inner) => self.mod_expr_idx(inner),
         }
     }
 

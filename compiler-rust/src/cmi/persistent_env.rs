@@ -3203,14 +3203,11 @@ fn decode_cmj_apply(value: &OcamlValue) -> Option<Apply> {
 }
 
 fn decode_cmj_ap_info(value: &OcamlValue) -> Option<ApInfo> {
-    // `Lambda.ap_info = {ap_loc; ap_inlined}`.
-    let (_, fields) = value.as_block_opt()?;
+    // `Lambda.lambda_apply.ap_loc` (a `Location.t`); the location itself
+    // is not needed for inlining.
+    value.as_block_opt()?;
     Some(ApInfo {
         loc: Location::none(),
-        inlined: fields
-            .get(1)
-            .and_then(decode_cmj_inline_attribute)
-            .unwrap_or_default(),
         status: ApplyStatus::Na,
     })
 }

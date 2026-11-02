@@ -1342,9 +1342,44 @@ pub fn print_expression(
                 (
                     ExpressionDesc::Pexp_pack(mod_expr_idx),
                     CoreTypeDesc::Ptyp_package(package_type),
+                ) if matches!(
+                    &*arena.get_mod_expr(*mod_expr_idx).pmod_desc,
+                    ModuleExprDesc::Pmod_constraint(..)
+                ) =>
+                {
+                    // `module((M: S1): S2)` would parse as a functor, so this
+                    // keeps the general form `(module((M: S1)): module(S2))`.
+                    let mod_doc = print_mod_expr_constraint_parens(
+                        state,
+                        arena.get_mod_expr(*mod_expr_idx),
+                        cmt_tbl,
+                        arena,
+                    );
+                    let type_doc = print_comments(
+                        print_package_type(state, package_type, true, cmt_tbl, arena),
+                        cmt_tbl,
+                        typ.ptyp_loc,
+                        arena,
+                    );
+                    Doc::concat(vec![
+                        Doc::lparen(),
+                        Doc::text("module("),
+                        mod_doc,
+                        Doc::text("): "),
+                        type_doc,
+                        Doc::rparen(),
+                    ])
+                }
+                (
+                    ExpressionDesc::Pexp_pack(mod_expr_idx),
+                    CoreTypeDesc::Ptyp_package(package_type),
                 ) => {
-                    let mod_doc =
-                        print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena);
+                    let mod_doc = print_mod_expr_constraint_parens(
+                        state,
+                        arena.get_mod_expr(*mod_expr_idx),
+                        cmt_tbl,
+                        arena,
+                    );
                     // Don't print "module(...)" wrapper - we're already inside module()
                     let type_doc = print_comments(
                         print_package_type(state, package_type, false, cmt_tbl, arena),
@@ -1406,12 +1441,6 @@ pub fn print_expression(
         ExpressionDesc::Pexp_extension(ext) => print_extension(state, ext, false, cmt_tbl, arena),
         ExpressionDesc::Pexp_regexp(regexp) => {
             Doc::text(format!("/{}/{}", regexp.pattern, regexp.flags))
-        }
-        // res_printer.ml:3857-3859: an if-let prints as an if chain.
-        ExpressionDesc::Pexp_match(inner)
-            if inner.1.len() == 2 && parsetree_viewer::is_if_let_expr(arena, e) =>
-        {
-            print_if_chain(state, e, cmt_tbl, arena)
         }
         // Match expression
         ExpressionDesc::Pexp_match(inner) => {
@@ -1566,7 +1595,12 @@ pub fn print_expression(
             Doc::text("module("),
             Doc::indent(Doc::concat(vec![
                 Doc::soft_line(),
-                print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena),
+                print_mod_expr_constraint_parens(
+                    state,
+                    arena.get_mod_expr(*mod_expr_idx),
+                    cmt_tbl,
+                    arena,
+                ),
             ])),
             Doc::soft_line(),
             Doc::rparen(),
@@ -1609,7 +1643,6 @@ pub fn print_expression(
         | ExpressionDesc::Pexp_setfield(_)
         | ExpressionDesc::Pexp_ifthenelse(_)
         | ExpressionDesc::Pexp_ternary(_) => true,
-        ExpressionDesc::Pexp_match(_) if parsetree_viewer::is_if_let_expr(arena, e) => true,
         ExpressionDesc::Pexp_jsx_element(_) => true,
         _ => false,
     };
@@ -2505,10 +2538,10 @@ fn print_ternary_expression(
 
     // Print attributes - ternary handles its own attributes
     // Check if any of the printable attributes need parens wrapping
-    let needs_parens = e.pexp_attributes.iter().any(|attr| {
-        !parsetree_viewer::is_parsing_attr(arena, attr)
-            && parsetree_viewer::is_printable_attribute(arena, attr)
-    });
+    let needs_parens = e
+        .pexp_attributes
+        .iter()
+        .any(|attr| !parsetree_viewer::is_parsing_attr(arena, attr));
 
     let attrs_doc = print_attributes(state, e.pexp_attributes.as_slice(), cmt_tbl, arena);
     Doc::concat(vec![
@@ -2561,57 +2594,34 @@ fn print_if_chain(
     let if_docs: Vec<Doc> = ifs
         .iter()
         .enumerate()
-        .map(|(i, (outer_loc, condition_kind, then_expr))| {
+        .map(|(i, (outer_loc, if_expr, then_expr))| {
             let if_txt = if i > 0 {
                 Doc::text("else if ")
             } else {
                 Doc::text("if ")
             };
 
-            let doc = match condition_kind {
-                parsetree_viewer::IfConditionKind::If(if_expr) => {
-                    let condition = if parsetree_viewer::is_block_expr(arena, if_expr) {
-                        print_expression_block(state, true, if_expr, cmt_tbl, arena)
-                    } else {
-                        let doc = print_expression_with_comments(state, if_expr, cmt_tbl, arena);
-                        match parens::expr(arena, if_expr) {
-                            ParenKind::Parenthesized => add_parens(doc),
-                            ParenKind::Braced(loc) => print_braces(doc, if_expr, loc, arena),
-                            ParenKind::Nothing => Doc::if_breaks(add_parens(doc.clone()), doc),
-                        }
-                    };
+            let doc = {
+                let condition = if parsetree_viewer::is_block_expr(arena, if_expr) {
+                    print_expression_block(state, true, if_expr, cmt_tbl, arena)
+                } else {
+                    let doc = print_expression_with_comments(state, if_expr, cmt_tbl, arena);
+                    match parens::expr(arena, if_expr) {
+                        ParenKind::Parenthesized => add_parens(doc),
+                        ParenKind::Braced(loc) => print_braces(doc, if_expr, loc, arena),
+                        ParenKind::Nothing => Doc::if_breaks(add_parens(doc.clone()), doc),
+                    }
+                };
 
-                    // Strip explicit braces from then_expr (from Reason conversion)
-                    let then_expr_to_print = parsetree_viewer::process_braces(arena, then_expr).1;
+                // Strip explicit braces from then_expr (from Reason conversion)
+                let then_expr_to_print = parsetree_viewer::process_braces(arena, then_expr).1;
 
-                    Doc::concat(vec![
-                        if_txt,
-                        Doc::group(condition),
-                        Doc::space(),
-                        print_expression_block(state, true, then_expr_to_print, cmt_tbl, arena),
-                    ])
-                }
-                parsetree_viewer::IfConditionKind::IfLet(pattern, condition_expr) => {
-                    let condition_doc = {
-                        let doc =
-                            print_expression_with_comments(state, condition_expr, cmt_tbl, arena);
-                        match parens::expr(arena, condition_expr) {
-                            ParenKind::Parenthesized => add_parens(doc),
-                            ParenKind::Braced(loc) => print_braces(doc, condition_expr, loc, arena),
-                            ParenKind::Nothing => doc,
-                        }
-                    };
-
-                    Doc::concat(vec![
-                        if_txt,
-                        Doc::text("let "),
-                        print_pattern(state, pattern, cmt_tbl, arena),
-                        Doc::text(" = "),
-                        condition_doc,
-                        Doc::space(),
-                        print_expression_block(state, true, then_expr, cmt_tbl, arena),
-                    ])
-                }
+                Doc::concat(vec![
+                    if_txt,
+                    Doc::group(condition),
+                    Doc::space(),
+                    print_expression_block(state, true, then_expr_to_print, cmt_tbl, arena),
+                ])
             };
 
             // Print leading comments for outer_loc
@@ -2636,15 +2646,8 @@ fn print_if_chain(
         ]),
     };
 
-    // Print attributes - Pexp_ifthenelse handles its own attributes
-    // Filter out fragile match attributes (res.braces, res.ternary)
-    let attrs = parsetree_viewer::filter_fragile_match_attributes(arena, &e.pexp_attributes);
-    let attrs_doc = print_attributes(
-        state,
-        &attrs.into_iter().cloned().collect::<Vec<_>>(),
-        cmt_tbl,
-        arena,
-    );
+    // Pexp_ifthenelse handles its own attributes.
+    let attrs_doc = print_attributes(state, e.pexp_attributes.as_slice(), cmt_tbl, arena);
     Doc::concat(vec![attrs_doc, if_docs, else_doc])
 }
 
@@ -2824,7 +2827,7 @@ fn collect_block_rows_inner(
             // Handle module constraint: module M: T = E
             let (name_doc, mod_expr_to_print) = match &*mod_expr.pmod_desc {
                 ModuleExprDesc::Pmod_constraint(inner_mod_idx, mod_type_idx)
-                    if !parsetree_viewer::has_await_attribute(arena, &mod_expr.pmod_attributes) =>
+                    if !parsetree_viewer::mod_expr_has_attributes(arena, mod_expr) =>
                 {
                     let name_with_type = Doc::concat(vec![
                         name_doc,
@@ -2840,7 +2843,7 @@ fn collect_block_rows_inner(
                 Doc::text("module "),
                 name_doc,
                 Doc::text(" = "),
-                print_mod_expr(state, mod_expr_to_print, cmt_tbl, arena),
+                print_mod_expr_constraint_parens(state, mod_expr_to_print, cmt_tbl, arena),
             ]);
 
             rows.push(BlockRow {
@@ -3987,10 +3990,10 @@ fn print_array_set_apply(
                 {
                     let if_expr = arena.get_expr(ite.0);
                     parsetree_viewer::is_binary_expression(arena, if_expr)
-                        || parsetree_viewer::has_attributes(arena, &if_expr.pexp_attributes)
+                        || !if_expr.pexp_attributes.is_empty()
                 }
                 _ => {
-                    parsetree_viewer::has_attributes(arena, &target_expr.pexp_attributes)
+                    !target_expr.pexp_attributes.is_empty()
                         || parsetree_viewer::is_array_access(arena, target_expr)
                 }
             }
@@ -4065,7 +4068,7 @@ fn print_assignment_rhs(arena: &ParseArena, operator: &str, rhs: &Expression, rh
     let should_indent = !parsetree_viewer::is_braced_expr(rhs)
         && (parsetree_viewer::is_binary_expression(arena, rhs)
             || match &*rhs.pexp_desc {
-                ExpressionDesc::Pexp_match(_) => !parsetree_viewer::is_if_let_expr(arena, rhs),
+                ExpressionDesc::Pexp_match(_) => true,
                 _ => false,
             });
     Doc::concat(vec![
@@ -4230,7 +4233,7 @@ fn with_internal_attributes(arena: &ParseArena, expr: &Expression) -> (Attribute
         .pexp_attributes
         .iter()
         .cloned()
-        .partition(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
+        .partition(|attr| !parsetree_viewer::is_parsing_attr(arena, attr));
     let mut internal_expr = expr.clone();
     internal_expr.pexp_attributes = Attributes::from(internal);
     (Attributes::from(printable), internal_expr)
@@ -4310,7 +4313,7 @@ fn print_binary_operand_flatten(
         let (operator, _, left, right) =
             binary_expression_parts(arena, expr).expect("binary expression");
         if parsetree_viewer::flattenable_operators(parent_operator, operator)
-            && !parsetree_viewer::has_attributes(arena, &expr.pexp_attributes)
+            && expr.pexp_attributes.is_empty()
         {
             let left_printed = print_binary_operand_flatten(
                 state,
@@ -4606,7 +4609,7 @@ fn print_binary_expression(
     let has_printable_attrs = expr
         .pexp_attributes
         .iter()
-        .any(|attr| parsetree_viewer::is_printable_attribute(arena, attr));
+        .any(|attr| !parsetree_viewer::is_parsing_attr(arena, attr));
     Doc::group(Doc::concat(vec![
         print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena),
         match parens::binary_expr_with_attrs(arena, expr, has_printable_attrs) {
@@ -5450,17 +5453,12 @@ pub fn print_pattern(
             // Use print_lident for proper escaping of exotic identifiers
             let doc = print_lident(arena, arena.get_longident(lid.txt));
             let doc = print_comments(doc, cmt_tbl, lid.loc, arena);
-            // res_printer.ml:2817-2822: a variant spread prints as `...t`.
-            let prefix = if pat
-                .ppat_attributes
-                .iter()
-                .any(|attr| arena.get_string(attr.0.txt) == "res.patVariantSpread")
-            {
-                "..."
-            } else {
-                "#..."
-            };
-            Doc::concat(vec![Doc::text(prefix), doc])
+            Doc::concat(vec![Doc::text("#..."), doc])
+        }
+        PatternDesc::Ppat_variant_spread(lid) => {
+            let doc = print_lident(arena, arena.get_longident(lid.txt));
+            let doc = print_comments(doc, cmt_tbl, lid.loc, arena);
+            Doc::concat(vec![Doc::text("..."), doc])
         }
         // interval: 'a' .. 'z'
         PatternDesc::Ppat_interval(inner) => {
@@ -6648,17 +6646,34 @@ fn print_mod_expr(
             let is_unit_sugar = match args.as_slice() {
                 [arg] => {
                     matches!(&*arg.pmod_desc, ModuleExprDesc::Pmod_structure(s) if s.is_empty())
+                        && arg.pmod_attributes.is_empty()
                 }
                 _ => false,
             };
 
             let should_hug = match args.as_slice() {
-                [arg] => matches!(&*arg.pmod_desc, ModuleExprDesc::Pmod_structure(_)),
+                [arg] => match &*arg.pmod_desc {
+                    ModuleExprDesc::Pmod_structure(_) => true,
+                    ModuleExprDesc::Pmod_await(inner) => matches!(
+                        &*arena.get_mod_expr(*inner).pmod_desc,
+                        ModuleExprDesc::Pmod_structure(_)
+                    ),
+                    _ => false,
+                },
                 _ => false,
             };
 
+            let call_expr_doc = {
+                let doc = print_mod_expr(state, call_expr, cmt_tbl, arena);
+                if parens::mod_apply_callee(arena, call_expr) {
+                    add_mod_expr_parens(doc)
+                } else {
+                    doc
+                }
+            };
+
             Doc::group(Doc::concat(vec![
-                print_mod_expr(state, call_expr, cmt_tbl, arena),
+                call_expr_doc,
                 if is_unit_sugar {
                     print_mod_apply_arg(state, args[0], cmt_tbl, arena)
                 } else {
@@ -6688,33 +6703,53 @@ fn print_mod_expr(
             ]))
         }
 
-        ModuleExprDesc::Pmod_constraint(mod_expr_inner_idx, mod_type_idx) => Doc::concat(vec![
-            print_mod_expr(
-                state,
-                arena.get_mod_expr(*mod_expr_inner_idx),
-                cmt_tbl,
-                arena,
-            ),
-            Doc::text(": "),
-            print_module_type(state, arena.get_mod_type(*mod_type_idx), cmt_tbl, arena),
-        ]),
+        ModuleExprDesc::Pmod_constraint(inner_idx, mod_type_idx) => {
+            let doc = Doc::concat(vec![
+                print_mod_expr(state, arena.get_mod_expr(*inner_idx), cmt_tbl, arena),
+                Doc::text(": "),
+                print_module_type(state, arena.get_mod_type(*mod_type_idx), cmt_tbl, arena),
+            ]);
+            // `@attr (M: S)`: without parens, the attributes would apply to `M`.
+            if parsetree_viewer::mod_expr_has_attributes(arena, mod_expr) {
+                add_mod_expr_parens(doc)
+            } else {
+                doc
+            }
+        }
 
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_, _, _) = **inner;
-            print_mod_functor(state, mod_expr, cmt_tbl, arena)
+        ModuleExprDesc::Pmod_functor(_) => print_mod_functor(state, mod_expr, cmt_tbl, arena),
+
+        ModuleExprDesc::Pmod_await(inner_idx) => {
+            let inner = arena.get_mod_expr(*inner_idx);
+            let inner_doc = print_mod_expr(state, inner, cmt_tbl, arena);
+            let inner_doc = match &*inner.pmod_desc {
+                // `await (await M)`: the parser reads one `await` per module.
+                ModuleExprDesc::Pmod_await(_) => add_mod_expr_parens(inner_doc),
+                // The attributes after `await` belong to the await.
+                _ if parsetree_viewer::mod_expr_has_attributes(arena, inner) => {
+                    add_mod_expr_parens(inner_doc)
+                }
+                _ if parens::mod_constraint(arena, inner) => add_mod_expr_parens(inner_doc),
+                _ => inner_doc,
+            };
+            // `@attr await M` does not parse: an await's attributes come after
+            // `await`, like a functor's on its first parameter.
+            Doc::concat(vec![
+                Doc::text("await "),
+                print_mod_expr_attributes(state, mod_expr, cmt_tbl, arena),
+                inner_doc,
+            ])
         }
     };
 
-    // Handle await attribute
-    let doc = if parsetree_viewer::has_await_attribute(arena, &mod_expr.pmod_attributes) {
-        match &*mod_expr.pmod_desc {
-            ModuleExprDesc::Pmod_constraint(_, _) => {
-                Doc::concat(vec![Doc::text("await "), Doc::lparen(), doc, Doc::rparen()])
-            }
-            _ => Doc::concat(vec![Doc::text("await "), doc]),
-        }
-    } else {
-        doc
+    let doc = match &*mod_expr.pmod_desc {
+        // A functor's attributes belong to its first parameter, see
+        // `print_mod_functor`, an await's are printed above.
+        ModuleExprDesc::Pmod_functor(_) | ModuleExprDesc::Pmod_await(_) => doc,
+        _ => Doc::concat(vec![
+            print_mod_expr_attributes(state, mod_expr, cmt_tbl, arena),
+            doc,
+        ]),
     };
 
     print_comments(doc, cmt_tbl, mod_expr.pmod_loc, arena)
@@ -6731,7 +6766,9 @@ fn print_mod_functor(
 
     // Extract return constraint if present
     let (return_constraint, return_body) = match &*return_mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_constraint(inner_mod_expr_idx, mod_type_idx) => {
+        ModuleExprDesc::Pmod_constraint(inner_mod_expr_idx, mod_type_idx)
+            if !parsetree_viewer::mod_expr_has_attributes(arena, return_mod_expr) =>
+        {
             let mod_type = arena.get_mod_type(*mod_type_idx);
             let constraint_doc = print_module_type(state, mod_type, cmt_tbl, arena);
             let constraint_doc = if parens::mod_expr_functor_constraint(mod_type) {
@@ -6742,7 +6779,7 @@ fn print_mod_functor(
             let mod_constraint = Doc::concat(vec![Doc::text(": "), constraint_doc]);
             (
                 mod_constraint,
-                print_mod_expr(
+                print_mod_expr_constraint_parens(
                     state,
                     arena.get_mod_expr(*inner_mod_expr_idx),
                     cmt_tbl,
@@ -6842,8 +6879,102 @@ fn print_mod_apply_arg(
     arena: &ParseArena,
 ) -> Doc {
     match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(s) if s.is_empty() => Doc::text("()"),
-        _ => print_mod_expr(state, mod_expr, cmt_tbl, arena),
+        ModuleExprDesc::Pmod_structure(s)
+            if s.is_empty() && mod_expr.pmod_attributes.is_empty() =>
+        {
+            Doc::text("()")
+        }
+        _ => {
+            let doc = print_mod_expr(state, mod_expr, cmt_tbl, arena);
+            // The parser doesn't accept a doc comment at the start of an argument.
+            if mod_expr_starts_with_doc_comment(arena, mod_expr) {
+                add_mod_expr_parens(doc)
+            } else {
+                doc
+            }
+        }
+    }
+}
+
+/// A module expression's attributes, doc comments first, on one line with
+/// it: unlike before a declaration, a line break here would leave the module
+/// at the start of the next line.
+fn print_mod_expr_attributes(
+    state: &PrinterState,
+    mod_expr: &ModuleExpr,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let attrs = parsetree_viewer::filter_parsing_attrs(arena, &mod_expr.pmod_attributes);
+    if attrs.is_empty() {
+        return Doc::nil();
+    }
+    let (doc_comments, others): (Vec<&Attribute>, Vec<&Attribute>) = attrs
+        .into_iter()
+        .partition(|attr| parsetree_viewer::is_doc_comment_attribute(arena, attr));
+    Doc::concat(
+        doc_comments
+            .into_iter()
+            .chain(others)
+            .map(|attr| {
+                Doc::concat(vec![
+                    print_attribute(state, attr, false, cmt_tbl, arena),
+                    Doc::space(),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// A constraint without attributes needs parens where `M: S` would not parse
+/// or would mean something else: after `module M: T =`, in a functor's
+/// result, after `module type of` and inside `module(...)`. With attributes it
+/// prints its own.
+fn print_mod_expr_constraint_parens(
+    state: &PrinterState,
+    mod_expr: &ModuleExpr,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let doc = print_mod_expr(state, mod_expr, cmt_tbl, arena);
+    if parens::mod_constraint(arena, mod_expr) {
+        add_mod_expr_parens(doc)
+    } else {
+        doc
+    }
+}
+
+/// Module expressions hug their parens, so a multi-line structure or
+/// signature keeps its braces next to them: `(M: {...})`.
+fn add_mod_expr_parens(doc: Doc) -> Doc {
+    Doc::concat(vec![Doc::lparen(), doc, Doc::rparen()])
+}
+
+/// Whether a module expression's printed form starts with a doc comment: doc
+/// comments print before other attributes, and an unparenthesized constraint
+/// or application starts with its leftmost module.
+fn mod_expr_starts_with_doc_comment(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
+    match &*mod_expr.pmod_desc {
+        // A functor's attributes print on its first parameter, an await's
+        // after `await`.
+        ModuleExprDesc::Pmod_functor(_) | ModuleExprDesc::Pmod_await(_) => false,
+        _ if mod_expr
+            .pmod_attributes
+            .iter()
+            .any(|attr| parsetree_viewer::is_doc_comment_attribute(arena, attr)) =>
+        {
+            true
+        }
+        _ if parsetree_viewer::mod_expr_has_attributes(arena, mod_expr) => false,
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            mod_expr_starts_with_doc_comment(arena, arena.get_mod_expr(*inner))
+        }
+        ModuleExprDesc::Pmod_apply(..) => {
+            let (_, call_expr) = parsetree_viewer::mod_expr_apply(arena, mod_expr);
+            !parens::mod_apply_callee(arena, call_expr)
+                && mod_expr_starts_with_doc_comment(arena, call_expr)
+        }
+        _ => false,
     }
 }
 
@@ -6960,7 +7091,12 @@ fn print_module_type(
 
         ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => Doc::concat(vec![
             Doc::text("module type of "),
-            print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena),
+            print_mod_expr_constraint_parens(
+                state,
+                arena.get_mod_expr(*mod_expr_idx),
+                cmt_tbl,
+                arena,
+            ),
         ]),
 
         ModuleTypeDesc::Pmty_extension(ext) => {
@@ -6971,13 +7107,6 @@ fn print_module_type(
             Doc::text("module "),
             print_longident_location(lid, cmt_tbl, arena),
         ]),
-    };
-
-    // Handle await attribute
-    let doc = if parsetree_viewer::has_await_attribute(arena, &mty.pmty_attributes) {
-        Doc::concat(vec![Doc::text("await "), doc])
-    } else {
-        doc
     };
 
     // Add attributes for types that don't print them internally
@@ -7855,7 +7984,7 @@ fn print_value_binding(
                 let (ref if_expr_idx, _, _) = **inner;
                 let if_expr = arena.get_expr(*if_expr_idx);
                 parsetree_viewer::is_binary_expression(arena, if_expr)
-                    || parsetree_viewer::has_attributes(arena, &if_expr.pexp_attributes)
+                    || !if_expr.pexp_attributes.is_empty()
             }
             // Pexp_newtype: don't indent
             ExpressionDesc::Pexp_newtype { .. } => false,
@@ -7865,7 +7994,7 @@ fn print_value_binding(
             ExpressionDesc::Pexp_jsx_element(_) => true,
             // Default: check attributes or array access or binary expression
             _ => {
-                parsetree_viewer::has_attributes(arena, &vb_expr.pexp_attributes)
+                !vb_expr.pexp_attributes.is_empty()
                     || parsetree_viewer::is_binary_expression(arena, vb_expr)
                     || parsetree_viewer::is_array_access(arena, vb_expr)
             }
@@ -9336,28 +9465,7 @@ fn print_module_binding(
 
     // Handle Pmod_constraint specially - print constraint before equals sign (like OCaml)
     // module X: Int = Y  vs  module X = Y: Int
-    let (expr_doc, constraint_doc) = match &*binding_expr.pmod_desc {
-        ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)
-            if !parsetree_viewer::has_await_attribute(arena, &binding_expr.pmod_attributes) =>
-        {
-            let expr_doc = print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena);
-            // Wrap in parens based on the outer binding expr (not inner)
-            let expr_doc = if parens::mod_expr_parens(arena, binding_expr) {
-                Doc::concat(vec![Doc::lparen(), expr_doc, Doc::rparen()])
-            } else {
-                expr_doc
-            };
-            let constraint_doc = Doc::concat(vec![
-                Doc::text(": "),
-                print_module_type(state, arena.get_mod_type(*mod_type_idx), cmt_tbl, arena),
-            ]);
-            (expr_doc, constraint_doc)
-        }
-        _ => {
-            let expr_doc = print_mod_expr(state, binding_expr, cmt_tbl, arena);
-            (expr_doc, Doc::nil())
-        }
-    };
+    let (expr_doc, constraint_doc) = print_module_binding_expr(state, binding_expr, cmt_tbl, arena);
 
     let doc = Doc::concat(vec![
         attrs_doc,
@@ -9370,6 +9478,38 @@ fn print_module_binding(
 
     // Wrap entire result with print_comments for binding location (like OCaml reference)
     print_comments(doc, cmt_tbl, binding.pmb_loc, arena)
+}
+
+/// The expression and constraint of a module binding (res_printer.ml
+/// `print_module_binding`): `module M: S = E` prints the constraint before
+/// `=`, except with attributes, which have no node there.
+fn print_module_binding_expr(
+    state: &PrinterState,
+    binding_expr: &ModuleExpr,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> (Doc, Doc) {
+    match &*binding_expr.pmod_desc {
+        ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)
+            if !parsetree_viewer::mod_expr_has_attributes(arena, binding_expr) =>
+        {
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
+            let expr_doc = if parens::mod_expr_parens(arena, binding_expr) {
+                add_mod_expr_parens(print_mod_expr(state, mod_expr, cmt_tbl, arena))
+            } else {
+                print_mod_expr_constraint_parens(state, mod_expr, cmt_tbl, arena)
+            };
+            let constraint_doc = Doc::concat(vec![
+                Doc::text(": "),
+                print_module_type(state, arena.get_mod_type(*mod_type_idx), cmt_tbl, arena),
+            ]);
+            (expr_doc, constraint_doc)
+        }
+        _ => (
+            print_mod_expr(state, binding_expr, cmt_tbl, arena),
+            Doc::nil(),
+        ),
+    }
 }
 
 /// Print recursive module bindings using print_listi for proper comment handling.
@@ -9404,32 +9544,8 @@ fn print_rec_module_bindings(
 
             // Handle Pmod_constraint specially - print constraint before equals sign (like OCaml)
             // module rec X: Int = Y  vs  module rec X = Y: Int
-            let (expr_doc, constraint_doc) = match &*binding_expr.pmod_desc {
-                ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)
-                    if !parsetree_viewer::has_await_attribute(
-                        arena,
-                        &binding_expr.pmod_attributes,
-                    ) =>
-                {
-                    let expr_doc =
-                        print_mod_expr(state, arena.get_mod_expr(*mod_expr_idx), cmt_tbl, arena);
-                    // Wrap in parens based on the outer binding expr (not inner)
-                    let expr_doc = if parens::mod_expr_parens(arena, binding_expr) {
-                        Doc::concat(vec![Doc::lparen(), expr_doc, Doc::rparen()])
-                    } else {
-                        expr_doc
-                    };
-                    let constraint_doc = Doc::concat(vec![
-                        Doc::text(": "),
-                        print_module_type(state, arena.get_mod_type(*mod_type_idx), cmt_tbl, arena),
-                    ]);
-                    (expr_doc, constraint_doc)
-                }
-                _ => {
-                    let expr_doc = print_mod_expr(state, binding_expr, cmt_tbl, arena);
-                    (expr_doc, Doc::nil())
-                }
-            };
+            let (expr_doc, constraint_doc) =
+                print_module_binding_expr(state, binding_expr, cmt_tbl, arena);
 
             Doc::concat(vec![
                 attrs_doc,
@@ -9513,7 +9629,12 @@ fn print_include_declaration(
         let (args, call_expr) = parsetree_viewer::mod_expr_apply(arena, include_mod);
 
         // Check if callee is an ident and single arg is structure with single type alias
-        if args.len() == 1 && matches!(&*call_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
+        if args.len() == 1
+            && include_mod.pmod_attributes.is_empty()
+            && call_expr.pmod_attributes.is_empty()
+            && args[0].pmod_attributes.is_empty()
+            && matches!(&*call_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_))
+        {
             if let ModuleExprDesc::Pmod_structure(items) = &*args[0].pmod_desc {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_type(type_inner) = &*items[0].pstr_desc {
@@ -9553,7 +9674,7 @@ fn print_include_declaration(
         print_mod_expr(state, include_mod, cmt_tbl, arena)
     };
 
-    let include_doc = if parens::include_mod_expr(include_mod) {
+    let include_doc = if parens::mod_constraint(arena, include_mod) {
         add_parens(mod_doc)
     } else {
         mod_doc

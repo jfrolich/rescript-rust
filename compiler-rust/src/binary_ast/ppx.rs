@@ -29,14 +29,14 @@ use crate::parser::ast::{
     ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind, FunParam,
     IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement,
     LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern,
-    PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, PrivateFlag, RecFlag, RowField,
-    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
-    TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
+    PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, RecFlag, RowField, SignatureItem,
+    SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension,
+    TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
 use super::spice_ppx;
-use crate::parser::ast::{PexpBraces, PrimitiveRepr, TypeDeclarationOrigin};
+use crate::parser::ast::{PexpBraces, PrimitiveRepr};
 use crate::types::external_ffi_types::{
     Attr, Cst, DeclKind, ExternalDecl, ExternalFfi, ExternalModuleName, ImportAttributes,
     InlineConst, Label, LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param, ReturnWrapper,
@@ -4329,12 +4329,11 @@ pub fn inline_float_primitive(f: &str) -> PrimitiveRepr {
     PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstFloat(f.to_string())))
 }
 
-/// `Ast_external_mk.inline_bigint`: binds `Bigint_utils.parse_bigint`'s sign
-/// flag (true for a positive literal) to the `negative` field, as upstream
-/// does; translation passes it through unchanged as Lambda's sign.
+/// `Ast_external_mk.inline_bigint` (compiler/frontend/ast_external_mk.ml):
+/// `Bigint_utils.parse_bigint`'s sign flag is true for a positive literal.
 pub fn inline_bigint_primitive(s: &str) -> PrimitiveRepr {
-    let (negative, digits) = crate::types::typecore::parse_bigint_literal(s);
-    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstBigint { negative, digits }))
+    let (positive, digits) = crate::types::typecore::parse_bigint_literal(s);
+    PrimitiveRepr::PrimInlineConst(Box::new(InlineConst::ConstBigint { positive, digits }))
 }
 
 // ========== @inline Handling ==========
@@ -5567,12 +5566,105 @@ fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseAren
 
 // ========== Module-Level Await Transformation ==========
 
-/// Check if attributes contain @res.await
-fn has_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> bool {
-    attrs.iter().any(|(attr_name, _)| {
-        let name = arena.get_string(attr_name.txt);
-        name == "res.await"
-    })
+/// `Ast_await.remove_awaits`: `m` without its outer awaits, e.g.
+/// `await (await M)`, whose attributes (e.g. `@warning`) stay on the module
+/// they wrap, after its own as in the v0 encoding, and whether it had any
+/// (`awaited` for the awaits already removed).
+fn remove_awaits(
+    awaited: bool,
+    m: &current::ModuleExpr,
+    arena: &ParseArena,
+) -> (bool, current::ModuleExpr) {
+    match &*m.pmod_desc {
+        ModuleExprDesc::Pmod_await(inner) => {
+            let mut inner = arena.get_mod_expr(*inner).clone();
+            let mut attrs = inner.pmod_attributes.to_vec();
+            attrs.extend(m.pmod_attributes.iter().cloned());
+            inner.pmod_attributes = attrs.into();
+            remove_awaits(true, &inner, arena)
+        }
+        _ => (awaited, m.clone()),
+    }
+}
+
+/// `Ast_await.awaited_module_path`: an awaited module path, `await M`, and
+/// `await (M: S)` or `(await M: S)`, where `await` may be repeated. Returns
+/// the path of `M`; the module to import, which is `e` without its awaits,
+/// whose attributes stay on the module they wrap; and `S` for the constrained
+/// forms. It is a dynamic import when `S` is absent or a module type path.
+fn awaited_module_path(
+    e: &current::ModuleExpr,
+    arena: &mut ParseArena,
+) -> Option<(Located<LidentIdx>, current::ModuleExpr, Option<ModTypeIdx>)> {
+    match remove_awaits(false, e, arena) {
+        (true, imported) => match &*imported.pmod_desc {
+            ModuleExprDesc::Pmod_ident(lid) => Some((*lid, imported.clone(), None)),
+            ModuleExprDesc::Pmod_constraint(m, mty) => {
+                awaited_constraint(true, &imported, *m, *mty, arena)
+            }
+            _ => None,
+        },
+        (false, constrained) => match &*constrained.pmod_desc {
+            ModuleExprDesc::Pmod_constraint(m, mty) => {
+                awaited_constraint(false, &constrained, *m, *mty, arena)
+            }
+            _ => None,
+        },
+    }
+}
+
+fn awaited_constraint(
+    awaited: bool,
+    constrained: &current::ModuleExpr,
+    m: ModExprIdx,
+    mty: ModTypeIdx,
+    arena: &mut ParseArena,
+) -> Option<(Located<LidentIdx>, current::ModuleExpr, Option<ModTypeIdx>)> {
+    let m = arena.get_mod_expr(m).clone();
+    match remove_awaits(awaited, &m, arena) {
+        (true, path) => {
+            let ModuleExprDesc::Pmod_ident(lid) = &*path.pmod_desc else {
+                return None;
+            };
+            let lid = *lid;
+            let path_idx = arena.push_mod_expr(path);
+            Some((
+                lid,
+                current::ModuleExpr {
+                    pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(path_idx, mty)),
+                    pmod_loc: constrained.pmod_loc,
+                    pmod_attributes: constrained.pmod_attributes.clone(),
+                },
+                Some(mty),
+            ))
+        }
+        (false, _) => None,
+    }
+}
+
+/// The shape `awaited_module_path` recognizes, without building the module
+/// to import: `None` when it is not an awaited module path, else whether it
+/// is constrained.
+fn awaited_module_path_kind(e: &current::ModuleExpr, arena: &ParseArena) -> Option<bool> {
+    fn strip<'a>(
+        awaited: bool,
+        m: &'a current::ModuleExpr,
+        arena: &'a ParseArena,
+    ) -> (bool, &'a current::ModuleExpr) {
+        match &*m.pmod_desc {
+            ModuleExprDesc::Pmod_await(inner) => strip(true, arena.get_mod_expr(*inner), arena),
+            _ => (awaited, m),
+        }
+    }
+    let (awaited, m) = strip(false, e, arena);
+    match &*m.pmod_desc {
+        ModuleExprDesc::Pmod_ident(_) if awaited => Some(false),
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            let (awaited, path) = strip(awaited, arena.get_mod_expr(*inner), arena);
+            (awaited && matches!(&*path.pmod_desc, ModuleExprDesc::Pmod_ident(_))).then_some(true)
+        }
+        _ => None,
+    }
 }
 
 /// Generate a local module type name from a Longident.
@@ -5589,71 +5681,32 @@ fn local_module_type_name(lid: LidentIdx, arena: &ParseArena) -> String {
     format!("__{}__", name)
 }
 
-/// Remove @res.await attribute from a list of attributes.
-fn remove_await_attribute(attrs: &[Attribute], arena: &ParseArena) -> Vec<Attribute> {
-    attrs
-        .iter()
-        .filter(|(attr_name, _)| {
-            let name = arena.get_string(attr_name.txt);
-            name != "res.await"
-        })
-        .cloned()
-        .collect()
-}
-
-/// Create the await module expression transformation for expression-level await.
-///
-/// Transforms `@res.await ME` into:
-///   `unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(ME: __ME__))))`
-///
-/// OCaml: ast_await.ml create_await_module_expression
-///
-/// This is used for expression-level `Pexp_letmodule`:
-///   `{ module M = @res.await ME; ... }` -> `{ module M = unpack(...); ... }`
-///
-/// The `module_type_lid` is the located longident for the module type constraint.
-/// The `mod_expr` can be either Pmod_ident or Pmod_constraint - OCaml handles both.
+/// `Ast_await.create_await_module_expression`: the dynamic import `e` of
+/// `imported`, as returned by `awaited_module_path`, becomes
+/// `unpack(await import(module(M: __M0__)))`.
 fn create_await_module_expression(
-    mod_expr: &current::ModuleExpr,
-    module_type_lid: Located<LidentIdx>, // Now includes location!
+    e: &current::ModuleExpr,
+    module_type_lid: Located<LidentIdx>,
+    imported: current::ModuleExpr,
     arena: &mut ParseArena,
 ) -> current::ModuleExpr {
-    // OCaml uses e.pmod_loc for all generated locations
-    let pmod_loc = mod_expr.pmod_loc;
-
-    // Create pack expression: module(ME)
-    // OCaml: Exp.pack ~loc:e.pmod_loc {e with pmod_attributes = remove_await_attribute ...}
-    // OCaml packs the ENTIRE module expression (could be Pmod_ident OR Pmod_constraint)
-    // NOTE: OCaml's remove_await_attribute uses `!=` (physical inequality) which doesn't
-    // actually remove the attribute because strings are different objects. So the inner
-    // pack expression KEEPS @res.await in the actual output.
-    let cleaned_mod_expr = current::ModuleExpr {
-        pmod_desc: mod_expr.pmod_desc.clone(), // Keep original desc (Pmod_ident or Pmod_constraint)
-        pmod_loc,
-        // Keep attributes as-is to match OCaml's actual behavior
-        pmod_attributes: mod_expr.pmod_attributes.clone(),
-    };
+    let pmod_loc = e.pmod_loc;
 
     let pack_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_pack(
-            arena.push_mod_expr(cleaned_mod_expr),
-        )),
+        pexp_desc: Box::new(ExpressionDesc::Pexp_pack(arena.push_mod_expr(imported))),
         pexp_loc: pmod_loc,
         pexp_attributes: Attributes::new(),
     };
 
-    // Create package type: (__ME__, [])
-    // The module_type_lid has its own location from the original source
     let package_type = CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((
-            module_type_lid, // Use the Located<LidentIdx> directly with its location
-            vec![],          // No with constraints
+            module_type_lid,
+            vec![],
         )))),
         ptyp_loc: pmod_loc,
         ptyp_attributes: Attributes::new(),
     };
 
-    // Create constrained expression: (module(ME): __ME__)
     let constrained_pack = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
             arena.push_expr(pack_expr),
@@ -5663,7 +5716,6 @@ fn create_await_module_expression(
         pexp_attributes: Attributes::new(),
     };
 
-    // Create Primitive_module.import(constrained_pack)
     let module_str = arena.intern_string("Primitive_module");
     let module_lident = arena.push_lident_from_idx(module_str);
     let import_lid = arena.push_ldot_static(module_lident, "import");
@@ -5688,20 +5740,51 @@ fn create_await_module_expression(
         pexp_attributes: Attributes::new(),
     };
 
-    // Create Primitive_promise.unsafe_await(import_apply)
-    let await_expr = transform_await(import_apply, mod_expr.pmod_loc, arena);
+    let await_expr = transform_await(import_apply, pmod_loc, arena);
 
-    // Create unpack(await_expr)
-    // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
+    // `{e with pmod_desc = Pmod_unpack ...}` keeps the await node's attributes.
     current::ModuleExpr {
         pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(arena.push_expr(await_expr))),
-        pmod_loc: mod_expr.pmod_loc,
-        // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
-        pmod_attributes: mod_expr.pmod_attributes.clone(),
+        pmod_loc,
+        pmod_attributes: e.pmod_attributes.clone(),
     }
 }
 
-/// Spelunk through an expression to find Pexp_letmodule with @res.await attributes.
+/// `local_module_type_decl` (bs_builtin_ppx.ml): `module type __List__ =
+/// module type of List`, the module type a dynamic import of `List` unpacks
+/// to, declared once per module.
+fn local_module_type_decl(
+    await_context: &mut std::collections::HashSet<String>,
+    lid: Located<LidentIdx>,
+    me: current::ModuleExpr,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    let name = local_module_type_name(lid.txt, arena);
+    if !await_context.insert(name.clone()) {
+        return vec![];
+    }
+    let loc = lid.loc;
+    let name_idx = arena.intern_string(&name);
+    let me_idx = arena.push_mod_expr(me);
+    let module_type_idx = arena.push_mod_type(current::ModuleType {
+        pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(me_idx)),
+        pmty_loc: loc,
+        pmty_attributes: Attributes::new(),
+    });
+    vec![StructureItem {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
+            current::ModuleTypeDeclaration {
+                pmtd_name: Located { txt: name_idx, loc },
+                pmtd_type: Some(module_type_idx),
+                pmtd_attributes: Attributes::new(),
+                pmtd_loc: loc,
+            },
+        ))),
+        pstr_loc: loc,
+    }]
+}
+
+/// Spelunk through an expression to find dynamic module imports.
 ///
 /// For each found, creates a module type declaration to hoist to structure level.
 /// Uses a context HashSet to track already-created module type names to avoid duplicates.
@@ -5718,57 +5801,18 @@ fn spelunk_expression_for_await_module_types(
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, ref mod_expr, ref body) = **inner;
             let mod_expr_val = arena.get_mod_expr(*mod_expr).clone();
-            let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc else {
-                return vec![];
-            };
-            if !has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
-                return vec![];
+            match awaited_module_path(&mod_expr_val, arena) {
+                Some((module_lid, imported, None)) => {
+                    // Before `aux expr`, which may import the same module.
+                    let mut results = local_module_type_decl(context, module_lid, imported, arena);
+                    let body_expr = arena.get_expr(*body).clone();
+                    results.extend(spelunk_expression_for_await_module_types(
+                        &body_expr, context, arena,
+                    ));
+                    results
+                }
+                _ => vec![],
             }
-            let module_type_name = local_module_type_name(located_lid.txt, arena);
-            let body_expr = arena.get_expr(*body).clone();
-            if context.contains(&module_type_name) {
-                return spelunk_expression_for_await_module_types(&body_expr, context, arena);
-            }
-            context.insert(module_type_name.clone());
-            let rest = spelunk_expression_for_await_module_types(&body_expr, context, arena);
-            // module type __ME__ = module type of ME
-            let module_type_name_idx = arena.intern_string(&module_type_name);
-            let lid_loc = located_lid.loc;
-
-            let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
-                    txt: located_lid.txt,
-                    loc: lid_loc,
-                })),
-                // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
-                // pmod_loc allocation (distinct from the lid location).
-                pmod_loc: mod_expr_val.pmod_loc,
-                // OCaml: Mty.typeof_ ~loc me uses original `me` attrs.
-                pmod_attributes: mod_expr_val.pmod_attributes.clone(),
-            });
-            let module_type_idx = arena.push_mod_type(current::ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
-                pmty_loc: lid_loc,
-                pmty_attributes: Attributes::new(),
-            });
-            let module_type_decl = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
-                    current::ModuleTypeDeclaration {
-                        pmtd_name: Located {
-                            txt: module_type_name_idx,
-                            loc: lid_loc,
-                        },
-                        pmtd_type: Some(module_type_idx),
-                        pmtd_attributes: Attributes::new(),
-                        pmtd_loc: lid_loc,
-                    },
-                ))),
-                pstr_loc: lid_loc,
-            };
-
-            let mut results = vec![module_type_decl];
-            results.extend(rest);
-            results
         }
         ExpressionDesc::Pexp_let(inner) => {
             let (_, ref bindings, ref body) = **inner;
@@ -5866,178 +5910,28 @@ fn spelunk_value_bindings_for_await_module_types(
     results
 }
 
-/// Create the module-level await transformation for `module M = @res.await ME`.
-/// Returns (optional module type decl, transformed module binding).
-///
-/// OCaml: bs_builtin_ppx.ml lines 661-702, ast_await.ml create_await_module_expression
-///
-/// Transforms:
-///   `module M = @res.await Belt.List`
-/// Into:
-///   `module type __Belt_List__ = module type of Belt.List`
-///   `module M = unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(Belt.List: __Belt_List__))))`
-///
-/// Key details from OCaml:
-/// - The Pmty_typeof uses the ORIGINAL module expression `me` (with @res.await attribute)
-/// - The transformed Pstr_module keeps the ORIGINAL pstr_loc from `item`
-/// - The transformed module expr keeps @res.await in pmod_attributes (via {e with pmod_desc = ...})
-/// - Only the inner pack expression removes @res.await
+/// The `Pstr_module` case of `structure_mapper` (bs_builtin_ppx.ml) for a
+/// dynamic import `module M = await List`: the module type declaration (once
+/// per module) and the rewritten binding.
 fn transform_module_await(
     mb: &current::ModuleBinding,
-    original_pstr_loc: LocIdx, // The original structure item location
+    original_pstr_loc: LocIdx,
+    await_context: &mut std::collections::HashSet<String>,
     arena: &mut ParseArena,
-) -> Option<(StructureItem, StructureItem)> {
-    // Check if the module expression is Pmod_ident with @res.await attribute
+) -> Option<Vec<StructureItem>> {
     let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
-    if !has_await_attribute(&mod_expr.pmod_attributes, arena) {
+    let Some((module_lid, imported, None)) = awaited_module_path(&mod_expr, arena) else {
         return None;
-    }
-
-    // Get the module identifier and its location
-    let (lid, lid_loc) = match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_ident(located_lid) => (located_lid.txt, located_lid.loc),
-        _ => return None, // Only handle Pmod_ident for now
     };
-
-    // Generate module type name: __Belt_List__
-    let module_type_name = local_module_type_name(lid, arena);
-    let module_type_name_idx = arena.intern_string(&module_type_name);
-
-    // Locations for generated code:
-    // - lid_loc: location of the Longident inside Pmod_ident (used for module type decl)
-    // - pmod_loc: location of the module expression (used for import/await expressions)
-
-    // 1. Create module type declaration: module type __Belt_List__ = module type of Belt.List
-    // OCaml uses (Mty.typeof_ ~loc me) where `me` is the ORIGINAL module expression
-    // This means the Pmty_typeof's inner module expr has the @res.await attribute
-    let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
-            txt: lid,
-            loc: lid_loc,
-        })),
-        // OCaml: Mty.typeof_ ~loc me - uses the ORIGINAL `me`, whose pmod_loc
-        // was overridden by parse_primary_mod_expr (a fresh allocation, not lid.loc)
-        pmod_loc: mod_expr.pmod_loc,
-        // OCaml: uses original `me` which has @res.await
-        pmod_attributes: mod_expr.pmod_attributes.clone(),
-    });
-    let module_type_idx = arena.push_mod_type(current::ModuleType {
-        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
-        pmty_loc: lid_loc,
-        pmty_attributes: Attributes::new(),
-    });
-    let module_type_decl = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
-            current::ModuleTypeDeclaration {
-                pmtd_name: Located {
-                    txt: module_type_name_idx,
-                    loc: lid_loc,
-                },
-                pmtd_type: Some(module_type_idx),
-                pmtd_attributes: Attributes::new(),
-                pmtd_loc: lid_loc,
-            },
-        ))),
-        pstr_loc: lid_loc,
+    let module_type_lid = Located {
+        txt: arena.push_lident(&local_module_type_name(module_lid.txt, arena)),
+        loc: mod_expr.pmod_loc,
     };
-
-    // 2. Create the transformed module expression:
-    // unpack(Primitive_promise.unsafe_await(Primitive_module.import(module(Belt.List: __Belt_List__))))
-
-    // Create module type lid for constraint: Lident("__Belt_List__")
-    let module_type_lid = arena.push_lident_from_idx(module_type_name_idx);
-
-    // Create pack expression: module(Belt.List)
-    // OCaml: Exp.pack ~loc:e.pmod_loc {e with pmod_attributes = remove_await_attribute ...}
-    // NOTE: OCaml's remove_await_attribute uses `!=` (physical inequality) which doesn't
-    // actually remove the attribute because strings are different objects. So the inner
-    // pack expression KEEPS @res.await in the actual output.
-    let cleaned_mod_expr = current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
-            txt: lid,
-            loc: lid_loc, // Preserve original Longident location
-        })),
-        pmod_loc: mod_expr.pmod_loc,
-        // Keep attributes as-is to match OCaml's actual behavior (not its intended behavior)
-        pmod_attributes: mod_expr.pmod_attributes.clone(),
-    };
-
-    // OCaml uses e.pmod_loc for pack, constraint, and package type locations
-    let pmod_loc = mod_expr.pmod_loc;
-
-    let pack_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_pack(
-            arena.push_mod_expr(cleaned_mod_expr),
-        )),
-        pexp_loc: pmod_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create package type: (Lident("__Belt_List__"), [])
-    // module_type_lid location is mb.pmb_expr.pmod_loc in OCaml
-    let package_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_package(Box::new((
-            Located {
-                txt: module_type_lid,
-                loc: pmod_loc,
-            },
-            vec![], // No with constraints
-        )))),
-        ptyp_loc: pmod_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    // Create constrained expression: (module(Belt.List): __Belt_List__)
-    let constrained_pack = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-            arena.push_expr(pack_expr),
-            arena.push_core_type(package_type),
-        )))),
-        pexp_loc: pmod_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create Primitive_module.import(constrained_pack)
-    let module_str = arena.intern_string("Primitive_module");
-    let module_lident = arena.push_lident_from_idx(module_str);
-    let import_lid = arena.push_ldot_static(module_lident, "import");
-
-    let import_ident = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-            txt: import_lid,
-            loc: pmod_loc,
-        })),
-        pexp_loc: pmod_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let import_apply = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-            funct: arena.push_expr(import_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_pack))],
-            partial: false,
-            transformed_jsx: false,
-        }))),
-        pexp_loc: pmod_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create Primitive_promise.unsafe_await(import_apply)
-    let await_expr = transform_await(import_apply, mod_expr.pmod_loc, arena);
-
-    // Create unpack(await_expr)
-    // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
-    let transformed_mod_expr = current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(arena.push_expr(await_expr))),
-        pmod_loc: mod_expr.pmod_loc,
-        // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
-        pmod_attributes: mod_expr.pmod_attributes.clone(),
-    };
-
-    // Create the transformed module binding
-    // OCaml: {item with pstr_desc = Pstr_module {mb with pmb_expr = ...}}
-    // This preserves original_pstr_loc (from item), not mb.pmb_loc
-    let transformed_mb = StructureItem {
+    // Before mapping the rest, which may import the same module.
+    let mut items = local_module_type_decl(await_context, module_lid, imported.clone(), arena);
+    let transformed_mod_expr =
+        create_await_module_expression(&mod_expr, module_type_lid, imported, arena);
+    items.push(StructureItem {
         pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(
             current::ModuleBinding {
                 pmb_name: mb.pmb_name,
@@ -6046,10 +5940,9 @@ fn transform_module_await(
                 pmb_loc: mb.pmb_loc,
             },
         ))),
-        pstr_loc: original_pstr_loc, // Use original structure item location
-    };
-
-    Some((module_type_decl, transformed_mb))
+        pstr_loc: original_pstr_loc,
+    });
+    Some(items)
 }
 
 // ========== Expression Rewriting ==========
@@ -6899,6 +6792,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         PatternDesc::Ppat_var(name) => PatternDesc::Ppat_var(*name),
         PatternDesc::Ppat_interval(inner) => PatternDesc::Ppat_interval(inner.clone()),
         PatternDesc::Ppat_type(lid) => PatternDesc::Ppat_type(*lid),
+        PatternDesc::Ppat_variant_spread(lid) => PatternDesc::Ppat_variant_spread(*lid),
         PatternDesc::Ppat_unpack(name) => PatternDesc::Ppat_unpack(*name),
         PatternDesc::Ppat_extension(ext) => {
             let (ref name, ref payload) = **ext;
@@ -8214,82 +8108,39 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (ref name, ref mod_expr, ref body) = **inner;
             let mod_expr_val = arena.get_mod_expr(*mod_expr).clone();
-            // Check for expression-level await: module M = @res.await ME
-            // OCaml: bs_builtin_ppx.ml lines 327-363
-            //
-            // Case 1: Pmod_ident with @res.await
-            //   module M = @res.await Belt.List
-            //   -> module M = unpack(...) using __Belt_List__
-            //
-            // Case 2: Pmod_constraint(Pmod_ident, Pmty_ident mtyp_lid) with @res.await
-            //   module M = @res.await (Belt.List: BeltList)
-            //   -> module M = unpack(...) using BeltList
-
-            // Check Case 1: Pmod_ident with await
-            if let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc {
-                if has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
-                    // Generate module type name: __Belt_List__
-                    let module_type_name = local_module_type_name(located_lid.txt, arena);
-                    // OCaml builds this name independently in expression mapper and
-                    // structure spelunking paths, so keep a fresh string identity here.
-                    let module_type_lid_idx = arena.push_lident(&module_type_name);
-                    // OCaml uses me.pmod_loc for this generated lid.
-                    let module_type_lid = Located {
-                        txt: module_type_lid_idx,
-                        loc: mod_expr_val.pmod_loc,
-                    };
-
-                    let transformed_mod_expr =
-                        create_await_module_expression(&mod_expr_val, module_type_lid, arena);
-
-                    // OCaml: {e with pexp_desc = Pexp_letmodule(Box::new((lid, transformed, self.expr self expr)))}
-                    let body_expr = arena.get_expr(*body).clone();
-                    let rw_body = rewrite_expression(&body_expr, arena);
-                    return Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(Box::new((
-                            *name,
-                            arena.push_mod_expr(transformed_mod_expr),
-                            arena.push_expr(rw_body),
-                        )))),
-                        pexp_loc: expr.pexp_loc,
-                        pexp_attributes: expr.pexp_attributes.clone(),
-                    };
+            // bs_builtin_ppx.ml `expr_mapper`: `module M = await List` and
+            // `module M = await (List: ListType)` are dynamic imports.
+            let module_type_lid = match awaited_module_path(&mod_expr_val, arena) {
+                Some((module_lid, imported, None)) => {
+                    let name = local_module_type_name(module_lid.txt, arena);
+                    Some((
+                        Located {
+                            txt: arena.push_lident(&name),
+                            loc: module_lid.loc,
+                        },
+                        imported,
+                    ))
                 }
-            }
-
-            // Check Case 2: Pmod_constraint(Pmod_ident, Pmty_ident mtyp_lid) with await
-            if let ModuleExprDesc::Pmod_constraint(inner_mod_idx, mty_idx) =
-                &*mod_expr_val.pmod_desc
-            {
-                let inner_mod = arena.get_mod_expr(*inner_mod_idx).clone();
-                let mty = arena.get_mod_type(*mty_idx).clone();
-                if let ModuleExprDesc::Pmod_ident(_) = &*inner_mod.pmod_desc {
-                    if let ModuleTypeDesc::Pmty_ident(mtyp_lid) = &*mty.pmty_desc {
-                        let mtyp_lid_copy = *mtyp_lid;
-                        let inner_has_await =
-                            has_await_attribute(&inner_mod.pmod_attributes, arena);
-                        let outer_has_await =
-                            has_await_attribute(&mod_expr_val.pmod_attributes, arena);
-                        // Check for @res.await on either the inner module or the constraint
-                        if inner_has_await || outer_has_await {
-                            // Use the existing module type identifier with its location
-                            let transformed_mod_expr =
-                                create_await_module_expression(&mod_expr_val, mtyp_lid_copy, arena);
-
-                            let body_expr = arena.get_expr(*body).clone();
-                            let rw_body = rewrite_expression(&body_expr, arena);
-                            return Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(Box::new((
-                                    *name,
-                                    arena.push_mod_expr(transformed_mod_expr),
-                                    arena.push_expr(rw_body),
-                                )))),
-                                pexp_loc: expr.pexp_loc,
-                                pexp_attributes: expr.pexp_attributes.clone(),
-                            };
-                        }
-                    }
-                }
+                Some((_, imported, Some(mty))) => match &*arena.get_mod_type(mty).pmty_desc {
+                    ModuleTypeDesc::Pmty_ident(mtyp_lid) => Some((*mtyp_lid, imported)),
+                    _ => None,
+                },
+                None => None,
+            };
+            if let Some((module_type_lid, imported)) = module_type_lid {
+                let transformed_mod_expr =
+                    create_await_module_expression(&mod_expr_val, module_type_lid, imported, arena);
+                let body_expr = arena.get_expr(*body).clone();
+                let rw_body = rewrite_expression(&body_expr, arena);
+                return Expression {
+                    pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(Box::new((
+                        *name,
+                        arena.push_mod_expr(transformed_mod_expr),
+                        arena.push_expr(rw_body),
+                    )))),
+                    pexp_loc: expr.pexp_loc,
+                    pexp_attributes: expr.pexp_attributes.clone(),
+                };
             }
 
             // Default: no await transformation needed, but DO recurse into module structure
@@ -8455,8 +8306,6 @@ fn rewrite_jsx_props(props: &[JsxProp], arena: &mut ParseArena) -> Vec<JsxProp> 
 #[derive(Debug, Clone, PartialEq)]
 enum DeriveAction {
     Accessors,
-    JsConverter { new_type: bool },
-    Abstract { light: bool },
 }
 
 struct DeriveActionConfig {
@@ -8537,97 +8386,6 @@ fn deriving_config_actions(
     }
 }
 
-fn validate_js_converter_config(expr_idx: ExprIdx, arena: &ParseArena) -> PpxResult<()> {
-    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(expr_idx));
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                ));
-            };
-            if arena.get_string(*name_idx) == "newType" {
-                Ok(())
-            } else {
-                Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                ))
-            }
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, _base) = &**inner;
-            let Some(field) = fields.first() else {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                ));
-            };
-            if fields.len() != 1 {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                ));
-            }
-            let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                ));
-            };
-            if arena.get_string(*name_idx) != "newType" {
-                return Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                ));
-            }
-            let value = crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr));
-            match &*value.pexp_desc {
-                ExpressionDesc::Pexp_ident(lid_loc) => {
-                    let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
-                        return Err(PpxError::at_loc(
-                            expr.pexp_loc,
-                            "such configuration is not supported",
-                        ));
-                    };
-                    if arena.get_string(*name_idx) == "newType" {
-                        Ok(())
-                    } else {
-                        Err(PpxError::at_loc(
-                            expr.pexp_loc,
-                            "such configuration is not supported",
-                        ))
-                    }
-                }
-                ExpressionDesc::Pexp_construct(ctor_lid, args) if args.txt.is_empty() => {
-                    let Longident::Lident(name_idx) = arena.get_longident(ctor_lid.txt) else {
-                        return Err(PpxError::at_loc(
-                            expr.pexp_loc,
-                            "such configuration is not supported",
-                        ));
-                    };
-                    match arena.get_string(*name_idx) {
-                        "true" | "false" => Ok(()),
-                        _ => Err(PpxError::at_loc(
-                            expr.pexp_loc,
-                            "such configuration is not supported",
-                        )),
-                    }
-                }
-                _ => Err(PpxError::at_loc(
-                    expr.pexp_loc,
-                    "such configuration is not supported",
-                )),
-            }
-        }
-        _ => Err(PpxError::at_loc(
-            expr.pexp_loc,
-            "such configuration is not supported",
-        )),
-    }
-}
-
 fn push_deriving_not_applicable_warning(
     loc: LocIdx,
     deriving_name: &str,
@@ -8639,14 +8397,6 @@ fn push_deriving_not_applicable_warning(
             message: format!("{deriving_name} not applicable to this type"),
         },
     });
-}
-
-fn js_converter_not_applicable(tdcl: &TypeDeclaration, arena: &ParseArena) -> bool {
-    match tdcl.ptype_kind {
-        TypeKind::Ptype_record(_) => false,
-        TypeKind::Ptype_abstract => is_enum_polyvar(tdcl, arena).is_none(),
-        TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => true,
-    }
 }
 
 /// Parse @deriving attribute to extract derive actions
@@ -8671,16 +8421,6 @@ fn parse_deriving_actions(
             for config in deriving_config_actions(payload, arena).unwrap_or_default() {
                 match config.name.as_str() {
                     "accessors" => actions.push(DeriveAction::Accessors),
-                    "jsConverter" => actions.push(DeriveAction::JsConverter {
-                        new_type: config
-                            .config
-                            .is_some_and(|expr| check_new_type_config(arena.get_expr(expr), arena)),
-                    }),
-                    "abstract" => actions.push(DeriveAction::Abstract {
-                        light: config.config.is_some_and(|expr| {
-                            check_abstract_light_config(arena.get_expr(expr), arena)
-                        }),
-                    }),
                     _ => {}
                 }
             }
@@ -8696,1675 +8436,12 @@ fn parse_deriving_actions(
     (actions, remaining_attrs)
 }
 
-/// Check if abstract config is `light` in @deriving({abstract: light})
-fn check_abstract_light_config(expr: &Expression, arena: &ParseArena) -> bool {
-    match &*crate::ast_payload::unwrap_braces(arena, expr).pexp_desc {
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let lid = arena.get_longident(lid_loc.txt);
-            if let Longident::Lident(s) = lid {
-                arena.get_string(*s) == "light"
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Check if an expression configures newType to true
-fn check_new_type_config(expr: &Expression, arena: &ParseArena) -> bool {
-    match &*crate::ast_payload::unwrap_braces(arena, expr).pexp_desc {
-        // {newType: true} or just `newType`
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let lid = arena.get_longident(lid_loc.txt);
-            if let Longident::Lident(s) = lid {
-                let name = arena.get_string(*s);
-                return name == "newType";
-            }
-            false
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, _) = **inner;
-            for field in fields {
-                let lid = arena.get_longident(field.lid.txt);
-                if let Longident::Lident(s) = lid {
-                    let field_name = arena.get_string(*s);
-                    if field_name == "newType" {
-                        // Check if value is `true`
-                        if let ExpressionDesc::Pexp_construct(ctor_lid, args) =
-                            &*crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr))
-                                .pexp_desc
-                            && args.txt.is_empty()
-                        {
-                            let ctor = arena.get_longident(ctor_lid.txt);
-                            if let Longident::Lident(s) = ctor {
-                                return arena.get_string(*s) == "true";
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Set the arity of the outermost Pexp_fun
-fn set_outermost_arity(expr: Expression, arity: i32, arena: &mut ParseArena) -> Expression {
-    if let ExpressionDesc::Pexp_fun(inner) = *expr.pexp_desc {
-        let PexpFun {
-            arg_label,
-            default,
-            lhs,
-            rhs,
-            is_async,
-            arity: _,
-            ..
-        } = *inner;
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label,
-                default,
-                lhs,
-                rhs,
-                is_async,
-                arity: arena.push_arity(Some(arity)),
-            }))),
-            pexp_loc: expr.pexp_loc,
-            pexp_attributes: expr.pexp_attributes,
-        }
-    } else {
-        expr
-    }
-}
-
-/// Generate a core type representing the type declaration
-fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena) -> CoreType {
-    // OCaml: Typ.constr ~attrs {txt = Lident txt; loc} (Ext_list.map ptype_params fst)
-    // - ptype_name = {txt; loc} -- so longident uses ptype_name.loc
-    // - Typ.constr has optional ~loc (defaults to !default_loc = ghost)
-    // - ptype_attributes = attrs -- but we don't include attrs here (see core_type_of_type_declaration_with_attrs)
-    let name_loc = tdcl.ptype_name.loc; // Longident uses the type name's location
-    let ptyp_loc = arena.none_loc(); // ptyp_loc defaults to ghost
-    let name_lid = arena.push_longident(Longident::Lident(tdcl.ptype_name.txt));
-
-    if tdcl.ptype_params.is_empty() {
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                Located {
-                    txt: name_lid,
-                    loc: name_loc,
-                },
-                vec![],
-            )))),
-            ptyp_loc,
-            ptyp_attributes: Attributes::new(),
-        }
-    } else {
-        // Type has parameters: 'a t -> t<'a>
-        let type_args: Vec<CoreTypeIdx> = tdcl
-            .ptype_params
-            .iter()
-            .map(|(core_type, _)| *core_type)
-            .collect();
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                Located {
-                    txt: name_lid,
-                    loc: name_loc,
-                },
-                type_args,
-            )))),
-            ptyp_loc,
-            ptyp_attributes: Attributes::new(),
-        }
-    }
-}
-
 /// Uncapitalize the first character of a string
 fn uncapitalize_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
         Some(c) => c.to_lowercase().chain(chars).collect(),
-    }
-}
-
-// ========== @deriving(jsConverter) Implementation ==========
-// This implements the OCaml `ast_derive_js_mapper.ml` transformation.
-// For polyvariant types, it generates:
-// - _eraseType: %identity primitive
-// - _index: @get_index primitive
-// - _map: %raw JSON object mapping variant tags to string values
-// - _revMap: %raw JSON object mapping string values to variant tags
-// - <type>ToJs: function using _index(_map, param)
-// - <type>FromJs: function using _index(_revMap, param)
-
-/// Check if a type declaration is an enum polyvariant (all nullary tags)
-fn is_enum_polyvar<'a>(tdcl: &'a TypeDeclaration, arena: &'a ParseArena) -> Option<&'a [RowField]> {
-    if let Some(manifest) = &tdcl.ptype_manifest {
-        if let CoreTypeDesc::Ptyp_variant(var_inner) = &*arena.get_core_type(*manifest).ptyp_desc {
-            let (ref row_fields, ref closed_flag, ref labels) = **var_inner;
-            if labels.is_none() && *closed_flag == current::ClosedFlag::Closed {
-                // Check all tags are nullary (empty type list)
-                // RowField::Rtag(name_loc, attrs, is_constant, types)
-                let all_nullary = row_fields.iter().all(|rf| match rf {
-                    RowField::Rtag(_name_loc, _attrs, is_constant, types) => {
-                        *is_constant && types.is_empty()
-                    }
-                    _ => false,
-                });
-                if all_nullary {
-                    return Some(row_fields);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Get @as value from attributes (used for polyvariant tag string mapping)
-fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    // OCaml `Ast_attributes.iter_process_bs_string_as`.
-    for attr in attrs {
-        let (attr_name, payload) = attr;
-        if arena.get_string(attr_name.txt) == "as"
-            && let Some(txt) = payload_semantic_string(payload, arena)
-        {
-            arena.mark_used_attribute(attr);
-            return Some(txt);
-        }
-    }
-    None
-}
-
-/// Build the JSON map string like `{"Red":"Red","Green":"Green","Blue":"Blue"}`
-fn build_js_converter_map(row_fields: &[RowField], arena: &ParseArena) -> (String, String, bool) {
-    let mut map_buf = String::from("{");
-    let mut rev_map_buf = String::from("{");
-    let mut has_bs_as = false;
-
-    let entries: Vec<(String, String)> = row_fields
-        .iter()
-        .filter_map(|rf| {
-            match rf {
-                // RowField::Rtag(name_loc, attrs, is_constant, types)
-                // name_loc.txt is a String (Label = String)
-                RowField::Rtag(name_loc, attrs, _, _) => {
-                    let tag_name = name_loc.txt.to_string();
-                    let js_name = match get_as_string_value(attrs, arena) {
-                        Some(name) => {
-                            has_bs_as = true;
-                            name
-                        }
-                        None => tag_name.clone(),
-                    };
-                    Some((tag_name, js_name))
-                }
-                _ => None,
-            }
-        })
-        .collect();
-
-    for (i, (tag_name, js_name)) in entries.iter().enumerate() {
-        let last = i == entries.len() - 1;
-        // map: {"Red":"Red", ...}
-        map_buf.push('"');
-        map_buf.push_str(tag_name);
-        map_buf.push_str("\":\"");
-        map_buf.push_str(js_name);
-        map_buf.push('"');
-        if !last {
-            map_buf.push(',');
-        }
-
-        // rev_map: {"Red":"Red", ...}
-        rev_map_buf.push('"');
-        rev_map_buf.push_str(js_name);
-        rev_map_buf.push_str("\":\"");
-        rev_map_buf.push_str(tag_name);
-        rev_map_buf.push('"');
-        if !last {
-            rev_map_buf.push(',');
-        }
-    }
-
-    map_buf.push('}');
-    rev_map_buf.push('}');
-
-    (map_buf, rev_map_buf, has_bs_as)
-}
-
-/// Create the _eraseType primitive: external _eraseType: 'a => 'a = "%identity"
-fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let erase_type_name = arena.intern_string("_eraseType");
-
-    // Type: 'a => 'a (Ptyp_any => Ptyp_any)
-    let any_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(any_type.clone()),
-            }),
-            arena.push_core_type(any_type),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let val_desc = ValueDescription {
-        pval_name: Located {
-            txt: erase_type_name,
-            loc: none_loc,
-        },
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: Some(PrimitiveRepr::PrimName(prim_str(arena, "%identity"))),
-        pval_attributes: Attributes::new(),
-        pval_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(val_desc))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create the _index primitive: external _index: 'a => 'b => 'c = "" (with @get_index attr)
-fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let index_name = arena.intern_string("_index");
-
-    // Type: ('a, 'b) => 'c
-    let any_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-    let args = vec![
-        TypeArg {
-            attrs: Attributes::new(),
-            lbl: ArgLabel::Nolabel,
-            typ: arena.push_core_type(any_type.clone()),
-        },
-        TypeArg {
-            attrs: Attributes::new(),
-            lbl: ArgLabel::Nolabel,
-            typ: arena.push_core_type(any_type.clone()),
-        },
-    ];
-    let arrow_type = make_arrows_type(&args, &any_type, arena);
-
-    // ast_derive_js_mapper.ml `unsafe_index_get` (`Prim_name ""` with
-    // `@get_index`), as the frontend digests it. The return wrapper is
-    // Return_unset for @get_index externals.
-    let ffi = ExternalFfi::FfiBs(
-        vec![Param::dummy(), Param::dummy()],
-        ReturnWrapper::ReturnUnset,
-        ExternalDecl {
-            kind: DeclKind::DeclGetIndex,
-            module_: None,
-            scopes: vec![],
-            variadic: false,
-            effective_arity: 2,
-        },
-    );
-
-    let val_desc = ValueDescription {
-        pval_name: Located {
-            txt: index_name,
-            loc: none_loc,
-        },
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: Some(PrimitiveRepr::PrimFfi {
-            name: String::new(),
-            spec: Box::new(ffi),
-        }),
-        pval_attributes: Attributes::new(),
-        pval_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(val_desc))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create _map or _revMap binding using %raw extension
-/// let _map = %raw(`{"Red":"Red","Green":"Green"}`)
-fn create_map_binding(
-    var_name: &str,
-    json_str: &str,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let var_name_idx = arena.intern_string(var_name);
-    let module_name_idx = arena.intern_string("J");
-    let unsafe_expr_idx = arena.intern_string("unsafe_expr");
-
-    // Create the module structure with external unsafe_expr: 'a => 'a = "#raw_expr"
-    let any_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(any_type.clone()),
-            }),
-            arena.push_core_type(any_type),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let unsafe_expr_prim = ValueDescription {
-        pval_name: Located {
-            txt: unsafe_expr_idx,
-            loc,
-        },
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: Some(PrimitiveRepr::PrimName(arena.prim_raw_expr())),
-        pval_attributes: Attributes::new(),
-        pval_loc: loc,
-    };
-
-    let module_structure = vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-            unsafe_expr_prim,
-        ))),
-        pstr_loc: loc,
-    }];
-
-    let module_expr = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(module_structure))),
-        pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
-    };
-
-    // Create J.unsafe_expr(json_str) application
-    let j_unsafe_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-            txt: arena.push_longident(Longident::Ldot(
-                Box::new(Longident::Lident(module_name_idx)),
-                unsafe_expr_idx,
-            )),
-            loc,
-        })),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // ast_derive_js_mapper.ml builds `%raw(Const.string data)`; expanding it
-    // with `raw_as_string_exp_exn` yields `Pconst_raw_source` of the semantic
-    // string.
-    let json_const = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-            Constant::RawSource(Cow::Owned(
-                crate::string_literal::normalize_semantic(json_str).into_owned(),
-            )),
-        ))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let apply_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-            funct: arena.push_expr(j_unsafe_expr),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(json_const))],
-            partial: false,
-            transformed_jsx: false,
-        }))),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create let module J = struct ... end in J.unsafe_expr(json_str)
-    // Pexp_letmodule(Box::new((StringLoc, ModuleExpr, ExprIdx)))
-    // StringLoc is Located<StrIdx>
-    let letmodule_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_letmodule(Box::new((
-            Located {
-                txt: module_name_idx,
-                loc,
-            },
-            arena.push_mod_expr(module_expr),
-            arena.push_expr(apply_expr),
-        )))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Create let _map = ...
-    // OCaml: Pat.var {loc; txt = map} - the variable name location is the type decl loc
-    // But pattern wrapper location is ghost (Pat.var has no ~loc parameter)
-    let binding = ValueBinding {
-        pvb_pat: arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                txt: var_name_idx,
-                loc,
-            })),
-            ppat_loc: none_loc,
-            ppat_attributes: Attributes::new(),
-        }),
-        pvb_expr: arena.push_expr(letmodule_expr),
-        pvb_attributes: Attributes::new(),
-        pvb_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-            RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create _revMap that references _map (when no @as attributes)
-fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let rev_map_name = arena.intern_string("_revMap");
-    let map_name = arena.intern_string("_map");
-
-    let map_ref = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-            txt: arena.push_longident(Longident::Lident(map_name)),
-            loc,
-        })),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let binding = ValueBinding {
-        pvb_pat: arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                txt: rev_map_name,
-                loc,
-            })), // OCaml: {loc; txt = rev_map}
-            ppat_loc: none_loc,
-            ppat_attributes: Attributes::new(),
-        }),
-        pvb_expr: arena.push_expr(map_ref),
-        pvb_attributes: Attributes::new(),
-        pvb_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-            RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create typeToJs function: let colorToJs = (param: color) => _index(_map, param)
-fn create_to_js_function(
-    fn_name_idx: StrIdx,
-    core_type: &CoreType,
-    has_bs_as: bool,
-    loc: LocIdx,
-    param_name: StrIdx,
-    param_lid: LidentIdx,
-    map_lid: LidentIdx,
-    index_lid: LidentIdx,
-    erase_type_lid: LidentIdx,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    let none_loc = arena.none_loc();
-
-    // If has_bs_as, body is: _index(_map, param)
-    // Otherwise, body is: _eraseType(param)
-    let body_expr = if has_bs_as {
-        // _index(_map, param)
-        let index_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: index_lid,
-                loc: none_loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let map_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: map_lid, loc })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let param_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: param_lid,
-                loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: arena.push_expr(index_ident),
-                args: vec![
-                    (ArgLabel::Nolabel, arena.push_expr(map_ident)),
-                    (ArgLabel::Nolabel, arena.push_expr(param_ident)),
-                ],
-                partial: false,
-                transformed_jsx: false,
-            }))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        // _eraseType(param)
-        let erase_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: erase_type_lid,
-                loc: none_loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let param_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: param_lid,
-                loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: arena.push_expr(erase_ident),
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(param_ident))],
-                partial: false,
-                transformed_jsx: false,
-            }))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    };
-
-    // Pattern: (param: color)
-    let param_pat = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-            arena.push_pat(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                    txt: param_name,
-                    loc,
-                })),
-                ppat_loc: none_loc,
-                ppat_attributes: Attributes::new(),
-            }),
-            arena.push_core_type(core_type.clone()),
-        )))),
-        ppat_loc: none_loc,
-        ppat_attributes: Attributes::new(),
-    };
-
-    let fun_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-            arg_label: ArgLabel::Nolabel,
-            default: None,
-            lhs: arena.push_pat(param_pat),
-            rhs: arena.push_expr(body_expr),
-            is_async: false,
-            arity: arena.static_ppx_arity_1(),
-        }))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let binding = ValueBinding {
-        pvb_pat: arena.push_pat(Pattern {
-            // OCaml uses tdcl.ptype_loc for function name pattern variable
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                txt: fn_name_idx,
-                loc,
-            })),
-            ppat_loc: none_loc,
-            ppat_attributes: Attributes::new(),
-        }),
-        pvb_expr: arena.push_expr(fun_expr),
-        pvb_attributes: Attributes::new(),
-        pvb_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-            RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create typeFromJs function: let colorFromJs = param => _index(_revMap, param)
-fn create_from_js_function(
-    fn_name_idx: StrIdx,
-    create_type: bool,
-    loc: LocIdx,
-    param_name: StrIdx,
-    param_lid: LidentIdx,
-    rev_map_lid: LidentIdx,
-    index_lid: LidentIdx,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    let none_loc = arena.none_loc();
-
-    // _index(_revMap, param)
-    let index_ident = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-            txt: index_lid,
-            loc: none_loc,
-        })),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-    let rev_map_ident = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-            txt: rev_map_lid,
-            loc,
-        })),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-    let param_ident = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-            txt: param_lid,
-            loc,
-        })),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let result_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-            funct: arena.push_expr(index_ident),
-            args: vec![
-                (ArgLabel::Nolabel, arena.push_expr(rev_map_ident)),
-                (ArgLabel::Nolabel, arena.push_expr(param_ident)),
-            ],
-            partial: false,
-            transformed_jsx: false,
-        }))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-    // OCaml ast_derive_js_mapper.ml:
-    // let result = _index(_revMap, param) in
-    // if create_type then Primitive_util.raiseWhenNotFound result else result
-    let body_expr = if create_type {
-        let util_lid = arena.intern_string("Primitive_util");
-        let raise_when_not_found = arena.intern_string("raiseWhenNotFound");
-        let raise_when_not_found_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: arena.push_longident(Longident::Ldot(
-                    Box::new(Longident::Lident(util_lid)),
-                    raise_when_not_found,
-                )),
-                loc: none_loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: arena.push_expr(raise_when_not_found_ident),
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(result_expr))],
-                partial: false,
-                transformed_jsx: false,
-            }))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        result_expr
-    };
-
-    let param_pat = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-            txt: param_name,
-            loc,
-        })),
-        ppat_loc: none_loc,
-        ppat_attributes: Attributes::new(),
-    };
-
-    let fun_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-            arg_label: ArgLabel::Nolabel,
-            default: None,
-            lhs: arena.push_pat(param_pat),
-            rhs: arena.push_expr(body_expr),
-            is_async: false,
-            arity: arena.static_ppx_arity_1(),
-        }))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    let binding = ValueBinding {
-        pvb_pat: arena.push_pat(Pattern {
-            // OCaml uses tdcl.ptype_loc for function name pattern variable
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                txt: fn_name_idx,
-                loc,
-            })),
-            ppat_loc: none_loc,
-            ppat_attributes: Attributes::new(),
-        }),
-        pvb_expr: arena.push_expr(fun_expr),
-        pvb_attributes: Attributes::new(),
-        pvb_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-            RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create toJs signature: val colorToJs: color => <ret_type>
-fn create_to_js_sig(
-    fn_name_idx: StrIdx,
-    core_type: &CoreType,
-    ret_type: CoreType,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> SignatureItem {
-    let none_loc = arena.none_loc();
-
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(core_type.clone()),
-            }),
-            arena.push_core_type(ret_type),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let val_desc = ValueDescription {
-        pval_name: Located {
-            txt: fn_name_idx,
-            loc,
-        },
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: None,
-        pval_attributes: Attributes::new(),
-        pval_loc: none_loc,
-    };
-
-    SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
-        psig_loc: none_loc,
-    }
-}
-
-/// Create fromJs signature: val colorFromJs: <arg_type> => <ret_type>
-fn create_from_js_sig(
-    fn_name_idx: StrIdx,
-    arg_type: CoreType,
-    ret_type: CoreType,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> SignatureItem {
-    let none_loc = arena.none_loc();
-
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(arg_type),
-            }),
-            arena.push_core_type(ret_type),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let val_desc = ValueDescription {
-        pval_name: Located {
-            txt: fn_name_idx,
-            loc,
-        },
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: None,
-        pval_attributes: Attributes::new(),
-        pval_loc: none_loc,
-    };
-
-    SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
-        psig_loc: none_loc,
-    }
-}
-
-/// Generate jsConverter structure/signature for polyvariant types
-fn generate_js_converter_polyvar(
-    tdcl: &TypeDeclaration,
-    row_fields: &[RowField],
-    create_type: bool,
-    inner_loc: LocIdx,
-    arena: &mut ParseArena,
-) -> (Vec<StructureItem>, Vec<SignatureItem>) {
-    // Clone type_name to avoid borrow issues
-    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
-    let (map_json, rev_map_json, has_bs_as) = build_js_converter_map(row_fields, arena);
-
-    // OCaml builds fresh `core_type` values independently in structure_gen and
-    // signature_gen. Recreate that split so marshal sharing matches pointer identity.
-    let core_type_structure = core_type_of_type_declaration_with_attrs(tdcl, arena);
-    let core_type_signature = core_type_of_type_declaration_with_attrs(tdcl, arena);
-
-    // Shared structure-level identifiers (OCaml reuses these bindings across generated
-    // toJs/fromJs expressions inside one type declaration).
-    let to_js_name_structure = arena.push_string(format!("{}ToJs", type_name));
-    let from_js_name_structure = arena.push_string(format!("{}FromJs", type_name));
-    let param_name = arena.push_string("param".to_string());
-    let param_lid = arena.push_lident_from_idx(param_name);
-    let map_name = arena.intern_string("_map");
-    let rev_map_name = arena.intern_string("_revMap");
-    let index_name = arena.intern_string("_index");
-    let erase_type_name = arena.intern_string("_eraseType");
-    let map_lid = arena.push_longident(Longident::Lident(map_name));
-    let rev_map_lid = arena.push_longident(Longident::Lident(rev_map_name));
-    let index_lid = arena.push_longident(Longident::Lident(index_name));
-    let erase_type_lid = arena.push_longident(Longident::Lident(erase_type_name));
-
-    // Build structure items
-    let mut structure_items = vec![];
-
-    // _eraseType
-    structure_items.push(create_erase_type_str(arena));
-
-    // _index
-    structure_items.push(create_unsafe_index_get_str(arena));
-
-    // _map
-    structure_items.push(create_map_binding("_map", &map_json, inner_loc, arena));
-
-    // _revMap (either same as _map or new %raw)
-    if has_bs_as {
-        structure_items.push(create_map_binding(
-            "_revMap",
-            &rev_map_json,
-            inner_loc,
-            arena,
-        ));
-    } else {
-        structure_items.push(create_rev_map_ref_binding(inner_loc, arena));
-    }
-
-    // colorToJs
-    structure_items.push(create_to_js_function(
-        to_js_name_structure,
-        &core_type_structure,
-        has_bs_as,
-        inner_loc,
-        param_name,
-        param_lid,
-        map_lid,
-        index_lid,
-        erase_type_lid,
-        arena,
-    ));
-
-    // colorFromJs
-    structure_items.push(create_from_js_function(
-        from_js_name_structure,
-        create_type,
-        inner_loc,
-        param_name,
-        param_lid,
-        rev_map_lid,
-        index_lid,
-        arena,
-    ));
-
-    // If create_type is true, prepend the new abstract type
-    if create_type {
-        let new_type_str = create_new_type_declaration(tdcl, &type_name, arena);
-        structure_items.insert(0, new_type_str);
-    }
-
-    // Build signature items
-    let mut signature_items = vec![];
-    let to_js_name_signature = arena.push_string(format!("{}ToJs", type_name));
-    let from_js_name_signature = arena.push_string(format!("{}FromJs", type_name));
-    let none_loc = arena.none_loc();
-    let string_name = arena.push_string("string".to_string());
-    let string_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            Located {
-                txt: arena.push_longident(Longident::Lident(string_name)),
-                loc: none_loc,
-            },
-            vec![],
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-    let new_type_ref = create_new_type_ref(tdcl, &type_name, arena);
-    let to_js_ret_type = if create_type {
-        new_type_ref.clone()
-    } else {
-        string_type.clone()
-    };
-    let from_js_arg_type = if create_type {
-        new_type_ref
-    } else {
-        string_type
-    };
-    let from_js_ret_type = if create_type {
-        core_type_signature.clone()
-    } else {
-        let core_type_sig_idx = arena.push_core_type(core_type_signature.clone());
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-                Located {
-                    txt: arena.predef_option_lident(),
-                    loc: none_loc,
-                },
-                vec![core_type_sig_idx],
-            )))),
-            ptyp_loc: none_loc,
-            ptyp_attributes: Attributes::new(),
-        }
-    };
-
-    if create_type {
-        signature_items.push(create_new_type_sig_declaration(tdcl, &type_name, arena));
-    }
-    signature_items.push(create_to_js_sig(
-        to_js_name_signature,
-        &core_type_signature,
-        to_js_ret_type,
-        inner_loc,
-        arena,
-    ));
-    signature_items.push(create_from_js_sig(
-        from_js_name_signature,
-        from_js_arg_type,
-        from_js_ret_type,
-        inner_loc,
-        arena,
-    ));
-
-    (structure_items, signature_items)
-}
-
-/// Generate jsConverter structure/signature for record types
-fn generate_js_converter_record(
-    tdcl: &TypeDeclaration,
-    labels: &[LabelDeclaration],
-    create_type: bool,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> (Vec<StructureItem>, Vec<SignatureItem>) {
-    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
-    let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
-    let _none_loc = arena.none_loc();
-
-    // For records, we generate:
-    // - _eraseType (if create_type)
-    // - abs_<name> type (if create_type)
-    // - <name>ToJs: converts record to JS object using %obj extension
-    // - <name>FromJs: converts JS object back to record
-
-    let mut structure_items = vec![];
-    let mut signature_items = vec![];
-
-    if create_type {
-        // _eraseType
-        structure_items.push(create_erase_type_str(arena));
-
-        // Abstract type: type abs_<name><params> = abstract
-        structure_items.push(create_new_type_declaration(tdcl, &type_name, arena));
-    }
-
-    // <name>ToJs function
-    let to_js_fn = create_record_to_js_function(tdcl, labels, &core_type, create_type, loc, arena);
-    structure_items.push(to_js_fn);
-
-    // <name>FromJs function
-    let from_js_fn =
-        create_record_from_js_function(tdcl, labels, &core_type, create_type, loc, arena);
-    structure_items.push(from_js_fn);
-
-    // Signature items
-    signature_items.push(create_record_to_js_sig(
-        tdcl,
-        &type_name,
-        labels,
-        &core_type,
-        create_type,
-        loc,
-        arena,
-    ));
-    signature_items.push(create_record_from_js_sig(
-        tdcl,
-        &type_name,
-        labels,
-        &core_type,
-        create_type,
-        loc,
-        arena,
-    ));
-
-    // If create_type, prepend the new type to signature as well
-    if create_type {
-        let sig_new_type = create_new_type_sig_declaration(tdcl, &type_name, arena);
-        signature_items.insert(0, sig_new_type);
-    }
-
-    (structure_items, signature_items)
-}
-
-/// Create a new abstract type declaration for jsConverter newType
-/// type abs_<name><params>
-fn create_new_type_declaration(
-    tdcl: &TypeDeclaration,
-    type_name: &str,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let new_name = format!("abs_{}", type_name);
-    let new_name_idx = arena.intern_string(&new_name);
-
-    // Create new type declaration matching OCaml's new_type_of_type_declaration
-    let new_tdcl = TypeDeclaration {
-        ptype_name: Located {
-            txt: new_name_idx,
-            loc: tdcl.ptype_name.loc,
-        },
-        ptype_params: tdcl.ptype_params.clone(),
-        ptype_cstrs: vec![],
-        ptype_kind: TypeKind::Ptype_abstract,
-        ptype_private: PrivateFlag::Public,
-        ptype_manifest: None,
-        ptype_origin: TypeDeclarationOrigin::Declared,
-        ptype_attributes: Attributes::new(),
-        ptype_loc: tdcl.ptype_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![new_tdcl],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create a new abstract type signature declaration for jsConverter newType
-fn create_new_type_sig_declaration(
-    tdcl: &TypeDeclaration,
-    type_name: &str,
-    arena: &mut ParseArena,
-) -> SignatureItem {
-    let none_loc = arena.none_loc();
-    let new_name = format!("abs_{}", type_name);
-    let new_name_idx = arena.intern_string(&new_name);
-
-    let new_tdcl = TypeDeclaration {
-        ptype_name: Located {
-            txt: new_name_idx,
-            loc: tdcl.ptype_name.loc,
-        },
-        ptype_params: tdcl.ptype_params.clone(),
-        ptype_cstrs: vec![],
-        ptype_kind: TypeKind::Ptype_abstract,
-        ptype_private: PrivateFlag::Public,
-        ptype_manifest: None,
-        ptype_origin: TypeDeclarationOrigin::Declared,
-        ptype_attributes: Attributes::new(),
-        ptype_loc: tdcl.ptype_loc,
-    };
-
-    SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![new_tdcl],
-        )))),
-        psig_loc: none_loc,
-    }
-}
-
-/// Create the <name>ToJs function for records
-/// let sourceToJs = (param: source[@deriving...]) => %obj({...})
-fn create_record_to_js_function(
-    tdcl: &TypeDeclaration,
-    labels: &[LabelDeclaration],
-    core_type: &CoreType,
-    create_type: bool,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
-    let to_js_name = format!("{}ToJs", type_name);
-    let to_js_name_idx = arena.intern_string(&to_js_name);
-    let param_str = arena.intern_string("param");
-
-    // Pattern: (param: <core_type>)
-    let param_pat = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-            arena.push_pat(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                    txt: param_str,
-                    loc,
-                })),
-                ppat_loc: none_loc,
-                ppat_attributes: Attributes::new(),
-            }),
-            arena.push_core_type(core_type.clone()),
-        )))),
-        ppat_loc: none_loc,
-        ppat_attributes: Attributes::new(),
-    };
-
-    // Build record expression for %obj extension: { field: param.field, ... }
-    // OCaml: label uses pld_name.loc, param ident uses tdcl.ptype_loc, expressions use default_loc (ghost)
-    let type_loc = loc; // loc is already tdcl.ptype_loc from the caller
-    let record_fields: Vec<ExpressionRecordField> = labels
-        .iter()
-        .map(|label| {
-            let field_name = label.pld_name.txt;
-            let field_loc = label.pld_name.loc; // OCaml: {pld_name = {loc; txt}}
-            let lid = Located {
-                txt: arena.push_longident(Longident::Lident(field_name)),
-                loc: field_loc, // OCaml: {Asttypes.loc; txt = Lident txt} where loc = pld_name.loc
-            };
-
-            // param.field (Pexp_field uses field_loc for the label, none_loc for expressions)
-            let param_lid = arena.push_lident_from_idx(param_str);
-            let param_ident = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                    txt: param_lid,
-                    loc: type_loc,
-                })),
-                pexp_loc: none_loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let param_idx = arena.push_expr(param_ident);
-            let field_access = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_field(param_idx, lid)),
-                pexp_loc: none_loc, // Exp.field uses !default_loc (ghost)
-                pexp_attributes: Attributes::new(),
-            };
-
-            ExpressionRecordField {
-                lid,
-                expr: arena.push_expr(field_access),
-                opt: false,
-            }
-        })
-        .collect();
-
-    // `Exp.object_literal ~loc fields` (ast_derive_js_mapper.ml:195-200).
-    let object_fields = record_fields
-        .into_iter()
-        .map(|field| {
-            let name = match arena.get_longident(field.lid.txt) {
-                Longident::Lident(name) => arena.get_string(*name).to_owned(),
-                _ => unreachable!("record label names are Lident"),
-            };
-            (Located::new(Cow::Owned(name), field.lid.loc), field.expr)
-        })
-        .collect();
-    let obj_extension = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_object_literal(Box::new(object_fields))),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // If create_type, wrap with constraint and erase_type
-    let body = if create_type {
-        // Create new type reference: abs_<name><params>
-        let new_type = create_new_type_ref(tdcl, &type_name, arena);
-
-        // erase_type(obj_extension) :> new_type
-        let erase_type_ident = arena.intern_string("_eraseType");
-        let erase_lid = arena.push_longident(Longident::Lident(erase_type_ident));
-        let erase_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: erase_lid,
-                loc: none_loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let erase_funct_idx = arena.push_expr(erase_ident);
-        let erase_app = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: erase_funct_idx,
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(obj_extension))],
-                partial: false,
-                transformed_jsx: false,
-            }))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-
-        // Constraint to new type
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                arena.push_expr(erase_app),
-                arena.push_core_type(new_type),
-            )))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        obj_extension
-    };
-
-    // Function: fun param => body
-    let fun_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-            arg_label: ArgLabel::Nolabel,
-            default: None,
-            lhs: arena.push_pat(param_pat),
-            rhs: arena.push_expr(body),
-            is_async: false,
-            arity: arena.static_ppx_arity_1(),
-        }))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Value binding: let <name>ToJs = fun param => body
-    let binding = ValueBinding {
-        pvb_pat: arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                txt: to_js_name_idx,
-                loc,
-            })),
-            ppat_loc: none_loc,
-            ppat_attributes: Attributes::new(),
-        }),
-        pvb_expr: arena.push_expr(fun_expr),
-        pvb_attributes: Attributes::new(),
-        pvb_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-            RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create the <name>FromJs function for records
-fn create_record_from_js_function(
-    tdcl: &TypeDeclaration,
-    labels: &[LabelDeclaration],
-    core_type: &CoreType,
-    create_type: bool,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    let none_loc = arena.none_loc();
-    let type_name = arena.get_string(tdcl.ptype_name.txt).to_string();
-    let from_js_name = format!("{}FromJs", type_name);
-    let from_js_name_idx = arena.intern_string(&from_js_name);
-    let param_str = arena.intern_string("param");
-
-    // Pattern: param (no constraint for fromJs)
-    let param_pat = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-            txt: param_str,
-            loc,
-        })),
-        ppat_loc: none_loc,
-        ppat_attributes: Attributes::new(),
-    };
-
-    // Build record expression: { field: ##param.field, ... }
-    // OCaml: label uses pld_name.loc, param ident uses tdcl.ptype_loc, expressions use default_loc (ghost)
-    let type_loc = loc; // loc is already tdcl.ptype_loc from the caller
-    let record_fields: Vec<ExpressionRecordField> = labels
-        .iter()
-        .map(|label| {
-            let field_name = label.pld_name.txt;
-            let field_loc = label.pld_name.loc; // OCaml: {pld_name = {loc; txt}}
-            let lid = Located {
-                txt: arena.push_longident(Longident::Lident(field_name)),
-                loc: field_loc, // OCaml: {Asttypes.loc; txt = Lident txt} where loc = pld_name.loc
-            };
-
-            // `js_field exp_param label` (ast_derive_js_mapper.ml:33-39):
-            // `Exp.mk ~loc:m.loc (Ast_util.js_property m.loc o name)`.
-            let field_name_str = arena.get_string(field_name).to_string();
-            let param_lid2 = arena.push_lident_from_idx(param_str);
-            let param_ident2 = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                    txt: param_lid2,
-                    loc: type_loc,
-                })),
-                pexp_loc: none_loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let param_idx2 = arena.push_expr(param_ident2);
-            let js_field = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_object_get(Box::new((
-                    param_idx2,
-                    Located {
-                        txt: Cow::Owned(field_name_str),
-                        loc: field_loc,
-                    },
-                )))),
-                pexp_loc: field_loc,
-                pexp_attributes: Attributes::new(),
-            };
-
-            ExpressionRecordField {
-                lid,
-                expr: arena.push_expr(js_field),
-                opt: false,
-            }
-        })
-        .collect();
-
-    let record_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((record_fields, None)))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Constrain to core_type
-    let constrained_record = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-            arena.push_expr(record_expr),
-            arena.push_core_type(core_type.clone()),
-        )))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // If create_type, wrap param with let binding
-    let body = if create_type {
-        let new_type = create_new_type_ref(tdcl, &type_name, arena);
-        let erase_type_ident = arena.intern_string("_eraseType");
-
-        // erase_type (param :> new_type)
-        let cp_lid = arena.push_lident_from_idx(param_str);
-        let cp_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located { txt: cp_lid, loc })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let cp_idx = arena.push_expr(cp_ident);
-        let constrained_param = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                cp_idx,
-                arena.push_core_type(new_type),
-            )))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-
-        let erase_lid2 = arena.push_longident(Longident::Lident(erase_type_ident));
-        let erase_ident2 = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                txt: erase_lid2,
-                loc: none_loc,
-            })),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let erase_funct_idx2 = arena.push_expr(erase_ident2);
-        let erase_app = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: erase_funct_idx2,
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_param))],
-                partial: false,
-                transformed_jsx: false,
-            }))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        };
-
-        // let param = erase_type(...) in constrained_record
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
-                RecFlag::Nonrecursive,
-                vec![ValueBinding {
-                    pvb_pat: arena.push_pat(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                            txt: param_str,
-                            loc,
-                        })),
-                        ppat_loc: none_loc,
-                        ppat_attributes: Attributes::new(),
-                    }),
-                    pvb_expr: arena.push_expr(erase_app),
-                    pvb_attributes: Attributes::new(),
-                    pvb_loc: none_loc,
-                }],
-                arena.push_expr(constrained_record),
-            )))),
-            pexp_loc: none_loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        constrained_record
-    };
-
-    // Function: fun param => body
-    let fun_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-            arg_label: ArgLabel::Nolabel,
-            default: None,
-            lhs: arena.push_pat(param_pat),
-            rhs: arena.push_expr(body),
-            is_async: false,
-            arity: arena.static_ppx_arity_1(),
-        }))),
-        pexp_loc: none_loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    // Value binding
-    let binding = ValueBinding {
-        pvb_pat: arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                txt: from_js_name_idx,
-                loc,
-            })),
-            ppat_loc: none_loc,
-            ppat_attributes: Attributes::new(),
-        }),
-        pvb_expr: arena.push_expr(fun_expr),
-        pvb_attributes: Attributes::new(),
-        pvb_loc: none_loc,
-    };
-
-    StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-            RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
-        pstr_loc: none_loc,
-    }
-}
-
-/// Create a core type reference for the new abstract type: abs_<name><params>
-fn create_new_type_ref(
-    tdcl: &TypeDeclaration,
-    type_name: &str,
-    arena: &mut ParseArena,
-) -> CoreType {
-    let none_loc = arena.none_loc();
-    let new_name = format!("abs_{}", type_name);
-    let new_name_idx = arena.intern_string(&new_name);
-
-    // Create type arguments from params
-    let type_args: Vec<CoreTypeIdx> = tdcl.ptype_params.iter().map(|(ct, _)| *ct).collect();
-
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            Located {
-                txt: arena.push_longident(Longident::Lident(new_name_idx)),
-                loc: tdcl.ptype_name.loc,
-            },
-            type_args,
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Create signature for record toJs function
-fn create_record_to_js_sig(
-    tdcl: &TypeDeclaration,
-    type_name: &str,
-    labels: &[LabelDeclaration],
-    core_type: &CoreType,
-    create_type: bool,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> SignatureItem {
-    let none_loc = arena.none_loc();
-    let to_js_name = format!("{}ToJs", type_name);
-    let fn_name_idx = arena.intern_string(&to_js_name);
-
-    // Return type: abs_<name> if create_type, else object type
-    let ret_type = if create_type {
-        // Use the new abstract type: abs_<name><params>
-        create_new_type_ref(tdcl, type_name, arena)
-    } else {
-        // Object type from labels
-        let fields: Vec<ObjectField> = labels
-            .iter()
-            .map(|label| ObjectField::Otag(label.pld_name, Attributes::new(), label.pld_type))
-            .collect();
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((
-                fields,
-                current::ClosedFlag::Closed,
-            )))),
-            ptyp_loc: none_loc,
-            ptyp_attributes: Attributes::new(),
-        }
-    };
-
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(core_type.clone()),
-            }),
-            arena.push_core_type(ret_type),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let val_desc = ValueDescription {
-        pval_name: Located {
-            txt: fn_name_idx,
-            loc,
-        }, // OCaml: pat_to_js uses tdcl.ptype_loc
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: None,
-        pval_attributes: Attributes::new(),
-        pval_loc: none_loc,
-    };
-
-    SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
-        psig_loc: none_loc,
-    }
-}
-
-/// Create signature for record fromJs function
-fn create_record_from_js_sig(
-    tdcl: &TypeDeclaration,
-    type_name: &str,
-    labels: &[LabelDeclaration],
-    core_type: &CoreType,
-    create_type: bool,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> SignatureItem {
-    let none_loc = arena.none_loc();
-    let from_js_name = format!("{}FromJs", type_name);
-    let fn_name_idx = arena.intern_string(&from_js_name);
-
-    // Arg type: abs_<name> if create_type, else open object type
-    let arg_type = if create_type {
-        // Use the new abstract type: abs_<name><params>
-        create_new_type_ref(tdcl, type_name, arena)
-    } else {
-        let fields: Vec<ObjectField> = labels
-            .iter()
-            .map(|label| ObjectField::Otag(label.pld_name, Attributes::new(), label.pld_type))
-            .collect();
-        CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((
-                fields,
-                current::ClosedFlag::Open,
-            )))),
-            ptyp_loc: none_loc,
-            ptyp_attributes: Attributes::new(),
-        }
-    };
-
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(arg_type),
-            }),
-            arena.push_core_type(core_type.clone()),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let val_desc = ValueDescription {
-        pval_name: Located {
-            txt: fn_name_idx,
-            loc,
-        }, // OCaml: pat_from_js uses tdcl.ptype_loc
-        pval_type: arena.push_core_type(arrow_type),
-        pval_prim: None,
-        pval_attributes: Attributes::new(),
-        pval_loc: none_loc,
-    };
-
-    SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
-        psig_loc: none_loc,
     }
 }
 
@@ -10406,54 +8483,6 @@ fn build_structure_signature_include(
         pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(include_decl))),
         pstr_loc: outer_loc,
     }
-}
-
-/// Generate jsConverter include for a type declaration group.
-///
-/// OCaml `Ast_derive.gen_structure_signature` builds exactly one include per deriving action
-/// over the full `tdcls` list (not one include per type declaration).
-/// Keep that grouping so typedtree module-constraint shapes match.
-fn generate_js_converter_include(
-    tdcls: &[TypeDeclaration],
-    create_type: bool,
-    pstr_loc: LocIdx,
-    arena: &mut ParseArena,
-) -> StructureItem {
-    // OCaml uses:
-    // - pstr_loc (from gen_structure_signature ~loc) for the outer include wrapper
-    // - each tdcl.ptype_loc for inner generated code (bindings, functions)
-    let outer_loc = pstr_loc;
-    let mut structure_items: Vec<StructureItem> = vec![];
-    let mut signature_items: Vec<SignatureItem> = vec![];
-
-    for tdcl in tdcls {
-        let inner_loc = tdcl.ptype_loc;
-        let (mut tdcl_structure_items, mut tdcl_signature_items) = match &tdcl.ptype_kind {
-            // Record types: generate toJs/fromJs with object conversion
-            TypeKind::Ptype_record(label_declarations) => generate_js_converter_record(
-                tdcl,
-                label_declarations,
-                create_type,
-                inner_loc,
-                arena,
-            ),
-            // Abstract types: check if it's an enum polyvariant
-            TypeKind::Ptype_abstract => {
-                if let Some(row_fields) = is_enum_polyvar(tdcl, arena).map(|rf| rf.to_vec()) {
-                    generate_js_converter_polyvar(tdcl, &row_fields, create_type, inner_loc, arena)
-                } else {
-                    // Abstract without polyvariant manifest: empty
-                    (vec![], vec![])
-                }
-            }
-            // Variant and open types: not applicable, generate empty
-            TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => (vec![], vec![]),
-        };
-        structure_items.append(&mut tdcl_structure_items);
-        signature_items.append(&mut tdcl_signature_items);
-    }
-
-    build_structure_signature_include(structure_items, signature_items, outer_loc, arena)
 }
 
 /// Handle @deriving for type declarations
@@ -10500,15 +8529,6 @@ fn handle_deriving_type(
 
     let loc = item.pstr_loc;
 
-    // Check if this is @deriving(abstract) - it requires completely different handling
-    let abstract_action = actions.iter().find_map(|a| {
-        if let DeriveAction::Abstract { light } = a {
-            Some(*light)
-        } else {
-            None
-        }
-    });
-
     // Step 1: Create type declaration with @deriving stripped from last tdcl
     // Also rewrite all type declarations for string transformations in attributes
     let new_tdcls: Vec<TypeDeclaration> = tdcls
@@ -10523,18 +8543,6 @@ fn handle_deriving_type(
             rewritten
         })
         .collect();
-
-    if let Some(light) = abstract_action {
-        // @deriving(abstract) has special structure:
-        // include (struct
-        //   include (struct <type_decl> end : sig end)
-        //   type t  -- abstract
-        //   external t: ... -- maker
-        //   external fieldGet: ... -- getters
-        //   ...
-        // end)
-        return handle_deriving_abstract(&new_tdcls, rec_flag, &new_tdcls, light, loc, arena);
-    }
 
     let type_str_item = StructureItem {
         pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
@@ -10551,13 +8559,6 @@ fn handle_deriving_type(
             DeriveAction::Accessors => {
                 // OCaml emits one include per action across the full tdcls group.
                 include_items.push(generate_accessor_include(tdcls, loc, arena));
-            }
-            DeriveAction::JsConverter { new_type } => {
-                // OCaml emits one include per action across the full tdcls group.
-                include_items.push(generate_js_converter_include(tdcls, *new_type, loc, arena));
-            }
-            DeriveAction::Abstract { light: _ } => {
-                // Handled above
             }
         }
     }
@@ -10640,33 +8641,6 @@ fn run_derivers(
         return Ok(());
     }
     let actions = deriving_config_actions(payload, arena)?;
-    // `Ast_derive_abstract.is_abstract` (ast_derive_abstract.ml:32-47).
-    let is_abstract = match actions.as_slice() {
-        [action] if action.name == "abstract" => match action.config {
-            None => true,
-            Some(config) if check_abstract_light_config(arena.get_expr(config), arena) => true,
-            Some(_) => {
-                return Err(PpxError::at_loc(
-                    action.name_loc,
-                    "invalid config for abstract",
-                ));
-            }
-        },
-        _ => {
-            if let Some(action) = actions.iter().find(|action| action.name == "abstract") {
-                return Err(PpxError::at_loc(
-                    action.name_loc,
-                    "deriving abstract does not work with any other deriving",
-                ));
-            }
-            false
-        }
-    };
-    if is_abstract {
-        // `Ast_derive_abstract` reads each field's rename from
-        // `pld_runtime_name`, which needs no validation.
-        return Ok(());
-    }
     for action in &actions {
         match action.name.as_str() {
             // `Ast_derive_projector` (ast_derive_projector.ml:17-137).
@@ -10682,40 +8656,16 @@ fn run_derivers(
                 }
                 accessors_gen(tdcls, warnings)?;
             }
-            // `Ast_derive_js_mapper` (ast_derive_js_mapper.ml:145-360).
-            "jsConverter" => {
-                if let Some(config) = action.config {
-                    validate_js_converter_config(config, arena)?;
-                }
-                if in_structure {
-                    for tdcl in tdcls {
-                        if let TypeKind::Ptype_abstract = &tdcl.ptype_kind
-                            && let Some(row_fields) = is_enum_polyvar(tdcl, arena)
-                        {
-                            // `build_map` reads each tag's `@as`.
-                            for row_field in row_fields {
-                                if let RowField::Rtag(_, attrs, _, _) = row_field {
-                                    validate_string_as_attrs(attrs, arena)?;
-                                }
-                            }
-                        } else if js_converter_not_applicable(tdcl, arena) {
-                            push_deriving_not_applicable_warning(
-                                tdcl.ptype_loc,
-                                "jsConverter",
-                                warnings,
-                            );
-                        }
-                    }
-                }
-                for tdcl in tdcls {
-                    if js_converter_not_applicable(tdcl, arena) {
-                        push_deriving_not_applicable_warning(
-                            tdcl.ptype_loc,
-                            "jsConverter",
-                            warnings,
-                        );
-                    }
-                }
+            // `Ast_derive.dispatch` (compiler/frontend/ast_derive.ml): the
+            // derivers that used to be built in get a dedicated error.
+            name if removed_deriver_hint(name).is_some() => {
+                return Err(PpxError::at_loc(
+                    action.name_loc,
+                    format!(
+                        "@deriving({name}) has been removed. {}",
+                        removed_deriver_hint(name).unwrap_or_default()
+                    ),
+                ));
             }
             name => {
                 return Err(PpxError::at_loc(
@@ -10726,6 +8676,19 @@ fn run_derivers(
         }
     }
     Ok(())
+}
+
+/// `Ast_derive.removed_deriver_hint` (compiler/frontend/ast_derive.ml).
+fn removed_deriver_hint(name: &str) -> Option<&'static str> {
+    match name {
+        "abstract" => Some(
+            "Use a record type instead. Records compile to plain JavaScript objects and support optional fields (`field?: t`), mutable fields and `@as` field renaming.",
+        ),
+        "jsConverter" => Some(
+            "Records already compile to plain JavaScript objects and polymorphic variants to their (`@as`-renamed) names, so the conversion functions are no longer needed.",
+        ),
+        _ => None,
+    }
 }
 
 /// `structure_gen`/`signature_gen` of `Ast_derive_projector`: both raise on a
@@ -10879,16 +8842,7 @@ fn validate_module_record_pattern_binding_error(
 }
 
 fn letmodule_expr_has_await_payload(mod_expr: &current::ModuleExpr, arena: &ParseArena) -> bool {
-    match &*mod_expr.pmod_desc {
-        ModuleExprDesc::Pmod_ident(_) => has_await_attribute(&mod_expr.pmod_attributes, arena),
-        ModuleExprDesc::Pmod_constraint(inner_mod_idx, _mty_idx) => {
-            let inner_mod = arena.get_mod_expr(*inner_mod_idx);
-            matches!(&*inner_mod.pmod_desc, ModuleExprDesc::Pmod_ident(_))
-                && (has_await_attribute(&inner_mod.pmod_attributes, arena)
-                    || has_await_attribute(&mod_expr.pmod_attributes, arena))
-        }
-        _ => false,
-    }
+    awaited_module_path_kind(mod_expr, arena).is_some()
 }
 
 fn expression_is_lident(expr_idx: ExprIdx, expected: &str, arena: &ParseArena) -> bool {
@@ -10929,613 +8883,6 @@ fn app_exp_mapper_error(expr: &Expression, arena: &ParseArena) -> Option<PpxErro
             "Invalid pipe syntax. The pipe symbol (->) can only be used as a binary operator.",
         )
     })
-}
-
-/// Handle @deriving(abstract) which transforms record types into abstract types with accessors
-///
-/// For a type like:
-/// ```rescript
-/// @deriving(abstract)
-/// type t = { @optional cite: React.component<...>, info: props }
-/// ```
-///
-/// Generates:
-/// ```rescript
-/// include (struct
-///   include (struct type t = { ... } end : sig end)  // Original type hidden
-///   type t                                           // Abstract type
-///   external t: (~cite: ..., ~info: ...) => t        // Maker function
-///   external citeGet: t => option<...>               // Getter for optional
-///   external infoGet: t => props                     // Getter
-/// end)
-/// ```
-fn handle_deriving_abstract(
-    tdcls: &[TypeDeclaration],
-    rec_flag: RecFlag,
-    new_tdcls: &[TypeDeclaration],
-    light: bool,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> Vec<StructureItem> {
-    let none_loc = arena.none_loc();
-
-    // Generate the code for each type declaration
-    let mut abstract_tdcls: Vec<TypeDeclaration> = vec![];
-    let mut primitives: Vec<StructureItem> = vec![];
-
-    for tdcl in tdcls {
-        let (abstract_tdcl, value_descriptions) = handle_abstract_tdcl(tdcl, light, arena);
-        abstract_tdcls.push(abstract_tdcl);
-        for vd in value_descriptions {
-            primitives.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
-                pstr_loc: none_loc,
-            });
-        }
-    }
-
-    // Create the inner include: include (struct <original type with record> end : sig end)
-    let type_str_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            rec_flag,
-            new_tdcls.to_vec(),
-        )))),
-        pstr_loc: loc,
-    };
-
-    let inner_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![
-            type_str_item,
-        ]))),
-        pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
-    };
-
-    let empty_sig = current::ModuleType {
-        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::default())),
-        pmty_loc: loc,
-        pmty_attributes: Attributes::new(),
-    };
-
-    let constrained_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
-            arena.push_mod_expr(inner_mod),
-            arena.push_mod_type(empty_sig),
-        )),
-        pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
-    };
-
-    let inner_include = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(
-            current::IncludeDeclaration {
-                pincl_mod: arena.push_mod_expr(constrained_mod),
-                pincl_loc: loc,
-                pincl_attributes: Attributes::new(),
-            },
-        ))),
-        pstr_loc: loc,
-    };
-
-    // Create the abstract type declaration
-    let abstract_type_str = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            rec_flag,
-            abstract_tdcls,
-        )))),
-        pstr_loc: none_loc,
-    };
-
-    // Build the outer structure: inner_include, abstract_type, primitives
-    let mut outer_structure = vec![inner_include, abstract_type_str];
-    outer_structure.extend(primitives);
-
-    let outer_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(outer_structure))),
-        pmod_loc: loc,
-        pmod_attributes: Attributes::new(),
-    };
-
-    let outer_include = current::IncludeDeclaration {
-        pincl_mod: arena.push_mod_expr(outer_mod),
-        pincl_loc: loc,
-        pincl_attributes: Attributes::new(),
-    };
-
-    vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(outer_include))),
-        pstr_loc: loc,
-    }]
-}
-
-/// Handle a single type declaration for @deriving(abstract)
-/// Returns the abstract type declaration and the list of value descriptions (primitives)
-fn handle_abstract_tdcl(
-    tdcl: &TypeDeclaration,
-    light: bool,
-    arena: &mut ParseArena,
-) -> (TypeDeclaration, Vec<ValueDescription>) {
-    let loc = tdcl.ptype_loc;
-    let core_type = core_type_of_type_declaration_with_attrs(tdcl, arena);
-
-    let is_private = matches!(tdcl.ptype_private, PrivateFlag::Private);
-
-    match &tdcl.ptype_kind {
-        TypeKind::Ptype_record(labels) => {
-            let abstract_tdcl = TypeDeclaration {
-                ptype_name: tdcl.ptype_name,
-                ptype_params: tdcl.ptype_params.clone(),
-                ptype_cstrs: tdcl.ptype_cstrs.clone(),
-                ptype_kind: TypeKind::Ptype_abstract,
-                ptype_private: tdcl.ptype_private,
-                ptype_manifest: tdcl.ptype_manifest,
-                ptype_origin: tdcl.ptype_origin,
-                ptype_attributes: Attributes::new(),
-                ptype_loc: tdcl.ptype_loc,
-            };
-            // OCaml uses Ext_list.fold_right which processes right-to-left and prepends (::)
-            // This results in accessors in the same order as the original labels.
-            // We collect into vectors and then reverse to get the same effect.
-            let mut setter_accessor: Vec<ValueDescription> = vec![];
-
-            // Check if any field has @optional
-            let has_optional_field = labels.iter().any(|label| {
-                label.pld_attributes.iter().any(|(attr_name, _)| {
-                    let name = arena.get_string(attr_name.txt);
-                    name == "optional"
-                })
-            });
-
-            // Build maker args and labels_info
-            // OCaml: fold_right starts with [unit] or [] accumulator, and prepends each arg
-            let mut maker_args: Vec<TypeArg> = vec![];
-            let mut labels_info: Vec<(bool, Located<StrIdx>)> = vec![];
-
-            // Process in reverse order (like fold_right) and prepend (like ::)
-            for label in labels.iter().rev() {
-                let label_name = arena.get_string(label.pld_name.txt).to_string();
-                let label_loc = label.pld_name.loc;
-                let pld_type = &label.pld_type;
-
-                // ast_derive_abstract.ml: the field's `pld_runtime_name`.
-                let prim_as_attr = crate::types::record_runtime::parsetree_runtime_name(label);
-                let prim_as_name = prim_as_attr.clone().unwrap_or_else(|| label_name.clone());
-                let _prim_as_idx = match &prim_as_attr {
-                    Some(name) if name != &label_name => arena.intern_string(name),
-                    _ => label.pld_name.txt,
-                };
-                let new_label = if prim_as_name != label_name {
-                    Located {
-                        txt: arena.intern_string(&prim_as_name),
-                        loc: label.pld_name.loc,
-                    }
-                } else {
-                    label.pld_name
-                };
-
-                // OCaml `Ast_attributes.has_bs_optional` marks the attribute used.
-                let is_optional = label.pld_attributes.iter().any(|attr| {
-                    let is_opt = arena.get_string(attr.0.txt) == "optional";
-                    if is_opt {
-                        arena.mark_used_attribute(attr);
-                    }
-                    is_opt
-                });
-
-                // Build the argument for maker function
-                let arg_label = if is_optional {
-                    ArgLabel::Optional(label.pld_name)
-                } else {
-                    ArgLabel::Labelled(label.pld_name)
-                };
-
-                // Insert at front (like OCaml :: prepending)
-                maker_args.insert(
-                    0,
-                    TypeArg {
-                        attrs: Attributes::new(),
-                        lbl: arg_label,
-                        typ: *pld_type,
-                    },
-                );
-
-                labels_info.insert(0, (is_optional, new_label));
-
-                // Build accessor type
-                // OCaml behavior varies based on whether encode_attributes_as_string processes it:
-                // - Non-optional: pval_prim already has FFI encoding, rs_externals returns false,
-                //   arrow is NOT re-processed. Arrow uses tdcl.ptype_loc (from Typ.arrows ~loc).
-                // - Optional: pval_prim = [name] with @get attr, rs_externals returns true,
-                //   encode_attributes_as_string rebuilds arrow with pval_loc = pld_loc.
-                let accessor_type = if is_optional {
-                    // Returns option<pld_type>
-                    // After encode_attributes_as_string, arrow uses pld_loc
-                    let pld_core_type = arena.get_core_type(*pld_type).clone();
-                    let option_type = lift_option_type(&pld_core_type, arena);
-                    make_arrow_type_with_loc(&core_type, &option_type, Some(label.pld_loc), arena)
-                } else {
-                    // Not re-processed, arrow uses tdcl.ptype_loc
-                    let pld_core_type = arena.get_core_type(*pld_type).clone();
-                    make_arrow_type_with_loc(&core_type, &pld_core_type, Some(loc), arena)
-                };
-
-                // Accessor primitive:
-                // Both optional and non-optional go through encode_attributes_as_string,
-                // which produces [prim_name, ffi_data].
-                //
-                // For optional: originally has [prim_as_name] with @get attr
-                //   -> encode_attributes_as_string processes @get -> [prim_as_name, ffi_bs Js_get]
-                // For non-optional: has ffi_bs_as_prims [dummy] -> ["", ffi_bs Js_get]
-                //
-                // The difference is:
-                // - Optional: prim_name = prim_as_name, first string is the name
-                // - Non-optional: prim_name = "", first string is empty
-                //
-                // Note: OCaml's ffi_bs uses Param_number(1) for [dummy] because
-                // ffi_bs_aux counts consecutive dummy params.
-                // ast_derive_abstract.ml: an optional field's accessor is
-                // `Prim_name prim_as_name` with `@get`, digested with the
-                // default Return_unset; a plain field's is built digested with
-                // Return_identity and an empty name.
-                let get_decl = ExternalDecl {
-                    kind: DeclKind::DeclGet {
-                        name: prim_as_name.clone(),
-                    },
-                    module_: None,
-                    scopes: vec![],
-                    variadic: false,
-                    effective_arity: 1,
-                };
-                let accessor_prim = if is_optional {
-                    PrimitiveRepr::PrimFfi {
-                        name: prim_as_name.clone(),
-                        spec: Box::new(ExternalFfi::FfiBs(
-                            vec![Param::dummy()],
-                            ReturnWrapper::ReturnUnset,
-                            get_decl,
-                        )),
-                    }
-                } else {
-                    PrimitiveRepr::PrimFfi {
-                        name: String::new(),
-                        spec: Box::new(ExternalFfi::FfiBs(
-                            vec![Param::dummy()],
-                            ReturnWrapper::ReturnIdentity,
-                            get_decl,
-                        )),
-                    }
-                };
-
-                // Accessor attributes: empty for both (FFI attrs like @get are consumed during encoding)
-                let accessor_attrs: Vec<Attribute> = vec![];
-
-                let accessor_name = if light {
-                    label.pld_name
-                } else {
-                    Located {
-                        txt: arena.push_string(format!("{}Get", label_name)),
-                        loc: label.pld_name.loc,
-                    }
-                };
-
-                let accessor_vd = ValueDescription {
-                    pval_name: accessor_name,
-                    pval_type: arena.push_core_type(accessor_type),
-                    pval_prim: Some(accessor_prim),
-                    pval_attributes: accessor_attrs.into(),
-                    pval_loc: label.pld_loc,
-                };
-                // Insert at front (like OCaml :: prepending)
-                setter_accessor.insert(0, accessor_vd);
-
-                // Setter for mutable fields - also insert at front
-                if matches!(label.pld_mutable, current::MutableFlag::Mutable) {
-                    let pld_core_type = arena.get_core_type(*pld_type).clone();
-                    let setter_type = make_setter_type_with_loc(
-                        &core_type,
-                        &pld_core_type,
-                        Some(label.pld_loc),
-                        arena,
-                    );
-                    // OCaml: setter pval_prim = [prim_as_name], pval_attributes = [@set]
-                    // The @set attribute gets processed by encode_external which adds
-                    // JsSet FFI encoding as a second prim string.
-                    // We do this directly here since our pipeline doesn't re-process.
-                    let setter_prim = PrimitiveRepr::PrimFfi {
-                        name: prim_as_name.clone(),
-                        spec: Box::new(ExternalFfi::FfiBs(
-                            vec![Param::dummy(), Param::dummy()],
-                            ReturnWrapper::ReturnUnset,
-                            ExternalDecl {
-                                kind: DeclKind::DeclSet {
-                                    name: prim_as_name.clone(),
-                                },
-                                module_: None,
-                                scopes: vec![],
-                                variadic: false,
-                                effective_arity: 2,
-                            },
-                        )),
-                    };
-                    let setter_vd = ValueDescription {
-                        pval_name: Located {
-                            txt: arena.push_string(format!("{}Set", label_name)),
-                            loc: label_loc,
-                        },
-                        pval_type: arena.push_core_type(setter_type),
-                        pval_prim: Some(setter_prim),
-                        pval_attributes: Attributes::new(),
-                        pval_loc: label.pld_loc,
-                    };
-                    // Setter comes before accessor in OCaml's prepend order
-                    setter_accessor.insert(0, setter_vd);
-                }
-            }
-
-            // Add unit arg at the end if has_optional_field (OCaml starts fold_right with [unit])
-            if has_optional_field {
-                let unit_type = make_unit_type(arena);
-                maker_args.push(TypeArg {
-                    attrs: Attributes::new(),
-                    lbl: ArgLabel::Nolabel,
-                    typ: arena.push_core_type(unit_type),
-                });
-            }
-
-            // Build the final value descriptions
-            let value_descs = if is_private {
-                setter_accessor
-            } else {
-                // Build maker type - use type decl location for outer arrow
-                let make_type = if maker_args.is_empty() {
-                    core_type.clone()
-                } else {
-                    make_arrows_type_with_loc(&maker_args, &core_type, Some(loc), arena)
-                };
-
-                // Compute prim for maker: ffi_obj_as_prims
-                let my_prims = compute_maker_prims(&labels_info, has_optional_field, arena);
-
-                let maker_vd = ValueDescription {
-                    // Reuse the type declaration's name identity so marshal sharing
-                    // matches OCaml in @deriving(abstract) maker generation.
-                    pval_name: Located {
-                        txt: tdcl.ptype_name.txt,
-                        loc,
-                    },
-                    pval_type: arena.push_core_type(make_type),
-                    pval_prim: Some(my_prims),
-                    pval_attributes: Attributes::new(),
-                    pval_loc: loc,
-                };
-
-                // OCaml: my_maker :: setter_accessor
-                let mut result = vec![maker_vd];
-                result.extend(setter_accessor);
-                result
-            };
-
-            (abstract_tdcl, value_descs)
-        }
-        _ => {
-            // OCaml keeps non-record declarations unchanged for deriving(abstract).
-            (tdcl.clone(), vec![])
-        }
-    }
-}
-
-/// Lift a type to option<type>
-fn lift_option_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
-    // OCaml's lift_option_type:
-    //   { ptyp_desc = Ptyp_constr ({txt = Ast_literal.predef_option; loc = ptyp_loc}, [ty]);
-    //     ptyp_loc;
-    //     ptyp_attributes = [] }
-    // predef_option = Ldot(Lident "*predef*", "option")
-    let ptyp_loc = typ.ptyp_loc;
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            Located {
-                txt: arena.predef_option_lident(),
-                loc: ptyp_loc,
-            },
-            vec![arena.push_core_type(typ.clone())],
-        )))),
-        ptyp_loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Create an arrow type: arg -> ret (uses ghost location)
-fn make_arrow_type(arg: &CoreType, ret: &CoreType, arena: &mut ParseArena) -> CoreType {
-    make_arrow_type_with_loc(arg, ret, None, arena)
-}
-
-/// Create an arrow type: arg -> ret with explicit location
-/// If loc is Some, uses that location; otherwise uses ghost
-fn make_arrow_type_with_loc(
-    arg: &CoreType,
-    ret: &CoreType,
-    loc: Option<LocIdx>,
-    arena: &mut ParseArena,
-) -> CoreType {
-    let ptyp_loc = loc.unwrap_or_else(|| arena.none_loc());
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(arg.clone()),
-            }),
-            arena.push_core_type(ret.clone()),
-            arena.push_arity(Some(1)),
-        )))),
-        ptyp_loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Create setter type: t -> field_type -> unit (uses ghost location)
-fn make_setter_type(
-    record_type: &CoreType,
-    field_type: &CoreType,
-    arena: &mut ParseArena,
-) -> CoreType {
-    make_setter_type_with_loc(record_type, field_type, None, arena)
-}
-
-/// Create setter type: t -> field_type -> unit with explicit location
-/// If loc is Some, uses that for the outermost arrow; inner arrow uses ghost
-fn make_setter_type_with_loc(
-    record_type: &CoreType,
-    field_type: &CoreType,
-    loc: Option<LocIdx>,
-    arena: &mut ParseArena,
-) -> CoreType {
-    let none_loc = arena.none_loc();
-    let outer_loc = loc.unwrap_or(none_loc);
-    let unit_type = make_unit_type(arena);
-
-    let args = vec![
-        TypeArg {
-            attrs: Attributes::new(),
-            lbl: ArgLabel::Nolabel,
-            typ: arena.push_core_type(record_type.clone()),
-        },
-        TypeArg {
-            attrs: Attributes::new(),
-            lbl: ArgLabel::Nolabel,
-            typ: arena.push_core_type(field_type.clone()),
-        },
-    ];
-    make_arrows_type_with_loc(&args, &unit_type, Some(outer_loc), arena)
-}
-
-/// Create unit type
-fn make_unit_type(arena: &mut ParseArena) -> CoreType {
-    let none_loc = arena.none_loc();
-    let unit_ident = arena.push_lident_static("unit");
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            Located {
-                txt: unit_ident,
-                loc: none_loc,
-            },
-            vec![],
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Create arrow type with multiple arguments (uses ghost location)
-fn make_arrows_type(args: &[TypeArg], ret: &CoreType, arena: &mut ParseArena) -> CoreType {
-    make_arrows_type_with_loc(args, ret, None, arena)
-}
-
-/// Create arrow type with multiple arguments
-/// OCaml's Typ.arrows:
-/// - Uses the provided loc for ALL arrows (loc is a closure variable)
-/// - Outermost arrow has `arity = Some(len(args))`
-/// - Inner arrows have `arity = None`
-fn make_arrows_type_with_loc(
-    args: &[TypeArg],
-    ret: &CoreType,
-    loc: Option<LocIdx>,
-    arena: &mut ParseArena,
-) -> CoreType {
-    let none_loc = arena.none_loc();
-    let ptyp_loc = loc.unwrap_or(none_loc);
-    if args.is_empty() {
-        return ret.clone();
-    }
-
-    let args = args.to_vec();
-    let arity = arena.push_arity(Some(args.len() as i32));
-    let first = args[0].clone();
-    arena.set_nary_arrow_args(arity, args);
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(first),
-            arena.push_core_type(ret.clone()),
-            arity,
-        )))),
-        ptyp_loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Make @get attribute
-fn make_get_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
-    (
-        Located {
-            txt: arena.intern_string("get"),
-            loc,
-        },
-        Payload::PStr(Box::default()),
-    )
-}
-
-/// Make @set attribute
-fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
-    (
-        Located {
-            txt: arena.intern_string("set"),
-            loc,
-        },
-        Payload::PStr(Box::default()),
-    )
-}
-
-/// Compute prims for maker function based on optional labels
-///
-/// OCaml's pval_prim_of_option_labels produces:
-///   [""; encode(Ffi_obj_create(arg_kinds))]
-///
-/// where arg_kinds is built from labels_info:
-/// - For optional labels: ObjOptional { name, for_sure_no_nested_option: false }
-/// - For non-optional labels: ObjLabel { name }
-/// - If ends_with_unit: [empty_kind Extern_unit] at the end
-fn compute_maker_prims(
-    labels_info: &[(bool, Located<StrIdx>)],
-    has_optional: bool,
-    arena: &mut ParseArena,
-) -> PrimitiveRepr {
-    // Build arg_kinds list matching OCaml's pval_prim_of_option_labels
-    let mut arg_kinds: Vec<ObjParam> = Vec::new();
-
-    for (is_optional, label) in labels_info {
-        let label_name = arena.get_string(label.txt).to_string();
-        let obj_arg_label = if *is_optional {
-            // OCaml: External_arg_spec.optional false label_name
-            // for_sure_no_nested_option = false
-            Label::ObjOptional {
-                name: label_name,
-                for_sure_no_nested_option: false,
-            }
-        } else {
-            // OCaml: External_arg_spec.obj_label label_name
-            Label::ObjLabel { name: label_name }
-        };
-
-        arg_kinds.push(ObjParam {
-            obj_arg_type: Attr::Nothing,
-            obj_arg_label,
-        });
-    }
-
-    // If ends_with_unit (has_optional), add empty_kind Extern_unit at the end
-    if has_optional {
-        arg_kinds.push(ObjParam {
-            obj_arg_type: Attr::ExternUnit,
-            obj_arg_label: Label::ObjEmpty,
-        });
-    }
-
-    // OCaml: Prim_ffi {name = ""; spec = Ffi_obj_create arg_kinds}
-    PrimitiveRepr::PrimFfi {
-        name: String::new(),
-        spec: Box::new(ExternalFfi::FfiObjCreate(arg_kinds)),
-    }
 }
 
 /// Generate accessor structure/signature items for one type declaration.
@@ -12357,17 +9704,8 @@ fn rewrite_structure_unit(
         StructureItemDesc::Pstr_module(mb) => {
             // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
             // and deduplicates generated module type declarations per structure.
-            if let Some((module_type_decl, transformed_mb)) =
-                transform_module_await(mb, item.pstr_loc, arena)
-            {
-                let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
-                    let module_type_name = local_module_type_name(located_lid.txt, arena);
-                    if await_context.insert(module_type_name) {
-                        result.push(module_type_decl);
-                    }
-                }
-                result.push(transformed_mb);
+            if let Some(items) = transform_module_await(mb, item.pstr_loc, await_context, arena) {
+                result.extend(items);
             } else if apply_spice {
                 result.extend(try_rewrite_structure_item(
                     item,
@@ -12415,12 +9753,10 @@ fn rewrite_structure_unit(
     Ok(result)
 }
 
-/// `module M = @res.await Path`, the structure_mapper case that maps its item
+/// `module M = await Path`, the structure_mapper case that maps its item
 /// before the rest of the structure (bs_builtin_ppx.ml:708-747).
 fn is_await_module_alias(mb: &current::ModuleBinding, arena: &ParseArena) -> bool {
-    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-    matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_))
-        && has_await_attribute(&mod_expr.pmod_attributes, arena)
+    awaited_module_path_kind(arena.get_mod_expr(mb.pmb_expr), arena) == Some(false)
 }
 
 /// Lightweight extension expansion: only expands %%raw, %raw, %re, %%private.
@@ -12824,7 +10160,6 @@ fn expand_signature_deriving_items(
         return vec![rewritten];
     }
     let loc = original.psig_loc;
-    let none_loc = arena.none_loc();
 
     // `new_tdcls tdcls new_attrs`: the processed `@deriving` is removed from
     // the last declaration; `new_tdcls_new_attrs` is that list mapped.
@@ -12835,82 +10170,7 @@ fn expand_signature_deriving_items(
     if let Some(last) = new_tdcls.last_mut() {
         last.ptype_attributes = rewrite_attributes(&new_attrs, arena).into();
     }
-    let mut original_tdcls_new_attrs: Vec<TypeDeclaration> = tdcls.clone();
-    if let Some(last) = original_tdcls_new_attrs.last_mut() {
-        last.ptype_attributes = new_attrs.clone().into();
-    }
-
-    let abstract_light = match actions.as_slice() {
-        [DeriveAction::Abstract { light }] => Some(*light),
-        _ => None,
-    };
-
-    let items = if let Some(light) = abstract_light {
-        // `include module type of (struct type ... end : sig end)` followed by
-        // `Ast_derive_abstract.handle_tdcls_in_sig` (ast_derive_abstract.ml:
-        // 215-223): the abstract declarations, then one `val` per generated
-        // external.
-        let type_str_item = StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-                *rec_flag,
-                new_tdcls.clone(),
-            )))),
-            pstr_loc: loc,
-        };
-        let inner_mod = arena.push_mod_expr(ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![
-                type_str_item,
-            ]))),
-            pmod_loc: loc,
-            pmod_attributes: Attributes::new(),
-        });
-        let empty_sig = arena.push_mod_type(current::ModuleType {
-            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::default())),
-            pmty_loc: loc,
-            pmty_attributes: Attributes::new(),
-        });
-        let constrained = arena.push_mod_expr(ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(inner_mod, empty_sig)),
-            pmod_loc: loc,
-            pmod_attributes: Attributes::new(),
-        });
-        let typeof_mty = arena.push_mod_type(current::ModuleType {
-            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(constrained)),
-            pmty_loc: loc,
-            pmty_attributes: Attributes::new(),
-        });
-        let mut items = vec![SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
-                current::IncludeDescription {
-                    pincl_mod: typeof_mty,
-                    pincl_loc: loc,
-                    pincl_attributes: Attributes::new(),
-                },
-            ))),
-            psig_loc: loc,
-        }];
-        let mut abstract_tdcls = Vec::with_capacity(original_tdcls_new_attrs.len());
-        let mut values = Vec::new();
-        for tdcl in &original_tdcls_new_attrs {
-            let (abstract_tdcl, value_descriptions) = handle_abstract_tdcl(tdcl, light, arena);
-            abstract_tdcls.push(abstract_tdcl);
-            values.extend(value_descriptions);
-        }
-        items.push(SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-                *rec_flag,
-                abstract_tdcls,
-            )))),
-            psig_loc: none_loc,
-        });
-        for vd in values {
-            items.push(SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
-                psig_loc: none_loc,
-            });
-        }
-        items
-    } else {
+    let items = {
         // `Sig.type_ ~loc rf new_tdcls_new_attrs ::
         //  Ast_derive.gen_signature tdcls actions rf` (ast_derive.ml:54-58).
         let mut items = vec![SignatureItem {
@@ -12930,39 +10190,6 @@ fn expand_signature_deriving_items(
                         }
                     }
                 }
-                DeriveAction::JsConverter { new_type } => {
-                    for tdcl in tdcls.iter() {
-                        let inner_loc = tdcl.ptype_loc;
-                        let (_structure_items, signature_items) = match &tdcl.ptype_kind {
-                            TypeKind::Ptype_record(label_declarations) => {
-                                generate_js_converter_record(
-                                    tdcl,
-                                    label_declarations,
-                                    *new_type,
-                                    inner_loc,
-                                    arena,
-                                )
-                            }
-                            TypeKind::Ptype_abstract => {
-                                match is_enum_polyvar(tdcl, arena).map(|rf| rf.to_vec()) {
-                                    Some(row_fields) => generate_js_converter_polyvar(
-                                        tdcl,
-                                        &row_fields,
-                                        *new_type,
-                                        inner_loc,
-                                        arena,
-                                    ),
-                                    None => (vec![], vec![]),
-                                }
-                            }
-                            TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => (vec![], vec![]),
-                        };
-                        items.extend(signature_items);
-                    }
-                }
-                // `abstract` combined with other actions is rejected by
-                // `run_derivers`; nothing is generated for it here.
-                DeriveAction::Abstract { .. } => {}
             }
         }
         items
@@ -13388,6 +10615,13 @@ fn rewrite_module_expr(
     mod_expr: &current::ModuleExpr,
     arena: &mut ParseArena,
 ) -> current::ModuleExpr {
+    // `module_expr_mapper` (bs_builtin_ppx.ml): outside the dynamic import
+    // forms, which the expression and structure mappers rewrite before
+    // mapping their children, `await` on a module has no effect. Remove it,
+    // keeping its attributes on the module it wraps, so the type checker sees
+    // the same module expressions as without it.
+    let (_, stripped) = remove_awaits(false, mod_expr, arena);
+    let mod_expr = &stripped;
     let new_desc = match &*mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
             let rewritten_items = rewrite_structure_impl(items, arena, false, true, None)

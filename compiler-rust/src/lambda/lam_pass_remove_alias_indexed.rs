@@ -597,7 +597,6 @@ mod tests {
     fn info() -> ApInfo {
         ApInfo {
             loc: Location::none(),
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         }
     }
@@ -1131,7 +1130,6 @@ mod tests {
         let x = id("x", 1);
         let app_info = ApInfo {
             loc: Location::new_for_error("guard.res", 4, 8),
-            inlined: InlineAttribute::Always,
             status: ApplyStatus::Uncurry,
         };
         let variants = vec![

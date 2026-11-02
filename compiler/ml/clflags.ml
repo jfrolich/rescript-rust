@@ -4,17 +4,12 @@ and include_dirs = ref ([] : string list) (* -I *)
 
 and debug = ref false (* -g *)
 
-and fast = ref false (* -unsafe *)
-
 and nopervasives = ref false (* -nopervasives *)
-
-and preprocessor = ref (None : string option) (* -pp *)
 
 and all_ppx = ref ([] : string list)
 
 (* -ppx *)
-let annotations = ref false (* -annot *)
-let binary_annotations = ref false (* -annot *)
+let binary_annotations = ref false (* write .cmt/.cmti; -bs-no-bin-annot *)
 
 and noassert = ref false (* -noassert *)
 
@@ -23,8 +18,6 @@ and verbose = ref false (* -verbose *)
 and open_modules = ref [] (* -open *)
 
 and real_paths = ref true (* -short-paths *)
-
-and applicative_functors = ref true (* -no-app-funct *)
 
 and error_size = ref 400 (* -error-size, in heap words *)
 
@@ -45,9 +38,9 @@ and dump_lambda_sexp = ref false (* -dlambda-sexp *)
 
 and dump_lambda_sexp_locs = ref false (* -dlambda-sexp-locs *)
 
-and only_parse = ref false (* -only-parse *)
+and dump_coercions = ref false (* -draw-coercions *)
 
-and editor_mode = ref false (* -editor-mode *)
+and only_parse = ref false (* -only-parse *)
 
 and ignore_parse_errors = ref false (* -ignore-parse-errors *)
 
@@ -62,7 +55,8 @@ let reset_dump_state () =
   dump_typed_sexp_locs := false;
   dump_rawlambda := false;
   dump_lambda_sexp := false;
-  dump_lambda_sexp_locs := false
+  dump_lambda_sexp_locs := false;
+  dump_coercions := false
 
 let keep_locs = ref true (* -keep-locs *)
 
