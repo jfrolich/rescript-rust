@@ -175,13 +175,14 @@ impl UnitDigests {
         self.registry.lambda_reads(resolved)
     }
 
-    /// The module's interface encoded for storage.
-    pub fn encode(
+    /// The module's interface encoded for storage, as its extras (`None` for
+    /// none) and core.
+    pub fn encode_parts(
         &self,
         module_name: &str,
         alias_rewrites: &[(String, rescript_compiler::types::path::Path)],
-    ) -> Option<Vec<u8>> {
-        self.registry.encode_stored_module(module_name, alias_rewrites)
+    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+        self.registry.encode_stored_module_parts(module_name, alias_rewrites)
     }
 
     /// The module's interface digest and item digests, `None` when it is not
@@ -290,13 +291,23 @@ pub fn current_record(
         })
         .filter_map(|module_name| {
             let aliases = alias_rewrites.get(module_name).map(Vec::as_slice).unwrap_or(&[]);
-            let data = digests.encode(module_name, aliases)?;
-            let hash = blake3::hash(&data);
+            let (extras, core) = digests.encode_parts(module_name, aliases)?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&core);
+            if let Some(extras) = &extras {
+                hasher.update(extras);
+            }
+            let hash = hasher.finalize();
             let content = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
             if stored.and_then(|stored| stored.get(module_name)) == Some(&content) {
                 return None;
             }
-            Some((module_name.clone(), (content, data)))
+            let interface = state_db::StoredInterface {
+                hash: content,
+                extras,
+                core,
+            };
+            Some((module_name.clone(), interface))
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -708,25 +719,34 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
                 .push(module_name.as_str());
         }
     }
-    let blobs: Vec<(String, Vec<u8>)> = by_package
-        .into_iter()
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .flat_map_iter(
-            |(package_name, modules)| match build_state.get_package(package_name) {
-                Some(package) => state_db::read_interfaces(package, &modules),
-                None => Vec::new(),
-            },
-        )
-        .collect();
-    // Only the alias rewrites and GenType declarations are decoded now; a
-    // module's signature and JS metadata are decoded when a compile first
-    // looks the module up.
+    // Each module's extras (alias rewrites and GenType declarations) are
+    // registered now; its core (signature and JS metadata) is read from the
+    // database and decoded when a compile first looks the module up.
+    let extras: Vec<(String, Option<Vec<u8>>, rescript_compiler::cmi::persistent_env::CoreFetcher)> =
+        by_package
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .flat_map_iter(|(package_name, modules)| {
+                let Some(package) = build_state.get_package(package_name) else {
+                    return Vec::new();
+                };
+                let mut extras = state_db::read_interface_extras(package, &modules);
+                let cores = std::sync::Arc::new(state_db::InterfaceCores::new(package));
+                let fetch: rescript_compiler::cmi::persistent_env::CoreFetcher =
+                    std::sync::Arc::new(move |module: &str| cores.read(module));
+                modules
+                    .into_iter()
+                    .map(|module_name| (module_name.to_string(), extras.remove(module_name), fetch.clone()))
+                    .collect()
+            })
+            .collect();
     let mut loaded = AHashSet::new();
     let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
-    for (module_name, data) in blobs {
-        let Some(aliases) = registry.register_stored_lazily(&module_name, &data) else {
+    for (module_name, extras, fetch) in extras {
+        let core = rescript_compiler::cmi::persistent_env::PendingCore::Fetch(fetch);
+        let Some(aliases) = registry.register_stored_parts(&module_name, extras.as_deref(), core) else {
             continue;
         };
         if !aliases.is_empty() {
@@ -765,7 +785,7 @@ pub fn decode_recorded_imports(
         .into_iter()
         .collect::<Vec<_>>()
         .into_par_iter()
-        .for_each(|module_name| registry.decode_stored(module_name));
+        .for_each(|module_name| registry.decode_stored(module_name, None));
 }
 
 /// Parse an incremental build in two rounds: first the source files that

@@ -18,6 +18,7 @@
 //! not synced to disk for the same reason.
 
 use super::packages::Package;
+use ahash::AHashMap;
 use rusqlite::{Connection, OpenFlags, params};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -44,6 +45,7 @@ CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NO
 CREATE TABLE reads (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE items (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE interfaces (module TEXT PRIMARY KEY, hash INTEGER NOT NULL, data BLOB NOT NULL);
+CREATE TABLE interface_extras (module TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
 CREATE TABLE runtime_interfaces (module TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
 ";
 
@@ -113,12 +115,22 @@ pub struct PackageState {
     /// record; the interfaces themselves with [`read_interfaces`]).
     pub stored_interfaces: BTreeMap<String, u64>,
     /// Stored interfaces to set: module to the content hash and the encoded
-    /// interface (`rescript_compiler::cmi::stored_module`).
-    pub interface_updates: BTreeMap<String, (u64, Vec<u8>)>,
+    /// interface's extras (`None` for none) and core
+    /// (`rescript_compiler::cmi::stored_module::encode_parts`).
+    pub interface_updates: BTreeMap<String, StoredInterface>,
     /// Whether `sources`, `modules` and `deps` hold only the rows to set:
     /// every recorded row missing from them is kept (see
     /// `incremental::current_record`).
     pub partial: bool,
+}
+
+/// A stored interface to write: its content hash, encoded extras (`None` for
+/// none) and encoded core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredInterface {
+    pub hash: u64,
+    pub extras: Option<Vec<u8>>,
+    pub core: Vec<u8>,
 }
 
 /// What a module's compile read of each unit: the digest of the items read
@@ -202,9 +214,63 @@ pub fn read_reads(package: &Package, modules: &[&str]) -> BTreeMap<String, UnitR
         .collect()
 }
 
-/// The stored interfaces of the given modules of the package.
-pub fn read_interfaces(package: &Package, modules: &[&str]) -> Vec<(String, Vec<u8>)> {
-    read_data_rows(package, "interfaces", modules)
+/// The encoded extras of the given modules' stored interfaces, for those
+/// that have any.
+pub fn read_interface_extras(package: &Package, modules: &[&str]) -> AHashMap<String, Vec<u8>> {
+    // One scan of the table is cheaper than a lookup per module when most
+    // rows are wanted, as for a build loading a large dependency closure.
+    let Some(conn) = open_existing(&path(package)) else {
+        return AHashMap::new();
+    };
+    let wanted: ahash::AHashSet<&str> = modules.iter().copied().collect();
+    let Ok(mut stmt) = conn.prepare("SELECT module, data FROM interface_extras") else {
+        return AHashMap::new();
+    };
+    let Ok(mut rows) = stmt.query([]) else {
+        return AHashMap::new();
+    };
+    let mut found = AHashMap::new();
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(module) = row.get_ref(0).and_then(|value| Ok(value.as_str()?.to_string())) else {
+            continue;
+        };
+        if wanted.contains(module.as_str())
+            && let Ok(data) = row.get::<_, Vec<u8>>(1)
+        {
+            found.insert(module, data);
+        }
+    }
+    found
+}
+
+/// Reads the cores of a package's stored interfaces one at a time, on
+/// demand, from one connection opened on first use: a build reads only the
+/// ones its compiles look up (see `ModuleRegistry::register_stored_parts`).
+pub struct InterfaceCores {
+    path: PathBuf,
+    conn: std::sync::Mutex<Option<Connection>>,
+}
+
+impl InterfaceCores {
+    pub fn new(package: &Package) -> Self {
+        Self {
+            path: path(package),
+            conn: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The core of `module`'s stored interface, `None` when there is none.
+    pub fn read(&self, module: &str) -> Option<Vec<u8>> {
+        let mut conn = self.conn.lock().unwrap();
+        if conn.is_none() {
+            *conn = Some(open_existing(&self.path)?);
+        }
+        let conn = conn.as_ref()?;
+        let mut stmt = conn
+            .prepare_cached("SELECT data FROM interfaces WHERE module = ?1")
+            .ok()?;
+        stmt.query_row(params![module], |row| row.get(0)).ok()
+    }
 }
 
 /// The recorded item digests of the given modules of the package.
@@ -523,8 +589,15 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             }
             let mut set_interface =
                 tx.prepare("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
-            for (module, (digest, data)) in &new.interface_updates {
-                set_interface.execute(params![module, *digest as i64, data])?;
+            let mut set_extras =
+                tx.prepare("INSERT OR REPLACE INTO interface_extras (module, data) VALUES (?1, ?2)")?;
+            let mut delete_extras = tx.prepare("DELETE FROM interface_extras WHERE module = ?1")?;
+            for (module, interface) in &new.interface_updates {
+                set_interface.execute(params![module, interface.hash as i64, interface.core])?;
+                match &interface.extras {
+                    Some(extras) => set_extras.execute(params![module, extras])?,
+                    None => delete_extras.execute(params![module])?,
+                };
             }
             let mut delete_interface = tx.prepare("DELETE FROM interfaces WHERE module = ?1")?;
             let mut delete_reads = tx.prepare("DELETE FROM reads WHERE module = ?1")?;
@@ -542,6 +615,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 partial,
                 |module| {
                     delete_interface.execute(params![module])?;
+                    delete_extras.execute(params![module])?;
                     delete_reads.execute(params![module])?;
                     delete_items.execute(params![module])?;
                     delete_module.execute(params![module]).map(drop)

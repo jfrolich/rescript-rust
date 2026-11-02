@@ -107,7 +107,7 @@ impl<V> Default for SharedRegistryMap<V> {
 /// decoded once, by the first lookup of its name; until then the module
 /// costs only its encoded bytes.
 pub struct LazyStoredModules {
-    pending: Mutex<HashMap<String, Arc<Mutex<Option<Vec<u8>>>>>>,
+    pending: Mutex<HashMap<String, Arc<Mutex<Option<PendingCore>>>>>,
     cached_modules: Arc<RwLock<HashMap<String, Arc<PortablePersStruct>>>>,
     module_info: Arc<RwLock<HashMap<String, InMemoryModuleInfo>>>,
 }
@@ -116,6 +116,19 @@ impl std::fmt::Debug for LazyStoredModules {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LazyStoredModules").finish_non_exhaustive()
     }
+}
+
+/// Reads the encoded core (see [`super::stored_module`]) of a stored module
+/// by name, `None` when it cannot.
+pub type CoreFetcher = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
+/// The not yet decoded core of a stored module: its bytes, or how to read
+/// them, so a module the build never looks up is never read either.
+pub enum PendingCore {
+    /// The encoded core.
+    Bytes(Vec<u8>),
+    /// Reads the encoded core when the module is first looked up.
+    Fetch(CoreFetcher),
 }
 
 impl LazyStoredModules {
@@ -127,16 +140,26 @@ impl LazyStoredModules {
     }
 
     fn materialize(&self, name: &str) -> bool {
+        self.materialize_with(name, None)
+    }
+
+    /// [`Self::materialize`], from `bytes` when given (read ahead by the
+    /// caller) instead of the entry's own.
+    fn materialize_with(&self, name: &str, bytes: Option<Vec<u8>>) -> bool {
         let Some(entry) = self.pending.lock().unwrap().get(name).cloned() else {
             return false;
         };
         // Concurrent lookups of the same module wait here for the first to
         // fill the maps.
-        let mut bytes = entry.lock().unwrap();
-        let Some(data) = bytes.take() else {
+        let mut pending = entry.lock().unwrap();
+        let Some(core) = pending.take() else {
             return true;
         };
-        if let Some(core) = super::stored_module::decode_core(&data) {
+        let data = match (bytes, core) {
+            (Some(bytes), _) | (None, PendingCore::Bytes(bytes)) => Some(bytes),
+            (None, PendingCore::Fetch(fetch)) => fetch(name),
+        };
+        if let Some(core) = data.as_deref().and_then(super::stored_module::decode_core) {
             if let Some(pers) = core.pers_struct {
                 self.cached_modules
                     .write()
@@ -148,7 +171,7 @@ impl LazyStoredModules {
                 .unwrap()
                 .insert(name.to_string(), core.info);
         }
-        drop(bytes);
+        drop(pending);
         self.pending.lock().unwrap().remove(name);
         true
     }
@@ -714,6 +737,26 @@ impl ModuleRegistry {
         ))
     }
 
+    /// [`Self::encode_stored_module`] as its extras, `None` when it has none,
+    /// and core (see [`super::stored_module::encode_parts`]).
+    pub fn encode_stored_module_parts(
+        &self,
+        name: &str,
+        alias_rewrites: &[(String, Path)],
+    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+        let (pers, info) = self.registered(name);
+        let info = info?;
+        let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
+        Some(super::stored_module::encode_parts(
+            &super::stored_module::StoredModuleRef {
+                pers_struct: pers.as_deref(),
+                info: &info,
+                alias_rewrites,
+                gentype_declarations: &gentype_declarations,
+            },
+        ))
+    }
+
     /// Register a stored module's interface (see
     /// [`super::stored_module::encode`]), as compiling it would. Its alias
     /// rewrites and GenType declarations are registered now; its signature
@@ -726,28 +769,45 @@ impl ModuleRegistry {
         name: &str,
         data: &[u8],
     ) -> Option<Vec<(String, Path)>> {
+        let (extras, core) = super::stored_module::split(data)?;
+        self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.to_vec()))
+    }
+
+    /// [`Self::register_stored_lazily`] for a module stored as its encoded
+    /// extras (`None` for none) and core (see
+    /// [`super::stored_module::encode_parts`]), the core possibly still to be
+    /// read.
+    pub fn register_stored_parts(
+        &mut self,
+        name: &str,
+        extras: Option<&[u8]>,
+        core: PendingCore,
+    ) -> Option<Vec<(String, Path)>> {
         assert!(
             !self.write_to_local,
             "stored modules are registered in the shared registry"
         );
-        let (extras, core) = super::stored_module::split(data)?;
-        let extras = super::stored_module::decode_extras(extras)?;
+        let extras = match extras {
+            Some(extras) => super::stored_module::decode_extras(extras)?,
+            None => super::stored_module::StoredExtras::default(),
+        };
         let lazy = self.lazy_stored_modules();
         self.extend_alias_rewrites(extras.alias_rewrite_map());
         crate::gentype::main::restore_type_declarations(name, extras.gentype_declarations);
         lazy.pending
             .lock()
             .unwrap()
-            .insert(name.to_string(), Arc::new(Mutex::new(Some(core.to_vec()))));
+            .insert(name.to_string(), Arc::new(Mutex::new(Some(core))));
         Some(extras.alias_rewrites)
     }
 
     /// Decode `name`'s stored module now if it is registered with
     /// [`Self::register_stored_lazily`] and not decoded yet, so a build can
-    /// decode the modules it knows its compiles will read in parallel.
-    pub fn decode_stored(&self, name: &str) {
+    /// decode the modules it knows its compiles will read in parallel. With
+    /// `core`, from those bytes (read ahead) instead of the entry's own.
+    pub fn decode_stored(&self, name: &str, core: Option<Vec<u8>>) {
         if let Some(lazy) = &self.cached_modules.lazy {
-            lazy.materialize(name);
+            lazy.materialize_with(name, core);
         }
     }
 
