@@ -2059,6 +2059,7 @@ __metadata:
       optional: true
   bin:
     rescript: cli/rescript.js
+    rescript-rust: cli/rescript-rust.js
     rescript-tools: cli/rescript-tools.js
   languageName: unknown
   linkType: soft

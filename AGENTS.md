@@ -54,8 +54,8 @@ The Makefile’s targets build on each other in this order:
 
 1. `yarn-install` runs automatically for targets that need JavaScript tooling (lib, playground, tests, formatting, etc.).
 2. `build` (default target) builds the toolchain binaries (all copied into `packages/@rescript/<platform>/bin`):
-   - `compiler` builds the dune executables (`bsc`, `rescript-*`, `ounit_tests`, etc.).
-   - `rewatch` builds the Rust-based ReScript build system and CLI.
+   - `compiler` builds the dune executables (`bsc`, `rescript-*`, `ounit_tests`, etc.), including upstream's OCaml build system (`rescript-ocaml`).
+   - `rewatch` builds the Rust build system and CLI with the Rust compiler linked in (`rescript`, the default).
 3. `lib` uses those toolchain outputs to build the runtime sources.
 4. Test targets (`make test`, `make test-syntax`, etc.) reuse everything above.
 

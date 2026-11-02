@@ -46,6 +46,7 @@ exports.rescript_editor_analysis_exe = path.join(
 );
 exports.rescript_tools_exe = path.join(binDir, "rescript-tools.exe");
 exports.rescript_exe = path.join(binDir, "rescript.exe");
+exports.rescript_ocaml_exe = path.join(binDir, "rescript-ocaml.exe");
 
 function checkNodeVersionSupported() {
   if (
