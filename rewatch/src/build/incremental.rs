@@ -1281,8 +1281,26 @@ fn recorded_digests(build_state: &BuildCommandState) -> AHashMap<String, u64> {
 /// written whose recorded imports include a module that now has a different
 /// interface digest. A module's current digest is the registry's when this
 /// build registered it, the recorded one otherwise.
-pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -> AHashSet<String> {
+///
+/// After the plan, every module not compiled records, for each unit it
+/// imports, the unit's recorded digest (the plan made the others stale or
+/// verified their imports). So only a module `compiled` this build whose
+/// digest now differs from its recorded one can change what an import
+/// reads; when there is none, as for an edit that keeps the interface, no
+/// module needs checking.
+pub fn next_round(
+    build_state: &BuildCommandState,
+    written: &AHashSet<String>,
+    compiled: &AHashSet<String>,
+) -> AHashSet<String> {
     let digests = UnitDigests::new(build_state);
+    let interface_changed = compiled.iter().any(|module_name| {
+        let recorded = recorded_row(build_state, module_name).and_then(|row| row.interface_digest);
+        recorded.is_none() || digests.whole(module_name) != recorded
+    });
+    if !interface_changed {
+        return AHashSet::new();
+    }
     let mut candidates = Vec::new();
     for (module_name, module) in build_state.modules.iter() {
         if written.contains(module_name) || module.is_mlmap() {

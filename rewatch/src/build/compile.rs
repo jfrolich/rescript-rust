@@ -1216,7 +1216,7 @@ pub fn compile(
             .filter(|module_name| !all_registry_only.contains(*module_name))
             .cloned()
             .collect();
-        let mut next = super::incremental::next_round(build_state, &written);
+        let mut next = super::incremental::next_round(build_state, &written, &compiled_this_build);
         // After errors, still compile the modules a full build would: those
         // that do not depend on a failed module (a failed module is not
         // compiled again).
