@@ -923,24 +923,25 @@ impl ModuleRegistry {
             },
             &sig_items,
         );
-        let portable = PortablePersStruct {
-            ps_name: namespace_name.to_string(),
-            ps_filename: format!("{}.mlmap", namespace_name),
-            ps_deprecated: None,
+        let portable = PortablePersStruct::new(
+            namespace_name.to_string(),
+            format!("{}.mlmap", namespace_name),
+            None,
             // The saved `.cmi`'s CRC list, recorded by importers like any
             // loaded unit's (env.ml:627-638, 1924-1930).
             ps_crcs,
-            ps_sig: sig_items,
-            raw_ps_sig: None,
-            cmi_longident_names: Vec::new(),
-            type_graph: portable_types::PortableTypeGraph {
-                entries: Vec::new(),
-                variant_layouts: Vec::new(),
-                mutabilities: Vec::new(),
+            portable_types::PortableSignature {
+                ps_sig: sig_items,
+                cmi_longident_names: Vec::new(),
+                type_graph: portable_types::PortableTypeGraph {
+                    entries: Vec::new(),
+                    variant_layouts: Vec::new(),
+                    mutabilities: Vec::new(),
+                },
             },
-            raw_type_graph: None,
+            None,
             fingerprint,
-        };
+        );
         self.insert_cached_module(namespace_name.to_string(), Arc::new(portable));
     }
 
@@ -7673,22 +7674,23 @@ mod resolution_view_tests {
 
     #[test]
     fn stored_modules_register_lazily_and_decode_on_first_lookup() {
-        let portable = PortablePersStruct {
-            ps_name: "Stored".to_string(),
-            ps_filename: "Stored.res".to_string(),
-            ps_deprecated: None,
-            ps_crcs: Vec::new(),
-            ps_sig: vec![],
-            raw_ps_sig: None,
-            cmi_longident_names: vec![],
-            type_graph: portable_types::PortableTypeGraph {
-                entries: vec![],
-                variant_layouts: vec![],
-                mutabilities: vec![],
+        let portable = PortablePersStruct::new(
+            "Stored".to_string(),
+            "Stored.res".to_string(),
+            None,
+            Vec::new(),
+            portable_types::PortableSignature {
+                ps_sig: vec![],
+                cmi_longident_names: vec![],
+                type_graph: portable_types::PortableTypeGraph {
+                    entries: vec![],
+                    variant_layouts: vec![],
+                    mutabilities: vec![],
+                },
             },
-            raw_type_graph: None,
-            fingerprint: 7,
-        };
+            None,
+            7,
+        );
         let mut compiled = ModuleRegistry::new();
         compiled.register_module(
             "Stored",
@@ -7739,22 +7741,23 @@ mod resolution_view_tests {
 
     #[test]
     fn portable_override_first_write_keeps_backing_graph_shared() {
-        let portable = Arc::new(PortablePersStruct {
-            ps_name: "Portable".to_string(),
-            ps_filename: "Portable.res".to_string(),
-            ps_deprecated: None,
-            ps_crcs: Vec::new(),
-            ps_sig: vec![],
-            raw_ps_sig: None,
-            cmi_longident_names: vec![],
-            type_graph: portable_types::PortableTypeGraph {
-                entries: vec![],
-                variant_layouts: vec![],
-                mutabilities: vec![],
+        let portable = Arc::new(PortablePersStruct::new(
+            "Portable".to_string(),
+            "Portable.res".to_string(),
+            None,
+            Vec::new(),
+            portable_types::PortableSignature {
+                ps_sig: vec![],
+                cmi_longident_names: vec![],
+                type_graph: portable_types::PortableTypeGraph {
+                    entries: vec![],
+                    variant_layouts: vec![],
+                    mutabilities: vec![],
+                },
             },
-            raw_type_graph: None,
-            fingerprint: 0,
-        });
+            None,
+            0,
+        ));
         let mut original = PersistentEnv::new();
         original
             .view_mut()

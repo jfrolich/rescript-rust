@@ -129,6 +129,13 @@ pub enum PortableRowField {
 }
 
 /// A PersStruct with types stored portably, independent of any TypeArena.
+///
+/// The signatures and type graphs are kept encoded (see
+/// [`crate::binser::Encoded`]): a build publishes one per compiled module and
+/// keeps them until it ends, while each is decoded only a few times (once by
+/// the shared pool that internalizes it for every worker, and for the
+/// incremental-build digests). Decoded, they were the largest part of a large
+/// build's memory.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PortablePersStruct {
     pub ps_name: String,
@@ -137,29 +144,82 @@ pub struct PortablePersStruct {
     pub ps_deprecated: Option<String>,
     /// `PersStruct::ps_crcs`.
     pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
-    /// Signature with TypeExprRef values being indices into `type_graph.entries`.
-    pub ps_sig: Signature,
-    /// Raw `ps_sig` copy for OCaml-style lazy alias scraping.
-    ///
-    /// OCaml stores `ps_sig = lazy (Subst.signature Subst.identity sign)` in
-    /// compiler/ml/env.ml:669-678 and compiler/ml/env.ml:1960-1977, separately
-    /// from component-table substitution at compiler/ml/env.ml:1513-1530. The
-    /// in-process registry crosses TypeContext boundaries, so carry that raw
-    /// copied signature portably instead of rebuilding it from the substituted
-    /// component signature later.
-    pub raw_ps_sig: Option<Signature>,
-    /// Synthetic longident component names created while reading CMI files.
-    pub cmi_longident_names: Vec<(u32, String)>,
-    /// Self-contained type graph.
-    pub type_graph: PortableTypeGraph,
-    /// Self-contained type graph for `raw_ps_sig`.
-    pub raw_type_graph: Option<PortableTypeGraph>,
+    /// Whether every entry of the type graph can live in a shared store
+    /// (see `graph_is_shareable`).
+    pub shareable: bool,
+    /// The signature, its type graph and file names.
+    sig: crate::binser::Encoded<PortableSignature>,
+    /// [`PortableRawSignature`], when the module has one.
+    raw: Option<crate::binser::Encoded<PortableRawSignature>>,
     /// Stamp-independent structural fingerprint of the type graph.
     /// Computed during serialization by hashing type structure with name-based
     /// path identity (ignoring stamps). Two compilations producing the same
     /// logical interface will have the same fingerprint even if internal stamps
     /// differ due to dependency changes.
     pub fingerprint: u64,
+}
+
+/// The decoded signature of a [`PortablePersStruct`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PortableSignature {
+    /// Signature with TypeExprRef values being indices into `type_graph.entries`.
+    pub ps_sig: Signature,
+    /// Synthetic longident component names created while reading CMI files.
+    pub cmi_longident_names: Vec<(u32, String)>,
+    /// Self-contained type graph.
+    pub type_graph: PortableTypeGraph,
+}
+
+/// Raw `ps_sig` copy for OCaml-style lazy alias scraping.
+///
+/// OCaml stores `ps_sig = lazy (Subst.signature Subst.identity sign)` in
+/// compiler/ml/env.ml:669-678 and compiler/ml/env.ml:1960-1977, separately
+/// from component-table substitution at compiler/ml/env.ml:1513-1530. The
+/// in-process registry crosses TypeContext boundaries, so carry that raw
+/// copied signature portably instead of rebuilding it from the substituted
+/// component signature later.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PortableRawSignature {
+    pub raw_ps_sig: Signature,
+    /// Self-contained type graph for `raw_ps_sig`.
+    pub raw_type_graph: PortableTypeGraph,
+}
+
+impl PortablePersStruct {
+    pub fn new(
+        ps_name: String,
+        ps_filename: String,
+        ps_deprecated: Option<String>,
+        ps_crcs: Vec<(String, Option<[u8; 16]>)>,
+        sig: PortableSignature,
+        raw: Option<PortableRawSignature>,
+        fingerprint: u64,
+    ) -> Self {
+        PortablePersStruct {
+            ps_name,
+            ps_filename,
+            ps_deprecated,
+            ps_crcs,
+            shareable: graph_is_shareable(&sig.type_graph),
+            sig: crate::binser::Encoded::encode(&sig),
+            raw: raw.as_ref().map(crate::binser::Encoded::encode),
+            fingerprint,
+        }
+    }
+
+    /// The signature, decoded.
+    pub fn signature(&self) -> PortableSignature {
+        self.sig.decode()
+    }
+
+    /// The raw signature, decoded, if the module has one.
+    pub fn raw_signature(&self) -> Option<PortableRawSignature> {
+        self.raw.as_ref().map(crate::binser::Encoded::decode)
+    }
+
+    pub fn has_raw_signature(&self) -> bool {
+        self.raw.is_some()
+    }
 }
 
 // ============================================================================
@@ -656,18 +716,24 @@ pub fn serialize_pers_struct(
         None => (None, None),
     };
     let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&type_graph), &sig);
-    PortablePersStruct {
-        ps_name: ps.ps_name.clone(),
-        ps_filename: ps.ps_filename.clone(),
-        ps_deprecated: ps.ps_deprecated.clone(),
-        ps_crcs: ps.ps_crcs.clone(),
-        ps_sig: sig,
-        raw_ps_sig,
-        cmi_longident_names: ctx.snapshot_cmi_longident_names(file_names),
-        type_graph,
-        raw_type_graph,
+    PortablePersStruct::new(
+        ps.ps_name.clone(),
+        ps.ps_filename.clone(),
+        ps.ps_deprecated.clone(),
+        ps.ps_crcs.clone(),
+        PortableSignature {
+            ps_sig: sig,
+            cmi_longident_names: ctx.snapshot_cmi_longident_names(file_names),
+            type_graph,
+        },
+        raw_ps_sig
+            .zip(raw_type_graph)
+            .map(|(raw_ps_sig, raw_type_graph)| PortableRawSignature {
+                raw_ps_sig,
+                raw_type_graph,
+            }),
         fingerprint,
-    }
+    )
 }
 
 /// Serialize `sig`, adding the raw file-name indices of its locations to
@@ -1140,7 +1206,7 @@ fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
 /// side tables (`cmi_longident_names`, GenType raw signatures) are still
 /// filled for each compilation.
 pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> Arc<PersStruct> {
-    if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
+    if pps.has_raw_signature() {
         ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
 
@@ -1149,14 +1215,16 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         return ps;
     }
 
-    let shareable = graph_is_shareable(&pps.type_graph);
+    let shareable = pps.shareable;
     if shareable {
         // Internalize once per build for every worker; the worker store
         // keeps the result so later units on this worker skip the pool map.
         let pool = store.shared_pool();
         let shared = pool.pers_struct(&pps, || {
-            let mut sig = internalize_signature_into_shared(&pps.ps_sig, &pps.type_graph, pool)?;
-            remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+            let portable = pps.signature();
+            let mut sig =
+                internalize_signature_into_shared(&portable.ps_sig, &portable.type_graph, pool)?;
+            remap_signature_file_names(&mut sig, &portable.cmi_longident_names, &|name| {
                 pool.intern_longident_name(name)
             });
             Some(Arc::new(PersStruct {
@@ -1173,14 +1241,17 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         }
     }
     let sig = if shareable {
-        let mut sig = internalize_signature_into_store(&pps.ps_sig, &pps.type_graph, store);
-        remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+        let portable = pps.signature();
+        let mut sig =
+            internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, store);
+        remap_signature_file_names(&mut sig, &portable.cmi_longident_names, &|name| {
             store.intern_longident_name(name)
         });
         sig
     } else {
-        let mut sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
-        remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+        let portable = pps.signature();
+        let mut sig = internalize_signature(&portable.ps_sig, &portable.type_graph, ctx);
+        remap_signature_file_names(&mut sig, &portable.cmi_longident_names, &|name| {
             ctx.intern_cmi_longident_name(name)
         });
         sig
@@ -1297,9 +1368,10 @@ pub(crate) fn internalize_raw_signature(
     pps: &PortablePersStruct,
     ctx: &TypeContext,
 ) -> Option<Signature> {
-    let mut sig =
-        internalize_signature(pps.raw_ps_sig.as_ref()?, pps.raw_type_graph.as_ref()?, ctx);
-    remap_signature_file_names(&mut sig, &pps.cmi_longident_names, &|name| {
+    let raw = pps.raw_signature()?;
+    let mut sig = internalize_signature(&raw.raw_ps_sig, &raw.raw_type_graph, ctx);
+    let names = pps.signature().cmi_longident_names;
+    remap_signature_file_names(&mut sig, &names, &|name| {
         ctx.intern_cmi_longident_name(name)
     });
     Some(sig)
