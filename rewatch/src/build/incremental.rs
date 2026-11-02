@@ -269,7 +269,17 @@ pub fn current_record(
         .as_ref()
         .and_then(|previous| previous.packages.get(package_name))
         .map(|record| &record.state.stored_interfaces);
-    let alias_rewrites = build_state.module_alias_rewrites.lock().unwrap().clone();
+    // Copied out: the lock must not be held across the parallel encoding
+    // (packages record in parallel, and a worker may steal another
+    // package's record that takes the same lock).
+    let alias_rewrites: AHashMap<&String, Vec<(String, rescript_compiler::types::path::Path)>> = {
+        let all = build_state.module_alias_rewrites.lock().unwrap();
+        build_state
+            .compiled_modules
+            .iter()
+            .filter_map(|module_name| Some((module_name, all.get(module_name)?.clone())))
+            .collect()
+    };
     record.interface_updates = build_state
         .compiled_modules
         .par_iter()
@@ -291,6 +301,12 @@ pub fn current_record(
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
+    let previous = build_state
+        .previous_in_process
+        .as_ref()
+        .and_then(|previous| previous.packages.get(package_name));
+    let changed = previous.and_then(|previous| changed_modules(build_state, package_name, previous));
+    record.partial = changed.is_some();
     let mut written: AHashMap<&String, WrittenRecord> = build_state
         .modules
         .par_iter()
@@ -301,18 +317,28 @@ pub fn current_record(
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    for (module_name, module) in build_state.modules.iter() {
+    let modules: Box<dyn Iterator<Item = (&String, &Module)>> = match &changed {
+        Some(changed) => Box::new(
+            changed
+                .iter()
+                .filter_map(|module_name| build_state.modules.get_key_value(*module_name)),
+        ),
+        None => Box::new(build_state.modules.iter()),
+    };
+    for (module_name, module) in modules {
         if module.package_name != package_name {
             continue;
         }
         let SourceType::SourceFile(source_file) = &module.source_type else {
             continue;
         };
-        record
-            .sources
-            .insert(source_file.implementation.path.clone(), module_name.clone());
-        if let Some(interface) = &source_file.interface {
-            record.sources.insert(interface.path.clone(), module_name.clone());
+        if !record.partial {
+            record
+                .sources
+                .insert(source_file.implementation.path.clone(), module_name.clone());
+            if let Some(interface) = &source_file.interface {
+                record.sources.insert(interface.path.clone(), module_name.clone());
+            }
         }
         // A module this build did not write keeps what its last written
         // compile read and published, with the imports this build checked
@@ -349,9 +375,7 @@ pub fn current_record(
         } else {
             (interface_digest, imports)
         };
-        record.modules.insert(
-            module_name.clone(),
-            ModuleRow {
+        let row = ModuleRow {
                 js_confirmed_at: (!invalidated)
                     .then(|| build_state.js_confirmed_at.get(module_name).copied())
                     .flatten(),
@@ -362,13 +386,12 @@ pub fn current_record(
                     .and_then(|interface| interface.compile_warnings.clone()),
                 interface_digest,
                 imports,
-            },
-        );
+        };
+        if record.partial && previous.and_then(|previous| previous.state.modules.get(module_name)) == Some(&row) {
+            continue;
+        }
+        record.modules.insert(module_name.clone(), row);
     }
-    let previous = build_state
-        .previous_in_process
-        .as_ref()
-        .and_then(|previous| previous.packages.get(package_name));
     let in_memory_deps = build_state.in_memory_deps.lock().unwrap();
     for (module_name, module) in build_state.modules.iter() {
         if module.package_name != package_name {
@@ -384,6 +407,14 @@ pub fn current_record(
         };
         for kind in kinds {
             let key = format!("{module_name}:{kind}");
+            // A partial record keeps the rows of sources not parsed since
+            // they were recorded (same modification time).
+            if record.partial
+                && let Some(previous) = previous.and_then(|previous| previous.state.deps.get(&key))
+                && build_state.source_mtimes.get(&key) == Some(&previous.mtime)
+            {
+                continue;
+            }
             let row = match (in_memory_deps.get(&key), build_state.source_mtimes.get(&key)) {
                 (Some(deps), Some(mtime)) => Some(SourceDeps {
                     mtime: *mtime,
@@ -407,6 +438,58 @@ pub fn current_record(
         .map(|(key, (_, text))| (key.clone(), text.clone()))
         .collect::<BTreeMap<_, _>>();
     record
+}
+
+/// For a one-shot build that kept `package_name`'s sources as `previous`
+/// recorded them, the modules of the package whose recorded row may differ
+/// from `previous`: those this build compiled, wrote, invalidated or left
+/// dirty, those whose imports it verified, and those without a recorded
+/// row. Every other module's row is the recorded one: the build restored its
+/// warnings and confirmation time and kept its digests. `None` when the
+/// whole record must be rebuilt (watch mode, which records several builds at
+/// once, or changed sources).
+fn changed_modules<'a>(
+    build_state: &'a BuildCommandState,
+    package_name: &str,
+    previous: &PackageRecord,
+) -> Option<AHashSet<&'a String>> {
+    if build_state.build_state.source_map_command == SourceMapCommand::Watch {
+        return None;
+    }
+    let mut source_count = 0;
+    let mut changed = AHashSet::new();
+    for (module_name, module) in build_state.modules.iter() {
+        if module.package_name != package_name || !matches!(module.source_type, SourceType::SourceFile(_)) {
+            continue;
+        }
+        if !recorded_as_is(module_name, module, Some(previous)) {
+            return None;
+        }
+        source_count += source_paths(module).map_or(0, |paths| paths.len());
+        if module.compile_dirty || !previous.state.modules.contains_key(module_name) {
+            changed.insert(module_name);
+        }
+    }
+    if source_count != previous.state.sources.len() {
+        return None;
+    }
+    let verified = build_state.verified_imports.lock().unwrap();
+    for set in [
+        &build_state.written_modules,
+        &build_state.compiled_modules,
+        &build_state.invalidated_modules,
+    ] {
+        changed.extend(set.iter().filter(|module_name| {
+            build_state
+                .get_module(module_name)
+                .is_some_and(|module| module.package_name == package_name)
+        }));
+    }
+    changed.extend(verified.keys().filter_map(|module_name| {
+        let (key, module) = build_state.modules.get_key_value(module_name)?;
+        (module.package_name == package_name).then_some(key)
+    }));
+    Some(changed)
 }
 
 /// The saved parse warnings, restored for a build that parses nothing:

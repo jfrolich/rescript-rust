@@ -115,6 +115,10 @@ pub struct PackageState {
     /// Stored interfaces to set: module to the content hash and the encoded
     /// interface (`rescript_compiler::cmi::stored_module`).
     pub interface_updates: BTreeMap<String, (u64, Vec<u8>)>,
+    /// Whether `sources`, `modules` and `deps` hold only the rows to set:
+    /// every recorded row missing from them is kept (see
+    /// `incremental::current_record`).
+    pub partial: bool,
 }
 
 /// What a module's compile read of each unit: the digest of the items read
@@ -463,17 +467,23 @@ pub fn write_meta(package: &Package, entries: &[(&str, String)]) {
 pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &PackageState) {
     let empty = PackageState::default();
     let previous = previous.unwrap_or(&empty);
-    if previous.sources == new.sources
-        && previous.modules == new.modules
+    let partial = new.partial;
+    let rows_unchanged = if partial {
+        new.sources.is_empty() && new.modules.is_empty() && new.deps.is_empty()
+    } else {
+        previous.sources == new.sources && previous.modules == new.modules && previous.deps == new.deps
+    };
+    // A partial record of a build that changed nothing keeps the recorded
+    // build start: it still precedes every input (see
+    // `incremental::everything_up_to_date`), so a no-op build writes nothing.
+    if rows_unchanged
         && previous.parse_warnings == new.parse_warnings
-        && previous.deps == new.deps
         && new.reads_updates.is_empty()
         && new.items_updates.is_empty()
         && new.interface_updates.is_empty()
-        && new
-            .meta
-            .iter()
-            .all(|(key, value)| previous.meta.get(key) == Some(value))
+        && new.meta.iter().all(|(key, value)| {
+            previous.meta.get(key) == Some(value) || (partial && key == META_BUILD_STARTED_AT)
+        })
     {
         return;
     }
@@ -494,6 +504,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             sync_rows(
                 &previous.sources,
                 &new.sources,
+                partial,
                 |path| delete_source.execute(params![path.to_string_lossy()]).map(drop),
                 |path, module| {
                     set_source
@@ -528,6 +539,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             sync_rows(
                 &previous.modules,
                 &new.modules,
+                partial,
                 |module| {
                     delete_interface.execute(params![module])?;
                     delete_reads.execute(params![module])?;
@@ -554,6 +566,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             sync_rows(
                 &previous.parse_warnings,
                 &new.parse_warnings,
+                false,
                 |source| delete_warning.execute(params![source]).map(drop),
                 |source, text| set_warning.execute(params![source, text]).map(drop),
             )?;
@@ -564,6 +577,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             sync_rows(
                 &previous.deps,
                 &new.deps,
+                partial,
                 |source| delete_deps.execute(params![source]).map(drop),
                 |source, row| {
                     set_deps
@@ -586,11 +600,12 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 fn sync_rows<K: Ord, V: PartialEq>(
     previous: &BTreeMap<K, V>,
     new: &BTreeMap<K, V>,
+    partial: bool,
     mut delete: impl FnMut(&K) -> rusqlite::Result<()>,
     mut set: impl FnMut(&K, &V) -> rusqlite::Result<()>,
 ) -> rusqlite::Result<()> {
     for key in previous.keys() {
-        if !new.contains_key(key) {
+        if !partial && !new.contains_key(key) {
             delete(key)?;
         }
     }
