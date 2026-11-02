@@ -549,7 +549,7 @@ impl LambdaCompiler {
             },
             Pduprecord => match <[Expression; 1]>::try_from(compiled_args) {
                 Ok([source]) => Expression::new(ExpressionDesc::Object(vec![
-                    crate::js_ir::ObjectEntry::Spread(source),
+                    crate::js_ir::ObjectEntry::RecordSpread(source),
                 ])),
                 _ => Expression::undefined(false),
             },

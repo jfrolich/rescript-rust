@@ -463,18 +463,15 @@ and pretty_dict_entries ppf = function
 
 let top_pretty ppf v = fprintf ppf "@[%a@]@?" pretty_val v
 
-let pretty_pat p =
-  top_pretty Format.str_formatter p;
-  prerr_string (Format.flush_str_formatter ())
+let pretty_pat p = prerr_string (Format.asprintf "%a" top_pretty p)
 
 type matrix = pattern list list
 
 let pretty_line ps =
   List.iter
     (fun p ->
-      top_pretty Format.str_formatter p;
       prerr_string " <";
-      prerr_string (Format.flush_str_formatter ());
+      prerr_string (Format.asprintf "%a" top_pretty p);
       prerr_string ">")
     ps
 
@@ -544,40 +541,7 @@ let all_record_args lbls =
         (fun lbl -> (mknoloc (Longident.Lident "?temp?"), lbl, omega, opt))
         lbl_all
     in
-    List.iter
-      (fun ((id, lbl, pat, o) as x) ->
-        let lbl_is_optional () =
-          match lbl.lbl_repres with
-          | Record_inlined _ -> false
-          | _ -> lbl.lbl_optional
-        in
-        let x =
-          match pat.pat_desc with
-          | Tpat_construct
-              ( {txt = Longident.Ldot (Longident.Lident "*predef*", "Some")},
-                _,
-                [({pat_desc = Tpat_constant _} as c)] )
-            when lbl_is_optional () ->
-            (id, lbl, c, o)
-          | Tpat_construct
-              ( {txt = Longident.Ldot (Longident.Lident "*predef*", "Some")},
-                _,
-                [({pat_desc = Tpat_construct (_, cd, _)} as pat_construct)] )
-            when lbl_is_optional () -> (
-            match cd.cstr_kind with
-            | Extension_constructor _ -> x
-            | Ordinary_constructor representation -> (
-              match Variant_runtime.representation representation with
-              | Block (Untagged {block_type})
-                when not
-                       (Ast_untagged_variants.block_type_can_be_undefined
-                          block_type) ->
-                (id, lbl, pat_construct, o)
-              | Constant _ | Block _ -> x))
-          | _ -> x
-        in
-        t.(lbl.lbl_pos) <- x)
-      lbls;
+    List.iter (fun ((_, lbl, _, _) as x) -> t.(lbl.lbl_pos) <- x) lbls;
     Array.to_list t
 
 (* Build argument list when p2 >= p1, where p1 is a simple pattern *)
@@ -1872,10 +1836,10 @@ module Conv = struct
   open Parsetree
   let mkpat desc = Ast_helper.Pat.mk desc
 
-  let name_counter = ref 0
   let fresh name =
-    let current = !name_counter in
-    name_counter := !name_counter + 1;
+    let state = Compiler_request_state.current () in
+    let current = state.parmatch_name_counter in
+    state.parmatch_name_counter <- current + 1;
     "#$" ^ name ^ string_of_int current
 
   let conv_record_rest (rest : Typedtree.record_pat_rest) =

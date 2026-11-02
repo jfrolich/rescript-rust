@@ -513,15 +513,19 @@ impl<'a> Mapper<'a> {
     }
 
     /// ast_mapper_from0.ml `E.dict_rows`: the rows of
-    /// `Primitive_dict.make([("a", 1), ...])`.
+    /// `Primitive_dict.make([("a", 1), ...])`, whose `make` carries `marker`.
     fn dict_rows<'e>(
         &mut self,
+        marker: &str,
         e: &'e pt0::Expression,
     ) -> Option<Vec<(current::StringLoc, &'e pt0::Expression)>> {
         let pt0::ExpressionDesc::Apply(func, args) = &e.pexp_desc else {
             return None;
         };
-        if !(self.is_primitive_dict(func, "make") && func.pexp_attributes.is_empty()) {
+        if !(self.is_primitive_dict(func, "make")
+            && matches!(func.pexp_attributes.as_slice(),
+                [(name, pt0::Payload::PStr(items))] if items.is_empty() && name.txt == marker))
+        {
             return None;
         }
         let [(pt0::ArgLabel::Nolabel, arg)] = args.as_slice() else {
@@ -584,14 +588,14 @@ impl<'a> Mapper<'a> {
             && sources_expr.pexp_attributes.is_empty()
         {
             let target_rows = if target.pexp_attributes.is_empty() {
-                self.dict_rows(target)
+                self.dict_rows(super::ast_dict::ROWS_MARKER, target)
             } else {
                 None
             }?;
             let mut entries = rows(target_rows);
             for source in sources {
                 let source_rows = if source.pexp_attributes.is_empty() {
-                    self.dict_rows(source)
+                    self.dict_rows(super::ast_dict::ROWS_MARKER, source)
                 } else {
                     None
                 };
@@ -602,7 +606,7 @@ impl<'a> Mapper<'a> {
             }
             return Some(entries);
         }
-        self.dict_rows(e).map(rows)
+        self.dict_rows(super::ast_dict::LITERAL_MARKER, e).map(rows)
     }
 
     /// ast_mapper_from0.ml `map_constant ~loc`.

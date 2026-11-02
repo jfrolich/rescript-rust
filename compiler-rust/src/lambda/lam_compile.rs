@@ -8400,7 +8400,8 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         ExpressionDesc::Object(entries) => {
             for entry in entries {
                 let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
+                | crate::js_ir::ObjectEntry::Spread(value)
+                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
                 collect_modules_from_expression(value, modules);
             }
         }

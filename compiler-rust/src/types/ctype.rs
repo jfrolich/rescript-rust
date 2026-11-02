@@ -5572,7 +5572,7 @@ fn generic_abbrev(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
 /// OCaml `extract_concrete_typedecl env ty` (ctype.ml:1249-1261):
 /// `(p, p', decl)` for the path of `ty` and the first non-abstract
 /// declaration its expansion reaches.
-fn extract_concrete_typedecl(
+pub(crate) fn extract_concrete_typedecl(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,

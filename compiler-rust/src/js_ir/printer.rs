@@ -1535,10 +1535,14 @@ impl<'r> JsPrinter<'r> {
         }
         let mut args = Vec::with_capacity(3);
         args.push(jsx.tag.clone());
-        args.push(Expression::new(ExpressionDesc::Object(object_entries(
-            jsx.spread.clone(),
-            props,
-        ))));
+        args.push(match (&jsx.spread, props.is_empty()) {
+            // The PPX passes a lone spread itself, not a copy of it.
+            (Some(spread), true) => spread.clone(),
+            (spread, _) => Expression::new(ExpressionDesc::Object(object_entries(
+                spread.clone(),
+                props,
+            ))),
+        });
         // An explicit undefined key is still passed, as by the call.
         args.extend(jsx.key.clone());
         let call = ExpressionDesc::Call(
@@ -1627,9 +1631,9 @@ impl<'r> JsPrinter<'r> {
 
             ExpressionDesc::Object(entries) => self.print_object_entries(
                 level,
-                entries
-                    .iter()
-                    .all(|entry| matches!(entry, ObjectEntry::Spread(_))),
+                entries.iter().all(|entry| {
+                    matches!(entry, ObjectEntry::Spread(_) | ObjectEntry::RecordSpread(_))
+                }),
                 entries,
                 |this, entry| this.print_object_entry(entry),
             ),
@@ -2437,7 +2441,7 @@ impl<'r> JsPrinter<'r> {
             // OCaml `js_dump.ml` prints the spread through `J.Spread` at level
             // 1, whose operand is printed at level 13 (so object literals get
             // parens).
-            ObjectEntry::Spread(spread) => {
+            ObjectEntry::Spread(spread) | ObjectEntry::RecordSpread(spread) => {
                 self.write("...");
                 self.print_expression(spread, 13);
             }
@@ -3523,7 +3527,9 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         }
         ExpressionDesc::Object(entries) => {
             for entry in entries {
-                let (ObjectEntry::Property(_, value) | ObjectEntry::Spread(value)) = entry;
+                let (ObjectEntry::Property(_, value)
+                | ObjectEntry::Spread(value)
+                | ObjectEntry::RecordSpread(value)) = entry;
                 collect_expression_idents(value, stats);
             }
         }

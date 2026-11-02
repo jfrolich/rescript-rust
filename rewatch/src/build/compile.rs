@@ -1571,6 +1571,9 @@ pub fn get_runtime_path_args(
 
 pub fn compiler_args(
     config: &config::Config,
+    // Match the parser's root spelling: canonical during builds, caller-supplied
+    // for compiler-args consumers such as editor incremental type checking.
+    project_root: &Path,
     ast_path: &Path,
     file_path: &Path,
     is_interface: bool,
@@ -1653,7 +1656,10 @@ pub fn compiler_args(
     };
 
     let package_name_arg = vec!["-bs-package-name".to_string(), config.name.to_owned()];
-    let project_root_args = config.get_project_root_args();
+    let project_root_args = vec![
+        "-bs-project-root".to_string(),
+        project_root.to_string_lossy().to_string(),
+    ];
 
     let implementation_args = if is_interface {
         debug!("Compiling interface file: {}", &module_name);
@@ -2102,7 +2108,10 @@ fn build_package_compiler_options(
             // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
             // compiler/bsc/rescript_compiler_main.ml:266-269 before
             // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t.
-            let mut gentype_args = package.config.get_project_root_args();
+            let mut gentype_args = vec![
+                "-bs-project-root".to_string(),
+                package.path.to_string_lossy().to_string(),
+            ];
             gentype_args.extend(package.config.get_gentype_args(
                 current_package_dirs,
                 Some(project_context.get_root_path()),

@@ -1106,24 +1106,31 @@ impl JsxExpression {
     }
 }
 
-/// An entry of an object literal: `k: v` or `...e`.
+/// An entry of an object literal: `k: v` or `...e`. `RecordSpread` copies a
+/// record, whose fields are read like plain data; `Spread` spreads any other
+/// object, such as a dict, which may run getters or proxy traps.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ObjectEntry {
     Property(PropertyName, Expression),
     Spread(Expression),
+    RecordSpread(Expression),
 }
 
 impl ObjectEntry {
     /// The entry's expression.
     pub fn expression(&self) -> &Expression {
         match self {
-            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) => e,
+            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) | ObjectEntry::RecordSpread(e) => {
+                e
+            }
         }
     }
 
     pub fn expression_mut(&mut self) -> &mut Expression {
         match self {
-            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) => e,
+            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) | ObjectEntry::RecordSpread(e) => {
+                e
+            }
         }
     }
 
@@ -1132,12 +1139,15 @@ impl ObjectEntry {
         match self {
             ObjectEntry::Property(name, e) => ObjectEntry::Property(name, f(e)),
             ObjectEntry::Spread(e) => ObjectEntry::Spread(f(e)),
+            ObjectEntry::RecordSpread(e) => ObjectEntry::RecordSpread(f(e)),
         }
     }
 
     pub fn into_expression(self) -> Expression {
         match self {
-            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) => e,
+            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) | ObjectEntry::RecordSpread(e) => {
+                e
+            }
         }
     }
 }
@@ -1152,7 +1162,7 @@ impl ExpressionDesc {
 /// `E.object_entries ?dup properties`: a spread of `dup`, then the properties.
 pub fn object_entries(dup: Option<Expression>, properties: PropertyMap) -> Vec<ObjectEntry> {
     let mut entries = Vec::with_capacity(properties.len() + usize::from(dup.is_some()));
-    entries.extend(dup.map(ObjectEntry::Spread));
+    entries.extend(dup.map(ObjectEntry::RecordSpread));
     entries.extend(
         properties
             .into_iter()
@@ -1796,7 +1806,9 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         // proxy traps.
         ExpressionDesc::Jsx(_) => false,
         ExpressionDesc::Object(entries) => entries.iter().all(|entry| match entry {
-            ObjectEntry::Property(_, value) => expression_has_no_side_effects(value),
+            ObjectEntry::Property(_, value) | ObjectEntry::RecordSpread(value) => {
+                expression_has_no_side_effects(value)
+            }
             ObjectEntry::Spread(_) => false,
         }),
         ExpressionDesc::Cond(test, consequent, alternate) => {

@@ -891,7 +891,10 @@ pub fn zyva_with_shared_actions(
     let (handlers, actions) = abstract_shared(shared_actions, next_raise);
 
     let (low, high) = edges;
-    let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
+    // OCaml compares with its native 63-bit `abs`, so the int32 bounds of an
+    // integer match (`int32_low`, matching.ml) do not overflow.
+    let ok_inter = i64::from(low).abs() <= i64::from(INTER_LIMIT)
+        && i64::from(high).abs() <= i64::from(INTER_LIMIT);
     let mut compiler = SwitchCompiler::new(ok_inter);
 
     let result = build_clustered_test(&mut compiler, cases, &actions, &arg);

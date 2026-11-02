@@ -193,6 +193,8 @@ struct Simplifier<'a> {
     id_gen: &'a IdGenerator,
     beta_diagnostics: &'a mut BetaDiagnostics,
     external: &'a mut IndexedExternalInlineResolver<'a>,
+    /// See [`super::lam_pass_remove_alias::MAX_INLINE_DEPTH`].
+    inline_depth: usize,
 }
 
 impl Simplifier<'_> {
@@ -493,7 +495,11 @@ impl Simplifier<'_> {
                             }
                             crate::lambda::lam_compile_context::RecFlag::SelfRec => {}
                             crate::lambda::lam_compile_context::RecFlag::NonRec
-                                if !args.iter().any(|n| hit_variable(self.store, &id, *n)) =>
+                                if !args.iter().any(|n| hit_variable(self.store, &id, *n))
+                                    && (self.inline_depth
+                                        < super::lam_pass_remove_alias::MAX_INLINE_DEPTH
+                                        || attr.inline
+                                            == crate::lambda::InlineAttribute::Always) =>
                             {
                                 let reduced = propagate_beta_reduce_with_map(
                                     self.store,
@@ -505,7 +511,10 @@ impl Simplifier<'_> {
                                     self.id_gen,
                                     self.beta_diagnostics,
                                 );
-                                return self.simpl(reduced);
+                                self.inline_depth += 1;
+                                let inlined = self.simpl(reduced);
+                                self.inline_depth -= 1;
+                                return inlined;
                             }
                             _ => {}
                         }
@@ -553,6 +562,7 @@ impl IndexedLambdaContext {
                 id_gen,
                 beta_diagnostics: &mut beta_diagnostics,
                 external,
+                inline_depth: 0,
             }
             .simpl(root)
         };

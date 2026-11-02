@@ -516,6 +516,9 @@ pub enum TypeCoreError {
 
     /// Backtick tagged-template syntax used with a non-tag value.
     TaggedTemplateNonTag { loc: LocIdx, typ: TypeExprRef },
+    /// typecore.ml `Jsx_unboxed_props`: the props of a JSX element have an
+    /// `@unboxed` record type.
+    JsxUnboxedProps { loc: LocIdx, typ: TypeExprRef },
 
     /// Wrong label in application.
     ApplyWrongLabel {
@@ -2246,9 +2249,13 @@ pub fn convert_constant(
         ParsedConstant::Integer(s, None) => {
             // Parse integer literal, handling underscores and 0x/0o/0b prefixes.
             // OCaml's native int is 63-bit on 64-bit systems. We parse as i64
-            // and simulate 63-bit wrapping to match OCaml's int_of_string behavior.
+            // and simulate 63-bit wrapping to match OCaml's int_of_string
+            // behavior. After that host-dependent parsing, pattern grouping and
+            // intervals must see Lambda's int32 value (`Int32.to_int
+            // (Int32.of_int value)`), so -0xFFFF_FFFF and 1 are the same key.
+            // This does not change overflow diagnostics.
             match parse_int_literal(s) {
-                Some(n) => Ok(Constant::Int(wrap_to_ocaml_int(n))),
+                Some(n) => Ok(Constant::Int(i64::from(wrap_to_ocaml_int(n) as i32))),
                 None => Err(TypeCoreError::LiteralOverflow {
                     loc,
                     ty: "int".to_string(),
@@ -10243,6 +10250,9 @@ fn type_application(
     //   unify_var env (newvar ()) funct.exp_type
     // Keep this before unifying the application result with expected_ty.
     ctx.end_def();
+    if transformed_jsx {
+        check_jsx_props(tctx, env, loc, &typed_args)?;
+    }
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
@@ -10260,6 +10270,36 @@ fn type_application(
         tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
+}
+
+/// typecore.ml `check_jsx_props`: the props of a JSX element, the second
+/// argument of the call the JSX PPX produces, must be an object. An
+/// `@unboxed` record is the value of its field.
+fn check_jsx_props(
+    tctx: &TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    args: &[crate::types::typedtree::ApplyArg],
+) -> Result<(), TypeCoreError> {
+    if let [_, props_arg, ..] = args
+        && matches!(props_arg.label, crate::types::asttypes::ArgLabel::Nolabel)
+        && let Some(props) = &props_arg.expression
+        && let Some((_, _, decl)) =
+            crate::types::ctype::extract_concrete_typedecl(tctx.type_ctx, env, props.exp_type)
+        && matches!(
+            decl.type_kind,
+            crate::types::TypeKind::TypeRecord(
+                _,
+                crate::types::RecordRepresentation::RecordUnboxed(_)
+            )
+        )
+    {
+        return Err(TypeCoreError::JsxUnboxedProps {
+            loc,
+            typ: props.exp_type,
+        });
+    }
+    Ok(())
 }
 
 fn extendable_fragile_match_path(path: &Path) -> bool {
@@ -28970,11 +29010,19 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_constant_large_fits_63bit() {
-        // Values that fit in 63-bit should be preserved
+    fn test_convert_constant_large_wraps_to_int32() {
+        // Values beyond int32 wrap to Lambda's int32 value
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999"), None);
         let result = convert_constant(&cst, LocIdx(0)).unwrap();
-        assert_eq!(result, Constant::Int(99999999999999999));
+        assert_eq!(
+            result,
+            Constant::Int(i64::from(99999999999999999i64 as i32))
+        );
+        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("4294967295"), None);
+        assert_eq!(
+            convert_constant(&cst, LocIdx(0)).unwrap(),
+            Constant::Int(-1)
+        );
     }
 
     #[test]
@@ -28988,26 +29036,27 @@ mod tests {
 
     #[test]
     fn test_convert_constant_underscores() {
-        // 949460645006 fits in 63 bits, should be preserved
+        // Underscores are skipped; 949460645006 then wraps to int32
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("949_460_645_006"), None);
         let result = convert_constant(&cst, LocIdx(0)).unwrap();
-        assert_eq!(result, Constant::Int(949_460_645_006));
+        assert_eq!(result, Constant::Int(i64::from(949_460_645_006i64 as i32)));
     }
 
     #[test]
     fn test_convert_constant_hex() {
-        // 0xFFFFFFFF = 4294967295, fits in 63 bits
+        // 0xFFFFFFFF = 4294967295, which is -1 as an int32
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("0xffff_ffff"), None);
         let result = convert_constant(&cst, LocIdx(0)).unwrap();
-        assert_eq!(result, Constant::Int(4294967295));
+        assert_eq!(result, Constant::Int(-1));
     }
 
     #[test]
     fn test_convert_constant_63bit_wrap() {
-        // 4611686018427387904 = 2^62, wraps to -2^62 in 63-bit
+        // 4611686018427387904 = 2^62 wraps to -2^62 in 63-bit, whose low 32
+        // bits are 0
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("4611686018427387904"), None);
         let result = convert_constant(&cst, LocIdx(0)).unwrap();
-        assert_eq!(result, Constant::Int(-4611686018427387904));
+        assert_eq!(result, Constant::Int(0));
     }
 
     #[test]
@@ -29337,35 +29386,6 @@ fn pm_type_shape(
     }
 }
 
-fn pm_is_predef_some_lid(arena: &ParseArena, lid: LidentIdx) -> bool {
-    match arena.get_longident(lid) {
-        Longident::Ldot(prefix, name) => {
-            arena.get_string(*name) == "Some"
-                && matches!(prefix.as_ref(), Longident::Lident(p) if arena.get_string(*p) == "*predef*")
-        }
-        _ => false,
-    }
-}
-
-fn pm_is_block_that_cannot_be_undefined(
-    ctx: &TypeContext,
-    cstr: &crate::types::ConstructorDescription,
-) -> bool {
-    use crate::types::variant_runtime::{BlockType, ConstructorCase};
-    let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
-        return false;
-    };
-    match reference.representation(ctx) {
-        // Ast_untagged_variants.block_type_can_be_undefined
-        // (ast_untagged_variants.ml:89-93).
-        ConstructorCase::Block(crate::types::VariantBlock::Untagged { block_type, .. }) => {
-            block_type != BlockType::Unknown
-        }
-        ConstructorCase::Block(crate::types::VariantBlock::Tagged(_)) => false,
-        ConstructorCase::Constant(_) => false,
-    }
-}
-
 fn pm_variant_length(ctx: &TypeContext, cstr: &crate::types::ConstructorDescription) -> usize {
     match cstr.cstr_kind {
         crate::types::ConstructorKind::Ordinary(reference) => {
@@ -29513,17 +29533,6 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         pattern_from_variant_spread_attr(self.tctx.arena, pat)
     }
 
-    fn is_predef_some_lid(&self, lid: LidentIdx) -> bool {
-        pm_is_predef_some_lid(self.tctx.arena, lid)
-    }
-
-    fn is_block_that_cannot_be_undefined(
-        &self,
-        cstr: &crate::types::ConstructorDescription,
-    ) -> bool {
-        pm_is_block_that_cannot_be_undefined(self.tctx.type_ctx, cstr)
-    }
-
     fn variant_length(&self, cstr: &crate::types::ConstructorDescription) -> usize {
         pm_variant_length(self.tctx.type_ctx, cstr)
     }
@@ -29631,17 +29640,6 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
 
     fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool {
         pattern_from_variant_spread_attr(self.arena, pat)
-    }
-
-    fn is_predef_some_lid(&self, lid: LidentIdx) -> bool {
-        pm_is_predef_some_lid(self.arena, lid)
-    }
-
-    fn is_block_that_cannot_be_undefined(
-        &self,
-        cstr: &crate::types::ConstructorDescription,
-    ) -> bool {
-        pm_is_block_that_cannot_be_undefined(self.ctx, cstr)
     }
 
     fn variant_length(&self, cstr: &crate::types::ConstructorDescription) -> usize {

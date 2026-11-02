@@ -1741,6 +1741,23 @@ pub(super) fn print_field_not_optional(
 }
 
 /// `Typecore.report_error`'s `Tagged_template_non_tag typ` (typecore.ml:5237-5250).
+/// typecore.ml `report_error`, `Jsx_unboxed_props`.
+pub(super) fn print_jsx_unboxed_props(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.str("The props of this JSX element have type ");
+    typecore_type_expr(ppf, &mut printer, typ);
+    ppf.str(", which is an ");
+    tagged(ppf, TAG_INFO, "@unboxed");
+    ppf.str(" record.");
+    ppf.cut();
+    ppf.cut();
+    ppf.str(
+        "JSX props must be an object, but an @unboxed record is represented by the value of its only field. Remove @unboxed from the props type.",
+    );
+    ppf.close_box();
+}
+
 pub(super) fn print_tagged_template_non_tag(
     ppf: &mut Ppf<'_>,
     ctx: &TypeContext,

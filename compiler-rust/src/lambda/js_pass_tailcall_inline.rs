@@ -803,7 +803,8 @@ fn collect_tailcall_use_counts_expression(
         ExpressionDesc::Object(entries) => {
             for entry in entries {
                 let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
+                | crate::js_ir::ObjectEntry::Spread(value)
+                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
                 collect_tailcall_use_counts_expression(value, decls, counts);
             }
         }
@@ -1084,7 +1085,8 @@ fn collect_once_pure_inline_decls_expression(
         ExpressionDesc::Object(entries) => {
             for entry in entries {
                 let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
+                | crate::js_ir::ObjectEntry::Spread(value)
+                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
                 collect_once_pure_inline_decls_expression(
                     value,
                     statuses,
@@ -1753,7 +1755,8 @@ fn apply_tailcall_used_stats_expression(
         ExpressionDesc::Object(entries) => {
             for entry in entries {
                 let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
+                | crate::js_ir::ObjectEntry::Spread(value)
+                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
                 apply_tailcall_used_stats_expression(value, statuses);
             }
         }

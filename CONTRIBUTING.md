@@ -337,7 +337,7 @@ Below we will discuss on how to write, build and run these test files.
 ### 1) Write a Mocha Test File
 
 - Create a file `tests/tests/src/feature_abc_test.res`. Make sure to end the file name with `_test.res`.
-- Inside the file, add a mocha test suite. The mocha bindings are defined in `tests/tests/src/mt.res`. To get you started, here is a simple scaffold for a test suite with multiple test cases:
+- Inside the file, add a mocha test suite. The mocha bindings are defined in `tests/tests/src/mocha.res`, the assertion helpers in `tests/tests/src/test_utils.res`. To get you started, here is a simple scaffold for a test suite with multiple test cases:
 
   ```rescript
   open Mocha
@@ -366,8 +366,8 @@ Below we will discuss on how to write, build and run these test files.
 This is usually the file you want to create to test certain compile behavior without running the JS code formally as a test, i.e., when you just want to check that the ReScript code compiles and produces the expected JS code.
 
 - Create your test file `tests/tests/src/my_file_test.res`. Make sure to end the file name with `_test.res`.
-- Build the `.js` artifact: `node scripts/test.js -mocha`.
-- Verify the output, check in the `tests/tests/src/my_file_test.res` and `tests/tests/src/my_file_test.js` to version control. The checked in `.js` file is essential for verifying regressions later on.
+- Build the `.mjs` artifact: `node scripts/test.js -mocha`.
+- Verify the output, check in the `tests/tests/src/my_file_test.res` and `tests/tests/src/my_file_test.mjs` to version control. The checked in `.mjs` file is essential for verifying regressions later on.
 - Eventually check in other relevant files changed during the rebuild (depends on your compiler changes).
 
 ## Contribute to the ReScript Playground Bundle
@@ -408,7 +408,7 @@ After a successful compilation, you will find following files in your project:
 - `packages/playground/packages/@rescript/belt` -> The Belt cmij, packaged separately from the compiler built-ins
 - `packages/playground/packages/*` -> Contains third party deps with cmij.js files (as defined in `packages/playground/rescript.json`)
 
-You can now use the `compiler.js` file either directly by using a `<script src="/path/to/compiler.js"/>` and `<script src="/path/to/packages/compilerCmij.js"/>` inside a html file, use a browser bundler infrastructure to optimize it, or use `nodejs` to run it on a command line:
+You can now use the `compiler.js` file either directly by using a `<script src="/path/to/compiler.js"/>` and `<script src="/path/to/packages/compiler-builtins/cmij.js"/>` inside a html file, use a browser bundler infrastructure to optimize it, or use `nodejs` to run it on a command line:
 
 ```
 $ node
@@ -501,7 +501,7 @@ Adding a new entry there requires re-running the analysis tests. Follow these st
 
 (If a `make` command fails, consider using the [DevContainer](#b-devcontainer).)
 
-Finally, add a line to [CHANGELOG.md](CHANGELOG.md), using the `#### :nail_care: Polish` section.
+Finally, add a `changes/<description>.polish.md` fragment following [the changelog instructions](changes/README.md).
 
 ## Code structure
 
@@ -563,7 +563,7 @@ The repository's `npm-release` GitHub environment should have required reviewers
 To build a new version and release it on NPM, follow these steps:
 
 1. Verify that the version number is already set correctly for the release. (It should have been incremented after releasing the previous version.)
-1. Create a PR to update `CHANGELOG.md`, removing the "(Unreleased)" for the version to be released.
+1. Run `yarn changelog:preview` to review pending notes, then `yarn changelog:release` to collect fragments into `CHANGELOG.md`, remove "(Unreleased)", and delete consumed fragments. Create a PR containing these changes, review the combined release notes, and apply the `changelog:release` label. Existing unreleased entries are preserved. If more fragments are merged before publishing, the `Publish` workflow refuses to run; repeat this step to add them to the same version. Don't run `yarn changelog:release` while a `Publish` run is in progress: it could add notes for changes that the run is not publishing.
 1. Once that PR is merged and built successfully, run the `Publish` workflow from the GitHub Actions tab. Use the "Run workflow" branch dropdown to select the release branch (normally `master`, or the relevant maintenance branch) and indicate whether this is the current stable release. The version is read from that branch's `package.json`, and the npm tag is derived automatically:
    - A current stable release is published as `latest`.
    - A stable maintenance release for an older major is published as `latest-<major>`, for example `latest-12`.
@@ -576,7 +576,7 @@ To build a new version and release it on NPM, follow these steps:
 1. Create a PR with the following changes to prepare for development of the next version:
    - Increment the `EXPECTED_VERSION` number in `yarn.config.cjs` for the next version.
    - Run `yarn constraints --fix` to take that version number over into other files.
-   - Update `CHANGELOG.md` and add an entry for the next version, e.g., "10.0.0-beta.2 (Unreleased)"
+   - Run `yarn changelog:open` to add the empty "(Unreleased)" section for the next version to `CHANGELOG.md`, and apply the `changelog:release` label to the PR.
 
 ## Debugging issues from CI builds
 
@@ -602,10 +602,8 @@ Then attempt to rebuild your project as you would normally.
 
 ## Contribution Licensing
 
-Since ReScript is distributed under the terms of the [LGPL Version 3](LICENSE), contributions that you make are licensed under the same terms. In order for us to be able to accept your contributions, we will need explicit confirmation from you that you are able and willing to provide them under these terms, and the mechanism we use to do this is called a Developer's Certificate of Origin [DCO](DCO.md). This is very similar to the process used by the Linux(R) kernel, Samba, and many other major open source projects.
+ReScript is distributed under the [LGPL Version 3](LICENSE), and contributions are licensed under the same terms. To confirm that you can contribute under these terms, sign off every commit to certify the [Developer Certificate of Origin](https://developercertificate.org), as the Linux kernel and many other projects do:
 
-To participate under these terms, all that you must do is include a line like the following as the last line of the commit message for each commit in your contribution:
+    Signed-off-by: Random J. Developer <random@developer.example.org>
 
-    Signed-Off-By: Random J. Developer <random@developer.example.org>
-
-You must use your real name (sorry, no pseudonyms, and no anonymous contributions).
+`git commit -s` adds this line. Use your real name. The DCO check on each PR fails if a commit lacks a sign-off; fix it with `git rebase --signoff HEAD~N`, where N is the number of commits in the PR, and force-push.

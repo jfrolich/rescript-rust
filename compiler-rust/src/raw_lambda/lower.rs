@@ -223,8 +223,6 @@ impl LoweringContext {
         // scrutinee to `Lam.switch`, so OCaml's right-to-left evaluation keeps
         // case/failaction exit-alias updates visible to the scrutinee, not the
         // other way around.
-        let const_only_switch =
-            switch.sw_failaction.is_none() && switch.sw_blocks.is_empty() && switch.sw_blocks_full;
         let lowered_consts = switch
             .sw_consts
             .into_iter()
@@ -239,25 +237,6 @@ impl LoweringContext {
             .sw_failaction
             .map(|lam| Box::new(self.lower_lambda(*lam)));
         let lowered_scrutinee = self.lower_lambda(scrutinee);
-
-        if const_only_switch
-            && let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch)
-        {
-            if diff == 0 {
-                return lowered_scrutinee;
-            }
-            return Lambda::prim(
-                Primitive::Paddint,
-                vec![
-                    lowered_scrutinee,
-                    Lambda::const_(Constant::Int {
-                        i: diff,
-                        comment: None,
-                    }),
-                ],
-                Location::none(),
-            );
-        }
 
         Lambda::Lswitch(
             Box::new(lowered_scrutinee),
@@ -797,42 +776,6 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
     }
 
     Lambda::prim(primitive, args, loc)
-}
-
-fn int_constant_value(lam: &Lambda) -> Option<i32> {
-    match lam {
-        Lambda::Lconst(Constant::Int { i, comment: None }) => Some(*i),
-        Lambda::Lconst(Constant::NativeInt { i, comment: None }) => i32::try_from(*i).ok(),
-        _ => None,
-    }
-}
-
-fn happens_to_be_diff(
-    sw_consts: &[(crate::lambda::SwitchKey, Lambda)],
-    sw_dispatch: &crate::lambda::SwitchDispatch,
-) -> Option<i32> {
-    if !matches!(sw_dispatch, crate::lambda::SwitchDispatch::Direct) {
-        return None;
-    }
-    let ((crate::lambda::SwitchKey::Int(a), a_lam), rest) = sw_consts.split_first()? else {
-        return None;
-    };
-    let (crate::lambda::SwitchKey::Int(b), b_lam) = rest.first()? else {
-        return None;
-    };
-    let diff = int_constant_value(a_lam)?.checked_sub(*a)?;
-    if int_constant_value(b_lam)?.checked_sub(*b)? != diff {
-        return None;
-    }
-    for (key, lam) in rest.iter().skip(1) {
-        let crate::lambda::SwitchKey::Int(value) = key else {
-            return None;
-        };
-        if int_constant_value(lam)?.checked_sub(*value)? != diff {
-            return None;
-        }
-    }
-    Some(diff)
 }
 
 fn collapse_module_alias(fields: &[String], args: &[Lambda]) -> Option<Lambda> {

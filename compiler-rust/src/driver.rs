@@ -3010,6 +3010,16 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::JsxUnboxedProps { loc, typ }) => {
+            let message = type_clash::render_error_message(|ppf| {
+                type_clash::print_jsx_unboxed_props(ppf, type_ctx, *typ)
+            });
+            UserDiagnostic::new(
+                format_compiler_error_report_formatted(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TaggedTemplateNonTag { loc, typ }) => {
             UserDiagnostic::new(
                 format_tagged_template_non_tag_report(
@@ -4572,10 +4582,12 @@ fn format_builtin_extension_error_report(
 ) -> String {
     let mut output =
         format_compiler_error_report(arena, source, filename, error.loc, &error.message);
+    // OCaml `Location.default_error_reporter` prints each sub-error after a
+    // break (`@,@[%a@]`), which shares the blank line ending the parent
+    // report.
     for sub in &error.sub {
-        output.push_str(&format_builtin_extension_error_report(
-            arena, source, filename, sub,
-        ));
+        let sub = format_builtin_extension_error_report(arena, source, filename, sub);
+        output.push_str(sub.strip_prefix('\n').unwrap_or(&sub));
     }
     output
 }

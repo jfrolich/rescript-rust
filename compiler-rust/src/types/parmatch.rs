@@ -77,11 +77,6 @@ pub(crate) trait Oracle {
     }
     /// Whether the pattern carries `res.patFromVariantSpread`.
     fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool;
-    /// Whether `lid` is `Ldot (Lident "*predef*", "Some")`.
-    fn is_predef_some_lid(&self, lid: LidentIdx) -> bool;
-    /// Whether a constructor's runtime representation is a block whose
-    /// `block_type` cannot be `undefined` (parmatch.ml:554-562).
-    fn is_block_that_cannot_be_undefined(&self, cstr: &ConstructorDescription) -> bool;
     /// `Variant_runtime.length (Variant_runtime.get_layout variant)`.
     fn variant_length(&self, cstr: &ConstructorDescription) -> usize;
     /// `get_type_path ty tenv` (parmatch.ml:334-338).
@@ -731,36 +726,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             })
             .collect();
         for field in lbls {
-            let lbl_is_optional = !matches!(
-                field.lbl.lbl_repres,
-                crate::types::decl::RecordRepresentation::RecordInlined { .. }
-            ) && field.lbl.lbl_optional;
-            let mut chosen = field.clone();
-            if lbl_is_optional
-                && let Desc::Construct {
-                    lid: Some(lid),
-                    args,
-                    ..
-                } = self.desc(field.pat)
-                && self.oracle.is_predef_some_lid(lid.txt)
-                && let [inner] = args.as_slice()
-            {
-                let inner = *inner;
-                match self.desc(inner) {
-                    Desc::Constant(_) => chosen.pat = inner,
-                    Desc::Construct { cstr, .. } => {
-                        if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_))
-                            && self.oracle.is_block_that_cannot_be_undefined(cstr)
-                        {
-                            chosen.pat = inner;
-                        }
-                    }
-                    _ => {}
-                }
-            }
             let pos = field.lbl.lbl_pos as usize;
             if pos < table.len() {
-                table[pos] = chosen;
+                table[pos] = field.clone();
             }
         }
         table

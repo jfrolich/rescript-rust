@@ -1264,7 +1264,8 @@ fn substitute_export_alias_use_in_expression(
         ExpressionDesc::Object(entries) => {
             for entry in entries {
                 let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
+                | crate::js_ir::ObjectEntry::Spread(value)
+                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
                 substitute_export_alias_use_in_expression(value, target, replacement);
             }
         }
@@ -1825,7 +1826,8 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         ExpressionDesc::Object(entries) => {
             for entry in entries {
                 let (crate::js_ir::ObjectEntry::Property(_, value)
-                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
+                | crate::js_ir::ObjectEntry::Spread(value)
+                | crate::js_ir::ObjectEntry::RecordSpread(value)) = entry;
                 collect_expression_idents(value, stats);
             }
         }

@@ -2,12 +2,17 @@
 //!
 //! `Pexp_dict` (`dict{"a": 1, ...d}`) used to be parsed into calls of the
 //! runtime's `Primitive_dict`, which remain its encoding for v0 PPXs:
-//! - without spreads, `Primitive_dict.make([("a", 1)])`;
+//! - without spreads, `Primitive_dict.make([("a", 1)])`, whose `make` carries
+//!   the `res.dict` marker;
 //! - with spreads, `Primitive_dict.spread(target, [part, ...])`, whose
 //!   `spread` carries the `res.dictSpread` marker. The target is
 //!   `Primitive_dict.make(rows)` with the rows before the first spread, and the
 //!   parts are the spreads and `Primitive_dict.make(rows)` for the rows between
-//!   them, like `Object.assign`.
+//!   them, like `Object.assign`. These `make` calls carry the `res.dictRows`
+//!   marker.
+//!
+//! The markers tell the encoding apart from calls written in the source, and
+//! the rows of a dict literal from a dict literal spread into it.
 
 use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
@@ -17,8 +22,17 @@ use crate::parser::ast::{
 use crate::parser::core::mknoloc;
 use crate::parser::longident::Longident;
 
+/// `Ast_dict.literal_marker`.
+pub const LITERAL_MARKER: &str = "res.dict";
 /// `Ast_dict.spread_marker`.
 pub const SPREAD_MARKER: &str = "res.dictSpread";
+/// `Ast_dict.rows_marker`.
+pub const ROWS_MARKER: &str = "res.dictRows";
+
+fn marker_attributes(arena: &mut ParseArena, marker: &str) -> Attributes {
+    let marker = arena.intern(marker);
+    Attributes::from_vec(vec![(mknoloc(marker), Payload::PStr(Box::default()))])
+}
 
 /// `Ast_dict.part`: consecutive rows, or a spread.
 pub enum Part<R, S> {
@@ -181,8 +195,14 @@ fn apply(
 }
 
 /// `Ast_dict.make`.
-fn make(arena: &mut ParseArena, loc: LocIdx, rows: &[(StringLoc, ExprIdx)]) -> Expression {
-    let funct = primitive_dict(arena, loc, Attributes::new(), "make");
+fn make(
+    arena: &mut ParseArena,
+    loc: LocIdx,
+    marker: &str,
+    rows: &[(StringLoc, ExprIdx)],
+) -> Expression {
+    let marker = marker_attributes(arena, marker);
+    let funct = primitive_dict(arena, loc, marker, "make");
     let array = rows_array(arena, loc, rows);
     apply(arena, loc, funct, vec![array])
 }
@@ -196,20 +216,18 @@ pub fn to_calls(
     entries: &[DictEntry],
 ) -> Expression {
     let mut e = match target_and_sources(parts(entries)) {
-        TargetAndSources::Rows(rows) => make(arena, loc, &rows),
+        TargetAndSources::Rows(rows) => make(arena, loc, LITERAL_MARKER, &rows),
         TargetAndSources::Spread(target, sources) => {
-            let marker = arena.intern(SPREAD_MARKER);
-            let marker =
-                Attributes::from_vec(vec![(mknoloc(marker), Payload::PStr(Box::default()))]);
+            let marker = marker_attributes(arena, SPREAD_MARKER);
             let funct = primitive_dict(arena, loc, marker, "spread");
             let target_loc = rows_loc(arena, loc, &target);
-            let target = make(arena, target_loc, &target);
+            let target = make(arena, target_loc, ROWS_MARKER, &target);
             let sources = sources
                 .into_iter()
                 .map(|part| match part {
                     Part::Rows(rows) => {
                         let rows_loc = rows_loc(arena, loc, &rows);
-                        let e = make(arena, rows_loc, &rows);
+                        let e = make(arena, rows_loc, ROWS_MARKER, &rows);
                         arena.push_expr(e)
                     }
                     Part::Spread(spread) => spread,

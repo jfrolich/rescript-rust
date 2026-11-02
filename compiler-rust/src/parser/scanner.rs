@@ -755,6 +755,7 @@ impl<'src> Scanner<'src> {
             loc: crate::location::Location::from_positions(start_pos, end_pos),
             prev_tok_end_pos: Position::default(),
             prev_tok_is_question: false,
+            jsx_container: None,
         })
     }
 
@@ -846,6 +847,7 @@ impl<'src> Scanner<'src> {
                 loc,
                 prev_tok_end_pos: Position::default(),
                 prev_tok_is_question: false,
+                jsx_container: None,
             })
         }
     }

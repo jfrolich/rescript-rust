@@ -544,7 +544,9 @@ fn import_keeps_nested_module_field_alias_binding_materialized_like_snapshot() {
         "expected Import to keep the nested module-field alias binding materialized, got:\n{output}"
     );
     assert!(
-        output.contains("let N_each = N2.forEach;\n\nlet N = {\n  N0: N0,\n  N1: N1,\n  N2: N2,\n  each: N_each\n};"),
+        output.contains(
+            "let N_each = N3.forEach;\n\nlet N = {\n  N0: N0,\n  N1: N1,\n  N2: N2,\n  N3: N3,\n  each: N_each\n};"
+        ),
         "expected Import to keep the outer module-field alias binding materialized with the module-prefixed name, got:\n{output}"
     );
     assert!(

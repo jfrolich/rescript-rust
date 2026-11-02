@@ -4683,9 +4683,39 @@ fn parse_jsx_children(p: &mut Parser<'_>) -> Vec<Expression> {
     }
     let mut children = vec![];
     loop {
+        // res_core.ml `Lbrace when Parser.peek2 p = Rbrace`.
+        let empty_braces = p.token == Token::Lbrace
+            && p.lookahead(|p| {
+                p.next();
+                p.token == Token::Rbrace
+            });
         match p.token {
             Token::Eof => return children,
             Token::LessThan if p.peek_slash() => return children,
+            Token::Lbrace if empty_braces => {
+                let start_pos_idx = p.start_pos_idx();
+                let start_pos = p.start_pos;
+                // Consuming `{` collects exactly the comments inside the braces.
+                let comments_before = p.comments_len();
+                p.next();
+                let comments_inside = p.comments_len();
+                p.next();
+                // Only comment-containing containers are trivia. Keep bare `{}`
+                // as an empty record, including when nested inside an
+                // expression container.
+                if comments_inside != comments_before {
+                    let loc = crate::location::Location::from_positions(start_pos, p.prev_end_pos);
+                    p.set_jsx_container(comments_before..comments_inside, loc);
+                } else {
+                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let operand = Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((vec![], None)))),
+                        pexp_loc: loc,
+                        pexp_attributes: Attributes::new(),
+                    };
+                    children.push(parse_primary_expr(p, operand, true));
+                }
+            }
             ref token if token == &Token::LessThan || grammar::is_jsx_child_start(token) => {
                 let operand = parse_atomic_expr(p);
                 children.push(parse_primary_expr(p, operand, true));

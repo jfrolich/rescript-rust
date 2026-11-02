@@ -151,6 +151,11 @@ impl Doc {
         Doc::BreakParent
     }
 
+    /// `Res_doc.is_nil`.
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Doc::Nil)
+    }
+
     // ========== Common combinators ==========
 
     pub fn space() -> Doc {

@@ -134,9 +134,13 @@ fi
 ./compile/21-namespaced-interface-is-checked.sh &&
 ./compile/22-worker-store-respects-package-visibility.sh &&
 ./compile/23-interface-mismatch-names-the-resi.sh &&
+./compile/21-rebuild-dependency-for-package-specs.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&
+
+# GenType tests
+./gentype/01-gentype-project-root.sh &&
 
 # Watch tests
 ./watch/01-watch-recompile.sh &&

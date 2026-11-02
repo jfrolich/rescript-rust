@@ -854,6 +854,23 @@ impl<'src> Parser<'src> {
         &self.warnings
     }
 
+    /// The number of collected comments.
+    pub fn comments_len(&self) -> usize {
+        self.comments.len()
+    }
+
+    /// Mark the collected comments in `range` as inside the comment-only JSX
+    /// container at `loc`.
+    pub fn set_jsx_container(
+        &mut self,
+        range: std::ops::Range<usize>,
+        loc: crate::location::Location,
+    ) {
+        for comment in &mut self.comments[range] {
+            comment.jsx_container = Some(loc);
+        }
+    }
+
     /// Get collected comments.
     pub fn comments(&self) -> &[Comment] {
         &self.comments

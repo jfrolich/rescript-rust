@@ -847,90 +847,6 @@ fn set_args_erase_mutable<'p>(
     do_set_args(pa, true, q, r)
 }
 
-fn untagged_payload_type_cannot_be_undefined(
-    ctx_ref: &TypeContext,
-    env_ref: EnvRef,
-    ty: TypeExprRef,
-) -> bool {
-    let Some(env) = ctx_ref.get_typed_env(env_ref) else {
-        return false;
-    };
-    let ty = crate::types::ctype::expand_head(ctx_ref, env.as_ref(), ty);
-    match &*ctx_ref.get_desc(ty) {
-        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-            path.same(&crate::types::predef::path_string())
-                || path.same(&crate::types::predef::path_int())
-                || path.same(&crate::types::predef::path_float())
-                || path.same(&crate::types::predef::path_bigint())
-                || path.same(&crate::types::predef::path_bool())
-                || path.same(&crate::types::predef::path_array())
-                || matches!(path, crate::types::path::Path::Pident(id) if id.name() == "dict")
-                || matches!(path.name().as_str(), "Js.Dict.t" | "Js_dict.t")
-        }
-        crate::types::type_expr::TypeDesc::Tarrow { .. }
-        | crate::types::type_expr::TypeDesc::Ttuple(_) => true,
-        _ => false,
-    }
-}
-
-fn can_strip_optional_construct_wrapper(
-    ctx_ref: &TypeContext,
-    pat_env: EnvRef,
-    cstr: &ConstructorDescription,
-) -> bool {
-    if !has_untagged(&cstr.cstr_attributes) {
-        return false;
-    }
-
-    if cstr.cstr_inlined.is_some() {
-        return true;
-    }
-
-    match cstr.cstr_args.as_slice() {
-        [] => false,
-        [arg] => untagged_payload_type_cannot_be_undefined(ctx_ref, pat_env, *arg),
-        [_, _, ..] => true,
-    }
-}
-
-/// Expand record pattern to all fields (filling missing with omega).
-/// OCaml's `all_record_args` uses `lbl_all` to get ALL labels, then fills
-/// missing ones with omega. Since Rust's `lbl_all` is a placeholder, we
-/// resolve via the TypeContext when available.
-fn strip_optional_record_pattern_wrapper<'p>(
-    ctx_ref: Option<&TypeContext>,
-    lbl: &LabelDescription,
-    pat: &'p Pattern,
-) -> &'p Pattern {
-    if !lbl.lbl_optional || matches!(lbl.lbl_repres, RecordRepresentation::RecordInlined { .. }) {
-        return pat;
-    }
-
-    match &pat.pat_desc {
-        PatternDesc::Tpat_construct(_, cstr, args)
-            if cstr.cstr_name == "Some" && args.len() == 1 =>
-        {
-            match &args[0].pat_desc {
-                PatternDesc::Tpat_constant(_) => &args[0],
-                PatternDesc::Tpat_construct(_, inner_cstr, _) => match ctx_ref {
-                    Some(ctx_ref)
-                        if can_strip_optional_construct_wrapper(
-                            ctx_ref,
-                            args[0].pat_env,
-                            inner_cstr,
-                        ) =>
-                    {
-                        &args[0]
-                    }
-                    _ => pat,
-                },
-                _ => pat,
-            }
-        }
-        _ => pat,
-    }
-}
-
 /// The complete label array of a record pattern (`lbl_all`), when it can be
 /// resolved; see `all_record_args`.
 fn record_all_labels(
@@ -988,8 +904,7 @@ fn all_record_args(
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
-                    let rewritten_pat = strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
-                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), rewritten_pat.clone(), *opt);
+                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), pat.clone(), *opt);
                 }
             }
             result
@@ -1017,8 +932,7 @@ fn all_record_arg_pats<'p>(
             let mut result: Vec<&'p Pattern> = vec![omega(); all_labels.len()];
             for (_, lbl, pat, _) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
-                    result[lbl.lbl_pos as usize] =
-                        strip_optional_record_pattern_wrapper(ctx_ref, lbl, pat);
+                    result[lbl.lbl_pos as usize] = pat;
                 }
             }
             result
@@ -5053,6 +4967,74 @@ fn divide_constructor<'p>(
         ctx,
         pm,
     )
+    .into_iter()
+    .map(|(cstr, cell)| (cstr, skip_nested_some_check(ctx_ref, cell)))
+    .collect()
+}
+
+/// matching.ml `rejects_nested_some`: whether the payload pattern `p` of
+/// `Some` can't match the object that represents `Some` of a value like
+/// `None` or undefined (see `Primitive_option.some`): it doesn't bind the
+/// payload itself, and tests it with a literal comparison or with a type test
+/// that an object fails. An untagged case binds its argument only once its
+/// type test has passed.
+fn rejects_nested_some(ctx_ref: &TypeContext, p: &Pattern) -> bool {
+    use crate::types::variant_runtime::{Block, BlockType, ConstructorCase, LiteralTag};
+    match &p.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => true,
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            rejects_nested_some(ctx_ref, p1) && rejects_nested_some(ctx_ref, p2)
+        }
+        PatternDesc::Tpat_construct(_, cstr, _) => match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference)
+                if !constructor_has_optional_shape(cstr) =>
+            {
+                match reference.representation(ctx_ref) {
+                    ConstructorCase::Constant(tag) => tag.literal != Some(LiteralTag::Undefined),
+                    ConstructorCase::Block(Block::Untagged {
+                        block_type: BlockType::Object | BlockType::Unknown,
+                        ..
+                    }) => false,
+                    ConstructorCase::Block(Block::Untagged { .. }) => true,
+                    ConstructorCase::Block(Block::Tagged(_)) => false,
+                }
+            }
+            crate::types::ConstructorKind::Ordinary(_)
+            | crate::types::ConstructorKind::Extension(_) => false,
+        },
+        _ => false,
+    }
+}
+
+/// matching.ml `skip_nested_some_check`: a `Some` payload whose patterns all
+/// reject the representation of a nested `Some` is matched as it is, without
+/// checking for that representation.
+fn skip_nested_some_check<'p>(ctx_ref: &TypeContext, mut cell: MatchCell<'p>) -> MatchCell<'p> {
+    let args = cell.pm.args.as_slice();
+    let Some((RawLambda::Lprim(prim), kind)) = args.first() else {
+        return cell;
+    };
+    if !matches!(prim.primitive, Primitive::PvalFromOption)
+        || prim.args.len() != 1
+        || !cell.pm.cases.iter().all(|(pats, _)| match pats.first() {
+            Some(p) => rejects_nested_some(ctx_ref, p),
+            None => false,
+        })
+    {
+        return cell;
+    }
+    let mut new_args = Vec::with_capacity(args.len());
+    new_args.push((
+        RawLambda::Lprim(Box::new(RawPrimInfo {
+            primitive: Primitive::PvalFromOptionNotNest,
+            args: prim.args.clone(),
+            loc: prim.loc.clone(),
+        })),
+        *kind,
+    ));
+    new_args.extend(args[1..].iter().cloned());
+    cell.pm.args = MatchArgs::new(new_args);
+    cell
 }
 
 // --- Variants (lines 1293-1362) ---
@@ -7109,6 +7091,13 @@ fn combine_constructor<'p>(
                 // bodies out of borrowed slice patterns.
                 let (_, act1) = consts.pop().expect("one constant constructor case");
                 let (_, act2) = nonconsts.pop().expect("one block constructor case");
+                // matching.ml `lower_constructor_matching_plan`: the presence
+                // test of an option is redundant when the present action
+                // starts with a test of its value that takes the absent
+                // action for undefined.
+                if is_option && value_test_defaults_on_undefined(&arg, &act1, &act2) {
+                    return (act2, jumps_union(local_jumps, total1));
+                }
                 let test_arg = if is_option {
                     RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::PisNotNone,
@@ -7180,6 +7169,166 @@ fn combine_constructor<'p>(
             }
         };
         (lambda1, jumps_union(local_jumps, total1))
+    }
+}
+
+/// lambda.ml `eq_approx` on raw lambdas.
+fn raw_eq_approx(l1: &RawLambda, l2: &RawLambda) -> bool {
+    fn list(l1: &[RawLambda], l2: &[RawLambda]) -> bool {
+        l1.len() == l2.len() && l1.iter().zip(l2).all(|(a, b)| raw_eq_approx(a, b))
+    }
+    match (l1.peel(), l2.peel()) {
+        (RawLambda::LglobalModule(i1), RawLambda::LglobalModule(i2))
+        | (RawLambda::Lvar(i1), RawLambda::Lvar(i2)) => i1.same(i2),
+        (RawLambda::Lconst(c1), RawLambda::Lconst(c2)) => c1.eq_approx(c2),
+        (RawLambda::Lapply(a1), RawLambda::Lapply(a2)) => {
+            raw_eq_approx(&a1.ap_func, &a2.ap_func) && list(&a1.ap_args, &a2.ap_args)
+        }
+        (RawLambda::LifThenElse(a, b, c), RawLambda::LifThenElse(a0, b0, c0)) => {
+            raw_eq_approx(a, a0) && raw_eq_approx(b, b0) && raw_eq_approx(c, c0)
+        }
+        (RawLambda::Lsequence(a, b), RawLambda::Lsequence(a0, b0))
+        | (RawLambda::Lwhile(a, b), RawLambda::Lwhile(a0, b0)) => {
+            raw_eq_approx(a, a0) && raw_eq_approx(b, b0)
+        }
+        (RawLambda::Lbreak, RawLambda::Lbreak) | (RawLambda::Lcontinue, RawLambda::Lcontinue) => {
+            true
+        }
+        (RawLambda::Lassign(v0, l0), RawLambda::Lassign(v1, l1)) => {
+            v0.same(v1) && raw_eq_approx(l0, l1)
+        }
+        (RawLambda::LstaticRaise(id, ls), RawLambda::LstaticRaise(id1, ls1)) => {
+            id == id1 && list(ls, ls1)
+        }
+        (RawLambda::Lprim(p1), RawLambda::Lprim(p2)) => {
+            p1.primitive.eq_approx(&p2.primitive) && list(&p1.args, &p2.args)
+        }
+        (
+            RawLambda::LstringSwitch(arg, patterns, default),
+            RawLambda::LstringSwitch(arg2, patterns2, default2),
+        ) => {
+            raw_eq_approx(arg, arg2)
+                && match (default, default2) {
+                    (None, None) => true,
+                    (Some(d1), Some(d2)) => raw_eq_approx(d1, d2),
+                    _ => false,
+                }
+                && patterns.len() == patterns2.len()
+                && patterns
+                    .iter()
+                    .zip(patterns2)
+                    .all(|((k, v), (k2, v2))| k == k2 && raw_eq_approx(v, v2))
+        }
+        _ => false,
+    }
+}
+
+/// matching.ml `value_test_defaults_on_undefined`: whether `present`, the
+/// action for a value of the option `arg`, starts with a test of that value
+/// that takes `absent` for undefined. The presence test of `arg` is then
+/// redundant: undefined reaches `absent` either way.
+fn value_test_defaults_on_undefined(
+    arg: &RawLambda,
+    absent: &RawLambda,
+    present: &RawLambda,
+) -> bool {
+    let is_value = |e: &RawLambda| match e.peel() {
+        RawLambda::Lprim(prim)
+            if matches!(prim.primitive, Primitive::PvalFromOptionNotNest)
+                && prim.args.len() == 1 =>
+        {
+            raw_eq_approx(arg, &prim.args[0])
+        }
+        e => raw_eq_approx(arg, e),
+    };
+    let is_equality = |p: &Primitive| match p {
+        Primitive::Pboolcomp(c)
+        | Primitive::Pintcomp(c)
+        | Primitive::Pfloatcomp(c)
+        | Primitive::Pbigintcomp(c)
+        | Primitive::Pstringcomp(c)
+        | Primitive::Pjscomp(c) => Some(*c),
+        _ => None,
+    };
+    // A constant that undefined is unequal to, even loosely.
+    let is_defined_constant = |e: &RawLambda| {
+        use crate::lambda::Constant;
+        matches!(
+            e.peel(),
+            RawLambda::Lconst(
+                Constant::Int { .. }
+                    | Constant::Char(_)
+                    | Constant::String { .. }
+                    | Constant::Float(_)
+                    | Constant::BigInt { .. }
+                    | Constant::JsFalse
+                    | Constant::JsTrue
+            )
+        )
+    };
+    let compares_value = |args: &[RawLambda]| match args {
+        [a, b] => {
+            (is_value(a) && is_defined_constant(b)) || (is_defined_constant(a) && is_value(b))
+        }
+        _ => false,
+    };
+    match present.peel() {
+        RawLambda::Llet(LetKind::Alias, id, def, body)
+            if matches!(def.peel(), RawLambda::Lprim(prim)
+                if matches!(prim.primitive, Primitive::PvalFromOptionNotNest)
+                    && prim.args.len() == 1
+                    && raw_eq_approx(arg, &prim.args[0])) =>
+        {
+            // The value bound to a name.
+            value_test_defaults_on_undefined(&RawLambda::Lvar(*id), absent, body)
+                || value_test_defaults_on_undefined(def, absent, body)
+        }
+        RawLambda::Lswitch(scrutinee, sw) => match &sw.sw_failaction {
+            Some(fail) => {
+                is_value(scrutinee)
+                    && raw_eq_approx(fail, absent)
+                    && switch_defaults_on_undefined(sw)
+            }
+            None => false,
+        },
+        RawLambda::LstringSwitch(scrutinee, _, Some(fail)) => {
+            is_value(scrutinee) && raw_eq_approx(fail, absent)
+        }
+        // undefined is unequal to every constant.
+        RawLambda::LifThenElse(cond, if_true, if_false) => match cond.peel() {
+            RawLambda::Lprim(prim) if compares_value(&prim.args) => {
+                match is_equality(&prim.primitive) {
+                    Some(Comparison::Neq) => raw_eq_approx(if_true, absent),
+                    Some(Comparison::Eq) => raw_eq_approx(if_false, absent),
+                    Some(_) | None => false,
+                }
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// matching.ml `switch_defaults_on_undefined`: whether the switch `sw` on an
+/// untagged variant takes its default action for undefined: no case matches
+/// undefined, and each side of the switch that undefined can reach has the
+/// default action.
+fn switch_defaults_on_undefined(sw: &RawLambdaSwitch) -> bool {
+    use crate::types::variant_runtime::{BlockType, ConstructorCase, LiteralTag};
+    match &sw.sw_dispatch {
+        crate::lambda::SwitchDispatch::Variant(facts) => {
+            !facts.block_types.is_empty()
+                && !facts.block_types.contains(&BlockType::Unknown)
+                && !sw.sw_blocks_full
+                && !(sw.sw_consts_full && !sw.sw_consts.is_empty())
+                && sw.sw_consts.iter().all(|(key, _)| match key {
+                    crate::lambda::SwitchKey::Constructor(ConstructorCase::Constant(tag)) => {
+                        tag.literal != Some(LiteralTag::Undefined)
+                    }
+                    _ => true,
+                })
+        }
+        crate::lambda::SwitchDispatch::Direct => false,
     }
 }
 
@@ -7805,12 +7954,28 @@ fn c_rec<'p>(
 fn name_pattern<'p>(ctx_ref: &TypeContext, default: &str, cases: &[Clause<'p>]) -> Ident {
     for (pats, _) in cases {
         if let Some(pat) = pats.first() {
-            if let Some(id) = id_of_pattern(ctx_ref, pat) {
+            if let Some(id) = matching_id_of_pattern(ctx_ref, pat) {
                 return id;
             }
         }
     }
     ctx_ref.create_ident(default)
+}
+
+/// matching.ml `id_of_pattern`: a name for the value `pat` matches, also
+/// found under an option's `Some`.
+fn matching_id_of_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<Ident> {
+    if let Some(id) = id_of_pattern(ctx_ref, pat) {
+        return Some(id);
+    }
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, args)
+            if args.len() == 1 && constructor_has_optional_shape(cstr) =>
+        {
+            id_of_pattern(ctx_ref, &args[0])
+        }
+        _ => None,
+    }
 }
 
 /// Extract an identifier from a pattern (for naming purposes).

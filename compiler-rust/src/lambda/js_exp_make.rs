@@ -43,7 +43,9 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         // proxy traps.
         ExpressionDesc::Jsx(_) => false,
         ExpressionDesc::Object(entries) => entries.iter().all(|entry| match entry {
-            ObjectEntry::Property(_, value) => js_expr_no_side_effects(value),
+            ObjectEntry::Property(_, value) | ObjectEntry::RecordSpread(value) => {
+                js_expr_no_side_effects(value)
+            }
             ObjectEntry::Spread(_) => false,
         }),
         ExpressionDesc::Cond(test, consequent, alternate) => {

@@ -5643,9 +5643,12 @@ fn awaited_constraint(
 }
 
 /// The shape `awaited_module_path` recognizes, without building the module
-/// to import: `None` when it is not an awaited module path, else whether it
-/// is constrained.
-fn awaited_module_path_kind(e: &current::ModuleExpr, arena: &ParseArena) -> Option<bool> {
+/// to import: `None` when it is not an awaited module path, else its
+/// constraint's module type, if any.
+fn awaited_module_path_kind(
+    e: &current::ModuleExpr,
+    arena: &ParseArena,
+) -> Option<Option<ModTypeIdx>> {
     fn strip<'a>(
         awaited: bool,
         m: &'a current::ModuleExpr,
@@ -5658,10 +5661,11 @@ fn awaited_module_path_kind(e: &current::ModuleExpr, arena: &ParseArena) -> Opti
     }
     let (awaited, m) = strip(false, e, arena);
     match &*m.pmod_desc {
-        ModuleExprDesc::Pmod_ident(_) if awaited => Some(false),
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
+        ModuleExprDesc::Pmod_ident(_) if awaited => Some(None),
+        ModuleExprDesc::Pmod_constraint(inner, mty) => {
             let (awaited, path) = strip(awaited, arena.get_mod_expr(*inner), arena);
-            (awaited && matches!(&*path.pmod_desc, ModuleExprDesc::Pmod_ident(_))).then_some(true)
+            (awaited && matches!(&*path.pmod_desc, ModuleExprDesc::Pmod_ident(_)))
+                .then_some(Some(*mty))
         }
         _ => None,
     }
@@ -5912,7 +5916,8 @@ fn spelunk_value_bindings_for_await_module_types(
 
 /// The `Pstr_module` case of `structure_mapper` (bs_builtin_ppx.ml) for a
 /// dynamic import `module M = await List`: the module type declaration (once
-/// per module) and the rewritten binding.
+/// per module) and the rewritten binding. `module M = await (List: ListType)`
+/// uses `ListType` and declares no module type.
 fn transform_module_await(
     mb: &current::ModuleBinding,
     original_pstr_loc: LocIdx,
@@ -5920,15 +5925,21 @@ fn transform_module_await(
     arena: &mut ParseArena,
 ) -> Option<Vec<StructureItem>> {
     let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
-    let Some((module_lid, imported, None)) = awaited_module_path(&mod_expr, arena) else {
-        return None;
+    let (mut items, module_type_lid, imported) = match awaited_module_path(&mod_expr, arena)? {
+        (module_lid, imported, None) => {
+            let module_type_lid = Located {
+                txt: arena.push_lident(&local_module_type_name(module_lid.txt, arena)),
+                loc: mod_expr.pmod_loc,
+            };
+            // Before mapping the rest, which may import the same module.
+            let items = local_module_type_decl(await_context, module_lid, imported.clone(), arena);
+            (items, module_type_lid, imported)
+        }
+        (_, imported, Some(mty)) => match &*arena.get_mod_type(mty).pmty_desc {
+            ModuleTypeDesc::Pmty_ident(module_type_lid) => (Vec::new(), *module_type_lid, imported),
+            _ => return None,
+        },
     };
-    let module_type_lid = Located {
-        txt: arena.push_lident(&local_module_type_name(module_lid.txt, arena)),
-        loc: mod_expr.pmod_loc,
-    };
-    // Before mapping the rest, which may import the same module.
-    let mut items = local_module_type_decl(await_context, module_lid, imported.clone(), arena);
     let transformed_mod_expr =
         create_await_module_expression(&mod_expr, module_type_lid, imported, arena);
     items.push(StructureItem {
@@ -9784,10 +9795,18 @@ fn rewrite_structure_unit(
     Ok(result)
 }
 
-/// `module M = await Path`, the structure_mapper case that maps its item
-/// before the rest of the structure (bs_builtin_ppx.ml:708-747).
+/// `module M = await Path` and `module M = await (Path: ModuleType)`, the
+/// structure_mapper cases that map their item before the rest of the
+/// structure (bs_builtin_ppx.ml `structure_mapper`, `Pstr_module`).
 fn is_await_module_alias(mb: &current::ModuleBinding, arena: &ParseArena) -> bool {
-    awaited_module_path_kind(arena.get_mod_expr(mb.pmb_expr), arena) == Some(false)
+    match awaited_module_path_kind(arena.get_mod_expr(mb.pmb_expr), arena) {
+        Some(None) => true,
+        Some(Some(mty)) => matches!(
+            &*arena.get_mod_type(mty).pmty_desc,
+            ModuleTypeDesc::Pmty_ident(_)
+        ),
+        None => false,
+    }
 }
 
 /// Lightweight extension expansion: only expands %%raw, %raw, %re, %%private.

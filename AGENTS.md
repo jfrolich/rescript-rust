@@ -334,7 +334,7 @@ Read the area guide before changing a compiler subsystem:
    - Unit tests for utility functions
    - Always check JavaScript output quality
 
-4. **Add a `CHANGELOG.md` entry** for any user-facing change (bug fix, feature, or breaking change). Put it under the matching section of the current `(Unreleased)` version and end the line with the PR link. See [CONTRIBUTING.md](CONTRIBUTING.md). PRs are expected to include one.
+4. **Add a changelog fragment** `changes/<description>.<category>.md` for any user-facing change (bug fix, feature, or breaking change) instead of editing `CHANGELOG.md`; see [changes/README.md](changes/README.md) for categories and format. Validate with `yarn changelog:check`.
 
 ### Debugging Techniques
 
@@ -521,7 +521,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 
 ### Commit Standards
 
-- Use DCO sign-off: `Signed-Off-By: Your Name <email>`
+- Sign off every commit with `Signed-off-by: Your Name <email>` (DCO)
 - Put the sign-off in the final paragraph of the message, next to any other
   trailers such as `Co-Authored-By:`, with no blank line between them. Git only
   parses the last paragraph as trailers, so a sign-off separated by a blank

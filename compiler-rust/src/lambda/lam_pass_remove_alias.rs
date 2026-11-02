@@ -134,6 +134,13 @@ fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> 
 /// entries for their fresh let-bound parameters (lam_beta_reduce.ml:66-73).
 /// Without this, blocks introduced by beta-reduced functor arguments remain
 /// opaque to subsequent `field_flatten_get` lookups.
+/// How deep inlining may nest: simplifying an inlined body can inline the
+/// functions it calls, and so on. Without a bound, a chain of small functions
+/// that each call the previous one gets the whole chain inlined into every
+/// function, which is quadratic in the length of the chain. Functions marked
+/// `@inline` are always inlined.
+pub(crate) const MAX_INLINE_DEPTH: usize = 4;
+
 pub fn simplify_alias_with_external_inline_owned(
     meta: &mut LamStats,
     lam: Lambda,
@@ -146,6 +153,7 @@ pub fn simplify_alias_with_external_inline_owned(
         export_idents: &export_idents,
         id_gen: &id_gen,
         external_inline,
+        inline_depth: 0,
     }
     .simpl_owned(lam);
     meta.export_idents = export_idents;
@@ -160,6 +168,7 @@ struct Simplifier<'a> {
     /// collide across independent beta reductions of the same function.
     id_gen: &'a crate::context::IdGenerator,
     external_inline: &'a mut ExternalInlineResolver<'a>,
+    inline_depth: usize,
 }
 
 use crate::lambda::lambda_traverse::Mapped;
@@ -459,7 +468,10 @@ impl<'a> Simplifier<'a> {
                     ),
                     RecFlag::SelfRec => normal(self, ap_args),
                     RecFlag::NonRec => {
-                        if ap_args.iter().any(|arg| hit_variable(&v, arg)) {
+                        if ap_args.iter().any(|arg| hit_variable(&v, arg))
+                            || (self.inline_depth >= MAX_INLINE_DEPTH
+                                && func.attr.inline != crate::lambda::InlineAttribute::Always)
+                        {
                             normal(self, ap_args)
                         } else {
                             let reduced =
@@ -471,7 +483,10 @@ impl<'a> Simplifier<'a> {
                                     &func.body,
                                     &ap_args,
                                 );
-                            (self.simpl_owned(reduced), true)
+                            self.inline_depth += 1;
+                            let inlined = self.simpl_owned(reduced);
+                            self.inline_depth -= 1;
+                            (inlined, true)
                         }
                     }
                 }
