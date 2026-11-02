@@ -2855,6 +2855,14 @@ pub(crate) fn pre_compile_runtime_modules(
         return Ok(());
     }
 
+    // PROTOTYPE: reuse the runtime's interfaces from the previous build.
+    let cache_path = runtime_cache_path(runtime_root, &runtime_paths);
+    if let Some(cache_path) = &cache_path
+        && load_runtime_cache(registry, cache_path)
+    {
+        return Ok(());
+    }
+
     let runtime_compile_threads = rayon::current_num_threads().max(2);
     // Runtime module compilation runs inside Rayon workers, so the outer
     // precompile thread stack is not enough for very large runtime IR cleanup.
@@ -2918,7 +2926,85 @@ pub(crate) fn pre_compile_runtime_modules(
         "Compiled {} runtime modules from source into registry",
         runtime_modules.len()
     );
+    if let Some(cache_path) = &cache_path {
+        write_runtime_cache(registry, &runtime_modules, cache_path);
+    }
     Ok(())
+}
+
+/// PROTOTYPE: where the runtime interface cache for these runtime sources and
+/// this compiler binary lives.
+fn runtime_cache_path(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    if std::env::var_os("RESCRIPT_NO_RUNTIME_CACHE").is_some() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let exe = std::env::current_exe().ok()?;
+    let meta = std::fs::metadata(&exe).ok()?;
+    (meta.len(), meta.modified().ok()).hash(&mut hasher);
+    runtime_root.hash(&mut hasher);
+    for (name, path) in runtime_paths {
+        name.hash(&mut hasher);
+        for p in [path.clone(), path.with_extension("resi")] {
+            if let Ok(m) = std::fs::metadata(&p) {
+                (p, m.len(), m.modified().ok()).hash(&mut hasher);
+            }
+        }
+    }
+    Some(std::env::temp_dir().join(format!("rescript-runtime-{:016x}.bin", hasher.finish())))
+}
+
+fn load_runtime_cache(registry: &Mutex<ModuleRegistry>, cache_path: &Path) -> bool {
+    let Ok(data) = std::fs::read(cache_path) else {
+        return false;
+    };
+    let mut entries = Vec::new();
+    let mut at = 0usize;
+    let read_u32 = |at: &mut usize| -> Option<usize> {
+        let bytes = data.get(*at..*at + 4)?;
+        *at += 4;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?) as usize)
+    };
+    while at < data.len() {
+        let Some(name_len) = read_u32(&mut at) else { return false };
+        let Some(name) = data.get(at..at + name_len) else { return false };
+        at += name_len;
+        let Some(blob_len) = read_u32(&mut at) else { return false };
+        let Some(blob) = data.get(at..at + blob_len) else { return false };
+        at += blob_len;
+        entries.push((String::from_utf8_lossy(name).into_owned(), blob));
+    }
+    let decoded: Vec<_> = entries
+        .into_par_iter()
+        .map(|(name, blob)| (name, rescript_compiler::cmi::stored_module::decode(blob)))
+        .collect();
+    if decoded.iter().any(|(_, m)| m.is_none()) {
+        return false;
+    }
+    let mut registry = registry.lock().unwrap();
+    for (name, module) in decoded {
+        registry.register_stored_module(&name, module.unwrap());
+    }
+    true
+}
+
+fn write_runtime_cache(registry: &Mutex<ModuleRegistry>, runtime_modules: &[RuntimeModuleSource], cache_path: &Path) {
+    let registry = registry.lock().unwrap();
+    let mut out = Vec::new();
+    for module in runtime_modules {
+        let Some(blob) = registry.encode_stored_module(&module.module_name, &[]) else {
+            return;
+        };
+        out.extend_from_slice(&(module.module_name.len() as u32).to_le_bytes());
+        out.extend_from_slice(module.module_name.as_bytes());
+        out.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+        out.extend_from_slice(&blob);
+    }
+    let tmp = cache_path.with_extension("tmp");
+    if std::fs::write(&tmp, out).is_ok() {
+        let _ = std::fs::rename(tmp, cache_path);
+    }
 }
 
 fn seed_runtime_registry(registry: &Mutex<ModuleRegistry>, runtime_modules: &[RuntimeModuleSource]) {
