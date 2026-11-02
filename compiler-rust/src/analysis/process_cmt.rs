@@ -684,7 +684,8 @@ impl Processor<'_> {
             }
             tt::PatternDesc::Tpat_variant(_, None, _)
             | tt::PatternDesc::Tpat_any
-            | tt::PatternDesc::Tpat_constant(_) => {}
+            | tt::PatternDesc::Tpat_constant(_)
+            | tt::PatternDesc::Tpat_interval(..) => {}
         }
     }
 

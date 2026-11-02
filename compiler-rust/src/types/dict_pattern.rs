@@ -25,6 +25,7 @@ fn for_each_subpattern<'p>(p: &'p Pattern, f: &mut impl FnMut(&'p Pattern)) {
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(..)
         | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => {}
         PatternDesc::Tpat_alias(inner, _, _) => f(inner),
         PatternDesc::Tpat_variant(_, Some(inner), _) => f(inner),
@@ -158,6 +159,7 @@ fn lower(labels: &AHashMap<String, Arc<LabelDescription>>, p: &Pattern) -> Patte
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(..)
         | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => p.pat_desc.clone(),
         PatternDesc::Tpat_alias(inner, id, name) => {
             PatternDesc::Tpat_alias(lower_box(inner), *id, name.clone())

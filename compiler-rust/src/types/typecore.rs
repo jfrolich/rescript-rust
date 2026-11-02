@@ -7346,7 +7346,8 @@ fn type_pattern_constraint_poly_var(
     }
 }
 
-/// Type check interval pattern.
+/// Type check interval pattern (typecore.ml `Ppat_interval`). `char` is an
+/// alias of `int`, so bounds may mix both.
 fn type_pattern_interval(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -7357,64 +7358,31 @@ fn type_pattern_interval(
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
-
-    // Convert constants
-    let constant1 = convert_constant(c1, loc)?;
-    let constant2 = convert_constant(c2, loc)?;
-
-    // OCaml only supports character intervals in patterns, and raises
-    // `Invalid_interval` before typing anything (typecore.ml:1335-1347).
-    let (start_val, end_val) = match (&constant1, &constant2) {
-        (Constant::Char(c1), Constant::Char(c2)) if c1 <= c2 => (*c1, *c2),
-        (Constant::Char(c1), Constant::Char(c2)) => (*c2, *c1),
-        _ => return Err(TypeCoreError::InvalidInterval { loc }),
+    let bound = |c: &crate::parser::ast::Constant| -> TypeCoreResult<Option<(i64, Constant)>> {
+        let c = convert_constant(c, loc)?;
+        Ok(crate::types::parmatch::int_of_constant(&c).map(|i| (i, c)))
     };
-
-    // Get type of first constant (both should have same type)
-    let const_ty = type_constant(ctx, env, &constant1);
-    unify_pattern_types(tctx, loc, const_ty, expected_ty)?;
-
-    let make_const = |val: i32| -> Constant { Constant::Char(val) };
-
-    // OCaml compiler/ml/typecore.ml:1425-1437 expands character intervals
-    // through Ast_helper with ghost locations for the generated constants and
-    // `or` nodes, then restores the source location only on the outer pattern.
-    // This keeps Parmatch warning 12 from reporting partially overlapped
-    // generated interval arms as source subpatterns.
-    let ghost_loc = tctx
-        .arena
-        .interval_ghost_loc(loc)
-        .unwrap_or_else(|| tctx.arena.none_loc());
-
-    // Build all constant patterns for the range
-    let mut patterns: Vec<Pattern> = (start_val..=end_val)
-        .map(|val| {
-            Pattern::new(
-                PatternDesc::Tpat_constant(make_const(val)),
-                ghost_loc,
-                expected_ty,
-                EnvRef(0),
-                Attributes::new(),
-            )
-        })
-        .collect();
-
-    // Build right-associative nested Tpat_or tree
-    let mut result = patterns.pop().unwrap();
-    while let Some(pat_left) = patterns.pop() {
-        result = Pattern::new(
-            PatternDesc::Tpat_or(Box::new(pat_left), Box::new(result), None),
-            ghost_loc,
-            expected_ty,
-            EnvRef(0),
-            Attributes::new(),
-        );
-    }
-
-    result.pat_loc = loc;
-    result.pat_attributes = pat.ppat_attributes.clone();
-
-    Ok(result)
+    let (Some(b1), Some(b2)) = (bound(c1)?, bound(c2)?) else {
+        return Err(TypeCoreError::InvalidInterval { loc });
+    };
+    let ((i1, lo), (i2, hi)) = if b1.0 <= b2.0 { (b1, b2) } else { (b2, b1) };
+    let ty = match (&lo, &hi) {
+        (Constant::Char(_), Constant::Char(_)) => type_constant(ctx, env, &lo),
+        _ => type_constant(ctx, env, &Constant::Int(0)),
+    };
+    unify_pattern_types(tctx, loc, ty, expected_ty)?;
+    let desc = if i1 == i2 {
+        PatternDesc::Tpat_constant(lo)
+    } else {
+        PatternDesc::Tpat_interval(lo, hi)
+    };
+    Ok(Pattern::new(
+        desc,
+        loc,
+        expected_ty,
+        tctx.type_ctx.store_typed_env(env),
+        pat.ppat_attributes.clone(),
+    ))
 }
 
 /// Type check exception pattern.
@@ -11037,9 +11005,10 @@ fn typed_pattern_has_variant(pat: &Pattern) -> bool {
         PatternDesc::Tpat_dict(entries) => entries
             .iter()
             .any(|entry| typed_pattern_has_variant(&entry.tdp_pattern)),
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
-            false
-        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => false,
     }
 }
 
@@ -11803,7 +11772,10 @@ fn finalize_variant_in_pattern(
                 );
             }
         }
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => {}
     }
 }
 
@@ -12722,7 +12694,6 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
         let bindings = desugar_nary_function_defaults(arena, loc, &params);
         arena.set_nary_fun_default_bindings(fun.lhs, bindings);
     }
-    arena.prepare_interval_ghost_locs();
     // Optional-default AST is allocated above while the arena is exclusive.
     // Prepare stable append-only storage afterward for environment-dependent
     // pattern rewrites performed during type checking (for example variants).
@@ -19565,7 +19536,10 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
                 iter_typed_pattern(&entry.tdp_pattern, f);
             }
         }
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => {}
     }
 }
 
@@ -19628,6 +19602,7 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
         }
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => {}
     }
 }
@@ -19982,6 +19957,7 @@ fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
             }
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_interval(..)
             | PatternDesc::Tpat_variant(_, None, _) => {}
         }
     }
@@ -19995,6 +19971,7 @@ fn rec_pattern_is_destructuring(pat: &Pattern) -> bool {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => false,
         PatternDesc::Tpat_alias(inner, _, _) => rec_pattern_is_destructuring(inner),
         PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_tuple(_)
         | PatternDesc::Tpat_construct(_, _, _)
         | PatternDesc::Tpat_variant(_, _, _)
@@ -29747,7 +29724,10 @@ fn pattern_surely_irrefutable(p: &Pattern) -> bool {
 
 fn pattern_contains_or(p: &Pattern) -> bool {
     match &p.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(..)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => false,
         PatternDesc::Tpat_or(..) => true,
         PatternDesc::Tpat_alias(p, _, _) => pattern_contains_or(p),
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
@@ -29896,6 +29876,11 @@ fn conv_counter_example(
                 arena,
                 loc,
                 P::Ppat_constant(Box::new(untype_constant(constant))),
+            ),
+            PatternDesc::Tpat_interval(c1, c2) => push_parsed_pattern(
+                arena,
+                loc,
+                P::Ppat_interval(Box::new((untype_constant(c1), untype_constant(c2)))),
             ),
             PatternDesc::Tpat_alias(inner, _, _) => lp(tctx, inner, counter, loc),
             PatternDesc::Tpat_tuple(items) => {
@@ -30087,6 +30072,11 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 arena,
                 none,
                 P::Ppat_constant(Box::new(untype_constant(constant))),
+            ),
+            PatternDesc::Tpat_interval(c1, c2) => push_parsed_pattern(
+                arena,
+                none,
+                P::Ppat_interval(Box::new((untype_constant(c1), untype_constant(c2)))),
             ),
             PatternDesc::Tpat_alias(inner, _, _) => untype(arena, inner),
             PatternDesc::Tpat_tuple(items) => {

@@ -5456,10 +5456,18 @@ fn handle_private_extension(
 ) -> PpxResult<Vec<StructureItem>> {
     let items = private_extension_structure_items(payload, loc)?;
 
-    // Rewrite the items first (for string transformations etc.)
+    // `self.structure_item` on each item: `%%raw`, `%%private` and
+    // `Pstr_raw` are only expanded by `structure_mapper`, so here they stay
+    // as written (and `Typemod_hide.check` rejects them).
     let rewritten_items: Vec<StructureItem> = items
         .iter()
-        .flat_map(|item| rewrite_structure_item(item, arena))
+        .flat_map(|item| {
+            if is_structure_mapper_extension(item, arena) {
+                vec![item.clone()]
+            } else {
+                rewrite_structure_item(item, arena)
+            }
+        })
         .collect();
 
     check_private_extension_items(&rewritten_items, arena)?;
@@ -5483,14 +5491,17 @@ fn private_extension_structure_items(
     }
 }
 
-/// `%%raw`/`%%private`: the structure items `Bs_builtin_ppx.structure_mapper`
-/// expands itself (bs_builtin_ppx.ml:681-705).
+/// `%%raw`/`%%private` and `Pstr_raw`: the structure items
+/// `Bs_builtin_ppx.structure_mapper` expands itself, which `structure_item`
+/// leaves alone.
 fn is_structure_mapper_extension(item: &StructureItem, arena: &ParseArena) -> bool {
-    matches!(
-        &*item.pstr_desc,
-        StructureItemDesc::Pstr_extension(inner)
-            if matches!(arena.get_string(inner.0.0.txt), "raw" | "private")
-    )
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_raw(_) => true,
+        StructureItemDesc::Pstr_extension(inner) => {
+            matches!(arena.get_string(inner.0.0.txt), "raw" | "private")
+        }
+        _ => false,
+    }
 }
 
 /// OCaml `Typemod_hide.check` (typemod_hide.ml:53-57). `expand_reverse` passes

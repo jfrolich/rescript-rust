@@ -655,6 +655,11 @@ fn sexp_pattern_desc(
         PatternDesc::Tpat_constant(c) => {
             Sexp::list(vec![Sexp::atom("Tpat_constant"), sexp_constant(c)])
         }
+        PatternDesc::Tpat_interval(c1, c2) => Sexp::list(vec![
+            Sexp::atom("Tpat_interval"),
+            sexp_constant(c1),
+            sexp_constant(c2),
+        ]),
         PatternDesc::Tpat_tuple(pats) => {
             let mut items = vec![Sexp::atom("Tpat_tuple")];
             for p in pats.iter() {

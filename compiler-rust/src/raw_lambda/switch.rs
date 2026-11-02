@@ -858,9 +858,10 @@ fn abstract_shared(
 
 /// Wrap result with catch handlers.
 fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawLambda {
-    // OCaml composes handlers as h(oh(x)), so first handler is outermost.
-    // We reverse to get the first handler as outermost.
-    for (exit_id, handler) in handlers.into_iter().rev() {
+    // switch.ml `abstract_shared` composes `handlers := fun act -> h (oh act)`
+    // in action order, so the first handler is innermost and the last one
+    // outermost.
+    for (exit_id, handler) in handlers {
         if let RawLambda::LstaticRaise(j, _) = result.peel() {
             if *j == exit_id {
                 result = handler;

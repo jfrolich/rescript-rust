@@ -30,7 +30,7 @@ use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::decl::{ConstructorDescription, LabelDescription, RecordRepresentation};
-use crate::types::parmatch::ConstKey;
+use crate::types::parmatch::{int_range, make_int_range};
 use crate::types::type_expr::TypeExprRef;
 use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::typedtree::Partial;
@@ -460,6 +460,13 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
+        (
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..),
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..),
+        ) => match (int_range(p), int_range(q)) {
+            (Some((lo1, hi1)), Some((lo2, hi2))) => lo1 <= lo2 && hi2 <= hi1,
+            _ => false,
+        },
         (PatternDesc::Tpat_construct(_, c1, ps), PatternDesc::Tpat_construct(_, c2, qs)) => {
             same_constructor(c1, c2) && le_pats(ps, qs)
         }
@@ -548,6 +555,15 @@ fn lub_cow<'x>(p: &'x Pattern, q: &'x Pattern) -> Result<Cow<'x, Pattern>, Empty
         {
             Ok(Cow::Borrowed(p))
         }
+        (
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..),
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..),
+        ) => match (int_range(p), int_range(q)) {
+            (Some((lo1, hi1)), Some((lo2, hi2))) if lo1.max(lo2) <= hi1.min(hi2) => {
+                Ok(Cow::Owned(make_int_range(p, lo1.max(lo2), hi1.min(hi2))))
+            }
+            _ => Err(Empty),
+        },
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => {
             let rs = lubs_owned(ps, qs)?;
             Ok(Cow::Owned(make_pat(
@@ -686,7 +702,7 @@ fn lubs<'p>(
 /// Equivalent to OCaml's `normalize_pat`.
 fn normalize_pat<'p>(pa: &'p PatArena, q: &'p Pattern) -> &'p Pattern {
     match &q.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => q,
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => q,
         PatternDesc::Tpat_alias(p, _, _) => normalize_pat(pa, p),
         _ => pa.alloc(normalize_pat_owned(q)),
     }
@@ -694,7 +710,9 @@ fn normalize_pat<'p>(pa: &'p PatArena, q: &'p Pattern) -> &'p Pattern {
 
 fn normalize_pat_owned(q: &Pattern) -> Pattern {
     match &q.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => q.clone(),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => {
+            q.clone()
+        }
         PatternDesc::Tpat_var(..) => make_pat(PatternDesc::Tpat_any, q.pat_type, q.pat_env),
         PatternDesc::Tpat_alias(p, _, _) => normalize_pat_owned(p),
         PatternDesc::Tpat_tuple(args) => make_pat(
@@ -825,7 +843,7 @@ fn do_set_args<'p>(
                 rest,
             )
         }
-        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_any => {
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) | PatternDesc::Tpat_any => {
             let mut result = Vec::with_capacity(r.len() + 1);
             result.push(q);
             result.extend_from_slice(r);
@@ -966,6 +984,13 @@ fn may_compat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
+        (
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..),
+            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..),
+        ) => match (int_range(p), int_range(q)) {
+            (Some((lo1, hi1)), Some((lo2, hi2))) => lo1 <= hi2 && lo2 <= hi1,
+            _ => false,
+        },
         (PatternDesc::Tpat_variant(l1, op1, _), PatternDesc::Tpat_variant(l2, op2, _)) => {
             l1 == l2
                 && match (op1, op2) {
@@ -1328,6 +1353,23 @@ where
                 _ => Err(MatchError::NoMatch),
             },
         ),
+        // `p` is a piece of a split column; values matched by a context
+        // range that overlaps it may reach it.
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..)
+            if int_range(p).is_some() =>
+        {
+            Box::new(
+                move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
+                    PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..)
+                        if may_compat(p, q) =>
+                    {
+                        Ok((p, rem.to_vec()))
+                    }
+                    PatternDesc::Tpat_any => Ok((p, rem.to_vec())),
+                    _ => Err(MatchError::NoMatch),
+                },
+            )
+        }
         PatternDesc::Tpat_constant(cst) => {
             Box::new(
                 move |q: &'p Pattern, rem: &[&'p Pattern]| match &q.pat_desc {
@@ -2889,48 +2931,13 @@ pub fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 /// Equivalent to OCaml's `as_matrix`.
 pub fn as_matrix<'p>(cases: &[Clause<'p>]) -> Matrix<'p> {
     let rows: Vec<&Vec<&'p Pattern>> = cases.iter().map(|(ps, _)| ps).collect();
-    get_mins_pats(rows).into_iter().cloned().collect()
-}
-
-/// parmatch.ml `get_mins_pats`: `get_mins le_pats pss`, but faster for many
-/// rows starting with distinct constants, e.g. an expanded character range.
-/// A row starting with an int, char or string constant can only be covered
-/// by rows starting with the same constant or with another kind of pattern,
-/// so only those are compared.
-fn get_mins_pats<'r, 'p>(pss: Vec<&'r Vec<&'p Pattern>>) -> Vec<&'r Vec<&'p Pattern>> {
-    // `select_rec [] pss` of `get_mins le_pats`: drops each row covered by a
-    // later row, and reverses the order.
-    fn select<'r, 'p>(pss: &[&'r Vec<&'p Pattern>]) -> Vec<&'r Vec<&'p Pattern>> {
-        let mut later: Vec<usize> = Vec::new();
-        let mut later_by_key: HashMap<ConstKey, Vec<usize>> = HashMap::default();
-        let mut later_unkeyed: Vec<usize> = Vec::new();
-        let mut kept = Vec::new();
-        for i in (0..pss.len()).rev() {
-            let ps = pss[i];
-            let key = ps.first().and_then(|p| match &p.pat_desc {
-                PatternDesc::Tpat_constant(c) => crate::types::parmatch::const_key(c),
-                _ => None,
-            });
-            let below = |j: &usize| le_pats(pss[*j], ps);
-            let dominated = match &key {
-                None => later.iter().any(below),
-                Some(c) => {
-                    later_by_key.get(c).is_some_and(|js| js.iter().any(below))
-                        || later_unkeyed.iter().any(below)
-                }
-            };
-            later.push(i);
-            match key {
-                None => later_unkeyed.push(i),
-                Some(c) => later_by_key.entry(c).or_default().push(i),
-            }
-            if !dominated {
-                kept.push(ps);
-            }
-        }
-        kept
-    }
-    select(&select(&pss))
+    get_mins(
+        |a: &&Vec<&'p Pattern>, b: &&Vec<&'p Pattern>| le_pats(a, b),
+        rows,
+    )
+    .into_iter()
+    .cloned()
+    .collect()
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
@@ -3011,6 +3018,7 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
         PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(r, p),
         PatternDesc::Tpat_or(p, _, _) => extract_vars(r, p),
         PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_any
         | PatternDesc::Tpat_variant(_, None, _) => r,
     }
@@ -3036,6 +3044,7 @@ fn pattern_binds_vars(p: &Pattern) -> bool {
             pattern_binds_vars(p)
         }
         PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_any
         | PatternDesc::Tpat_variant(_, None, _) => false,
     }
@@ -3298,7 +3307,10 @@ fn pat_as_constr(p: &Pattern) -> &crate::types::ConstructorDescription {
 /// Group predicate for constant patterns.
 /// Equivalent to OCaml's `group_constant`.
 fn group_constant(p: &Pattern) -> bool {
-    matches!(&p.pat_desc, PatternDesc::Tpat_constant(_))
+    matches!(
+        &p.pat_desc,
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..)
+    )
 }
 
 /// Group predicate for constructor patterns.
@@ -3348,7 +3360,7 @@ fn group_array(p: &Pattern) -> bool {
 fn get_group(p: &Pattern) -> fn(&Pattern) -> bool {
     match &p.pat_desc {
         PatternDesc::Tpat_any => group_var,
-        PatternDesc::Tpat_constant(_) => group_constant,
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => group_constant,
         PatternDesc::Tpat_construct(_, _, _) => group_constructor,
         PatternDesc::Tpat_tuple(_) => group_tuple,
         PatternDesc::Tpat_record(_, _, _) => group_record,
@@ -3360,8 +3372,21 @@ fn get_group(p: &Pattern) -> fn(&Pattern) -> bool {
 
 /// Check if a pattern is an or-pattern.
 /// Equivalent to OCaml's `is_or`.
-fn is_or(p: &Pattern) -> bool {
-    matches!(&p.pat_desc, PatternDesc::Tpat_or(_, _, _))
+/// `is_or p ps`: a row starting with an or-pattern. An interval is
+/// precompiled like an or-pattern of its values when the rest of its row
+/// tests something: that is then compiled once, in a handler, instead of
+/// once per piece of the column.
+fn is_or(p: &Pattern, ps: &[&Pattern]) -> bool {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(_, _, _) => true,
+        PatternDesc::Tpat_interval(..) => ps.iter().any(|q| {
+            !matches!(
+                q.pat_desc,
+                PatternDesc::Tpat_any | PatternDesc::Tpat_var(..)
+            )
+        }),
+        _ => false,
+    }
 }
 
 // ============================================================================
@@ -3386,7 +3411,7 @@ fn or_ok_iter<'p: 'a, 'a>(
     mut clauses: impl Iterator<Item = &'a Clause<'p>>,
 ) -> bool {
     clauses.all(|(row, act)| match row.split_first() {
-        Some((q, qs)) if is_or(q) => conda(p, q) || condb(act, ps, qs),
+        Some((q, qs)) if is_or(q, qs) => conda(p, q) || condb(act, ps, qs),
         _ => true,
     })
 }
@@ -3448,7 +3473,7 @@ fn insert_or_append<'p>(
         };
         let act_q = &cl.1;
 
-        if is_or(q_head) && may_compat(p, q_head) {
+        if is_or(q_head, qs) && may_compat(p, q_head) {
             if !pattern_binds_vars(p) && !pattern_binds_vars(q_head) && equiv_pat(p, q_head) {
                 // OCaml compiler/ml/matching.ml:743-756 checks the tail after
                 // the equivalent-prefix group. Keep that as deque iteration so
@@ -3618,7 +3643,7 @@ fn do_split_or<'p>(
             let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
             let act = &cl.1;
             if up_ok_iter(ctx_ref, cl.0.as_slice(), act, no.iter()) {
-                if is_or(p) {
+                if is_or(p, ps) {
                     let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
                     ors = new_ors;
                     no = new_no;
@@ -4383,7 +4408,7 @@ fn do_cases_or_deque<'p>(
         None => (VecDeque::new(), Vec::new()),
         Some((cl, rem)) => {
             match cl.0.first() {
-                Some(orp) if is_or(orp) => {
+                Some(orp) if is_or(orp, &cl.0[1..]) => {
                     let patl = &cl.0[1..];
                     let action = &cl.1;
 
@@ -4534,11 +4559,7 @@ fn add<'p, K>(
 /// conses the current case with `add` (`compiler/ml/matching.ml:1100-1108`).
 /// Iterating from the tail, pushing, and reversing once preserves the same
 /// group/case order without Rust `Vec::insert(0, ...)` shifting every element.
-///
-/// Cells whose key has a `hashable` key are also found by hashing, which must
-/// agree with `eq_key`. This keeps a column of many distinct keys linear.
 fn divide<'p, K>(
-    hashable: impl Fn(&K) -> Option<ConstKey>,
     make: impl Fn(&'p Pattern, &DefaultEnv<'p>, &[Ctx<'p>], &MatchArgs) -> MatchCell<'p>,
     eq_key: impl Fn(&K, &K) -> bool,
     get_key: impl Fn(&'p Pattern) -> K,
@@ -4547,28 +4568,17 @@ fn divide<'p, K>(
     pm: &PatternMatching<'p>,
 ) -> Vec<(K, MatchCell<'p>)> {
     let mut division: Vec<(K, MatchCell<'p>)> = Vec::new();
-    let mut cells: HashMap<ConstKey, usize> = HashMap::default();
 
     for (patl, action) in pm.cases.iter().rev() {
         let Some((p, rest_patl)) = patl.split_first() else {
             division.clear();
-            cells.clear();
             continue;
         };
 
         let key = get_key(p);
         let patl_action = (get_args(p, rest_patl), action.clone());
 
-        if let Some(hash_key) = hashable(&key) {
-            if let Some(&pos) = cells.get(&hash_key) {
-                division[pos].1.pm.cases.push(patl_action);
-            } else {
-                let mut cell = make(p, &pm.default, ctx, &pm.args);
-                cell.pm.cases.push(patl_action);
-                cells.insert(hash_key, division.len());
-                division.push((key, cell));
-            }
-        } else if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
+        if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
             division[pos].1.pm.cases.push(patl_action);
         } else {
             let mut cell = make(p, &pm.default, ctx, &pm.args);
@@ -4626,20 +4636,51 @@ fn divide_line<'p>(
 
 // --- Constants (lines 1148-1177) ---
 
+/// The key of a constant column is a range of constants: `(c, c)` for a
+/// constant `c`, and the bounds of a piece of a split interval column.
+type ConstantKey = (Constant, Constant);
+
+/// `int_key key`: the bounds of an int or char key.
+fn int_key((c1, c2): &ConstantKey) -> Option<(i64, i64)> {
+    Some((
+        crate::types::parmatch::int_of_constant(c1)?,
+        crate::types::parmatch::int_of_constant(c2)?,
+    ))
+}
+
 /// Matcher for constant patterns.
 /// Equivalent to OCaml's `matcher_const`.
 fn matcher_const<'p>(
-    cst: &Constant,
+    key: &ConstantKey,
     p: &'p Pattern,
     rem: &[&'p Pattern],
 ) -> Result<Vec<&'p Pattern>, MatchError> {
     match &p.pat_desc {
-        PatternDesc::Tpat_or(p1, p2, _) => match matcher_const(cst, p1, rem) {
+        PatternDesc::Tpat_or(p1, p2, _) => match matcher_const(key, p1, rem) {
             Ok(r) => Ok(r),
-            Err(MatchError::NoMatch) => matcher_const(cst, p2, rem),
+            Err(MatchError::NoMatch) => matcher_const(key, p2, rem),
             Err(e) => Err(e),
         },
-        PatternDesc::Tpat_constant(c1) if const_compare(c1, cst) == std::cmp::Ordering::Equal => {
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..)
+            if int_range(p).is_some() =>
+        {
+            match (int_key(key), int_range(p)) {
+                (Some((lo, hi)), Some((a, b))) => {
+                    if a <= lo && hi <= b {
+                        Ok(rem.to_vec())
+                    } else if b < lo || hi < a {
+                        Err(MatchError::NoMatch)
+                    } else {
+                        crate::misc::fatal_error("Matching.matcher_const: range across a piece")
+                    }
+                }
+                _ => Err(MatchError::NoMatch),
+            }
+        }
+        PatternDesc::Tpat_constant(c)
+            if const_compare(c, &key.0) == std::cmp::Ordering::Equal
+                && const_compare(c, &key.1) == std::cmp::Ordering::Equal =>
+        {
             Ok(rem.to_vec())
         }
         PatternDesc::Tpat_any => Ok(rem.to_vec()),
@@ -4647,11 +4688,12 @@ fn matcher_const<'p>(
     }
 }
 
-/// Get the key (constant) from a constant pattern.
+/// Get the key (a range of constants) from a constant or interval pattern.
 /// Equivalent to OCaml's `get_key_constant`.
-fn get_key_constant(caller: &str, p: &Pattern) -> Constant {
+fn get_key_constant(caller: &str, p: &Pattern) -> ConstantKey {
     match &p.pat_desc {
-        PatternDesc::Tpat_constant(cst) => cst.clone(),
+        PatternDesc::Tpat_constant(cst) => (cst.clone(), cst.clone()),
+        PatternDesc::Tpat_interval(lo, hi) => (lo.clone(), hi.clone()),
         _ => {
             panic!("get_key_constant ({caller}): not a constant pattern");
         }
@@ -4692,22 +4734,109 @@ fn make_constant_matching<'p>(
     }
 }
 
+/// `column_int_ranges m`: the int and char ranges of the first column of
+/// the cases and of the default matrices, when one of them is an interval.
+fn column_int_ranges(m: &PatternMatching<'_>) -> Option<Vec<(i64, i64)>> {
+    fn heads(p: &Pattern, has_interval: &mut bool, acc: &mut Vec<(i64, i64)>) {
+        match &p.pat_desc {
+            PatternDesc::Tpat_alias(p, _, _) => heads(p, has_interval, acc),
+            PatternDesc::Tpat_or(p1, p2, _) => {
+                heads(p2, has_interval, acc);
+                heads(p1, has_interval, acc);
+            }
+            desc => {
+                if matches!(desc, PatternDesc::Tpat_interval(..)) {
+                    *has_interval = true;
+                }
+                if let Some(r) = int_range(p) {
+                    acc.push(r);
+                }
+            }
+        }
+    }
+    let mut has_interval = false;
+    let mut ranges = Vec::new();
+    let rows = m
+        .cases
+        .iter()
+        .map(|(ps, _)| ps)
+        .chain(m.default.iter().flat_map(|(pss, _)| pss.iter()));
+    for row in rows {
+        if let Some(p) = row.first() {
+            heads(p, &mut has_interval, &mut ranges);
+        }
+    }
+    has_interval.then_some(ranges)
+}
+
+/// `divide_constant_ranges ranges ctx m`: divides a column with intervals
+/// into pieces cut at the bounds of all its ranges, so that each range
+/// covers whole pieces. A case goes to every piece its head covers; the
+/// number of pieces depends on the number of patterns, not on the width of
+/// the ranges.
+fn divide_constant_ranges<'p>(
+    pa: &'p PatArena,
+    ranges: &[(i64, i64)],
+    ctx: &[Ctx<'p>],
+    m: &PatternMatching<'p>,
+) -> Vec<(ConstantKey, MatchCell<'p>)> {
+    let mut cuts: Vec<i64> = ranges.iter().flat_map(|&(lo, hi)| [lo, hi + 1]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let n = cuts.len() - 1;
+    let index = |x: i64| {
+        cuts.binary_search(&x)
+            .expect("Matching.divide_constant_ranges: a bound is a cut")
+    };
+    let mut rows: Vec<Vec<Clause<'p>>> = vec![Vec::new(); n];
+    let mut heads: Vec<Option<&'p Pattern>> = vec![None; n];
+    for (patl, action) in &m.cases {
+        let Some((p, patl)) = patl.split_first() else {
+            crate::misc::fatal_error("Matching.divide_constant_ranges");
+        };
+        match int_range(p) {
+            Some((lo, hi)) => {
+                for i in index(lo)..index(hi + 1) {
+                    rows[i].push((get_args_constant(p, patl), action.clone()));
+                    heads[i].get_or_insert(*p);
+                }
+            }
+            None => {
+                get_key_constant("divide", p);
+            }
+        }
+    }
+    let mut cells = Vec::new();
+    for i in (0..n).rev() {
+        if let Some(head) = heads[i] {
+            let p = pa.alloc(make_int_range(head, cuts[i], cuts[i + 1] - 1));
+            let mut cell = make_constant_matching(pa, p, &m.default, ctx, &m.args);
+            cell.pm.cases = std::mem::take(&mut rows[i]);
+            cells.push((get_key_constant("divide", p), cell));
+        }
+    }
+    cells.reverse();
+    cells
+}
+
 /// Divide a pattern matching by constant values.
 /// Equivalent to OCaml's `divide_constant`.
 fn divide_constant<'p>(
     pa: &'p PatArena,
     ctx: &[Ctx<'p>],
     m: &PatternMatching<'p>,
-) -> Vec<(Constant, MatchCell<'p>)> {
-    divide(
-        crate::types::parmatch::const_key,
-        |p, d, c, a| make_constant_matching(pa, p, d, c, a),
-        |c, d| const_compare(c, d) == std::cmp::Ordering::Equal,
-        |p| get_key_constant("divide", p),
-        get_args_constant,
-        ctx,
-        m,
-    )
+) -> Vec<(ConstantKey, MatchCell<'p>)> {
+    match column_int_ranges(m) {
+        Some(ranges) => divide_constant_ranges(pa, &ranges, ctx, m),
+        None => divide(
+            |p, d, c, a| make_constant_matching(pa, p, d, c, a),
+            |(c, _), (d, _)| const_compare(c, d) == std::cmp::Ordering::Equal,
+            |p| get_key_constant("divide", p),
+            get_args_constant,
+            ctx,
+            m,
+        ),
+    }
 }
 
 // --- Constructors (lines 1180-1289) ---
@@ -5020,7 +5149,6 @@ fn divide_constructor<'p>(
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
     divide(
-        |_| None,
         |p, def, ctx_inner, args| make_constr_matching(ctx_ref, pa, arena, p, def, ctx_inner, args),
         |left, right| same_constructor(left, right),
         get_key_constr,
@@ -5042,7 +5170,9 @@ fn divide_constructor<'p>(
 fn rejects_nested_some(ctx_ref: &TypeContext, p: &Pattern) -> bool {
     use crate::types::variant_runtime::{Block, BlockType, ConstructorCase, LiteralTag};
     match &p.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => true,
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => {
+            true
+        }
         PatternDesc::Tpat_or(p1, p2, _) => {
             rejects_nested_some(ctx_ref, p1) && rejects_nested_some(ctx_ref, p2)
         }
@@ -5715,7 +5845,6 @@ fn divide_array<'p>(
     pm: &PatternMatching<'p>,
 ) -> Vec<(usize, MatchCell<'p>)> {
     divide(
-        |_| None,
         |p, d, c, a| make_array_matching(pa, arena, p, d, c, a),
         |a, b| a == b,
         get_key_array,
@@ -6176,26 +6305,38 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
 
 /// Get the last key from a sorted list of (int, lambda) pairs.
 /// Equivalent to OCaml's `last`.
-fn last_key(def: i32, l: &[(i32, RawLambda)]) -> i32 {
+fn last_key(def: i32, l: &[(i32, i32, RawLambda)]) -> i32 {
     match l.last() {
         None => def,
-        Some((x, _)) => *x,
+        Some((_, x, _)) => *x,
     }
 }
 
-/// Get the edge values (low, high) from a sorted list.
+/// Get the edge values (low, high) from a sorted list of ranges.
 /// Equivalent to OCaml's `get_edges`.
-fn get_edges(low: i32, high: i32, l: &[(i32, RawLambda)]) -> (i32, i32) {
+fn get_edges(low: i32, high: i32, l: &[(i32, i32, RawLambda)]) -> (i32, i32) {
     match l.first() {
         None => (low, high),
-        Some((x, _)) => (*x, last_key(high, l)),
+        Some((x, _, _)) => (*x, last_key(high, l)),
     }
 }
 
-/// Remaining `(key, action)` cases, consumed front to back.
-type IntCases = std::vec::IntoIter<(i32, RawLambda)>;
+/// Remaining `(lo, hi, action)` cases, consumed front to back.
+type IntCases = std::vec::IntoIter<(i32, i32, RawLambda)>;
 
-/// Convert a sorted int-lambda list with a fail action into intervals.
+/// `do_store _tag i j act` of `as_interval_canfail`: the action of a range
+/// `i .. j` is used for each of its values. Storing it as shared emits it
+/// once, as an expanded range sharing the action of each value used to;
+/// copies would declare its variables twice.
+fn store_range_action(store: &mut StoreExp, i: i32, j: i32, act: RawLambda) -> usize {
+    if i < j {
+        store.act_store_shared(act)
+    } else {
+        store.act_store(act)
+    }
+}
+
+/// Convert a sorted range-lambda list with a fail action into intervals.
 /// Equivalent to OCaml's `as_interval_canfail`.
 ///
 /// The actions are moved into the store; the recursion mirrors OCaml's
@@ -6204,11 +6345,11 @@ fn as_interval_canfail(
     fail: RawLambda,
     low: i32,
     high: i32,
-    l: Vec<(i32, RawLambda)>,
+    l: Vec<(i32, i32, RawLambda)>,
 ) -> (Vec<(i32, i32, usize)>, StoreExp) {
     let mut store = StoreExp::mk_store();
 
-    let fail_idx = store.act_store(fail);
+    let fail_idx = store_range_action(&mut store, 0, 0, fail);
     assert_eq!(fail_idx, 0); // fail has action index 0
 
     fn nofail_rec(
@@ -6219,37 +6360,37 @@ fn as_interval_canfail(
         high: i32,
         store: &mut StoreExp,
     ) -> Vec<(i32, i32, usize)> {
-        let Some((i, act_i)) = rest.next() else {
+        let Some((i, j, act_i)) = rest.next() else {
             return if cur_high == high {
                 vec![(cur_low, cur_high, cur_act)]
             } else {
                 vec![(cur_low, cur_high, cur_act), (cur_high + 1, high, 0)]
             };
         };
-        let act_index = store.act_store(act_i);
+        let act_index = store_range_action(store, i, j, act_i);
         if cur_high + 1 == i {
             if act_index == cur_act {
-                nofail_rec(cur_low, i, cur_act, rest, high, store)
+                nofail_rec(cur_low, j, cur_act, rest, high, store)
             } else if act_index == 0 {
                 let mut r = vec![(cur_low, i - 1, cur_act)];
-                r.extend(fail_rec(i, i, rest, high, store));
+                r.extend(fail_rec(i, j, rest, high, store));
                 r
             } else {
                 let mut r = vec![(cur_low, i - 1, cur_act)];
-                r.extend(nofail_rec(i, i, act_index, rest, high, store));
+                r.extend(nofail_rec(i, j, act_index, rest, high, store));
                 r
             }
         } else if act_index == 0 {
-            // OCaml recurses with `fail_rec (cur_high + 1) (cur_high + 1) l`,
+            // OCaml recurses with `fail_rec (cur_high + 1) (cur_high + 1) all`,
             // re-storing this case's action. That store hits the fail action
             // again (index 0, already marked shared), so `fail_rec` continues
-            // as `fail_rec (cur_high + 1) i rem`.
+            // as `fail_rec (cur_high + 1) j rem`.
             let mut r = vec![(cur_low, cur_high, cur_act)];
-            r.extend(fail_rec(cur_high + 1, i, rest, high, store));
+            r.extend(fail_rec(cur_high + 1, j, rest, high, store));
             r
         } else {
             let mut r = vec![(cur_low, cur_high, cur_act), (cur_high + 1, i - 1, 0)];
-            r.extend(nofail_rec(i, i, act_index, rest, high, store));
+            r.extend(nofail_rec(i, j, act_index, rest, high, store));
             r
         }
     }
@@ -6261,15 +6402,15 @@ fn as_interval_canfail(
         high: i32,
         store: &mut StoreExp,
     ) -> Vec<(i32, i32, usize)> {
-        let Some((i, act_i)) = rest.next() else {
+        let Some((i, j, act_i)) = rest.next() else {
             return vec![(cur_low, cur_high, 0)];
         };
-        let index = store.act_store(act_i);
+        let index = store_range_action(store, i, j, act_i);
         if index == 0 {
-            fail_rec(cur_low, i, rest, high, store)
+            fail_rec(cur_low, j, rest, high, store)
         } else {
             let mut r = vec![(cur_low, i - 1, 0)];
-            r.extend(nofail_rec(i, i, index, rest, high, store));
+            r.extend(nofail_rec(i, j, index, rest, high, store));
             r
         }
     }
@@ -6277,16 +6418,16 @@ fn as_interval_canfail(
     let mut rest = l.into_iter();
     let intervals = match rest.next() {
         None => vec![(low, high, 0)],
-        Some((i, act_i)) => {
-            let index = store.act_store(act_i);
+        Some((i, j, act_i)) => {
+            let index = store_range_action(&mut store, i, j, act_i);
             if index == 0 {
-                fail_rec(low, i, &mut rest, high, &mut store)
+                fail_rec(low, j, &mut rest, high, &mut store)
             } else if low < i {
                 let mut r = vec![(low, i - 1, 0)];
-                r.extend(nofail_rec(i, i, index, &mut rest, high, &mut store));
+                r.extend(nofail_rec(i, j, index, &mut rest, high, &mut store));
                 r
             } else {
-                nofail_rec(i, i, index, &mut rest, high, &mut store)
+                nofail_rec(i, j, index, &mut rest, high, &mut store)
             }
         }
     };
@@ -6294,9 +6435,9 @@ fn as_interval_canfail(
     (intervals, store)
 }
 
-/// Convert a sorted int-lambda list (no fail action) into intervals.
+/// Convert a sorted range-lambda list (no fail action) into intervals.
 /// Equivalent to OCaml's `as_interval_nofail`.
-fn as_interval_nofail(l: Vec<(i32, RawLambda)>) -> (Vec<(i32, i32, usize)>, StoreExp) {
+fn as_interval_nofail(l: Vec<(i32, i32, RawLambda)>) -> (Vec<(i32, i32, usize)>, StoreExp) {
     let mut store = StoreExp::mk_store();
 
     fn i_rec(
@@ -6306,51 +6447,47 @@ fn as_interval_nofail(l: Vec<(i32, RawLambda)>) -> (Vec<(i32, i32, usize)>, Stor
         rest: &mut IntCases,
         store: &mut StoreExp,
     ) -> Vec<(i32, i32, usize)> {
-        let Some((i, act)) = rest.next() else {
+        let Some((i, j, act)) = rest.next() else {
             return vec![(cur_low, cur_high, cur_act)];
         };
-        let act_index = store.act_store(act);
+        let act_index = store_range_action(store, i, j, act);
         if act_index == cur_act {
-            i_rec(cur_low, i, cur_act, rest, store)
+            i_rec(cur_low, j, cur_act, rest, store)
         } else {
             let mut r = vec![(cur_low, cur_high, cur_act)];
-            r.extend(i_rec(i, i, act_index, rest, store));
+            r.extend(i_rec(i, j, act_index, rest, store));
             r
         }
     }
 
     assert!(!l.is_empty());
     // OCaml `some_hole` is applied to the tail of the list.
-    let has_hole = l[1..].windows(2).any(|w| w[1].0 > w[0].0 + 1);
+    let has_hole = l[1..].windows(2).any(|w| w[1].0 > w[0].1 + 1);
     let mut rest = l.into_iter();
-    let (i, act) = rest.next().expect("non-empty");
-    let act_index = if has_hole {
+    let (i, j, act) = rest.next().expect("non-empty");
+    // In case there is some hole and that a switch is emitted, action 0 will
+    // be used as the action of unreachable cases (cf. switch.ml,
+    // make_switch). Hence, this action will be shared.
+    let act_index = if has_hole || i < j {
         store.act_store_shared(act)
     } else {
         store.act_store(act)
     };
     assert_eq!(act_index, 0);
-    let inters = i_rec(i, i, act_index, &mut rest, &mut store);
+    let inters = i_rec(i, j, act_index, &mut rest, &mut store);
 
     (inters, store)
 }
 
-/// Sort an int-lambda list by key.
-/// Equivalent to OCaml's `sort_int_lambda_list`.
-fn sort_int_lambda_list(mut l: Vec<(i32, RawLambda)>) -> Vec<(i32, RawLambda)> {
-    l.sort_by(|(i1, _), (i2, _)| i1.cmp(i2));
-    l
-}
-
-/// Convert an int-lambda list into intervals for the switch compiler.
-/// Equivalent to OCaml's `as_interval`.
-fn as_interval(
+/// `as_interval_ranges fail low high l`: `l` maps disjoint ranges
+/// `lo .. hi` to actions.
+fn as_interval_ranges(
     fail: Option<RawLambda>,
     low: i32,
     high: i32,
-    l: Vec<(i32, RawLambda)>,
+    mut l: Vec<(i32, i32, RawLambda)>,
 ) -> ((i32, i32), (Vec<(i32, i32, usize)>, StoreExp)) {
-    let l = sort_int_lambda_list(l);
+    l.sort_by_key(|&(i, _, _)| i);
     let edges = get_edges(low, high, &l);
     let result = match fail {
         None => as_interval_nofail(l),
@@ -6369,7 +6506,23 @@ pub fn call_switcher(
     int_lambda_list: Vec<(i32, RawLambda)>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
+    let range_lambda_list = int_lambda_list
+        .into_iter()
+        .map(|(i, act)| (i, i, act))
+        .collect();
+    call_switcher_ranges(fail, arg, low, high, range_lambda_list, next_raise_count)
+}
+
+/// `call_switcher_ranges fail arg low high range_lambda_list`.
+fn call_switcher_ranges(
+    fail: Option<RawLambda>,
+    arg: RawLambda,
+    low: i32,
+    high: i32,
+    range_lambda_list: Vec<(i32, i32, RawLambda)>,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    let (edges, (cases, store)) = as_interval_ranges(fail, low, high, range_lambda_list);
 
     // Pass the existing action array through without re-storing it. The cases
     // above already contain indices into this exact array.
@@ -6765,41 +6918,38 @@ fn combine_constant<'p>(
     partial: &Partial,
     ctx: &[Ctx<'p>],
     def: &DefaultEnv<'p>,
-    c_div: (Vec<(Constant, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
+    c_div: (Vec<(ConstantKey, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let (const_lambda_list, total, _pats) = c_div;
     let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
     let lambda1 = match cst {
-        Constant::Int(_) => {
-            let int_lambda_list: Vec<(i32, RawLambda)> = const_lambda_list
+        // `char` is an alias of `int`, so a column can mix both. Its keys
+        // are ranges. Match intervals use ReScript's int32 bounds.
+        Constant::Int(_) | Constant::Char(_) => {
+            let range_lambda_list: Vec<(i32, i32, RawLambda)> = const_lambda_list
                 .into_iter()
-                .map(|(c, l)| match c {
-                    Constant::Int(n) => (n as i32, l),
-                    _ => panic!("combine_constant: expected Const_int"),
+                .map(|(key, l)| match int_key(&key) {
+                    Some((lo, hi)) => (lo as i32, hi as i32, l),
+                    None => panic!("combine_constant: expected an int range"),
                 })
                 .collect();
-            call_switcher(
+            call_switcher_ranges(
                 fail,
                 arg,
                 i32::MIN,
                 i32::MAX,
-                int_lambda_list,
+                range_lambda_list,
                 next_raise_count,
             )
         }
-        Constant::Char(_) => {
-            let int_lambda_list: Vec<(i32, RawLambda)> = const_lambda_list
-                .into_iter()
-                .map(|(c, l)| match c {
-                    Constant::Char(ch) => (ch, l),
-                    _ => panic!("combine_constant: expected Const_char"),
-                })
-                .collect();
-            call_switcher(fail, arg, 0, i32::MAX, int_lambda_list, next_raise_count)
-        }
         Constant::String(_) => {
-            let const_lambda_list = sort_lambda_list(const_lambda_list);
+            let const_lambda_list = sort_lambda_list(
+                const_lambda_list
+                    .into_iter()
+                    .map(|((c, _), l)| (c, l))
+                    .collect(),
+            );
             let sw: Vec<(String, RawLambda)> = const_lambda_list
                 .into_iter()
                 .map(|(c, act)| match c {
@@ -6820,7 +6970,10 @@ fn combine_constant<'p>(
             Primitive::Pfloatcomp(Comparison::Neq),
             Primitive::Pfloatcomp(Comparison::Lt),
             arg,
-            const_lambda_list,
+            const_lambda_list
+                .into_iter()
+                .map(|((c, _), l)| (c, l))
+                .collect(),
             next_raise_count,
         ),
         Constant::BigInt(_, _) => make_test_sequence(
@@ -6829,7 +6982,10 @@ fn combine_constant<'p>(
             Primitive::Pbigintcomp(Comparison::Neq),
             Primitive::Pbigintcomp(Comparison::Lt),
             arg,
-            const_lambda_list,
+            const_lambda_list
+                .into_iter()
+                .map(|((c, _), l)| (c, l))
+                .collect(),
             next_raise_count,
         ),
     };
@@ -8227,7 +8383,7 @@ fn do_compile_matching<'p>(
                         next_raise_count,
                     )
                 }
-                PatternDesc::Tpat_constant(cst) => {
+                PatternDesc::Tpat_constant(cst) | PatternDesc::Tpat_interval(cst, _) => {
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let cst_clone = cst.clone();
@@ -8863,6 +9019,7 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
             .any(|entry| find_in_pat(pred, &entry.tdp_pattern)),
         PatternDesc::Tpat_or(p, q, _) => find_in_pat(pred, p) || find_in_pat(pred, q),
         PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_var(_, _)
         | PatternDesc::Tpat_any
         | PatternDesc::Tpat_variant(_, None, _) => false,

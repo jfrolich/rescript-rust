@@ -7480,6 +7480,7 @@ where
         PatternDesc::Tpat_or(left, _right, _) => iter_bound_pattern_idents(left, f),
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => {}
     }
 }

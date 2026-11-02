@@ -214,6 +214,8 @@ pub enum PatternDesc {
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Tpat_constant(Constant),
+    /// `Tpat_interval (lo, hi)`: an int or char range, `lo < hi`.
+    Tpat_interval(Constant, Constant),
 
     /// Tuple: `(P1, ..., Pn)`.
     /// Invariant: length >= 2.

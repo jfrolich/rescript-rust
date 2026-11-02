@@ -2694,13 +2694,13 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         );
     }
 
-    // char = int (private manifest)
+    // predef.ml build_initial_env: `char` is an alias of `int`, so a char
+    // literal is its code point.
     add_type_with_constrs(
         &mut env,
         predef::ident_char(),
         TypeDeclaration {
             type_manifest: Some(ctx.new_generic_constr(predef::path_int(), vec![])),
-            type_private: PrivateFlag::Private,
             ..decl_abstr(0, true)
         },
         ctx,

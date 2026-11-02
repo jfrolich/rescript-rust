@@ -2503,7 +2503,7 @@ fn type_mod_error_to_anyhow_styled(
                     source,
                     filename,
                     *loc,
-                    "Only character intervals are supported in patterns.",
+                    "Only int and char intervals are supported in patterns.",
                 ),
                 2,
             )

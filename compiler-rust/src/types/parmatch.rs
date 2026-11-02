@@ -158,6 +158,8 @@ pub(crate) enum Desc<'a> {
     Var(VarKind),
     Alias(P),
     Constant(Cow<'a, Constant>),
+    /// `Tpat_interval (lo, hi)`: an int or char range.
+    Interval(Constant, Constant),
     Tuple(Vec<P>),
     Construct {
         lid: Option<crate::parse_arena::Located<LidentIdx>>,
@@ -300,6 +302,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
             PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import(inner)),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Borrowed(c)),
+            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.clone(), hi.clone()),
             PatternDesc::Tpat_tuple(items) => {
                 Desc::Tuple(items.iter().map(|item| self.import(item)).collect())
             }
@@ -391,6 +394,71 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
     }
 
+    /// `int_range p`: the values matched by an int or char constant or
+    /// interval, as bounds.
+    fn int_range(&self, p: P) -> Option<(i64, i64)> {
+        match self.desc(p) {
+            Desc::Constant(c) => int_of_constant(c).map(|i| (i, i)),
+            Desc::Interval(lo, hi) => Some((int_of_constant(lo)?, int_of_constant(hi)?)),
+            _ => None,
+        }
+    }
+
+    /// `make_int_range p lo hi`: a constant or interval for `lo .. hi`, of
+    /// the same kind as `p`: chars when `p` starts with a char and the bounds
+    /// can be written as char literals.
+    fn make_int_range(&mut self, p: P, lo: i64, hi: i64) -> P {
+        let starts_with_char = match self.desc(p) {
+            Desc::Constant(c) => matches!(**c, Constant::Char(_)),
+            Desc::Interval(lo, _) => matches!(lo, Constant::Char(_)),
+            _ => false,
+        };
+        let chars = is_valid_uchar(lo) && is_valid_uchar(hi) && starts_with_char;
+        let konst = |i: i64| {
+            if chars {
+                Constant::Char(i as i32)
+            } else {
+                Constant::Int(i)
+            }
+        };
+        let desc = if lo == hi {
+            Desc::Constant(Cow::Owned(konst(lo)))
+        } else {
+            Desc::Interval(konst(lo), konst(hi))
+        };
+        self.with_desc(p, desc)
+    }
+
+    /// `split_int_range q column`: splits interval `q` at the bounds of the
+    /// ranges in `column`, so that each piece is either inside or outside
+    /// each of them. A constant is one piece.
+    fn split_int_range(&mut self, q: P, column: &[P]) -> Vec<P> {
+        let (Desc::Interval(..), Some((lo, hi))) = (self.desc(q), self.int_range(q)) else {
+            return vec![q];
+        };
+        let mut cuts = Vec::new();
+        for &p in column {
+            if let Some((a, b)) = self.int_range(p) {
+                if lo < a && a <= hi {
+                    cuts.push(a);
+                }
+                if b < hi && lo <= b {
+                    cuts.push(b + 1);
+                }
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut pieces = Vec::with_capacity(cuts.len() + 1);
+        let mut start = lo;
+        for c in cuts {
+            pieces.push(self.make_int_range(q, start, c - 1));
+            start = c;
+        }
+        pieces.push(self.make_int_range(q, start, hi));
+        pieces
+    }
+
     fn coherent_heads(&mut self, hp1: P, hp2: P) -> bool {
         enum Check {
             Done(bool),
@@ -401,12 +469,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Construct { .. }, Desc::Construct { .. }) => Check::HeadPaths,
             (Desc::Constant(c1), Desc::Constant(c2)) => Check::Done(matches!(
                 (&**c1, &**c2),
-                (Constant::Char(_), Constant::Char(_))
-                    | (Constant::Int(_), Constant::Int(_))
-                    | (Constant::BigInt(..), Constant::BigInt(..))
+                (
+                    Constant::Char(_) | Constant::Int(_),
+                    Constant::Char(_) | Constant::Int(_)
+                ) | (Constant::BigInt(..), Constant::BigInt(..))
                     | (Constant::Float(_), Constant::Float(_))
                     | (Constant::String(..), Constant::String(..))
             )),
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                Check::Done(self.int_range(hp1).is_some() && self.int_range(hp2).is_some())
+            }
             (Desc::Tuple(l1), Desc::Tuple(l2)) => Check::Done(l1.len() == l2.len()),
             (Desc::Record { fields: f1, .. }, Desc::Record { fields: f2, .. })
                 if !f1.is_empty() && !f2.is_empty() =>
@@ -541,6 +613,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Constant(c1), Desc::Constant(c2)) => {
                 const_compare(c1, c2) == std::cmp::Ordering::Equal
             }
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                match (self.int_range(p), self.int_range(q)) {
+                    (Some((lo1, hi1)), Some((lo2, hi2))) => lo1 <= hi2 && lo2 <= hi1,
+                    _ => false,
+                }
+            }
             (Desc::Tuple(ps), Desc::Tuple(qs)) => self.compats(ps, qs),
             (Desc::Record { fields: l1, .. }, Desc::Record { fields: l2, .. }) => {
                 let (ps, qs) = self.records_args(l1, l2);
@@ -576,8 +654,62 @@ pub(crate) fn const_compare(x: &Constant, y: &Constant) -> std::cmp::Ordering {
             bigint_compare((*s1, b1), (*s2, b2))
         }
         (Constant::String(s1), Constant::String(s2)) => s1.as_bytes().cmp(s2.as_bytes()),
+        // `char` is an alias of `int`.
+        (Constant::Char(_) | Constant::Int(_), Constant::Char(_) | Constant::Int(_)) => {
+            int_of_constant(x).cmp(&int_of_constant(y))
+        }
         _ => constant_structural_compare(x, y),
     }
+}
+
+/// The value of an int or char constant.
+pub(crate) fn int_of_constant(c: &Constant) -> Option<i64> {
+    match c {
+        Constant::Int(i) => Some(*i),
+        Constant::Char(c) => Some(i64::from(*c)),
+        Constant::String(_) | Constant::Float(_) | Constant::BigInt(..) => None,
+    }
+}
+
+/// OCaml `Uchar.is_valid`.
+fn is_valid_uchar(i: i64) -> bool {
+    (0..=0xD7FF).contains(&i) || (0xE000..=0x10FFFF).contains(&i)
+}
+
+/// `Parmatch.int_range` on a typed pattern: the values matched by an int or
+/// char constant or interval, as bounds.
+pub(crate) fn int_range(p: &Pattern) -> Option<(i64, i64)> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_constant(c) => int_of_constant(c).map(|i| (i, i)),
+        PatternDesc::Tpat_interval(lo, hi) => Some((int_of_constant(lo)?, int_of_constant(hi)?)),
+        _ => None,
+    }
+}
+
+/// `Parmatch.make_int_range` on a typed pattern: a constant or interval for
+/// `lo .. hi`, of the same kind as `p`, as `{p with pat_desc; pat_extra = []}`.
+pub(crate) fn make_int_range(p: &Pattern, lo: i64, hi: i64) -> Pattern {
+    let starts_with_char = matches!(
+        &p.pat_desc,
+        PatternDesc::Tpat_constant(Constant::Char(_))
+            | PatternDesc::Tpat_interval(Constant::Char(_), _)
+    );
+    let chars = is_valid_uchar(lo) && is_valid_uchar(hi) && starts_with_char;
+    let konst = |i: i64| {
+        if chars {
+            Constant::Char(i as i32)
+        } else {
+            Constant::Int(i)
+        }
+    };
+    let mut q = p.clone();
+    q.pat_desc = if lo == hi {
+        PatternDesc::Tpat_constant(konst(lo))
+    } else {
+        PatternDesc::Tpat_interval(konst(lo), konst(hi))
+    };
+    q.pat_extra = Default::default();
+    q
 }
 
 /// OCaml `float_of_string` for the float literals kept in the typed tree.
@@ -675,6 +807,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Constant(c1), Desc::Constant(c2)) => {
                 const_compare(c1, c2) == std::cmp::Ordering::Equal
             }
+            // `p1` is a piece of a column split by `split_int_range`, so it
+            // is either inside or outside `p2`.
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                match (self.int_range(p1), self.int_range(p2)) {
+                    (Some((lo1, hi1)), Some((lo2, hi2))) => lo2 <= lo1 && hi1 <= hi2,
+                    _ => false,
+                }
+            }
             (Desc::Record { .. }, Desc::Record { .. }) => true,
             (Desc::Tuple(a), Desc::Tuple(b)) | (Desc::Array(a), Desc::Array(b)) => {
                 a.len() == b.len()
@@ -756,7 +896,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `normalize_pat q` (parmatch.ml:599-622).
     fn normalize_pat(&mut self, q: P) -> P {
         match self.desc(q).clone() {
-            Desc::Any | Desc::Constant(_) => q,
+            Desc::Any | Desc::Constant(_) | Desc::Interval(..) => q,
             Desc::Var(_) => self.make_pat_like(Desc::Any, q),
             Desc::Alias(p) => self.normalize_pat(p),
             Desc::Tuple(args) => {
@@ -917,7 +1057,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let (args, rest) = Self::read_args(omegas.len(), r);
                 (self.make_pat_like(Desc::Array(args), q), rest)
             }
-            Desc::Constant(_) | Desc::Any => (q, r.to_vec()),
+            Desc::Constant(_) | Desc::Interval(..) | Desc::Any => (q, r.to_vec()),
             _ => crate::misc::fatal_error("Parmatch.set_args"),
         };
         let mut result = vec![head];
@@ -977,6 +1117,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         out
     }
 
+    /// `filter_all`'s `same_head`: int and char ranges are grouped by equal
+    /// bounds, not by containment as `simple_match` does, so that
+    /// `build_other` sees every range.
+    fn same_head(&self, q0: P, q: P) -> bool {
+        match (self.int_range(q0), self.int_range(q)) {
+            (Some(r0), Some(r)) => r0 == r,
+            _ => self.simple_match(q0, q),
+        }
+    }
+
     /// `filter_all pat0 pss` (parmatch.ml:770-822).
     fn filter_all(&mut self, pat0: P, pss: &[Row]) -> Vec<(P, Vec<Row>)> {
         // Each group's rows are kept newest-first, like OCaml's `::`.
@@ -986,8 +1136,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             } else {
                 Vec::new()
             };
-        let mut keyed_groups: std::collections::HashMap<GroupKey, usize> =
-            std::collections::HashMap::new();
         // filter_rec
         let mut stack: Vec<Row> = pss.iter().rev().cloned().collect();
         while let Some(row) = stack.pop() {
@@ -1001,21 +1149,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     stack.push(prepend(p1, ps));
                 }
                 Desc::Any | Desc::Var(_) => {}
-                desc => {
-                    // insert p ps: for int, char and string constants and
-                    // for polymorphic variants `simple_match` is equality,
-                    // so their groups are also found by hashing. This keeps
-                    // a column of many distinct heads, e.g. an expanded
-                    // character range, linear instead of quadratic.
-                    let key = match &desc {
-                        Desc::Constant(c) => const_key(c).map(GroupKey::Const),
-                        Desc::Variant { label, .. } => Some(GroupKey::Variant(label.to_string())),
-                        _ => None,
-                    };
-                    let group = match &key {
-                        Some(key) => keyed_groups.get(key).copied(),
-                        None => env.iter().position(|(q0, _)| self.simple_match(*q0, p)),
-                    };
+                _ => {
+                    // insert p ps: the row goes to the group whose head
+                    // matches it; there is at most one such group, since a
+                    // group is only created when no other matches.
+                    let group = env.iter().position(|(q0, _)| self.same_head(*q0, p));
                     if let Some(group) = group {
                         let q0 = env[group].0;
                         let mut new_row = self.simple_match_args(q0, p);
@@ -1025,9 +1163,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         let q0 = self.normalize_pat(p);
                         let mut new_row = self.simple_match_args(q0, p);
                         new_row.extend_from_slice(ps);
-                        if let Some(key) = key {
-                            keyed_groups.insert(key, env.len());
-                        }
                         env.push((q0, std::collections::VecDeque::from(vec![new_row])));
                     }
                 }
@@ -1139,7 +1274,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         })
                 }
             }
-            Desc::Constant(_) => false,
+            Desc::Constant(_) | Desc::Interval(..) => false,
             Desc::Tuple(_) | Desc::Record { .. } => true,
             Desc::Array(_) => false,
             _ => panic!("Parmatch.full_match"),
@@ -1164,6 +1299,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 ConstructorKind::Extension(_) => false,
             },
             Desc::Constant(_)
+            | Desc::Interval(..)
             | Desc::Tuple(_)
             | Desc::Variant { .. }
             | Desc::Record { .. }
@@ -1355,41 +1491,46 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     }
                 }
             }
+            // Int and char constants and intervals can share a column; the
+            // example is the least value from 0 up that no range covers, else
+            // the greatest one below 0, of the kind of the first pattern.
+            // Ranges sorted by a bound are skipped in one pass.
+            Desc::Constant(_) | Desc::Interval(..) if self.int_range(p).is_some() => {
+                let ranges: Vec<(i64, i64)> =
+                    env.iter().filter_map(|(q, _)| self.int_range(*q)).collect();
+                let mut by_lo = ranges.clone();
+                by_lo.sort_by_key(|&(lo, _)| lo);
+                let up = by_lo.iter().fold(
+                    0i64,
+                    |i, &(lo, hi)| {
+                        if lo <= i && i <= hi { hi + 1 } else { i }
+                    },
+                );
+                let int32_max = i64::from(i32::MAX);
+                let int32_min = i64::from(i32::MIN);
+                if up <= int32_max {
+                    Ok(self.make_int_range(p, up, up))
+                } else {
+                    let mut by_hi = ranges;
+                    by_hi.sort_by(|(_, hi1), (_, hi2)| hi2.cmp(hi1));
+                    let other =
+                        by_hi.iter().fold(
+                            -1i64,
+                            |i, &(lo, hi)| {
+                                if lo <= i && i <= hi { lo - 1 } else { i }
+                            },
+                        );
+                    // Every int is covered; ints are never matched
+                    // exhaustively.
+                    if other < int32_min {
+                        Ok(self.omega)
+                    } else {
+                        Ok(self.make_int_range(p, other, other))
+                    }
+                }
+            }
             Desc::Constant(c) => Ok(match c.as_ref() {
-                Constant::Int(_) => {
-                    let all: Vec<i64> = env
-                        .iter()
-                        .filter_map(|(q, _)| match self.desc(*q) {
-                            Desc::Constant(c) => match c.as_ref() {
-                                Constant::Int(i) => Some(*i),
-                                _ => None,
-                            },
-                            _ => None,
-                        })
-                        .collect();
-                    let mut i = 0i64;
-                    while all.contains(&i) {
-                        i += 1;
-                    }
-                    self.make_pat_like(Desc::Constant(Cow::Owned(Constant::Int(i))), p)
-                }
-                Constant::Char(_) => {
-                    let all: Vec<i32> = env
-                        .iter()
-                        .filter_map(|(q, _)| match self.desc(*q) {
-                            Desc::Constant(c) => match c.as_ref() {
-                                Constant::Char(i) => Some(*i),
-                                _ => None,
-                            },
-                            _ => None,
-                        })
-                        .collect();
-                    let mut i = 0i32;
-                    while all.contains(&i) {
-                        i += 1;
-                    }
-                    self.make_pat_like(Desc::Constant(Cow::Owned(Constant::Char(i))), p)
-                }
+                Constant::Int(_) | Constant::Char(_) => unreachable!("int ranges"),
                 Constant::BigInt(..) => {
                     let all: Vec<usize> = env
                         .iter()
@@ -1505,7 +1646,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     }
                 }
             }
-            Desc::Any | Desc::Var(_) | Desc::Constant(_) => true,
+            Desc::Any | Desc::Var(_) | Desc::Constant(_) | Desc::Interval(..) => true,
             Desc::Alias(p) => self.has_instance(p),
             Desc::Or(p1, p2) => self.has_instance(p1) || self.has_instance(p2),
             Desc::Construct { args: ps, .. } | Desc::Tuple(ps) | Desc::Array(ps) => {
@@ -1575,10 +1716,15 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads = Self::heads(pss);
                 let q0 = self.discr_pat(q, &heads);
-                let filtered = self.filter_one(q0, pss);
-                let mut row = self.simple_match_args(q0, q);
-                row.extend_from_slice(qs_rest);
-                self.satisfiable(&filtered, &row)
+                for q0 in self.split_int_range(q0, &column[1..]) {
+                    let filtered = self.filter_one(q0, pss);
+                    let mut row = self.simple_match_args(q0, q);
+                    row.extend_from_slice(qs_rest);
+                    if self.satisfiable(&filtered, &row) {
+                        return true;
+                    }
+                }
+                false
             }
         }
     }
@@ -1638,11 +1784,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads = Self::heads(pss);
                 let q0 = self.discr_pat(q, &heads);
-                let filtered = self.filter_one(q0, pss);
-                let mut row = self.simple_match_args(q0, q);
-                row.extend_from_slice(qs_rest);
-                let results = self.satisfiables(&filtered, &row);
-                results.into_iter().map(|r| self.set_args(q0, &r)).collect()
+                let mut results = Vec::new();
+                for q0 in self.split_int_range(q0, &column[1..]) {
+                    let filtered = self.filter_one(q0, pss);
+                    let mut row = self.simple_match_args(q0, q);
+                    row.extend_from_slice(qs_rest);
+                    for r in self.satisfiables(&filtered, &row) {
+                        results.push(self.set_args(q0, &r));
+                    }
+                }
+                results
             }
         }
     }
@@ -1884,6 +2035,37 @@ fn make_row(ps: Vec<P>) -> URow {
 }
 
 /// `union_res r1 r2`.
+/// `pieces_res rs`: an interval split into pieces is used when one of its
+/// pieces is. An or-pattern below it is unused when every used piece reports
+/// it unused.
+fn pieces_res(rs: Vec<Answer>) -> Answer {
+    let used: Vec<Answer> = rs
+        .into_iter()
+        .filter(|r| !matches!(r, Answer::Unused))
+        .collect();
+    if used.is_empty() {
+        return Answer::Unused;
+    }
+    if used.iter().any(|r| matches!(r, Answer::Used)) {
+        return Answer::Used;
+    }
+    let mut partials = used.into_iter().map(|r| match r {
+        Answer::Upartial(u) => u,
+        _ => Vec::new(),
+    });
+    match partials.next() {
+        None => Answer::Used,
+        Some(u) => {
+            let us: Vec<Vec<P>> = partials.collect();
+            Answer::Upartial(
+                u.into_iter()
+                    .filter(|p| us.iter().all(|u| u.contains(p)))
+                    .collect(),
+            )
+        }
+    }
+}
+
 fn union_res(r1: Answer, r2: Answer) -> Answer {
     match (r1, r2) {
         (Answer::Unused, _) | (_, Answer::Unused) => Answer::Unused,
@@ -2089,16 +2271,25 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads: Vec<P> = pss.iter().map(|r| r.active[0]).collect();
                 let q0 = self.discr_pat(q, &heads);
-                let filtered = self.filter_one_rows(q0, pss);
-                let mut active = self.simple_match_args(q0, q);
-                active.extend_from_slice(rem);
-                self.every_satisfiables(
-                    &filtered,
-                    &URow {
-                        active,
-                        ..qs.clone()
-                    },
-                )
+                let mut piece = |this: &mut Self, q0: P| {
+                    let filtered = this.filter_one_rows(q0, pss);
+                    let mut active = this.simple_match_args(q0, q);
+                    active.extend_from_slice(rem);
+                    this.every_satisfiables(
+                        &filtered,
+                        &URow {
+                            active,
+                            ..qs.clone()
+                        },
+                    )
+                };
+                match self.split_int_range(q0, &column[1..]).as_slice() {
+                    [q0] => piece(self, *q0),
+                    q0s => {
+                        let rs = q0s.iter().map(|q0| piece(self, *q0)).collect();
+                        pieces_res(rs)
+                    }
+                }
             }
         }
     }
@@ -2159,6 +2350,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (_, Desc::Alias(q)) => Step::Pat(p, *q),
             (Desc::Constant(c1), Desc::Constant(c2)) => {
                 Step::Done(const_compare(c1, c2) == std::cmp::Ordering::Equal)
+            }
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                Step::Done(match (self.int_range(p), self.int_range(q)) {
+                    (Some((lo1, hi1)), Some((lo2, hi2))) => lo1 <= lo2 && hi2 <= hi1,
+                    _ => false,
+                })
             }
             (
                 Desc::Construct {
@@ -2227,44 +2424,18 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         ps.iter().zip(qs).all(|(p, q)| self.le_pat(*p, *q))
     }
 
-    /// `get_mins_pats pss` (parmatch.ml): `get_mins le_pats pss`, but faster
-    /// for many rows starting with distinct constants, e.g. an expanded
-    /// character range. A row starting with an int, char or string constant
-    /// can only be covered by rows starting with the same constant or with
-    /// another kind of pattern, so only those are compared.
+    /// `get_mins le_pats ps` (parmatch.ml `get_mins`).
     fn get_mins(&mut self, ps: Vec<Row>) -> Vec<Row> {
         let once = self.select_rec(ps);
         self.select_rec(once)
     }
 
-    /// `select_rec [] pss` of `get_mins le_pats`: drops each row covered by
-    /// a later row, and reverses the order.
+    /// `select_rec [] ps`: keeps each row not covered by a later row, and
+    /// reverses the order.
     fn select_rec(&mut self, pss: Vec<Row>) -> Vec<Row> {
-        let mut later: Vec<usize> = Vec::new();
-        let mut later_by_key: std::collections::HashMap<ConstKey, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut later_unkeyed: Vec<usize> = Vec::new();
         let mut kept: Vec<usize> = Vec::new();
         for i in (0..pss.len()).rev() {
-            let key = pss[i].first().and_then(|&p| match self.desc(p) {
-                Desc::Constant(c) => const_key(c),
-                _ => None,
-            });
-            let candidates: &[usize] = match &key {
-                None => &later,
-                Some(c) => later_by_key.get(c).map_or(&[], Vec::as_slice),
-            };
-            let mut dominated = candidates.iter().any(|&j| self.le_pats(&pss[j], &pss[i]));
-            if !dominated && key.is_some() {
-                dominated = later_unkeyed
-                    .iter()
-                    .any(|&j| self.le_pats(&pss[j], &pss[i]));
-            }
-            later.push(i);
-            match key {
-                None => later_unkeyed.push(i),
-                Some(c) => later_by_key.entry(c).or_default().push(i),
-            }
+            let dominated = (i + 1..pss.len()).any(|j| self.le_pats(&pss[j], &pss[i]));
             if !dominated {
                 kept.push(i);
             }
@@ -2290,6 +2461,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
             PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import_owned(inner)),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Owned(c.clone())),
+            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.clone(), hi.clone()),
             PatternDesc::Tpat_tuple(items) => {
                 Desc::Tuple(items.iter().map(|item| self.import_owned(item)).collect())
             }
@@ -2357,6 +2529,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
             }
             Desc::Constant(c) => PatternDesc::Tpat_constant(c.into_owned()),
+            Desc::Interval(lo, hi) => PatternDesc::Tpat_interval(lo, hi),
             Desc::Tuple(items) => {
                 PatternDesc::Tpat_tuple(items.into_iter().map(|p| self.export(p)).collect())
             }
@@ -2577,6 +2750,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_var(..)
             | PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_interval(..)
             | PatternDesc::Tpat_variant(_, None, _) => {}
             PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
                 for p in ps {
@@ -2662,7 +2836,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     fn children(&self, p: P) -> Vec<P> {
         match self.desc(p) {
-            Desc::Any | Desc::Var(_) | Desc::Constant(_) => Vec::new(),
+            Desc::Any | Desc::Var(_) | Desc::Constant(_) | Desc::Interval(..) => Vec::new(),
             Desc::Alias(p) => vec![*p],
             Desc::Tuple(ps) | Desc::Array(ps) => ps.clone(),
             Desc::Construct { args, .. } => args.clone(),
@@ -2818,7 +2992,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 pub(crate) fn contains_extension(pat: &Pattern) -> bool {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => true,
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(..)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => false,
         PatternDesc::Tpat_alias(p, _, _) => contains_extension(p),
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
             ps.iter().any(contains_extension)
@@ -3132,7 +3309,7 @@ fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
                 pat_bound_idents(&entry.tdp_pattern, out);
             }
         }
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => {}
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
             for p in ps {
                 pat_bound_idents(p, out);
@@ -3149,30 +3326,4 @@ fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
             }
         }
     }
-}
-
-/// A constant that `const_compare` only equates with itself, so it can key a
-/// hash table (parmatch.ml `filter_all`, `get_mins_pats`; matching.ml
-/// `divide_constant`). Floats and bigints compare by value, not spelling.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ConstKey {
-    Int(i64),
-    Char(i32),
-    String(String),
-}
-
-pub(crate) fn const_key(c: &Constant) -> Option<ConstKey> {
-    match c {
-        Constant::Int(i) => Some(ConstKey::Int(*i)),
-        Constant::Char(c) => Some(ConstKey::Char(*c)),
-        Constant::String(s) => Some(ConstKey::String(s.clone())),
-        Constant::Float(_) | Constant::BigInt(..) => None,
-    }
-}
-
-/// `filter_all`'s hashed groups: constants and polymorphic variant labels.
-#[derive(PartialEq, Eq, Hash)]
-enum GroupKey {
-    Const(ConstKey),
-    Variant(String),
 }

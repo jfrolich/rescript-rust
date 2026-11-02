@@ -309,6 +309,7 @@ where
         PatternDesc::Tpat_or(left, _, _) => iter_bound_pattern_idents(left, f),
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => {}
     }
 }
@@ -2138,10 +2139,7 @@ impl<'a> RawLambdaConverter<'a> {
         ty: TypeExprRef,
         env: &crate::types::env::Env,
     ) -> Primitive {
-        if self.is_base_type_with_env(ty, "int", env)
-            || self.is_base_type_with_env(ty, "char", env)
-            || self.is_immediate_type_with_env(ty, env)
-        {
+        if self.is_base_type_with_env(ty, "int", env) || self.is_immediate_type_with_env(ty, env) {
             table.intcomp
         } else if self.is_base_type_with_env(ty, "float", env) {
             table.floatcomp
@@ -6489,6 +6487,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_variant(_, None, _) => false,
             // Matched through the full compiler, which lowers dict patterns.
             PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_interval(..)
             | PatternDesc::Tpat_or(_, _, _)
             | PatternDesc::Tpat_dict(_) => false,
         }

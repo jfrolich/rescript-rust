@@ -231,7 +231,10 @@ pub fn walk_pat<I: TastIterator + ?Sized>(sub: &mut I, p: &Pattern) {
         }
     }
     match &p.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(..)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => {}
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => {

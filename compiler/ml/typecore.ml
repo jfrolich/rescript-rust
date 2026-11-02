@@ -601,7 +601,8 @@ let rec build_as_type env p =
     | Some row ->
       let row = row_repr row in
       newty (Tvariant {row with row_closed = false; row_more = newvar ()}))
-  | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_dict _ | Tpat_array _ ->
+  | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_interval _ | Tpat_dict _
+  | Tpat_array _ ->
     p.pat_type
 
 let build_or_pat env loc lid =
@@ -1422,22 +1423,35 @@ and type_pat_aux ~constrs ~labels ~no_existentials ~mode ~explode ~env sp
         pat_attributes = sp.ppat_attributes;
         pat_env = !env;
       }
-  | Ppat_interval (Pconst_char {semantic = c1}, Pconst_char {semantic = c2}) ->
-    let open Ast_helper.Pat in
-    let gloc = {loc with Location.loc_ghost = true} in
-    let char semantic =
-      Pconst_char
-        {source = String_literal.encode_char_source semantic; semantic}
+  | Ppat_interval (c1, c2) -> (
+    (* [char] is an alias of [int], so bounds may mix both *)
+    let bound c =
+      match constant_or_raise !env loc c with
+      | (Const_int i | Const_char i) as c -> Some (i, c)
+      | Const_string _ | Const_float _ | Const_bigint _ -> None
     in
-    let rec loop c1 c2 =
-      if c1 = c2 then constant ~loc:gloc (char c1)
-      else or_ ~loc:gloc (constant ~loc:gloc (char c1)) (loop (c1 + 1) c2)
-    in
-    let p = if c1 <= c2 then loop c1 c2 else loop c2 c1 in
-    let p = {p with ppat_loc = loc} in
-    type_pat ~explode:0 p expected_ty k
-    (* TODO: record 'extra' to remember about interval *)
-  | Ppat_interval _ -> raise (Error (loc, !env, Invalid_interval))
+    match (bound c1, bound c2) with
+    | Some b1, Some b2 ->
+      let (i1, lo), (i2, hi) =
+        if fst b1 <= fst b2 then (b1, b2) else (b2, b1)
+      in
+      let ty =
+        match (lo, hi) with
+        | Const_char _, Const_char _ -> type_constant lo
+        | _ -> instance_def (Predef.type_int ())
+      in
+      unify_pat_types loc !env ty expected_ty;
+      rp k
+        {
+          pat_desc =
+            (if i1 = i2 then Tpat_constant lo else Tpat_interval (lo, hi));
+          pat_loc = loc;
+          pat_extra = [];
+          pat_type = expected_ty;
+          pat_attributes = sp.ppat_attributes;
+          pat_env = !env;
+        }
+    | _ -> raise (Error (loc, !env, Invalid_interval)))
   | Ppat_tuple spl ->
     assert (List.length spl >= 2);
     let spl_ann = List.map (fun p -> (p, newvar ())) spl in
@@ -5371,7 +5385,7 @@ let report_error env loc ppf error =
        prefix in this pattern.@]"
       name Printtyp.path tpath
   | Invalid_interval ->
-    fprintf ppf "@[Only character intervals are supported in patterns.@]"
+    fprintf ppf "@[Only int and char intervals are supported in patterns.@]"
   | Invalid_for_loop_index ->
     fprintf ppf "@[Invalid for-loop index: only variables and _ are allowed.@]"
   | No_value_clauses ->

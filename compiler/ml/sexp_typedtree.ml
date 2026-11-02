@@ -323,6 +323,8 @@ and pattern_desc ~with_locs desc =
     let p_sexp = pattern ~with_locs p in
     Sexp.list [Sexp.atom "Tpat_alias"; p_sexp; ident id]
   | Tpat_constant c -> Sexp.list [Sexp.atom "Tpat_constant"; constant c]
+  | Tpat_interval (c1, c2) ->
+    Sexp.list [Sexp.atom "Tpat_interval"; constant c1; constant c2]
   | Tpat_tuple l ->
     let items = List.map (pattern ~with_locs) l in
     Sexp.list (Sexp.atom "Tpat_tuple" :: items)
