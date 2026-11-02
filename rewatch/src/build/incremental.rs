@@ -252,6 +252,14 @@ pub fn current_record(
         state_db::META_OUTPUTS.to_string(),
         expected_outputs(build_state, package_name).join("\n"),
     );
+    if build_state
+        .get_package(package_name)
+        .is_some_and(|package| package.is_root)
+    {
+        record
+            .meta
+            .insert(META_MODULE_SET.to_string(), module_set_digest(build_state));
+    }
     if let Some(started) = build_state.build_started_at {
         record.meta.insert(
             state_db::META_BUILD_STARTED_AT.to_string(),
@@ -358,21 +366,24 @@ pub fn current_record(
             Some(written) => {
                 record.reads_updates.insert(module_name.clone(), written.reads);
                 record.items_updates.insert(module_name.clone(), written.items);
-                (Some(written.digest), Some(written.imports))
+                (Some(written.digest), Some(state_db::Imports::new(written.imports)))
             }
             None => recorded_row(build_state, module_name)
                 .filter(|_| !build_state.written_modules.contains(module_name))
                 .map_or((None, None), |row| {
                     let verified = build_state.verified_imports.lock().unwrap();
-                    let imports = row.imports.clone().map(|imports| {
-                        imports
-                            .into_iter()
-                            .map(|(unit, digest)| {
-                                let now = verified.get(module_name).and_then(|units| units.get(&unit));
-                                let digest = now.copied().unwrap_or(digest);
-                                (unit, digest)
-                            })
-                            .collect()
+                    let imports = row.imports.as_ref().map(|imports| match verified.get(module_name) {
+                        // Unchanged: keep the recorded (possibly undecoded) row.
+                        None => imports.clone(),
+                        Some(units) => state_db::Imports::new(
+                            imports
+                                .list()
+                                .iter()
+                                .map(|(unit, digest)| {
+                                    (unit.clone(), units.get(unit).copied().unwrap_or(*digest))
+                                })
+                                .collect(),
+                        ),
                     });
                     (row.interface_digest, imports)
                 }),
@@ -773,7 +784,7 @@ pub fn decode_recorded_imports(
     let imports: AHashSet<&str> = round
         .iter()
         .filter_map(|module_name| recorded_row(build_state, module_name)?.imports.as_ref())
-        .flatten()
+        .flat_map(state_db::Imports::list)
         .map(|(import, _)| import.as_str())
         .filter(|import| loaded.contains(*import))
         .collect();
@@ -1150,7 +1161,17 @@ pub fn plan(build_state: &mut BuildCommandState) {
         // whose interface its compile read now has a different digest.
         // Dependents of a recompiled module are decided once its new digest
         // is known (see `next_round`).
-        let digests = recorded_digests(build_state);
+        // After a build that succeeded in every package, with the same
+        // modules, every recorded import is consistent: it names an existing
+        // module, with that module's recorded digest (the build compiled or
+        // verified every module whose imports changed). Only a build after a
+        // failed one, or with modules added or removed, compares them.
+        let check_imports = !imports_consistent(build_state);
+        let digests = if check_imports {
+            recorded_digests(build_state)
+        } else {
+            AHashMap::new()
+        };
         let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
         for (module_name, own) in &times {
             let own_stale = !own.recorded
@@ -1164,8 +1185,10 @@ pub fn plan(build_state: &mut BuildCommandState) {
                     .iter()
                     .any(|dep| times.get(dep).is_some_and(|times| !times.recorded))
             });
-            let import_removed = row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
+            let import_removed = check_imports
+                && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
                 imports
+                    .list()
                     .iter()
                     .any(|(import, _)| !build_state.modules.contains_key(import))
             });
@@ -1173,10 +1196,13 @@ pub fn plan(build_state: &mut BuildCommandState) {
                 stale.insert(module_name.clone());
                 continue;
             }
+            if !check_imports {
+                continue;
+            }
             let changed: Vec<(String, u64)> = row
                 .and_then(|row| row.imports.as_ref())
                 .into_iter()
-                .flatten()
+                .flat_map(state_db::Imports::list)
                 .filter_map(|(import, digest)| {
                     let current = *digests.get(import)?;
                     (current != *digest).then(|| (import.clone(), current))
@@ -1264,6 +1290,44 @@ fn recorded_row<'a>(build_state: &'a BuildCommandState, module_name: &str) -> Op
         .get(module_name)
 }
 
+/// The metadata key, in the root package's record, of [`module_set_digest`].
+const META_MODULE_SET: &str = "module_set";
+
+/// A digest of the names of every module of the build.
+fn module_set_digest(build_state: &BuildCommandState) -> String {
+    let mut names: Vec<&String> = build_state.modules.keys().collect();
+    names.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for name in names {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex()[..16].to_string()
+}
+
+/// Whether the previous build left every recorded import consistent (see
+/// `plan`): it finished without errors in every package of this build, and
+/// built the same modules.
+fn imports_consistent(build_state: &BuildCommandState) -> bool {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return false;
+    };
+    let all_clean = build_state.packages.keys().all(|package_name| {
+        previous
+            .packages
+            .get(package_name)
+            .is_some_and(|record| record.clean_build_started_at.is_some())
+    });
+    let root_meta = build_state
+        .packages
+        .values()
+        .find(|package| package.is_root)
+        .and_then(|root| previous.packages.get(&root.name))
+        .map(|record| &record.state.meta);
+    all_clean
+        && root_meta.and_then(|meta| meta.get(META_MODULE_SET)) == Some(&module_set_digest(build_state))
+}
+
 /// Every module's recorded interface digest.
 fn recorded_digests(build_state: &BuildCommandState) -> AHashMap<String, u64> {
     let Some(previous) = build_state.previous_in_process.as_ref() else {
@@ -1314,6 +1378,7 @@ pub fn next_round(
         let checked = verified.get(module_name);
         // Units this build did not compile are as recorded.
         let changed: Vec<(String, u64)> = imports
+            .list()
             .iter()
             .filter_map(|(import, digest)| {
                 let now = digests.whole(import)?;

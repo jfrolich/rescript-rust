@@ -69,21 +69,68 @@ pub struct ModuleRow {
     pub interface_digest: Option<u64>,
     /// The project modules whose interface the compile read, with the
     /// digest each had then. `None` when unknown.
-    pub imports: Option<Vec<(String, u64)>>,
+    pub imports: Option<Imports>,
 }
 
-fn encode_imports(imports: &Option<Vec<(String, u64)>>) -> Option<String> {
-    imports.as_ref().map(|imports| {
-        imports
-            .iter()
-            .map(|(module, digest)| format!("{module}={digest:x}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
+/// A module's recorded imports (see [`ModuleRow::imports`]). Read from the
+/// record as text and decoded on first use: most builds look at the imports
+/// of few modules, and a large package records ~100k of them.
+#[derive(Debug, Clone)]
+pub struct Imports {
+    text: Option<std::sync::Arc<str>>,
+    list: std::sync::OnceLock<Vec<(String, u64)>>,
 }
 
-fn decode_imports(text: Option<String>) -> Option<Vec<(String, u64)>> {
-    let text = text?;
+impl Imports {
+    pub fn new(list: Vec<(String, u64)>) -> Self {
+        Self {
+            text: None,
+            list: std::sync::OnceLock::from(list),
+        }
+    }
+
+    fn from_text(text: String) -> Self {
+        Self {
+            text: Some(text.into()),
+            list: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Each imported unit with the digest it had.
+    pub fn list(&self) -> &[(String, u64)] {
+        self.list.get_or_init(|| {
+            let text = self.text.as_deref().unwrap_or_default();
+            // The record writes this text; a row that does not decode reads
+            // as no imports.
+            decode_imports(text).unwrap_or_default()
+        })
+    }
+
+    fn encode(&self) -> String {
+        match (&self.text, self.list.get()) {
+            (Some(text), None) => text.to_string(),
+            _ => self
+                .list()
+                .iter()
+                .map(|(module, digest)| format!("{module}={digest:x}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+impl PartialEq for Imports {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.text, &other.text) {
+            (Some(a), Some(b)) if self.list.get().is_none() && other.list.get().is_none() => a == b,
+            _ => self.list() == other.list(),
+        }
+    }
+}
+
+impl Eq for Imports {}
+
+fn decode_imports(text: &str) -> Option<Vec<(String, u64)>> {
     text.split('\n')
         .filter(|line| !line.is_empty())
         .map(|line| {
@@ -436,7 +483,7 @@ fn read_modules(conn: &Connection) -> rusqlite::Result<BTreeMap<String, ModuleRo
                 implementation_warnings: row.get(2)?,
                 interface_warnings: row.get(3)?,
                 interface_digest: row.get::<_, Option<i64>>(4)?.map(|digest| digest as u64),
-                imports: decode_imports(row.get(5)?),
+                imports: row.get::<_, Option<String>>(5)?.map(Imports::from_text),
             },
         ))
     })? {
@@ -694,7 +741,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                             row.implementation_warnings,
                             row.interface_warnings,
                             row.interface_digest.map(|digest| digest as i64),
-                            encode_imports(&row.imports)
+                            row.imports.as_ref().map(Imports::encode)
                         ])
                         .map(drop)
                 },
@@ -818,7 +865,7 @@ mod tests {
                 implementation_warnings: warning.map(str::to_string),
                 interface_warnings: None,
                 interface_digest: Some(u64::MAX - js),
-                imports: Some(vec![("B".to_string(), js), ("C".to_string(), u64::MAX)]),
+                imports: Some(Imports::new(vec![("B".to_string(), js), ("C".to_string(), u64::MAX)])),
             },
         );
         state
