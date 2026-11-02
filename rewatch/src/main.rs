@@ -10,6 +10,47 @@ use std::{io::Write, path::Path};
 // work; it must not change generated typedtree/lambda/JS output.
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Set mimalloc options that bound memory without a measurable speed cost.
+///
+/// mimalloc commits a page's memory when it takes the page into use, and
+/// purges freed memory only after a delay; an in-process build spreads its
+/// allocations over many worker heaps, so both keep a large share of a large
+/// build's peak footprint (about 200 MB on Tella) in memory no live data uses.
+/// Committing on demand and purging after 10 ms keeps it close to the live
+/// data. Options are read when they apply, so setting them at startup affects
+/// every later page.
+fn tune_allocator() {
+    // `mi_option_t` values of mimalloc 3 (include/mimalloc.h).
+    const MI_OPTION_PURGE_DELAY: i32 = 15;
+    const MI_OPTION_PAGE_COMMIT_ON_DEMAND: i32 = 40;
+    unsafe extern "C" {
+        fn mi_version() -> i32;
+        fn mi_option_set(option: i32, value: std::ffi::c_long);
+    }
+    // SAFETY: both are plain mimalloc API calls with no pointer arguments;
+    // the option indices are only used with the mimalloc major version they
+    // were taken from.
+    unsafe {
+        if mi_version() / 10_000 != 3 {
+            return;
+        }
+        // mimalloc reads `MIMALLOC_<OPTION>` from the environment; keep a
+        // value set there.
+        for (option, name, value) in [
+            (MI_OPTION_PURGE_DELAY, "MIMALLOC_PURGE_DELAY", 10),
+            (
+                MI_OPTION_PAGE_COMMIT_ON_DEMAND,
+                "MIMALLOC_PAGE_COMMIT_ON_DEMAND",
+                1,
+            ),
+        ] {
+            if std::env::var_os(name).is_none() {
+                mi_option_set(option, value);
+            }
+        }
+    }
+}
+
 use rescript::{
     build, cli, cmd, format,
     lock::{LockKind, drop_lock, get_lock_or_exit},
@@ -52,6 +93,7 @@ fn bsc_registry(
 }
 
 fn main() {
+    tune_allocator();
     // Hidden test commands: run the linked compiler one file at a time, as
     // the parity scripts compare it against the OCaml reference compiler.
     let mut args = std::env::args().skip(1);
