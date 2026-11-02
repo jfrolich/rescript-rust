@@ -127,11 +127,12 @@ pub fn remove_obsolete_outputs_of_build(build_state: &BuildCommandState) {
 }
 
 /// The output files each package's last recorded build listed.
-pub fn recorded_outputs(packages: &AHashMap<String, Package>) -> AHashMap<String, AHashSet<String>> {
-    packages
+pub fn recorded_outputs(
+    metas: &AHashMap<String, std::collections::BTreeMap<String, String>>,
+) -> AHashMap<String, AHashSet<String>> {
+    metas
         .par_iter()
-        .filter_map(|(name, package)| {
-            let meta = build::state_db::read_meta(package)?;
+        .filter_map(|(name, meta)| {
             let outputs = meta.get(build::state_db::META_OUTPUTS)?;
             Some((
                 name.clone(),

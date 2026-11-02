@@ -15,7 +15,7 @@ pub mod tooling;
 
 use self::parse::parser_args;
 use crate::build::compile::mark_modules_with_deleted_deps_dirty;
-use crate::build::compiler_info::{CompilerCheckResult, verify_compiler_info, write_compiler_info};
+use crate::build::compiler_info::{CompilerCheckResult, write_compiler_info};
 use crate::config::SourceMapCommand;
 use crate::helpers::emojis::*;
 use crate::helpers::{self};
@@ -283,8 +283,9 @@ pub fn initialize_build(
         .get_root_config()
         .get_source_map_args(source_map_command);
     // Read before `verify_compiler_info` may clean a package's build state.
-    let recorded_outputs = clean::recorded_outputs(&packages);
-    let compiler_check = verify_compiler_info(&packages, &compiler, &source_map_args);
+    let metas = compiler_info::read_metas(&packages);
+    let recorded_outputs = clean::recorded_outputs(&metas);
+    let compiler_check = compiler_info::verify_compiler_info_with(&packages, &compiler, &source_map_args, &metas);
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));

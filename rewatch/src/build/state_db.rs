@@ -553,7 +553,24 @@ pub fn write_runtime_interfaces(db: &Path, key: &str, interfaces: &[(String, Vec
 
 /// Set the given metadata keys, writing only when something changed.
 pub fn write_meta(package: &Package, entries: &[(&str, String)]) {
-    let existing = read_meta(package).unwrap_or_default();
+    write_meta_over(package, None, entries)
+}
+
+/// [`write_meta`], given the package's current metadata when the caller
+/// already read it.
+pub fn write_meta_over(
+    package: &Package,
+    existing: Option<&BTreeMap<String, String>>,
+    entries: &[(&str, String)],
+) {
+    let read;
+    let existing = match existing {
+        Some(existing) => existing,
+        None => {
+            read = read_meta(package).unwrap_or_default();
+            &read
+        }
+    };
     if entries
         .iter()
         .all(|(key, value)| existing.get(*key) == Some(value))
