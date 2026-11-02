@@ -409,7 +409,7 @@ impl<'src> Scanner<'src> {
         let start_off = self.offset;
 
         // Skip valid identifier characters (all ASCII, so byte == char)
-        while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'') {
+        while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'' | '$') {
             self.next();
         }
 
@@ -935,7 +935,7 @@ impl<'src> Scanner<'src> {
 
             let token = match self.ch {
                 // Identifiers and keywords
-                'A'..='Z' | 'a'..='z' => self.scan_identifier(),
+                'A'..='Z' | 'a'..='z' | '$' => self.scan_identifier(),
 
                 // Numbers
                 '0'..='9' => self.scan_number(),
@@ -995,7 +995,7 @@ impl<'src> Scanner<'src> {
                 '"' => self.scan_string(),
 
                 '_' => {
-                    if matches!(self.peek(), 'A'..='Z' | 'a'..='z' | '0'..='9' | '_') {
+                    if matches!(self.peek(), 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '$') {
                         self.scan_identifier()
                     } else {
                         self.next();
@@ -1516,6 +1516,16 @@ impl<'src> Scanner<'src> {
                 DiagnosticCategory::message("A quoted identifier can't be empty string."),
             );
             Token::Lident(Cow::Borrowed(ident))
+        } else if name == "_" {
+            // `_` is the wildcard and the placeholder of underscore apply
+            // sugar; a quoted `_` couldn't be told apart from them.
+            let end_pos = self.position();
+            self.error(
+                start_pos,
+                end_pos,
+                DiagnosticCategory::message("`_` can't be used as a quoted identifier."),
+            );
+            Token::Lident(Cow::Borrowed(name))
         } else if Self::is_uident(name) {
             Token::Lident(Cow::Borrowed(ident))
         } else {

@@ -191,7 +191,6 @@ struct Simplifier<'a> {
     store: &'a mut IndexedLambda,
     meta: &'a mut IndexedLamStats,
     id_gen: &'a IdGenerator,
-    beta_hash_bucket_count: &'a mut usize,
     beta_diagnostics: &'a mut BetaDiagnostics,
     external: &'a mut IndexedExternalInlineResolver<'a>,
 }
@@ -440,7 +439,7 @@ impl Simplifier<'_> {
             let (module, name) = (*module, name.clone());
             if let Some(lambda) = (self.external)(&module, &name) {
                 let imported = self.store.append_compat_lambda(lambda);
-                if let NodeSnapshot::Function(_,params,body,attr, _)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen,self.beta_hash_bucket_count,self.beta_diagnostics); return self.simpl(reduced); }
+                if let NodeSnapshot::Function(_,params,body,attr, _)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen,self.beta_diagnostics); return self.simpl(reduced); }
             }
         }
         if let NodeView::Var(id) = self.store.view(function) {
@@ -471,7 +470,6 @@ impl Simplifier<'_> {
                         body,
                         &args,
                         self.id_gen,
-                        self.beta_hash_bucket_count,
                         self.beta_diagnostics,
                     );
                     return self.simpl(reduced);
@@ -490,7 +488,6 @@ impl Simplifier<'_> {
                                     body,
                                     &args,
                                     self.id_gen,
-                                    self.beta_hash_bucket_count,
                                     self.beta_diagnostics,
                                 );
                             }
@@ -506,7 +503,6 @@ impl Simplifier<'_> {
                                     body,
                                     &args,
                                     self.id_gen,
-                                    self.beta_hash_bucket_count,
                                     self.beta_diagnostics,
                                 );
                                 return self.simpl(reduced);
@@ -531,7 +527,6 @@ impl Simplifier<'_> {
                 body,
                 &args,
                 self.id_gen,
-                self.beta_hash_bucket_count,
                 self.beta_diagnostics,
             );
             return self.simpl(reduced);
@@ -551,12 +546,11 @@ impl IndexedLambdaContext {
         let root = self.current_root();
         let mut beta_diagnostics = BetaDiagnostics::default();
         let root = {
-            let (store, meta, beta_hash_bucket_count) = self.parts_mut();
+            let (store, meta) = self.parts_mut();
             Simplifier {
                 store,
                 meta,
                 id_gen,
-                beta_hash_bucket_count,
                 beta_diagnostics: &mut beta_diagnostics,
                 external,
             }

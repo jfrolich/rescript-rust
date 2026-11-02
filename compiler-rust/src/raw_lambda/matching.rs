@@ -5506,9 +5506,6 @@ fn make_record_matching<'p>(
             let mut new_args = Vec::new();
             for lbl in all_labels.iter() {
                 let access = match &lbl.lbl_repres {
-                    RecordRepresentation::RecordFloatUnused => {
-                        panic!("Record_float_unused")
-                    }
                     RecordRepresentation::RecordRegular => {
                         RawLambda::Lprim(Box::new(RawPrimInfo {
                             primitive: Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)),

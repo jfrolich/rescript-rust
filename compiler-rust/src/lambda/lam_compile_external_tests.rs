@@ -1605,8 +1605,8 @@ fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
             vscode,
             some_namespace,
             some_default,
-            ome_default,
             ome_namespace,
+            ome_default,
         ]
     );
 }

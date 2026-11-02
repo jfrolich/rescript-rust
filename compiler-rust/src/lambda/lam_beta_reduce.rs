@@ -20,7 +20,6 @@ use ahash::AHashMap as HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::no_side_effects;
-use crate::lambda::lam_beta_reduce_indexed::reference_fold_order;
 use crate::lambda::lam_closure::StatsMap;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::{IdKind, IdentTable};
@@ -105,14 +104,10 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
         Some(result)
     }
 
-    // OCaml folds the shared `param_hash` (lam_beta_reduce_util.ml:78-84,
-    // 112-116), so unused arguments are sequenced in `Hash_ident` bucket
-    // order. The tree path does not thread the retained table capacity, so
-    // it starts from the initial bucket count each call.
+    // `Lam_beta_reduce_util.seq_unused`: sequence the unused arguments
+    // before the body, in parameter order.
     let wrap_unused = |usages: &[ArgUsage], mut result: Lambda| {
-        let mut capacity = 32;
-        for index in reference_fold_order(&params[..usages.len()], &mut capacity) {
-            let usage = &usages[index];
+        for usage in usages.iter().rev() {
             if !usage.used {
                 result = Lambda::seq(usage.lambda.clone(), result);
             }

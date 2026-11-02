@@ -295,7 +295,7 @@ impl IndexedLambdaContext {
     ) {
         let root = self.current_root();
         let root = {
-            let (store, metadata, _) = self.parts_mut();
+            let (store, metadata) = self.parts_mut();
             simplify(store, metadata, id_gen, external, root)
         };
         self.replace_root(root);

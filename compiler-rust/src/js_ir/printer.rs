@@ -18,10 +18,26 @@ use crate::lambda::SwitchCaseTag;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 
+/// `Ext_pp_scope.t`: the printed names of one function scope. Lookups of
+/// identifiers printed in an enclosing scope fall through to it, as OCaml's
+/// `sub_scope` copies them.
 #[derive(Clone, Default)]
 struct NameScope {
     ident_names: HashMap<Ident, String>,
-    next_suffix: HashMap<String, usize>,
+    /// Per mangled name, the printed name of each stamp.
+    names: HashMap<String, MangledNames>,
+    /// Every printed name in scope. Identifiers may contain `$`, so a
+    /// suffixed name like `x$1` can equal another identifier's mangled name;
+    /// new names are checked against `used` instead of being assumed fresh.
+    used: HashSet<String>,
+}
+
+/// `Ext_pp_scope.stamps`: `next` is the first suffix to try; every suffix
+/// below it is assigned or was already taken when skipped.
+#[derive(Clone, Default)]
+struct MangledNames {
+    next: usize,
+    stamps: Vec<(i32, String)>,
 }
 
 struct FunctionPrintContext<'a> {
@@ -49,6 +65,12 @@ pub struct JsPrinter<'r> {
     indent_str: &'static str,
     /// Assigned printable names for identifiers in the active lexical scopes.
     name_scopes: Vec<NameScope>,
+    /// `Ext_pp_scope.reserve`: the raw JS names the program refers to, which
+    /// a suffixed name must not capture.
+    reserved_js_names: HashSet<String>,
+    /// Stamp of the next fresh identifier (`Ext_ident.create`), counting
+    /// down from -1 so it is distinct from every program identifier.
+    next_fresh_stamp: i32,
     /// Module-path resolver used for printing import declarations.
     pub(super) module_path_resolver: Option<&'r ModulePathResolver>,
     /// Matches OCaml's `!Js_config.debug` toggle in the dumper.
@@ -79,6 +101,8 @@ impl<'r> JsPrinter<'r> {
             last_new_line: false,
             indent_str: "  ",
             name_scopes: vec![NameScope::default()],
+            reserved_js_names: HashSet::default(),
+            next_fresh_stamp: -1,
             module_path_resolver: None,
             debug: false,
             jsx_preserve: false,
@@ -195,6 +219,8 @@ impl<'r> JsPrinter<'r> {
             last_new_line: false,
             indent_str: self.indent_str,
             name_scopes: self.name_scopes.clone(),
+            reserved_js_names: self.reserved_js_names.clone(),
+            next_fresh_stamp: self.next_fresh_stamp,
             module_path_resolver: self.module_path_resolver,
             debug: self.debug,
             jsx_preserve: self.jsx_preserve,
@@ -348,50 +374,97 @@ impl<'r> JsPrinter<'r> {
             .find_map(|scope| scope.ident_names.get(id).cloned())
     }
 
-    fn reserve_printed_name(scope: &mut NameScope, printed: &str) {
-        let (base, next_suffix) = printed_name_base_and_next_suffix(printed);
-        let next = scope.next_suffix.entry(base).or_insert(0);
-        *next = (*next).max(next_suffix);
-    }
-
-    fn visible_next_suffix_for_base(&self, base: &str) -> Option<usize> {
-        self.name_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.next_suffix.get(base).copied())
+    /// `Ext_pp_scope.add_ident`: the printed name of the identifier with
+    /// mangled name `name` and `stamp` in the current scope.
+    fn add_ident(&mut self, name: &str, stamp: i32) -> String {
+        let scope = self
+            .name_scopes
+            .last_mut()
+            .expect("printer must always have a name scope");
+        if let Some((_, printed)) = scope
+            .names
+            .get(name)
+            .and_then(|names| names.stamps.iter().find(|(s, _)| *s == stamp))
+        {
+            return printed.clone();
+        }
+        let mut i = scope.names.get(name).map_or(0, |names| names.next);
+        let printed = loop {
+            let candidate = if i == 0 {
+                name.to_string()
+            } else {
+                format!("{name}${i}")
+            };
+            if !(scope.used.contains(&candidate)
+                || (i > 0 && self.reserved_js_names.contains(&candidate)))
+            {
+                break candidate;
+            }
+            i += 1;
+        };
+        let names = scope.names.entry(name.to_string()).or_default();
+        names.next = i + 1;
+        names.stamps.push((stamp, printed.clone()));
+        scope.used.insert(printed.clone());
+        printed
     }
 
     fn assign_scoped_ident_name(&mut self, id: &Ident, base: String) -> String {
-        let next = self
-            .current_name_scope_mut()
-            .next_suffix
-            .entry(base.clone())
-            .or_insert(0);
-        let printed = if *next == 0 {
-            base.clone()
-        } else {
-            format!("{base}${next}")
-        };
-        *next += 1;
+        let printed = self.add_ident(&base, id.stamp());
         self.current_name_scope_mut()
             .ident_names
             .insert(*id, printed.clone());
         printed
     }
 
+    /// The name of a fresh identifier (`Ext_ident.create`), whose stamp no
+    /// other identifier has.
     fn fresh_scoped_name(&mut self, base: String) -> String {
-        let next = self
-            .current_name_scope_mut()
-            .next_suffix
-            .entry(base.clone())
-            .or_insert(0);
-        let printed = if *next == 0 {
-            base.clone()
-        } else {
-            format!("{base}${next}")
-        };
-        *next += 1;
-        printed
+        let stamp = self.next_fresh_stamp;
+        self.next_fresh_stamp -= 1;
+        self.add_ident(&base, stamp)
+    }
+
+    /// `Js_dump_program.initial_scope`: reserve the raw JS names `block`
+    /// refers to, so that renamed locals can't capture them.
+    pub(super) fn reserve_js_names(&mut self, block: &Block) {
+        #[derive(Default)]
+        struct JsNames<'a>(HashSet<&'a str>);
+        impl<'a> JsNames<'a> {
+            fn add(&mut self, id: &'a Ident) {
+                // `Ext_ident.is_js`: Rust creates JS globals as persistent
+                // idents.
+                if id.is_js() || (id.is_global() && id.stamp() == 0) {
+                    self.0.insert(id.name());
+                }
+            }
+        }
+        impl<'a> super::walk::Visitor<'a> for JsNames<'a> {
+            fn visit_expression(&mut self, expression: &'a Expression) {
+                match &expression.desc {
+                    ExpressionDesc::Var(VIdent::Id(id)) => self.add(id),
+                    ExpressionDesc::Fun { params, .. } => params.iter().for_each(|p| self.add(p)),
+                    _ => {}
+                }
+            }
+            fn visit_declaration(&mut self, declaration: &'a VariableDeclaration) {
+                self.add(&declaration.ident);
+            }
+            fn visit_block(&mut self, block: &'a Block) {
+                for stmt in block {
+                    match &stmt.desc {
+                        StatementDesc::ForRange(_, _, _, id, _, _)
+                        | StatementDesc::ForOf(_, id, _, _)
+                        | StatementDesc::ForAwaitOf(_, id, _, _)
+                        | StatementDesc::Try(_, Some((id, _)), _) => self.add(id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut names = JsNames::default();
+        super::walk::walk_block(&mut names, block);
+        self.reserved_js_names = names.0.into_iter().map(str::to_string).collect();
     }
 
     /// Get a unique name for an identifier
@@ -979,21 +1052,30 @@ impl<'r> JsPrinter<'r> {
         reserved_idents: &[Ident],
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
+        // `Ext_pp_scope.merge`: the context continued after the function
+        // has the function's environment printed.
+        self.reserve_idents_in_current_scope(reserved_idents);
+        // `Ext_pp_scope.sub_scope`: only the environment matters inside the
+        // function. Each of its mangled names keeps all its printed names
+        // (so capturing outer `match` also keeps a visible sibling `match$1`,
+        // and a body-local `match` starts at `match$2`).
         let mut scope = NameScope::default();
         for ident in reserved_idents {
-            let printed = self.ident_name(ident);
-            let (base, next_suffix) = printed_name_base_and_next_suffix(&printed);
-            // OCaml's Ext_pp_scope.sub_scope copies the whole stamp map for a
-            // captured mangled name, not just the one captured identifier
-            // (compiler/ext/ext_pp_scope.ml:109-117). That means capturing
-            // outer `match` also reserves an already-visible sibling
-            // `match$1`, so body-local `match` starts at `match$2`.
-            let visible_next = self
-                .visible_next_suffix_for_base(&base)
-                .unwrap_or(next_suffix);
+            let mangled = convert_ident_name(ident.name());
+            if scope.names.contains_key(&mangled) {
+                continue;
+            }
+            let names = self
+                .name_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.names.get(&mangled))
+                .cloned()
+                .expect("a function's environment is printed in the enclosing scope");
             scope
-                .next_suffix
-                .insert(base, visible_next.max(next_suffix));
+                .used
+                .extend(names.stamps.iter().map(|(_, printed)| printed.clone()));
+            scope.names.insert(mangled, names);
         }
 
         self.name_scopes.push(scope);
@@ -1109,11 +1191,11 @@ impl<'r> JsPrinter<'r> {
     pub(super) fn reserve_idents_in_current_scope(&mut self, idents: &[Ident]) {
         for ident in idents {
             if ident.stamp() == 0 {
-                // OCaml `Ext_pp_scope.merge` reserves the converted printed
-                // name for every id in a function environment, including
-                // stamp-0 JS globals; see compiler/ext/ext_pp_scope.ml:98-100.
+                // OCaml `Ext_pp_scope.merge` adds every id in a function
+                // environment, including stamp-0 JS globals, under its
+                // converted name.
                 let base = convert_ident_name(ident.name());
-                Self::reserve_printed_name(self.current_name_scope_mut(), &base);
+                self.add_ident(&base, 0);
             } else {
                 let _ = self.ident_name(ident);
             }
@@ -2070,7 +2152,24 @@ impl<'r> JsPrinter<'r> {
                         num_nonconst: _,
                         runtime,
                     } => {
-                        if name == "::" {
+                        if let ([hd, tl], "::") = (elements.as_slice(), name.as_str()) {
+                            // A list cell is printed on one line, so a list
+                            // literal keeps the same indentation however long
+                            // it is, instead of nesting one level deeper per
+                            // element.
+                            let needs_paren = level > 1;
+                            if needs_paren {
+                                self.write_char('(');
+                            }
+                            self.write("{hd: ");
+                            self.print_expression(hd, 1);
+                            self.write(", tl: ");
+                            self.print_expression(tl, 1);
+                            self.write_char('}');
+                            if needs_paren {
+                                self.write_char(')');
+                            }
+                        } else if name == "::" {
                             self.print_object_literal(
                                 level,
                                 elements.iter().enumerate(),
@@ -3189,15 +3288,6 @@ fn mangle_ident_char(c: char, op: bool) -> &'static str {
         '[' => "$lbrack",
         ']' => "$rbrack",
         _ => "$unknown",
-    }
-}
-
-fn printed_name_base_and_next_suffix(printed: &str) -> (String, usize) {
-    match printed.rsplit_once('$') {
-        Some((base, suffix)) if !base.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) => {
-            (base.to_string(), suffix.parse::<usize>().unwrap_or(0) + 1)
-        }
-        _ => (printed.to_string(), 1),
     }
 }
 
@@ -5833,7 +5923,7 @@ mod tests {
             Box::new(TagInfo::constructor("::", 1)),
         ));
 
-        assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
+        assert_eq!(print_expression(&expr), "{hd: 1, tl: 0}");
     }
 
     #[test]

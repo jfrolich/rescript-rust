@@ -6111,7 +6111,23 @@ fn check_variant_well_formed(
             UntaggedVariantBlockType::Function => function_types += 1,
             UntaggedVariantBlockType::Int | UntaggedVariantBlockType::Float => number_types += 1,
             UntaggedVariantBlockType::Bigint => bigint_types += 1,
-            UntaggedVariantBlockType::Boolean => boolean_types += 1,
+            UntaggedVariantBlockType::Boolean => {
+                // Literal cases are matched before payload cases, so a boolean
+                // payload only receives the booleans that are not literal
+                // cases. A partial overlap is allowed, like for strings and
+                // numbers.
+                if nonstring_literals_consts.contains("true")
+                    && nonstring_literals_consts.contains("false")
+                {
+                    return Err(invalid_untagged_variant_definition(
+                        *loc,
+                        format!(
+                            "Case {name} can never match: both true and false are already cases of this variant."
+                        ),
+                    ));
+                }
+                boolean_types += 1
+            }
             UntaggedVariantBlockType::String => string_types += 1,
         }
 
@@ -6166,11 +6182,7 @@ fn check_variant_well_formed(
                 "At most one case can be a bigint type.",
             ));
         }
-        if boolean_types > 1
-            || (boolean_types > 0
-                && (nonstring_literals_consts.contains("true")
-                    || nonstring_literals_consts.contains("false")))
-        {
+        if boolean_types > 1 {
             return Err(invalid_untagged_variant_definition(
                 *loc,
                 "At most one case can be a boolean type.",

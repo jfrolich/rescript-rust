@@ -258,8 +258,6 @@ impl TypeDeclaration {
 pub enum RecordRepresentation {
     /// Regular record (all fields boxed/tagged)
     RecordRegular,
-    /// Float record (unused, kept for compatibility)
-    RecordFloatUnused,
     /// Unboxed single-field record
     RecordUnboxed(bool),
     /// Inlined record (in variant constructor)

@@ -1075,7 +1075,6 @@ pub struct IndexedLambdaContext {
     /// canonical optimizer root remains `store.root`; these immutable roots
     /// are a single-owner view over the same store, not another mutation API.
     backend_roots: Vec<NodeId>,
-    beta_hash_bucket_count: usize,
     #[cfg(test)]
     substitution_table_peak_unique_nodes: usize,
     #[cfg(test)]
@@ -1092,7 +1091,6 @@ impl IndexedLambdaContext {
             optimizer_root,
             metadata: IndexedLamStats::new(exports),
             backend_roots: Vec::new(),
-            beta_hash_bucket_count: 32,
             #[cfg(test)]
             substitution_table_peak_unique_nodes: 0,
             #[cfg(test)]
@@ -1111,7 +1109,6 @@ impl IndexedLambdaContext {
             optimizer_root,
             metadata: IndexedLamStats::new(exports),
             backend_roots: Vec::new(),
-            beta_hash_bucket_count: 32,
             substitution_table_peak_unique_nodes: 0,
             beta_substitution_peak_unique_nodes: 0,
         }
@@ -1362,15 +1359,11 @@ impl IndexedLambdaContext {
             .append_compat_lambda(Lambda::Lfunction(Box::new(function)))
     }
 
-    /// Splits the owner-held store, metadata, and native `Hash_ident` bucket
-    /// count. Optimizer passes and consumer-side indexed beta (after grouping
-    /// has consumed `optimizer_root`) share the same state.
-    pub(crate) fn parts_mut(&mut self) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
-        (
-            &mut self.store,
-            &mut self.metadata,
-            &mut self.beta_hash_bucket_count,
-        )
+    /// Splits the owner-held store and metadata. Optimizer passes and
+    /// consumer-side indexed beta (after grouping has consumed
+    /// `optimizer_root`) share the same state.
+    pub(crate) fn parts_mut(&mut self) -> (&mut IndexedLambda, &mut IndexedLamStats) {
+        (&mut self.store, &mut self.metadata)
     }
 
     #[cfg(test)]

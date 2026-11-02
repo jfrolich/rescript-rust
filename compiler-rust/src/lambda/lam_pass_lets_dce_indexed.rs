@@ -18,7 +18,6 @@ struct Lets<'a> {
     occurrences: &'a OccurrenceTable,
     substitutions: AHashMap<Ident, NodeId>,
     strings: AHashMap<Ident, String>,
-    beta_hash_capacity: &'a mut usize,
 }
 
 impl Lets<'_> {
@@ -167,8 +166,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 && !attr.async_
                 && attr.directive.is_none()
             {
-                let reduced =
-                    no_names_beta_reduce(store, &params, body, &args, state.beta_hash_capacity);
+                let reduced = no_names_beta_reduce(store, &params, body, &args);
                 return simplify(store, state, reduced);
             }
             let args = args
@@ -324,15 +322,14 @@ impl IndexedLambdaContext {
     pub fn simplify_lets(&mut self) {
         let root = self.current_root();
         let root = {
-            let (store, _, beta_hash_capacity) = self.parts_mut();
-            let occurrences = collect_occurs(store, root, beta_hash_capacity);
+            let (store, _) = self.parts_mut();
+            let occurrences = collect_occurs(store, root);
             simplify(
                 store,
                 &mut Lets {
                     occurrences: &occurrences,
                     substitutions: AHashMap::with_capacity(32),
                     strings: AHashMap::with_capacity(32),
-                    beta_hash_capacity,
                 },
                 root,
             )
@@ -538,8 +535,6 @@ mod tests {
         );
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.simplify_lets();
-        let (_, _, capacity) = context.parts_mut();
-        assert_eq!(*capacity, 64);
         assert_exact(
             &context.materialize(),
             &Lambda::prim(Primitive::Paddint, vec![int(0), int(0)], Location::none()),

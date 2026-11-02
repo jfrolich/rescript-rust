@@ -160,6 +160,13 @@ pub mod recover {
             return false;
         }
 
+        // Something is missing before a comma, e.g. the value in
+        // `{a: , b: 1}`: leave the comma to the enclosing list instead of
+        // skipping to the next row.
+        if matches!(p.token, Token::Comma) {
+            return false;
+        }
+
         // Case 2: should abort list parse
         // OCaml `skip_tokens_and_maybe_retry` (compiler/syntax/src/res_core.ml:1354-1365)
         // consumes the token before retrying; retrying in place recurses forever.

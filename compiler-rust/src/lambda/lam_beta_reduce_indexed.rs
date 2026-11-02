@@ -42,82 +42,11 @@ impl BetaDiagnostics {
     }
 }
 
-fn mix(mut h: u32, mut d: u32) -> u32 {
-    d = d.wrapping_mul(0xcc9e2d51);
-    d = d.rotate_left(15);
-    d = d.wrapping_mul(0x1b873593);
-    h ^= d;
-    h.rotate_left(13).wrapping_mul(5).wrapping_add(0xe6546b64)
-}
-fn finish(mut h: u32) -> u32 {
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85ebca6b);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xc2b2ae35);
-    h ^= h >> 16;
-    h & 0x3fff_ffff
-}
-fn ident_hash(id: &Ident) -> u32 {
-    if id.stamp() != 0 {
-        // The native C stub's `MIX(h, d)` receives OCaml's tagged 64-bit
-        // `value d`; its macro shifts/multiplies that width before truncating
-        // into the 32-bit accumulator.
-        let mut tagged = (id.stamp() as u64).wrapping_mul(2).wrapping_add(1);
-        tagged = tagged.wrapping_mul(0xcc9e2d51);
-        tagged = (tagged << 15) | (tagged >> 17);
-        tagged = tagged.wrapping_mul(0x1b873593);
-        let mut h = tagged as u32;
-        h = h.rotate_left(13);
-        h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
-        return finish(h);
-    }
-    let bytes = id.name().as_bytes();
-    let mut h = 0;
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        h = mix(
-            h,
-            u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]),
-        );
-        i += 4;
-    }
-    if i < bytes.len() {
-        let mut word = 0;
-        for (shift, byte) in bytes[i..].iter().enumerate() {
-            word |= (*byte as u32) << (shift * 8);
-        }
-        h = mix(h, word);
-    }
-    finish(h ^ bytes.len() as u32)
-}
-
-/// Reproduces `Hash_ident` bucket traversal, including retained resize capacity.
-pub(crate) fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Vec<usize> {
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); (*capacity).max(32).next_power_of_two()];
-    for (entry, id) in params.iter().enumerate() {
-        let bucket = (ident_hash(id) as usize) & (buckets.len() - 1);
-        buckets[bucket].insert(0, entry);
-        if entry + 1 > buckets.len() << 1 {
-            let mut resized = vec![Vec::new(); buckets.len() * 2];
-            for old in &buckets {
-                for &index in old {
-                    let bucket = (ident_hash(&params[index]) as usize) & (resized.len() - 1);
-                    resized[bucket].push(index);
-                }
-            }
-            buckets = resized;
-        }
-    }
-    *capacity = buckets.len();
-    buckets.into_iter().flatten().collect()
-}
-
 pub(crate) fn simple_beta_reduce(
     store: &mut IndexedLambda,
     params: &[Ident],
     body: NodeId,
     args: &[NodeId],
-    hash_capacity: &mut usize,
 ) -> Option<NodeId> {
     let indices: AHashMap<Ident, usize> = params
         .iter()
@@ -152,14 +81,10 @@ pub(crate) fn simple_beta_reduce(
             })
             .collect()
     }
-    let (mut result, fold_order) = match store.snapshot(body) {
+    let mut result = match store.snapshot(body) {
         NodeSnapshot::Prim(primitive, body_args, loc) => {
-            let fold_order = reference_fold_order(params, hash_capacity);
             let body_args = replace(store, &indices, &mut usages, &body_args)?;
-            (
-                append_rebuilt(store, NodeSnapshot::Prim(primitive, body_args, loc)),
-                fold_order,
-            )
+            append_rebuilt(store, NodeSnapshot::Prim(primitive, body_args, loc))
         }
         NodeSnapshot::Apply(function, body_args, info)
             if match store.view(function) {
@@ -170,7 +95,6 @@ pub(crate) fn simple_beta_reduce(
                 _ => false,
             } =>
         {
-            let fold_order = reference_fold_order(params, hash_capacity);
             let body_args = replace(store, &indices, &mut usages, &body_args)?;
             let function = if let NodeView::Var(id) = store.view(function) {
                 match indices.get(id).map(|index| &mut usages[*index]) {
@@ -184,15 +108,13 @@ pub(crate) fn simple_beta_reduce(
             } else {
                 function
             };
-            (
-                append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info)),
-                fold_order,
-            )
+            append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info))
         }
         _ => return None,
     };
-    for index in fold_order {
-        let usage = &usages[index];
+    // `Lam_beta_reduce_util.seq_unused`: sequence the unused arguments
+    // before the body, in parameter order.
+    for usage in usages.iter().rev() {
         if !usage.used {
             result = append_rebuilt(store, NodeSnapshot::Sequence(usage.node, result));
         }
@@ -205,9 +127,8 @@ pub(crate) fn no_names_beta_reduce(
     params: &[Ident],
     body: NodeId,
     args: &[NodeId],
-    hash_capacity: &mut usize,
 ) -> NodeId {
-    if let Some(node) = simple_beta_reduce(store, params, body, args, hash_capacity) {
+    if let Some(node) = simple_beta_reduce(store, params, body, args) {
         return node;
     }
     params
@@ -350,10 +271,9 @@ fn propagate(
     body: NodeId,
     args: &[NodeId],
     id_gen: &IdGenerator,
-    hash_capacity: &mut usize,
     diagnostics: &mut BetaDiagnostics,
 ) -> NodeId {
-    if let Some(result) = simple_beta_reduce(store, params, body, args, hash_capacity) {
+    if let Some(result) = simple_beta_reduce(store, params, body, args) {
         return result;
     }
     let mut bindings = Vec::new();
@@ -393,20 +313,9 @@ pub(crate) fn propagate_beta_reduce(
     body: NodeId,
     args: &[NodeId],
     id_gen: &IdGenerator,
-    hash_capacity: &mut usize,
     diagnostics: &mut BetaDiagnostics,
 ) -> NodeId {
-    propagate(
-        store,
-        meta,
-        None,
-        params,
-        body,
-        args,
-        id_gen,
-        hash_capacity,
-        diagnostics,
-    )
+    propagate(store, meta, None, params, body, args, id_gen, diagnostics)
 }
 
 pub(crate) fn propagate_beta_reduce_with_map(
@@ -417,7 +326,6 @@ pub(crate) fn propagate_beta_reduce_with_map(
     body: NodeId,
     args: &[NodeId],
     id_gen: &IdGenerator,
-    hash_capacity: &mut usize,
     diagnostics: &mut BetaDiagnostics,
 ) -> NodeId {
     propagate(
@@ -428,7 +336,6 @@ pub(crate) fn propagate_beta_reduce_with_map(
         body,
         args,
         id_gen,
-        hash_capacity,
         diagnostics,
     )
 }
@@ -457,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn unused_effectful_arguments_follow_reference_hash_fold_order() {
+    fn unused_effectful_arguments_are_evaluated_in_parameter_order() {
         let params = ids(1, 3);
         let body = crate::lambda::Lambda::prim(
             Primitive::Pidentity,
@@ -470,8 +377,7 @@ mod tests {
             .into_iter()
             .map(|name| store.append_compat_lambda(effect(name)))
             .collect();
-        let mut capacity = 32;
-        let reduced = simple_beta_reduce(&mut store, &params, root, &args, &mut capacity).unwrap();
+        let reduced = simple_beta_reduce(&mut store, &params, root, &args).unwrap();
         let mut names = Vec::new();
         let mut current = store.materialize_node(reduced);
         while let crate::lambda::Lambda::Lsequence(first, rest) = current {
@@ -482,52 +388,6 @@ mod tests {
             }
             current = *rest;
         }
-        assert_eq!(names, vec!["c", "b"]);
-    }
-
-    #[test]
-    fn failed_simple_reduction_retains_reference_resize_capacity() {
-        let params = ids(1, 65);
-        let body = crate::lambda::Lambda::prim(
-            Primitive::Paddint,
-            vec![
-                crate::lambda::Lambda::var(params[0]),
-                crate::lambda::Lambda::var(params[0]),
-            ],
-            Location::none(),
-        );
-        let mut store = IndexedLambda::from_lambda(body);
-        let root = store.root();
-        let args: Vec<_> = (0..65)
-            .map(|i| {
-                store.append_compat_lambda(crate::lambda::Lambda::const_(
-                    crate::lambda::Constant::int(i),
-                ))
-            })
-            .collect();
-        let mut capacity = 32;
-        assert!(simple_beta_reduce(&mut store, &params, root, &args, &mut capacity).is_none());
-        assert_eq!(capacity, 64);
-    }
-
-    #[test]
-    fn hash_ident_fold_order_preserves_collisions_resize_and_clear_capacity() {
-        let mut capacity = 32;
-        assert_eq!(
-            reference_fold_order(&ids(1, 6), &mut capacity),
-            vec![3, 1, 5, 2, 4, 0]
-        );
-        let expected = vec![
-            13, 65, 0, 32, 50, 3, 42, 58, 57, 64, 39, 28, 34, 49, 4, 30, 25, 23, 20, 1, 61, 69, 8,
-            6, 37, 47, 18, 38, 46, 5, 9, 66, 60, 52, 55, 56, 54, 31, 59, 14, 16, 53, 45, 63, 27,
-            29, 21, 24, 11, 44, 12, 40, 36, 33, 10, 62, 48, 51, 35, 68, 26, 22, 15, 67, 43, 41, 2,
-            19, 17, 7,
-        ];
-        assert_eq!(reference_fold_order(&ids(7, 70), &mut capacity), expected);
-        assert_eq!(capacity, 64);
-        assert_eq!(
-            reference_fold_order(&ids(77, 6), &mut capacity),
-            vec![0, 2, 4, 5, 1, 3]
-        );
+        assert_eq!(names, vec!["b", "c"]);
     }
 }

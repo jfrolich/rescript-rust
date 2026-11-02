@@ -610,11 +610,11 @@ impl WarningConfig {
             disabled: false,
         };
         // Match OCaml compiler/ext/bsc_warnings.ml:46-48. ReScript starts
-        // from `+a-4-9-20-41-50-102` and warning-as-error
-        // `-a+5+6+101+109`; later -w/-warn-error flags are layered on top
-        // by Warnings.parse_options in compiler/ext/warnings.ml:286-290.
-        config.parse("+a-4-9-20-41-50-102").ok();
-        config.parse_as_error("-a+5+6+101+109").ok();
+        // from `+a-4-9-20-41-102` and warning-as-error `-a+5+101+109`;
+        // later -w/-warn-error flags are layered on top by
+        // Warnings.parse_options in compiler/ext/warnings.ml.
+        config.parse("+a-4-9-20-41-102").ok();
+        config.parse_as_error("-a+5+101+109").ok();
         config
     }
 
@@ -779,19 +779,19 @@ const ALL_WARNINGS: [usize; LAST_WARNING_NUMBER] = {
 fn letter_warnings(letter: char) -> &'static [usize] {
     match letter {
         'a' => &ALL_WARNINGS,
-        'c' => &[1, 2],
+        'c' => &[],
         'd' => &[3],
         'e' => &[4],
         'f' => &[5],
-        'k' => &[32, 33, 34, 35, 36, 37, 38, 39],
-        'l' => &[6],
-        'm' => &[7],
+        'k' => &[32, 33, 34, 35, 37, 38, 39],
+        'l' => &[],
+        'm' => &[],
         'p' => &[8],
         'r' => &[9],
-        's' => &[10],
+        's' => &[],
         'u' => &[11, 12],
-        'v' => &[13],
-        'x' => &[14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30],
+        'v' => &[],
+        'x' => &[20, 21, 22, 23, 30],
         'y' => &[26],
         'z' => &[27],
         _ => &[],

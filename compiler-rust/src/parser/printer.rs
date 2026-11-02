@@ -140,14 +140,18 @@ pub fn classify_ident_content(
     match bytes[0] {
         b'\\' => return IdentifierStyle::UppercaseExoticIdent,
         b'A'..=b'Z' if !allow_uident => return IdentifierStyle::ExoticIdent,
-        b'a'..=b'z' | b'_' | b'A'..=b'Z' => {}
+        b'a'..=b'z' | b'$' | b'A'..=b'Z' => {}
+        // The scanner reads `_` as an identifier only when one of these
+        // follows; otherwise it is a wildcard.
+        b'_' if len > 1
+            && matches!(bytes[1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'$') => {}
         _ => return IdentifierStyle::ExoticIdent,
     }
 
     // Check remaining characters
     for &c in &bytes[1..] {
         match c {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'\'' | b'_' => {}
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'\'' | b'_' | b'$' => {}
             b'-' if allow_hyphen => {}
             _ => return IdentifierStyle::ExoticIdent,
         }
@@ -1146,6 +1150,16 @@ pub fn print_expression(
             let constr = print_longident_location(longident_loc, cmt_tbl, arena);
             let args_doc = print_expression_args(state, &args.txt, cmt_tbl, arena);
             Doc::group(Doc::concat(vec![constr, args_doc]))
+        }
+        // The `_` placeholder of underscore apply sugar, see
+        // `parsetree_viewer::rewrite_underscore_apply`.
+        ExpressionDesc::Pexp_ident(path)
+            if matches!(
+                arena.get_longident(path.txt),
+                Longident::Lident(s) if arena.get_string(*s) == "_"
+            ) =>
+        {
+            print_comments(Doc::text("_"), cmt_tbl, path.loc, arena)
         }
         // Identifier
         ExpressionDesc::Pexp_ident(path) => print_lident_path(path, cmt_tbl, arena),

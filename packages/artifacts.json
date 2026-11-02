@@ -9,6 +9,7 @@
     "README.md",
     "cli/common/bins.cjs",
     "cli/common/bins.js",
+    "cli/common/platform.cjs",
     "cli/common/runtime.js",
     "cli/common/tools.cjs",
     "cli/common/tools.js",

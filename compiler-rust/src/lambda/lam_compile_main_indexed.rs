@@ -201,7 +201,7 @@ impl IndexedPreJsBackend {
                         fields.push(match element {
                             IndexedElement::Na => crate::lambda::lam_arity::Arity::na(),
                             IndexedElement::SimpleForm(root) => {
-                                let (store, metadata, _) = self.context.parts_mut();
+                                let (store, metadata) = self.context.parts_mut();
                                 get_arity_external(store, metadata, root, external_arity)
                             }
                         });
@@ -219,7 +219,7 @@ impl IndexedPreJsBackend {
                         Some(fields) => {
                             let mut arities = Vec::with_capacity(fields.len());
                             for root in fields {
-                                let (store, metadata, _) = self.context.parts_mut();
+                                let (store, metadata) = self.context.parts_mut();
                                 arities.push(get_arity_external(
                                     store,
                                     metadata,
@@ -673,7 +673,7 @@ fn coerce_and_group(
             _ => {
                 let newid = original.rename(id_gen);
                 let arity = {
-                    let (store, metadata, _) = context.parts_mut();
+                    let (store, metadata) = context.parts_mut();
                     get_arity_external(store, metadata, value, external_arity)
                 };
                 if !arity.first_arity_na() {

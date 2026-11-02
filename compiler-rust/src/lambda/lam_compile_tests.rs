@@ -7752,7 +7752,7 @@ fn lowers_qualified_ml_module_closed_undefined_constant_from_cmj() {
 }
 
 #[test]
-fn external_shadow_pass_rewrites_only_shadowed_initializer_reads() {
+fn external_shadow_pass_reads_global_through_global_this_where_binding_is_in_scope() {
     let process = Ident::create_local("process");
     let proc = Ident::create_local("proc");
     let global_process = Ident::create_persistent("process");
@@ -7778,40 +7778,29 @@ fn external_shadow_pass_rewrites_only_shadowed_initializer_reads() {
         side_effect: None,
     };
 
+    // A toplevel `let process` is in scope in its whole block, so both
+    // reads of the global go through `globalThis`.
     let rewritten = apply_external_shadow_pass(deps);
     let [first, second] = rewritten.program.block.as_slice() else {
         panic!("expected two variable declarations");
     };
-
-    match &first.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::StaticIndex(target, field, _),
-                    ..
-                }),
-            ..
-        }) => {
-            assert_eq!(field, "process");
-            assert!(matches!(
-                target.desc,
-                ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "globalThis"
-            ));
-        }
-        other => panic!("expected first initializer to read globalThis.process, got {other:?}"),
-    }
-
-    match &second.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            value:
-                Some(Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
-                    ..
-                }),
-            ..
-        }) => assert_eq!(id.name(), "process"),
-        other => {
-            panic!("expected second initializer to remain a plain process read, got {other:?}")
+    for stmt in [first, second] {
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::StaticIndex(target, field, _),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert_eq!(field, "process");
+                assert!(matches!(
+                    target.desc,
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(ref id)) if id.name() == "globalThis"
+                ));
+            }
+            other => panic!("expected the initializer to read globalThis.process, got {other:?}"),
         }
     }
 }

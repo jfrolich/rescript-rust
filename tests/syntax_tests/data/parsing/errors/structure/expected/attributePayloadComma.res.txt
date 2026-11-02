@@ -8,6 +8,7 @@
 
   Did you forget a `)` here?
 
-;;accessors[@@deriving abstract]
+;;[%rescript.exprhole ][@@deriving abstract]
+;;accessors
 type nonrec t = {
   x: int }

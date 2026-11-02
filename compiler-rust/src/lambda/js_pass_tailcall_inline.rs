@@ -12,10 +12,16 @@ use crate::js_ir::{
     BinOp, Block, CaseClause, DepsProgram, Expression, ExpressionDesc, Program, Statement,
     StatementDesc, StringClause, VariableDeclaration,
 };
-use crate::lambda::js_pass_external_shadow::is_lexical_binding_kind;
 use crate::lambda::lam_compat::LetKind;
 
 use super::js_exp_make::js_expr_no_side_effects;
+
+fn is_lexical_binding_kind(property: LetKind) -> bool {
+    matches!(
+        property,
+        LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
+    )
+}
 
 pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgram {
     deps.program = tailcall_inline_program(deps.program);

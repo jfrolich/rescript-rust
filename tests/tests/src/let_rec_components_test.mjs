@@ -36,10 +36,7 @@ function countdown(n) {
   if (n <= 0) {
     return /* [] */0;
   } else {
-    return {
-      hd: n,
-      tl: countdown(n - 1 | 0)
-    };
+    return {hd: n, tl: countdown(n - 1 | 0)};
   }
 }
 
@@ -61,16 +58,7 @@ Mocha.describe("Let_rec_components_test", () => {
     Test_utils.eq("File \"let_rec_components_test.res\", line 24, characters 7-14", true, isOdd(7));
     Test_utils.eq("File \"let_rec_components_test.res\", line 25, characters 7-14", 10, 10);
   });
-  Mocha.test("self recursion", () => Test_utils.eq("File \"let_rec_components_test.res\", line 27, characters 34-41", {
-    hd: 3,
-    tl: {
-      hd: 2,
-      tl: {
-        hd: 1,
-        tl: /* [] */0
-      }
-    }
-  }, countdown(3)));
+  Mocha.test("self recursion", () => Test_utils.eq("File \"let_rec_components_test.res\", line 27, characters 34-41", {hd: 3, tl: {hd: 2, tl: {hd: 1, tl: /* [] */0}}}, countdown(3)));
   Mocha.test("bindings that use other components", () => {
     Test_utils.eq("File \"let_rec_components_test.res\", line 29, characters 7-14", 15, 15);
     Test_utils.eq("File \"let_rec_components_test.res\", line 30, characters 7-14", "even 14", describe$p(4));

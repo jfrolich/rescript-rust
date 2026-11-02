@@ -430,11 +430,10 @@ fn raw_polyvariant_const(tag: &str) -> RawLambda {
     })
 }
 
-fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
+fn raw_record_field_access(lbl: &LabelDescription) -> (i32, FieldDbgInfo) {
     let name = label_runtime_name(lbl);
     let info = match &lbl.lbl_repres {
         RecordRepresentation::RecordRegular => FieldDbgInfo::Record { name },
-        RecordRepresentation::RecordFloatUnused => return None,
         RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record { name },
         RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline { name },
         RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension { name },
@@ -443,16 +442,14 @@ fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)
         RecordRepresentation::RecordExtension => lbl.lbl_pos + 1,
         _ => lbl.lbl_pos,
     };
-    Some((pos, info))
+    (pos, info)
 }
 
 fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDbgInfo)> {
     let name = label_runtime_name(lbl);
     let info = match &lbl.lbl_repres {
         RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(name),
-        RecordRepresentation::RecordFloatUnused | RecordRepresentation::RecordUnboxed(_) => {
-            return None;
-        }
+        RecordRepresentation::RecordUnboxed(_) => return None,
         RecordRepresentation::RecordInlined { .. } => SetFieldDbgInfo::RecordInlineSet(name),
         RecordRepresentation::RecordExtension => SetFieldDbgInfo::RecordExtensionSet(name),
     };
@@ -3118,14 +3115,13 @@ impl<'a> RawLambdaConverter<'a> {
                         };
                         if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
                             base_var.clone()
-                        } else if let Some((pos, info)) = raw_record_field_access(lbl) {
+                        } else {
+                            let (pos, info) = raw_record_field_access(lbl);
                             RawLambda::prim(
                                 Primitive::Pfield(pos, info),
                                 vec![base_var.clone()],
                                 self.loc(lid.loc),
                             )
-                        } else {
-                            RawLambda::unit()
                         }
                     }
                 };
@@ -3163,7 +3159,6 @@ impl<'a> RawLambdaConverter<'a> {
                         )
                     }
                 }
-                RecordRepresentation::RecordFloatUnused => RawLambda::unit(),
                 RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
                     [value] => value.clone(),
                     _ => RawLambda::unit(),
@@ -5933,14 +5928,13 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
                     self.convert_expr_raw(record)
-                } else if let Some((pos, info)) = raw_record_field_access(lbl) {
+                } else {
+                    let (pos, info) = raw_record_field_access(lbl);
                     RawLambda::prim(
                         Primitive::Pfield(pos, info),
                         vec![self.convert_expr_raw(record)],
                         self.loc(expr.exp_loc),
                     )
-                } else {
-                    RawLambda::unit()
                 }
             }
             ExpressionDesc::Texp_setfield(record, _, lbl, value) => {
@@ -6636,10 +6630,7 @@ impl<'a> RawLambdaConverter<'a> {
                         // them past existing Alias Llets. StrictOpt (mutable) fields stay
                         // at the outermost position. We simulate this reordering here.
                         let mut field_indices: Vec<(usize, LetKind)> = Vec::new();
-                        for (idx, (_, _, mutflag, repr, _)) in all_labels.iter().enumerate() {
-                            if matches!(repr, RecordRepresentation::RecordFloatUnused) {
-                                continue;
-                            }
+                        for (idx, (_, _, mutflag, _, _)) in all_labels.iter().enumerate() {
                             let kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
                                 LetKind::StrictOpt
                             } else {
@@ -6680,7 +6671,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 RecordRepresentation::RecordRegular => {
                                     FieldDbgInfo::Record { name: name.clone() }
                                 }
-                                RecordRepresentation::RecordFloatUnused => continue,
                                 RecordRepresentation::RecordInlined { .. } => {
                                     FieldDbgInfo::RecordInline { name: name.clone() }
                                 }
@@ -6728,9 +6718,7 @@ impl<'a> RawLambdaConverter<'a> {
                         let field = match &lbl.lbl_repres {
                             RecordRepresentation::RecordUnboxed(_) => RawLambda::var(tmp),
                             _ => {
-                                let Some((pos, info)) = raw_record_field_access(lbl) else {
-                                    continue;
-                                };
+                                let (pos, info) = raw_record_field_access(lbl);
                                 RawLambda::prim(
                                     Primitive::Pfield(pos, info),
                                     vec![RawLambda::var(tmp)],

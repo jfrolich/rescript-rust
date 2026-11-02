@@ -10,11 +10,7 @@ use crate::lambda::lam_pass_count::{OccurrenceTable, UsedInfo};
 
 type LocalTable = AHashMap<Ident, usize>;
 
-pub(crate) fn collect_occurs(
-    store: &mut IndexedLambda,
-    root: NodeId,
-    hash_capacity: &mut usize,
-) -> OccurrenceTable {
+pub(crate) fn collect_occurs(store: &mut IndexedLambda, root: NodeId) -> OccurrenceTable {
     fn add_one_use(occ: &mut OccurrenceTable, local: &LocalTable, id: &Ident) {
         if let Some(index) = local.get(id).copied() {
             occ.values[index].times += 1;
@@ -68,26 +64,25 @@ pub(crate) fn collect_occurs(
         occ: &mut OccurrenceTable,
         local: &mut LocalTable,
         node: NodeId,
-        hash_capacity: &mut usize,
     ) {
         match store.snapshot(node) {
             NodeSnapshot::Function(_, _, body, _, _) => {
-                count(store, occ, &mut LocalTable::new(), body, hash_capacity)
+                count(store, occ, &mut LocalTable::new(), body)
             }
             NodeSnapshot::For(_, from, to, _, body) => {
-                count(store, occ, local, from, hash_capacity);
-                count(store, occ, local, to, hash_capacity);
-                count(store, occ, &mut LocalTable::new(), body, hash_capacity);
+                count(store, occ, local, from);
+                count(store, occ, local, to);
+                count(store, occ, &mut LocalTable::new(), body);
             }
             NodeSnapshot::ForOf(_, iterable, body)
             | NodeSnapshot::ForAwaitOf(_, iterable, body) => {
-                count(store, occ, local, iterable, hash_capacity);
-                count(store, occ, &mut LocalTable::new(), body, hash_capacity);
+                count(store, occ, local, iterable);
+                count(store, occ, &mut LocalTable::new(), body);
             }
             NodeSnapshot::While(condition, body) => {
                 let empty = &mut LocalTable::new();
-                count(store, occ, empty, condition, hash_capacity);
-                count(store, occ, empty, body, hash_capacity);
+                count(store, occ, empty, condition);
+                count(store, occ, empty, body);
             }
             NodeSnapshot::Var(id) => add_one_use(occ, local, &id),
             NodeSnapshot::Let(_, id, value, body)
@@ -97,30 +92,26 @@ pub(crate) fn collect_occurs(
                     unreachable!()
                 };
                 let source = *source;
-                with_binding(occ, local, &id, |occ, local| {
-                    count(store, occ, local, body, hash_capacity)
-                });
+                with_binding(occ, local, &id, |occ, local| count(store, occ, local, body));
                 inherit_use(occ, local, &source, &id);
             }
             NodeSnapshot::Let(kind, id, value, body) => {
-                with_binding(occ, local, &id, |occ, local| {
-                    count(store, occ, local, body, hash_capacity)
-                });
+                with_binding(occ, local, &id, |occ, local| count(store, occ, local, body));
                 if kind == LetKind::Strict || occ.used(&id) {
-                    count(store, occ, local, value, hash_capacity);
+                    count(store, occ, local, value);
                 }
             }
-            NodeSnapshot::Assign(_, value) => count(store, occ, local, value, hash_capacity),
+            NodeSnapshot::Assign(_, value) => count(store, occ, local, value),
             NodeSnapshot::Prim(_, args, _) | NodeSnapshot::StaticRaise(_, args) => {
                 for node in args {
-                    count(store, occ, local, node, hash_capacity);
+                    count(store, occ, local, node);
                 }
             }
             NodeSnapshot::LetRec(bindings, body) => {
                 for (_, node) in bindings {
-                    count(store, occ, local, node, hash_capacity);
+                    count(store, occ, local, node);
                 }
-                count(store, occ, local, body, hash_capacity);
+                count(store, occ, local, body);
             }
             NodeSnapshot::Apply(function, args, _) => {
                 if let NodeSnapshot::Function(_, params, body, attr, _) = store.snapshot(function)
@@ -128,12 +119,12 @@ pub(crate) fn collect_occurs(
                     && !attr.async_
                     && attr.directive.is_none()
                 {
-                    let reduced = no_names_beta_reduce(store, &params, body, &args, hash_capacity);
-                    count(store, occ, local, reduced, hash_capacity);
+                    let reduced = no_names_beta_reduce(store, &params, body, &args);
+                    count(store, occ, local, reduced);
                 } else {
-                    count(store, occ, local, function, hash_capacity);
+                    count(store, occ, local, function);
                     for node in args {
-                        count(store, occ, local, node, hash_capacity);
+                        count(store, occ, local, node);
                     }
                 }
             }
@@ -148,43 +139,43 @@ pub(crate) fn collect_occurs(
             } => {
                 if let Some(fail) = fail_action {
                     if !consts_full && !blocks_full {
-                        count(store, occ, local, fail, hash_capacity);
-                        count(store, occ, local, fail, hash_capacity);
+                        count(store, occ, local, fail);
+                        count(store, occ, local, fail);
                     } else {
                         assert!(!consts_full || !blocks_full);
-                        count(store, occ, local, fail, hash_capacity);
+                        count(store, occ, local, fail);
                     }
                 }
-                count(store, occ, local, scrutinee, hash_capacity);
+                count(store, occ, local, scrutinee);
                 for (_, node) in consts {
-                    count(store, occ, local, node, hash_capacity);
+                    count(store, occ, local, node);
                 }
                 for (_, node) in blocks {
-                    count(store, occ, local, node, hash_capacity);
+                    count(store, occ, local, node);
                 }
             }
             NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
-                count(store, occ, local, scrutinee, hash_capacity);
+                count(store, occ, local, scrutinee);
                 for (_, node) in cases {
-                    count(store, occ, local, node, hash_capacity);
+                    count(store, occ, local, node);
                 }
                 if let Some(node) = default {
-                    count(store, occ, local, node, hash_capacity);
+                    count(store, occ, local, node);
                 }
             }
             NodeSnapshot::StaticCatch(body, _, _, handler)
             | NodeSnapshot::TryWith(body, _, handler) => {
-                count(store, occ, local, body, hash_capacity);
-                count(store, occ, local, handler, hash_capacity);
+                count(store, occ, local, body);
+                count(store, occ, local, handler);
             }
             NodeSnapshot::IfThenElse(a, b, c) => {
-                count(store, occ, local, a, hash_capacity);
-                count(store, occ, local, b, hash_capacity);
-                count(store, occ, local, c, hash_capacity);
+                count(store, occ, local, a);
+                count(store, occ, local, b);
+                count(store, occ, local, c);
             }
             NodeSnapshot::Sequence(a, b) => {
-                count(store, occ, local, a, hash_capacity);
-                count(store, occ, local, b, hash_capacity);
+                count(store, occ, local, a);
+                count(store, occ, local, b);
             }
             NodeSnapshot::GlobalModule(_)
             | NodeSnapshot::Const(_)
@@ -194,7 +185,7 @@ pub(crate) fn collect_occurs(
     }
 
     let mut occ = OccurrenceTable::default();
-    count(store, &mut occ, &mut LocalTable::new(), root, hash_capacity);
+    count(store, &mut occ, &mut LocalTable::new(), root);
     occ
 }
 
@@ -228,8 +219,7 @@ mod tests {
         );
         let mut store = IndexedLambda::from_lambda(input);
         let root = store.root();
-        let mut capacity = 32;
-        let occurrences = collect_occurs(&mut store, root, &mut capacity);
+        let occurrences = collect_occurs(&mut store, root);
         assert_eq!(occurrences.get(&outer).times, 3);
         assert!(!occurrences.get(&outer).captured);
         assert_eq!(occurrences.get(&inner).times, 2);
@@ -252,8 +242,7 @@ mod tests {
         let (kind, id, init, body) = (kind, *id, init, body);
         let body = store.append_sequence(body, body);
         let root = store.append(NodeSnapshot::Let(kind, id, init, body));
-        let mut capacity = 32;
-        let occurrences = collect_occurs(&mut store, root, &mut capacity);
+        let occurrences = collect_occurs(&mut store, root);
         assert_eq!(occurrences.get(&value).times, 2);
         assert!(!occurrences.get(&value).captured);
     }
@@ -284,8 +273,7 @@ mod tests {
         for (consts_full, blocks_full) in [(true, false), (false, true)] {
             let (value, mut store) = switch_default_input(consts_full, blocks_full);
             let root = store.root();
-            let mut capacity = 32;
-            let occurrences = collect_occurs(&mut store, root, &mut capacity);
+            let occurrences = collect_occurs(&mut store, root);
             assert_eq!(occurrences.get(&value).times, 1);
         }
     }
@@ -295,8 +283,7 @@ mod tests {
     fn both_full_switch_tables_reject_fail_action() {
         let (_, mut store) = switch_default_input(true, true);
         let root = store.root();
-        let mut capacity = 32;
-        collect_occurs(&mut store, root, &mut capacity);
+        collect_occurs(&mut store, root);
     }
 
     #[test]
@@ -332,9 +319,8 @@ mod tests {
             ),
         );
         let mut store = IndexedLambda::from_lambda(input);
-        let mut capacity = 32;
         let root = store.root();
-        let occurrences = collect_occurs(&mut store, root, &mut capacity);
+        let occurrences = collect_occurs(&mut store, root);
         assert_eq!(occurrences.get(&alias).times, 2);
         assert!(occurrences.get(&alias).captured);
         assert_eq!(occurrences.get(&outer).times, 2);

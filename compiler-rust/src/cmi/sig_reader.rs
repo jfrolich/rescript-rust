@@ -254,13 +254,12 @@ impl<'a> SigReadContext<'a> {
     /// Read record_representation.
     ///
     /// Constants and non-constants numbered separately:
-    /// Constants:     Record_regular=0, Record_float_unused=1, Record_extension=2
+    /// Constants:     Record_regular=0, Record_extension=1
     /// Non-constants: Record_unboxed=0, Record_inlined=1
     fn read_record_representation(&mut self, value: &OcamlValue) -> RecordRepresentation {
         match value {
             OcamlValue::Int(0) => RecordRepresentation::RecordRegular,
-            OcamlValue::Int(1) => RecordRepresentation::RecordFloatUnused,
-            OcamlValue::Int(2) => RecordRepresentation::RecordExtension,
+            OcamlValue::Int(1) => RecordRepresentation::RecordExtension,
             OcamlValue::Block(0, fields) => {
                 RecordRepresentation::RecordUnboxed(fields[0].as_bool())
             }

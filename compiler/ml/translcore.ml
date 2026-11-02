@@ -503,7 +503,7 @@ let import_source_of_arg (arg : Typedtree.expression) : Lambda.import_source =
     match module_path me with
     | Some path -> of_global_path ~is_module:true arg.exp_loc me.mod_env path
     | None -> unsupported arg.exp_loc)
-  | Texp_ident (_, _, {val_kind = Val_prim ({prim_kind; prim_name} as p)}) -> (
+  | Texp_ident (_, _, {val_kind = Val_prim {prim_kind; prim_name}}) -> (
     match prim_kind with
     | Kind_external
         (Ffi_bs (_, _, {kind = Decl_val {name}; module_; scopes; _})) -> (
@@ -522,9 +522,7 @@ let import_source_of_arg (arg : Typedtree.expression) : Lambda.import_source =
               };
             path = [];
           }
-      | None ->
-        ignore p;
-        unsupported arg.exp_loc)
+      | None -> unsupported arg.exp_loc)
     | _ -> unsupported arg.exp_loc)
   | Texp_ident (path, _, _) -> of_global_path arg.exp_loc arg.exp_env path
   | _ -> unsupported arg.exp_loc
@@ -1413,7 +1411,6 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.t =
   | Texp_field (arg, _, lbl) -> (
     let targ = transl_exp arg in
     match lbl.lbl_repres with
-    | Record_float_unused -> assert false
     | Record_regular ->
       prim
         ~primitive:
@@ -1434,7 +1431,6 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.t =
   | Texp_setfield (arg, _, lbl, newval) ->
     let access =
       match lbl.lbl_repres with
-      | Record_float_unused -> assert false
       | Record_regular ->
         Psetfield (lbl.lbl_pos, Lambda.fld_record_set lbl.lbl_runtime_name)
       | Record_inlined _ ->
@@ -1770,7 +1766,6 @@ and transl_record loc env fields repres opt_init_expr =
             | Kept _ ->
               let access =
                 match repres with
-                | Record_float_unused -> assert false
                 | Record_regular ->
                   Pfield (i, Lambda.fld_record lbl.lbl_runtime_name)
                 | Record_inlined _ ->
@@ -1795,7 +1790,6 @@ and transl_record loc env fields repres opt_init_expr =
           if mut = Mutable then raise Not_constant;
           let cl = List.map extract_constant ll in
           match repres with
-          | Record_float_unused -> assert false
           | Record_regular ->
             const (Const_block (Lambda.blk_record (field_shape ()) mut, cl))
           | Record_inlined {name; representation} ->
@@ -1825,7 +1819,6 @@ and transl_record loc env fields repres opt_init_expr =
             prim
               ~primitive:(Pmakeblock (Lambda.blk_record (field_shape ()) mut))
               ~args:ll loc
-          | Record_float_unused -> assert false
           | Record_inlined {name; representation} ->
             let runtime =
               match Variant_runtime.representation representation with
@@ -1872,7 +1865,6 @@ and transl_record loc env fields repres opt_init_expr =
         | Overridden (_lid, expr) ->
           let upd =
             match repres with
-            | Record_float_unused -> assert false
             | Record_regular ->
               Psetfield (lbl.lbl_pos, Lambda.fld_record_set lbl.lbl_runtime_name)
             | Record_inlined _ ->

@@ -37,17 +37,19 @@ pub fn uncaught_exception_report(payload: &(dyn std::any::Any + Send)) -> Option
         .map(|exception| format!("Fatal error: exception {}", exception.0))
 }
 
-/// The compilation-unit name of a source file: its basename up to the first
-/// `.`, with the first character uppercased.
+/// `Ext_filename.module_name`: the compilation-unit name of a source file,
+/// its basename without the final extension (the output prefix), with only
+/// an ASCII first letter capitalized. `Button.test.res` is `Button.test`, so
+/// it can refer to `Button`.
 pub fn module_name_from_source_filename(path: &str) -> String {
     let basename = std::path::Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
-    let name = basename.split('.').next().unwrap_or(basename);
-    let mut chars = name.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
+    let name = basename.rsplit_once('.').map_or(basename, |(name, _)| name);
+    let mut name = name.to_string();
+    if let Some(first) = name.get_mut(0..1) {
+        first.make_ascii_uppercase();
     }
+    name
 }

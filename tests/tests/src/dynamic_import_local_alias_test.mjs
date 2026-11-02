@@ -3,13 +3,7 @@
 
 async function length() {
   let N = await import("@rescript/runtime/lib/es6/Stdlib_List.mjs");
-  return N.length({
-    hd: 1,
-    tl: {
-      hd: 2,
-      tl: /* [] */0
-    }
-  });
+  return N.length({hd: 1, tl: {hd: 2, tl: /* [] */0}});
 }
 
 let Old;

@@ -263,7 +263,7 @@ let rec constant (c : Lambda.structured_constant) =
   | Const_module_alias -> Sexp.atom "Const_module_alias"
 
 (* Primitive *)
-let primitive ~with_locs (prim : Lambda.primitive) =
+let primitive (prim : Lambda.primitive) =
   match prim with
   | Pcreate_extension s -> Sexp.list [Sexp.atom "Pcreate_extension"; string s]
   | Pinit_mod -> Sexp.atom "Pinit_mod"
@@ -486,7 +486,7 @@ let rec lambda ~with_locs (lam : Lambda.t) =
     let loc_sexp = if with_locs then [location ~with_locs loc] else [] in
     Sexp.list ([
       Sexp.atom "Lprim";
-      primitive ~with_locs prim;
+      primitive prim;
       Sexp.list (List.map (lambda ~with_locs) args);
     ] @ loc_sexp)
   | Lswitch (arg, sw) ->

@@ -782,9 +782,7 @@ fn same_record_representation(
 ) -> bool {
     use super::decl::RecordRepresentation as R;
     match (left, right) {
-        (R::RecordRegular, R::RecordRegular)
-        | (R::RecordFloatUnused, R::RecordFloatUnused)
-        | (R::RecordExtension, R::RecordExtension) => true,
+        (R::RecordRegular, R::RecordRegular) | (R::RecordExtension, R::RecordExtension) => true,
         (R::RecordInlined { name: left, .. }, R::RecordInlined { name: right, .. }) => {
             left == right
         }

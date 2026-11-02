@@ -21,6 +21,7 @@ use std::sync::Arc;
 impl JsPrinter<'_> {
     /// Print a program
     pub fn print_program(&mut self, program: &Program) {
+        self.reserve_js_names(&program.block);
         self.at_least_two_lines();
         self.print_statements(&program.block, true);
     }
@@ -77,6 +78,7 @@ impl JsPrinter<'_> {
             }
             self.at_least_two_lines();
         }
+        self.reserve_js_names(&program.program.block);
         let _printed_imports = self.print_module_imports(&program.modules);
         self.at_least_two_lines();
         self.reserve_idents_in_current_scope(&program.program.name_reservations);

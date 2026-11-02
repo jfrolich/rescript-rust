@@ -178,7 +178,25 @@ fn is_prefix_operator(name: &str) -> bool {
 /// Check if an identifier needs parens when printed as a value
 /// (OCaml wraps operators in parens when used as values)
 fn ident_needs_parens(name: &str) -> bool {
-    is_infix_operator(name) || is_prefix_operator(name)
+    is_infix_operator(name) || is_prefix_operator(name) || name.starts_with('.')
+}
+
+/// pprintast.ml `protect_ident`: binders that are infix or prefix operators
+/// are parenthesized, with spaces around a `*` to avoid comment syntax.
+fn protect_ident<W: Write>(f: &mut Formatter<W>, name: &str) {
+    if !ident_needs_parens(name) {
+        f.string(name);
+    } else if name.starts_with('*') || name.ends_with('*') {
+        f.string("(");
+        f.space();
+        f.string(name);
+        f.space();
+        f.string(")");
+    } else {
+        f.string("(");
+        f.string(name);
+        f.string(")");
+    }
 }
 
 /// Get operator name if expression is an identifier that is an operator
@@ -455,7 +473,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.open_box(BoxKind::HOV, 2);
             f.string("external");
             f.space();
-            f.string(arena.get_string(vd.pval_name.txt));
+            protect_ident(f, arena.get_string(vd.pval_name.txt));
             f.space();
             f.string(":");
             f.space();
@@ -1416,15 +1434,6 @@ fn print_expression_inner<W: Write>(
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => {
             // OCaml wraps operators in parens when used as values
-            if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
-                let name = arena.get_string(*name_idx);
-                if ident_needs_parens(name) {
-                    f.string("(");
-                    f.string(name);
-                    f.string(")");
-                    return;
-                }
-            }
             print_longident_idx(f, arena, lid.txt);
         }
         ExpressionDesc::Pexp_constant(c) => {
@@ -2521,9 +2530,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         PatternDesc::Ppat_any => {
             f.string("_");
         }
-        PatternDesc::Ppat_var(name) => {
-            f.string(arena.get_string(name.txt));
-        }
+        PatternDesc::Ppat_var(name) => protect_ident(f, arena.get_string(name.txt)),
         PatternDesc::Ppat_alias(p, name) => {
             // OCaml: @[<2>%a@;as@;%a@]
             f.open_box(BoxKind::Box, 2);
@@ -2531,7 +2538,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.space(); // @; before as
             f.string("as");
             f.space(); // @; after as
-            f.string(arena.get_string(name.txt));
+            protect_ident(f, arena.get_string(name.txt));
             f.close_box();
         }
         PatternDesc::Ppat_constant(c) => {
@@ -3336,15 +3343,11 @@ fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant) {
 
 fn print_longident<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, lid: &Longident) {
     match lid {
-        Longident::Lident(name_idx) => {
-            let name = arena.get_string(*name_idx);
-            f.string(name);
-        }
+        Longident::Lident(name_idx) => protect_ident(f, arena.get_string(*name_idx)),
         Longident::Ldot(prefix, name_idx) => {
             print_longident(f, arena, prefix);
             f.string(".");
-            let name = arena.get_string(*name_idx);
-            f.string(name);
+            protect_ident(f, arena.get_string(*name_idx));
         }
         Longident::Lapply(m1, m2) => {
             print_longident(f, arena, m1);
@@ -4103,7 +4106,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 f.string("external");
             }
             f.space();
-            f.string(arena.get_string(vd.pval_name.txt));
+            protect_ident(f, arena.get_string(vd.pval_name.txt));
             f.space();
             f.string(":");
             f.space();

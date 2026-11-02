@@ -1459,14 +1459,14 @@ impl<'a> Mapper<'a> {
             self.map_attributes(&expr.pexp_attributes)
         };
 
-        // ast_mapper_from0.ml E.map: the first `res.braces`/`ns.braces` or
+        // ast_mapper_from0.ml E.map: the first `res.braces` or
         // `res.await` marker decides which wrapper node the v0 attribute
         // slot encodes.
         let first_wrapper =
             expr.pexp_attributes
                 .iter()
                 .find_map(|(name, _)| match name.txt.as_str() {
-                    "res.braces" | "ns.braces" => Some(true),
+                    "res.braces" => Some(true),
                     "res.await" => Some(false),
                     _ => None,
                 });
@@ -1474,7 +1474,7 @@ impl<'a> Mapper<'a> {
             let at = expr
                 .pexp_attributes
                 .iter()
-                .position(|(name, _)| name.txt == "res.braces" || name.txt == "ns.braces")
+                .position(|(name, _)| name.txt == "res.braces")
                 .expect("found above");
             let outer_attrs = &expr.pexp_attributes[..at];
             let braces_loc = self.loc(&expr.pexp_attributes[at].0.loc);

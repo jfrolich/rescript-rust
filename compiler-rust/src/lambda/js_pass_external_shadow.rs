@@ -1,245 +1,278 @@
-//! JS IR pass: rewrite references to externally-shadowed globals.
-//!
-//! When a top-level `let`/`const` binding shadows a built-in global name
-//! (e.g. `let Map = ...`), later references to the *original* global must
-//! go through `globalThis.Map` instead of bare `Map`.
+//! JS IR pass (`Js_pass_external_shadow`): a reference to a JS global `x` is
+//! printed as `x`. If a binding printed as `x` is in scope there, that name
+//! refers to the binding instead, so the reference has to go through
+//! `globalThis.x`.
 
 use crate::ident::Ident;
-use crate::js_ir::printer::is_js_keyword_or_global;
+use crate::js_ir::printer::convert_ident_name;
 use crate::js_ir::{
     Block, CaseClause, DepsProgram, Expression, ExpressionDesc, Statement, StatementDesc,
-    StringClause, VariableDeclaration,
+    StringClause, VIdent, VariableDeclaration,
 };
-use crate::lambda::lam_compat::LetKind;
-use ahash::AHashSet as HashSet;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 pub(crate) fn apply_external_shadow_pass(mut deps: DepsProgram) -> DepsProgram {
-    let shadowed_globals = deps
-        .program
-        .block
-        .iter()
-        .filter_map(|stmt| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident, property, ..
-            }) if is_lexical_binding_kind(*property) && should_rewrite_binding(ident) => {
-                Some(ident.name().to_string())
-            }
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-
-    if shadowed_globals.is_empty() {
-        return deps;
-    }
-
-    // Both rewrites below only replace a reference to a JS global whose name
-    // is also the name of a lexical binding (`shadowed_globals` holds the
-    // top-level ones; `rewrite_shadowed_global_in_expr` runs for every
-    // lexical binding at any depth). When no JS global referenced in the
-    // program shares a name with any binding, the pass rebuilds the program
-    // unchanged, so skip it.
+    // Only bindings named like a referenced JS global matter; without such
+    // references the pass would rebuild the program unchanged.
     let mut names = ReferencedNames::default();
     crate::js_ir::walk::walk_block(&mut names, &deps.program.block);
-    if names
-        .globals
-        .iter()
-        .all(|name| !names.bindings.contains(name))
+    if names.globals.is_empty() {
+        return deps;
+    }
+    let mut scope = Scope {
+        globals: names.globals.iter().map(|name| name.to_string()).collect(),
+        counts: HashMap::default(),
+        log: Vec::new(),
+    };
+    // Statically imported modules are toplevel bindings of the generated
+    // module (`import * as M from ...` or `let M = require(...)`).
+    for module in &names.imported_modules {
+        scope.add_binding(module);
+    }
+    if scope.log.is_empty()
+        && !names
+            .bindings
+            .iter()
+            .any(|name| scope.globals.contains(name.as_str()))
     {
         return deps;
     }
-
-    let rw = Rewriter {
-        shadowed_globals: &shadowed_globals,
-        enclosing_bindings: std::cell::RefCell::new(Vec::new()),
-    };
-    deps.program.block = rewrite_block(std::mem::take(&mut deps.program.block), &rw);
+    deps.program.block = scope.block(std::mem::take(&mut deps.program.block));
     deps
 }
 
-struct Rewriter<'a> {
-    /// The top-level lexical bindings that shadow a JS global.
-    shadowed_globals: &'a HashSet<String>,
-    /// Names of the lexical bindings whose initializer is being traversed: a
-    /// JS global with such a name can't be referenced directly there.
-    enclosing_bindings: std::cell::RefCell<Vec<String>>,
+/// `in_scope`: the printed names of the bindings in scope at the current
+/// point, restricted to the names of referenced JS globals.
+struct Scope {
+    globals: HashSet<String>,
+    counts: HashMap<String, u32>,
+    /// The names added, in order, so that leaving a scope can remove them.
+    log: Vec<String>,
 }
 
-pub(crate) fn is_lexical_binding_kind(property: LetKind) -> bool {
-    matches!(
-        property,
-        LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
-    )
+/// A reference to a JS global (`Ext_ident.is_js`): Rust creates JS globals
+/// as persistent idents.
+fn is_js_global(id: &Ident) -> bool {
+    id.is_js() || (id.is_global() && id.stamp() == 0)
 }
 
-fn should_rewrite_binding(ident: &Ident) -> bool {
-    !ident.is_global() && !is_js_keyword_or_global(ident.name())
+/// The name a binding is printed with. Bindings named like JS keywords or
+/// reserved globals are printed with a `$$` prefix, so they shadow nothing.
+fn printed_binding_name(ident: &Ident) -> Option<String> {
+    (!ident.is_js()).then(|| convert_ident_name(ident.name()))
 }
 
-fn rewrite_block(block: Block, rw: &Rewriter<'_>) -> Block {
-    block
-        .into_iter()
-        .map(|stmt| rewrite_statement(stmt, rw))
-        .collect()
-}
-
-fn rewrite_statement(stmt: Statement, rw: &Rewriter<'_>) -> Statement {
-    let Statement {
-        source_loc,
-        desc,
-        comment,
-    } = stmt;
-    let desc = match desc {
-        StatementDesc::Block(block) => StatementDesc::Block(rewrite_block(block, rw)),
-        StatementDesc::Variable(decl) => {
-            let value = decl.value.map(|value| {
-                if is_lexical_binding_kind(decl.property) && should_rewrite_binding(&decl.ident) {
-                    rw.enclosing_bindings
-                        .borrow_mut()
-                        .push(decl.ident.name().to_string());
-                    let value = rewrite_global_static_index_expr(value, rw);
-                    rw.enclosing_bindings.borrow_mut().pop();
-                    value
-                } else {
-                    rewrite_global_static_index_expr(value, rw)
-                }
-            });
-            StatementDesc::Variable(VariableDeclaration {
-                ident: decl.ident,
-                value,
-                property: decl.property,
-                ident_info: decl.ident_info,
-            })
-        }
-        StatementDesc::Exp(expr) => StatementDesc::Exp(rewrite_global_static_index_expr(expr, rw)),
-        StatementDesc::If(cond, then_block, else_block) => StatementDesc::If(
-            rewrite_global_static_index_expr(cond, rw),
-            rewrite_block(then_block, rw),
-            rewrite_block(else_block, rw),
-        ),
-        StatementDesc::While(label, cond, body) => StatementDesc::While(
-            label,
-            rewrite_global_static_index_expr(cond, rw),
-            rewrite_block(body, rw),
-        ),
-        StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
-            label,
-            init.map(|expr| Box::new(rewrite_global_static_index_expr(*expr, rw))),
-            Box::new(rewrite_global_static_index_expr(*end, rw)),
-            id,
-            direction,
-            rewrite_block(body, rw),
-        ),
-        StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
-            label,
-            id,
-            Box::new(rewrite_global_static_index_expr(*iterable, rw)),
-            rewrite_block(body, rw),
-        ),
-        StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
-            label,
-            id,
-            Box::new(rewrite_global_static_index_expr(*iterable, rw)),
-            rewrite_block(body, rw),
-        ),
-        StatementDesc::Continue(label) => StatementDesc::Continue(label),
-        StatementDesc::Break(label) => StatementDesc::Break(label),
-        StatementDesc::Return(expr) => {
-            StatementDesc::Return(rewrite_global_static_index_expr(expr, rw))
-        }
-        StatementDesc::IntSwitch(expr, clauses, default) => StatementDesc::IntSwitch(
-            rewrite_global_static_index_expr(expr, rw),
-            clauses
-                .into_iter()
-                .map(|(value, clause)| (value, rewrite_case_clause(clause, rw)))
-                .collect(),
-            default.map(|block| rewrite_block(block, rw)),
-        ),
-        StatementDesc::StringSwitch(expr, clauses, default) => StatementDesc::StringSwitch(
-            rewrite_global_static_index_expr(expr, rw),
-            clauses
-                .into_iter()
-                .map(|clause| StringClause {
-                    tag_type: clause.tag_type,
-                    clause: rewrite_case_clause(clause.clause, rw),
-                })
-                .collect(),
-            default.map(|block| rewrite_block(block, rw)),
-        ),
-        StatementDesc::Throw(expr) => {
-            StatementDesc::Throw(rewrite_global_static_index_expr(expr, rw))
-        }
-        StatementDesc::Try(body, catch, finally) => StatementDesc::Try(
-            rewrite_block(body, rw),
-            catch.map(|(ident, block)| (ident, rewrite_block(block, rw))),
-            finally.map(|block| rewrite_block(block, rw)),
-        ),
-        StatementDesc::Debugger => StatementDesc::Debugger,
-    };
-
-    Statement {
-        source_loc,
-        desc,
-        comment,
-    }
-}
-
-fn rewrite_case_clause(clause: CaseClause, rw: &Rewriter<'_>) -> CaseClause {
-    CaseClause {
-        source_loc: clause.source_loc,
-        body: rewrite_block(clause.body, rw),
-        should_break: clause.should_break,
-        comment: clause.comment,
-    }
-}
-
-fn rewrite_global_static_index_expr(expr: Expression, rw: &Rewriter<'_>) -> Expression {
-    let mut rewrite_expr = |child| rewrite_global_static_index_expr(child, rw);
-    let mut rewrite_function_body = |body| rewrite_block(body, rw);
-    let expr = rewrite_expr_children(expr, &mut rewrite_expr, &mut rewrite_function_body);
-    let Expression {
-        source_loc,
-        desc,
-        comment,
-    } = expr;
-    match desc {
-        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
-            if id.is_global()
-                && rw
-                    .enclosing_bindings
-                    .borrow()
-                    .iter()
-                    .any(|name| name == id.name()) =>
+impl Scope {
+    fn add_binding(&mut self, ident: &Ident) {
+        if let Some(name) = printed_binding_name(ident)
+            && self.globals.contains(&name)
         {
-            global_this_field(id.name())
+            *self.counts.entry(name.clone()).or_insert(0) += 1;
+            self.log.push(name);
         }
-        ExpressionDesc::StaticIndex(obj, field, pos) => match &obj.desc {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
-                if id.is_global() && rw.shadowed_globals.contains(id.name()) =>
-            {
-                // `{expr with expression_desc = Static_index (obj, field, pos)}`
-                // (js_pass_external_shadow.ml:86) keeps the comment and
-                // source location.
-                Expression {
-                    source_loc,
-                    desc: ExpressionDesc::StaticIndex(
-                        Box::new(global_this_field(id.name())),
-                        field,
-                        pos,
-                    ),
-                    comment,
-                }
+    }
+
+    fn in_scope(&self, name: &str) -> bool {
+        self.counts.get(name).is_some_and(|count| *count > 0)
+    }
+
+    /// `with_bindings`: the bindings added after `enter` stay in scope
+    /// until `leave`.
+    fn enter(&self) -> usize {
+        self.log.len()
+    }
+
+    fn leave(&mut self, mark: usize) {
+        while self.log.len() > mark {
+            let name = self.log.pop().expect("scope log entry");
+            if let Some(count) = self.counts.get_mut(&name) {
+                *count -= 1;
             }
-            _ => Expression {
-                source_loc,
-                desc: ExpressionDesc::StaticIndex(obj, field, pos),
-                comment,
-            },
-        },
-        desc => Expression {
+        }
+    }
+
+    /// A JS `let`, `const` or function declaration is in scope in its whole
+    /// block, including before the declaration.
+    fn add_declarations(&mut self, block: &Block) {
+        for stmt in block {
+            if let StatementDesc::Variable(VariableDeclaration { ident, .. }) = &stmt.desc {
+                self.add_binding(ident);
+            }
+        }
+    }
+
+    fn block(&mut self, block: Block) -> Block {
+        let mark = self.enter();
+        self.add_declarations(&block);
+        let block = block.into_iter().map(|stmt| self.statement(stmt)).collect();
+        self.leave(mark);
+        block
+    }
+
+    fn with_binding<T>(&mut self, ident: &Ident, f: impl FnOnce(&mut Self) -> T) -> T {
+        let mark = self.enter();
+        self.add_binding(ident);
+        let result = f(self);
+        self.leave(mark);
+        result
+    }
+
+    fn case_clause(&mut self, clause: CaseClause) -> CaseClause {
+        CaseClause {
+            body: self.block(clause.body),
+            ..clause
+        }
+    }
+
+    /// The cases of a switch are printed without braces, so they share one
+    /// scope.
+    fn add_switch_declarations<'c>(
+        &mut self,
+        bodies: impl Iterator<Item = &'c Block>,
+        default: Option<&Block>,
+    ) {
+        for body in bodies {
+            self.add_declarations(body);
+        }
+        if let Some(block) = default {
+            self.add_declarations(block);
+        }
+    }
+
+    fn statement(&mut self, stmt: Statement) -> Statement {
+        let Statement {
             source_loc,
             desc,
             comment,
-        },
+        } = stmt;
+        let desc = match desc {
+            StatementDesc::Block(block) => StatementDesc::Block(self.block(block)),
+            StatementDesc::Variable(decl) => StatementDesc::Variable(VariableDeclaration {
+                value: decl.value.map(|value| self.expression(value)),
+                ..decl
+            }),
+            StatementDesc::Exp(expr) => StatementDesc::Exp(self.expression(expr)),
+            StatementDesc::If(cond, then_block, else_block) => StatementDesc::If(
+                self.expression(cond),
+                self.block(then_block),
+                self.block(else_block),
+            ),
+            StatementDesc::While(label, cond, body) => {
+                StatementDesc::While(label, self.expression(cond), self.block(body))
+            }
+            StatementDesc::ForRange(label, init, end, id, direction, body) => {
+                self.with_binding(&id, |this| {
+                    StatementDesc::ForRange(
+                        label,
+                        init.map(|expr| Box::new(this.expression(*expr))),
+                        Box::new(this.expression(*end)),
+                        id,
+                        direction,
+                        this.block(body),
+                    )
+                })
+            }
+            StatementDesc::ForOf(label, id, iterable, body) => self.with_binding(&id, |this| {
+                StatementDesc::ForOf(
+                    label,
+                    id,
+                    Box::new(this.expression(*iterable)),
+                    this.block(body),
+                )
+            }),
+            StatementDesc::ForAwaitOf(label, id, iterable, body) => {
+                self.with_binding(&id, |this| {
+                    StatementDesc::ForAwaitOf(
+                        label,
+                        id,
+                        Box::new(this.expression(*iterable)),
+                        this.block(body),
+                    )
+                })
+            }
+            StatementDesc::Continue(label) => StatementDesc::Continue(label),
+            StatementDesc::Break(label) => StatementDesc::Break(label),
+            StatementDesc::Return(expr) => StatementDesc::Return(self.expression(expr)),
+            // The discriminant is evaluated before the scope shared by the
+            // cases is entered.
+            StatementDesc::IntSwitch(expr, clauses, default) => {
+                let expr = self.expression(expr);
+                let mark = self.enter();
+                self.add_switch_declarations(
+                    clauses.iter().map(|(_, clause)| &clause.body),
+                    default.as_ref(),
+                );
+                let clauses = clauses
+                    .into_iter()
+                    .map(|(value, clause)| (value, self.case_clause(clause)))
+                    .collect();
+                let default = default.map(|block| self.block(block));
+                self.leave(mark);
+                StatementDesc::IntSwitch(expr, clauses, default)
+            }
+            StatementDesc::StringSwitch(expr, clauses, default) => {
+                let expr = self.expression(expr);
+                let mark = self.enter();
+                self.add_switch_declarations(
+                    clauses.iter().map(|clause| &clause.clause.body),
+                    default.as_ref(),
+                );
+                let clauses = clauses
+                    .into_iter()
+                    .map(|clause| StringClause {
+                        tag_type: clause.tag_type,
+                        clause: self.case_clause(clause.clause),
+                    })
+                    .collect();
+                let default = default.map(|block| self.block(block));
+                self.leave(mark);
+                StatementDesc::StringSwitch(expr, clauses, default)
+            }
+            StatementDesc::Throw(expr) => StatementDesc::Throw(self.expression(expr)),
+            // The catch parameter is only in scope in the handler.
+            StatementDesc::Try(body, catch, finally) => {
+                let body = self.block(body);
+                let catch = catch.map(|(ident, handler)| {
+                    let handler = self.with_binding(&ident, |this| this.block(handler));
+                    (ident, handler)
+                });
+                let finally = finally.map(|block| self.block(block));
+                StatementDesc::Try(body, catch, finally)
+            }
+            StatementDesc::Debugger => StatementDesc::Debugger,
+        };
+        Statement {
+            source_loc,
+            desc,
+            comment,
+        }
+    }
+
+    fn expression(&mut self, expr: Expression) -> Expression {
+        match &expr.desc {
+            ExpressionDesc::Var(VIdent::Id(id)) if is_js_global(id) && self.in_scope(id.name()) => {
+                global_this_field(id.name())
+            }
+            ExpressionDesc::Fun { params, .. } => {
+                let mark = self.enter();
+                for param in params {
+                    self.add_binding(param);
+                }
+                let expr = self.expression_children(expr);
+                self.leave(mark);
+                expr
+            }
+            _ => self.expression_children(expr),
+        }
+    }
+
+    fn expression_children(&mut self, expr: Expression) -> Expression {
+        let this = std::cell::RefCell::new(self);
+        rewrite_expr_children(
+            expr,
+            &mut |child| this.borrow_mut().expression(child),
+            &mut |body| this.borrow_mut().block(body),
+        )
     }
 }
 
@@ -383,59 +416,219 @@ fn global_this_field(name: &str) -> Expression {
     ))
 }
 
-/// Names of the JS globals a program references and of the variables it
-/// declares.
+/// Names of the JS globals a program references, of the bindings it
+/// declares and the statically imported modules.
 #[derive(Default)]
 struct ReferencedNames<'a> {
     globals: HashSet<&'a str>,
-    bindings: HashSet<&'a str>,
+    bindings: HashSet<String>,
+    imported_modules: Vec<&'a Ident>,
 }
 
 impl<'a> crate::js_ir::walk::Visitor<'a> for ReferencedNames<'a> {
     fn visit_expression(&mut self, expression: &'a Expression) {
-        if let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &expression.desc
-            && id.is_global()
-        {
-            self.globals.insert(id.name());
+        match &expression.desc {
+            ExpressionDesc::Var(VIdent::Id(id)) if is_js_global(id) => {
+                self.globals.insert(id.name());
+            }
+            ExpressionDesc::Var(VIdent::Qualified(module, _)) if !module.dynamic_import => {
+                self.imported_modules.push(&module.id);
+            }
+            ExpressionDesc::Fun { params, .. } => {
+                self.bindings
+                    .extend(params.iter().filter_map(printed_binding_name));
+            }
+            _ => {}
         }
     }
 
     fn visit_declaration(&mut self, declaration: &'a VariableDeclaration) {
-        self.bindings.insert(declaration.ident.name());
+        self.bindings
+            .extend(printed_binding_name(&declaration.ident));
+    }
+
+    fn visit_block(&mut self, block: &'a Block) {
+        for stmt in block {
+            match &stmt.desc {
+                StatementDesc::ForRange(_, _, _, id, _, _)
+                | StatementDesc::ForOf(_, id, _, _)
+                | StatementDesc::ForAwaitOf(_, id, _, _)
+                | StatementDesc::Try(_, Some((id, _)), _) => {
+                    self.bindings.extend(printed_binding_name(id));
+                }
+                _ => {}
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ident::IdentFlags;
-    use crate::js_ir::VIdent;
+    use crate::js_ir::op::IdentInfo;
+    use crate::js_ir::{CallInfo, Program};
+    use crate::lambda::lam_compat::LetKind;
 
+    fn js_global(name: &str) -> Expression {
+        Expression::var(Ident::create_persistent(name))
+    }
+
+    fn is_global_read(e: &Expression) -> bool {
+        matches!(&e.desc, ExpressionDesc::Var(VIdent::Id(id)) if is_js_global(id) && id.name() == "g")
+    }
+
+    fn is_global_this_read(e: &Expression) -> bool {
+        matches!(
+            &e.desc,
+            ExpressionDesc::StaticIndex(obj, field, _)
+                if field == "g"
+                    && matches!(&obj.desc, ExpressionDesc::Var(VIdent::Id(gt)) if gt.name() == "globalThis")
+        )
+    }
+
+    fn run(block: Block) -> Block {
+        apply_external_shadow_pass(DepsProgram {
+            program: Program::new(block, vec![]),
+            modules: Default::default(),
+            side_effect: None,
+        })
+        .program
+        .block
+    }
+
+    fn define(ident: Ident, value: Expression) -> Statement {
+        Statement::variable(VariableDeclaration {
+            ident,
+            value: Some(value),
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        })
+    }
+
+    fn call_f(args: Vec<Expression>) -> Statement {
+        Statement::exp(Expression::call(js_global("f"), args, CallInfo::default()))
+    }
+
+    /// `switch (g) { case 1: let g = 1; f(g, <global g>) }`: the
+    /// discriminant is read outside the scope of the cases
+    /// (ounit_external_shadow_tests.ml).
     #[test]
-    fn shadowed_static_index_keeps_comment() {
-        let global = Ident::new("Map", 0, IdentFlags::GLOBAL);
-        let mut expr = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::new(ExpressionDesc::Var(VIdent::Id(global)))),
-            "size".to_string(),
+    fn switch_discriminant_is_read_outside_the_scope_of_the_cases() {
+        let local = Ident::create_local("g");
+        let body = vec![
+            define(local, Expression::number(crate::js_ir::Number::int(1))),
+            call_f(vec![Expression::var(local), js_global("g")]),
+        ];
+        let block = run(vec![Statement::new(StatementDesc::IntSwitch(
+            js_global("g"),
+            vec![(
+                1,
+                CaseClause {
+                    body,
+                    should_break: true,
+                    comment: None,
+                    source_loc: None,
+                },
+            )],
             None,
-        ));
-        expr.comment = Some(Box::new("note".to_string()));
-        let shadowed: HashSet<String> = ["Map".to_string()].into_iter().collect();
-
-        let rw = Rewriter {
-            shadowed_globals: &shadowed,
-            enclosing_bindings: std::cell::RefCell::new(Vec::new()),
+        ))]);
+        let [
+            Statement {
+                desc: StatementDesc::IntSwitch(discr, clauses, None),
+                ..
+            },
+        ] = block.as_slice()
+        else {
+            panic!("unexpected program shape")
         };
-        let rewritten = rewrite_global_static_index_expr(expr, &rw);
-
-        assert_eq!(
-            rewritten.comment.as_deref().map(String::as_str),
-            Some("note")
+        assert!(
+            is_global_read(discr),
+            "discriminant reads the global directly"
         );
-        let ExpressionDesc::StaticIndex(obj, field, _) = &rewritten.desc else {
-            panic!("expected a static index");
+        let [
+            _,
+            Statement {
+                desc: StatementDesc::Exp(call),
+                ..
+            },
+        ] = clauses[0].1.body.as_slice()
+        else {
+            panic!("unexpected case body")
         };
-        assert_eq!(field, "size");
-        assert!(!matches!(obj.desc, ExpressionDesc::Var(VIdent::Id(_))));
+        let ExpressionDesc::Call(_, args, _) = &call.desc else {
+            panic!("expected a call")
+        };
+        assert!(
+            args.iter().any(is_global_this_read),
+            "read in the case goes through globalThis"
+        );
+    }
+
+    /// A toplevel binding is in scope before its declaration, and a
+    /// parameter only inside its function.
+    #[test]
+    fn bindings_follow_js_scoping() {
+        let local = Ident::create_local("g");
+        let param = Ident::create_local("g");
+        let fun = Expression::new(ExpressionDesc::Fun {
+            is_method: false,
+            params: vec![param],
+            body: vec![call_f(vec![js_global("g")])],
+            env: Default::default(),
+            return_unit: false,
+            async_: false,
+            directive: None,
+        });
+        let block = run(vec![
+            call_f(vec![js_global("g")]),
+            define(local, Expression::number(crate::js_ir::Number::int(1))),
+        ]);
+        let Statement {
+            desc: StatementDesc::Exp(call),
+            ..
+        } = &block[0]
+        else {
+            panic!("expected a call")
+        };
+        let ExpressionDesc::Call(_, args, _) = &call.desc else {
+            panic!("expected a call")
+        };
+        assert!(is_global_this_read(&args[0]));
+
+        let block = run(vec![call_f(vec![js_global("g")]), Statement::exp(fun)]);
+        let Statement {
+            desc: StatementDesc::Exp(call),
+            ..
+        } = &block[0]
+        else {
+            panic!("expected a call")
+        };
+        let ExpressionDesc::Call(_, args, _) = &call.desc else {
+            panic!("expected a call")
+        };
+        assert!(
+            is_global_read(&args[0]),
+            "the parameter is out of scope here"
+        );
+        let Statement {
+            desc: StatementDesc::Exp(fun),
+            ..
+        } = &block[1]
+        else {
+            panic!("expected the function")
+        };
+        let ExpressionDesc::Fun { body, .. } = &fun.desc else {
+            panic!("expected the function")
+        };
+        let StatementDesc::Exp(call) = &body[0].desc else {
+            panic!("expected a call")
+        };
+        let ExpressionDesc::Call(_, args, _) = &call.desc else {
+            panic!("expected a call")
+        };
+        assert!(
+            is_global_this_read(&args[0]),
+            "the parameter shadows the global"
+        );
     }
 }

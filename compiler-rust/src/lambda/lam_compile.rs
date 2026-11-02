@@ -1194,7 +1194,7 @@ impl LambdaCompiler {
         let (_, parameter_map) =
             is_closed_with_map_indexed(context.store(), &exports, &params, body);
         let mut diagnostics = IndexedBetaDiagnostics::default();
-        let (store, metadata, beta_hash_bucket_count) = context.parts_mut();
+        let (store, metadata) = context.parts_mut();
         propagate_beta_reduce_with_map_indexed(
             store,
             metadata,
@@ -1203,7 +1203,6 @@ impl LambdaCompiler {
             body,
             args,
             &self.id_gen,
-            beta_hash_bucket_count,
             &mut diagnostics,
         )
     }
@@ -6848,6 +6847,18 @@ fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
         .len()
         .cmp(&right_name.len())
         .then_with(|| left_name.cmp(right_name))
+        .then_with(|| module_kind_rank(left).cmp(&module_kind_rank(right)))
+}
+
+/// `Lam_module_ident.compare_same_name`: modules with the same name are
+/// ordered by kind.
+fn module_kind_rank(module: &ModuleId) -> u8 {
+    match module.kind {
+        Kind::Ml => 0,
+        Kind::Runtime => 1,
+        Kind::External { default: false, .. } => 2,
+        Kind::External { default: true, .. } => 3,
+    }
 }
 
 fn ext_ident_cmp(left: &Ident, right: &Ident) -> std::cmp::Ordering {

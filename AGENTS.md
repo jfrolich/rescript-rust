@@ -522,6 +522,11 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 ### Commit Standards
 
 - Use DCO sign-off: `Signed-Off-By: Your Name <email>`
+- Put the sign-off in the final paragraph of the message, next to any other
+  trailers such as `Co-Authored-By:`, with no blank line between them. Git only
+  parses the last paragraph as trailers, so a sign-off separated by a blank
+  line doesn't count. Check with
+  `git log -1 --format=%B | git interpret-trailers --parse`.
 - Include appropriate tests with all changes
 - Build must pass before committing
 - **Commit atomically** - Each commit should address exactly one concern (one bug fix, one feature, one refactor). When making multiple related changes, split them into separate atomic commits. For example, if fixing a parity issue requires adding a new field to a struct and then using that field in parsing logic, make two commits: one for the struct change, one for the parsing logic. This makes it easier to review changes, bisect issues, revert specific changes if needed, and understand the evolution of the codebase. Each commit message should clearly describe what was changed and why.

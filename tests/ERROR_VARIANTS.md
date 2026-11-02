@@ -460,6 +460,7 @@ Untagged-variant validation errors. Source: `type untagged_error` and `type erro
 | `AtMostOneNumber` | ✓ | `UntaggedAtMostOneNumber.res` | `int` and `float` payloads collide on the number runtime check. |
 | `AtMostOneBigint` | ✓ | `UntaggedAtMostOneBigint.res` | Two bigint payloads. |
 | `AtMostOneBoolean` | ✓ | `UntaggedAtMostOneBoolean.res` | Two boolean payloads. |
+| `UnreachableBoolean` | ✓ | `UntaggedUnreachableBoolean.res` | Boolean payload alongside both `@as(true)` and `@as(false)` cases. |
 | `DuplicateLiteral` | ✓ | `UntaggedDuplicateLiteral.res` | `@as("x")` on two different constructors. |
 | `ConstructorMoreThanOneArg` | ✓ | `UntaggedConstructorMoreThanOneArg.res`, `UntaggedConstructorAttributeMoreThanOneArg.res` | Multiple payload arguments with type-level or constructor-level `@unboxed`. |
 
@@ -559,9 +560,9 @@ PPX/malformed ASTs, or test helper APIs, were retained and reclassified.
 ## Warnings
 
 Warnings are declared in [`compiler/ext/warnings.ml`](../compiler/ext/warnings.ml).
-The default warning set is `+a-4-9-20-41-50-102`
+The default warning set is `+a-4-9-20-41-102`
 ([`compiler/ext/bsc_warnings.ml`](../compiler/ext/bsc_warnings.ml)), so
-warnings 4, 9, 20, 41, 50, and 102 are disabled by default; the rest are
+warnings 4, 9, 20, 41, and 102 are disabled by default; the rest are
 enabled. Fixtures use `-w +A` (everything on) so default-disabled
 warnings still fire.
 

@@ -255,8 +255,10 @@ mod tests {
                     lam = *rest;
                 }
                 RawLambda::Lletrec(bindings, rest) => {
-                    let mut names: Vec<String> =
-                        bindings.iter().map(|(id, _)| id.name().to_string()).collect();
+                    let mut names: Vec<String> = bindings
+                        .iter()
+                        .map(|(id, _)| id.name().to_string())
+                        .collect();
                     names.sort();
                     shape.push(Shape::Rec(names));
                     lam = *rest;
