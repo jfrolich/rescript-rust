@@ -477,20 +477,18 @@ fn source_keys<'a>(module_name: &str, module: &'a Module) -> Vec<(String, &'a Pa
 
 /// Read every source file's modification time, before anything is parsed.
 pub fn collect_source_mtimes(build_state: &mut BuildCommandState) {
-    let mtimes: Vec<(String, i64)> = build_state
+    let mtimes: AHashMap<String, i64> = build_state
         .modules
-        .par_iter()
-        .flat_map_iter(|(module_name, module)| {
-            let package = build_state.get_package(&module.package_name).expect("package");
+        .iter()
+        .flat_map(|(module_name, module)| {
             source_keys(module_name, module)
                 .into_iter()
-                .filter_map(|(key, path)| {
-                    mtime(&package.path.join(path)).map(|time| (key, state_db::nanos_from_time(time)))
-                })
-                .collect::<Vec<_>>()
+                .map(|(key, _)| key)
+                .zip(source_times(module).unwrap_or_default())
+                .map(|(key, time)| (key, state_db::nanos_from_time(time)))
         })
         .collect();
-    build_state.source_mtimes = mtimes.into_iter().collect();
+    build_state.source_mtimes = mtimes;
 }
 
 /// Use the recorded module references of every source file that has not
@@ -813,6 +811,20 @@ fn mtime(path: &Path) -> Option<SystemTime> {
         .ok()
 }
 
+/// The modification times of the source files a module is compiled from, as
+/// the package scan read them (`packages::read_folders`, which follows
+/// symlinks like [`mtime`]).
+fn source_times(module: &Module) -> Option<Vec<SystemTime>> {
+    let SourceType::SourceFile(source_file) = &module.source_type else {
+        return None;
+    };
+    let mut times = vec![source_file.implementation.last_modified];
+    if let Some(interface) = &source_file.interface {
+        times.push(interface.last_modified);
+    }
+    Some(times)
+}
+
 /// The source files a module is compiled from, relative to its package.
 fn source_paths(module: &Module) -> Option<Vec<&Path>> {
     let SourceType::SourceFile(source_file) = &module.source_type else {
@@ -828,14 +840,10 @@ fn source_paths(module: &Module) -> Option<Vec<&Path>> {
 /// The newest of a module's own inputs: its sources and `config_time`, the
 /// newer of its package's and the root configuration. `None` if one is
 /// unreadable.
-fn newest_own_input(
-    module: &Module,
-    package: &Package,
-    config_time: Option<SystemTime>,
-) -> Option<SystemTime> {
+fn newest_own_input(module: &Module, config_time: Option<SystemTime>) -> Option<SystemTime> {
     let mut newest = config_time?;
-    for path in source_paths(module)? {
-        newest = newest.max(mtime(&package.path.join(path))?);
+    for time in source_times(module)? {
+        newest = newest.max(time);
     }
     Some(newest)
 }
@@ -869,7 +877,7 @@ fn recorded_as_is(module_name: &str, module: &Module, record: Option<&PackageRec
 }
 
 /// Facts about one source module, gathered from the file system.
-struct ModuleTimes {
+pub struct ModuleTimes {
     recorded: bool,
     newest_input: Option<SystemTime>,
     /// When the JavaScript was last known to be up to date: the oldest output
@@ -879,7 +887,16 @@ struct ModuleTimes {
     js_confirmed_at: Option<SystemTime>,
 }
 
-fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes> {
+/// [`compute_module_times`], once per build: the no-op check and the plan
+/// both read them, and nothing between the two changes the files they read.
+fn module_times(build_state: &mut BuildCommandState) -> AHashMap<String, ModuleTimes> {
+    match build_state.module_times.take() {
+        Some(times) => times,
+        None => compute_module_times(build_state),
+    }
+}
+
+fn compute_module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes> {
     let previous = build_state.previous_in_process.as_ref();
     let root_config = build_state.get_root_config();
     let root_config_time = mtime(&root_config.path);
@@ -914,7 +931,7 @@ fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes
                 .map(|oldest| js_confirmed_at.map_or(oldest, |confirmed| oldest.max(confirmed)));
             let times = ModuleTimes {
                 recorded: true,
-                newest_input: newest_own_input(module, package, config_times[&module.package_name]),
+                newest_input: newest_own_input(module, config_times[&module.package_name]),
                 output,
                 js_confirmed_at,
             };
@@ -931,14 +948,15 @@ fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes
 /// input was last modified, and every JavaScript output still exists. The
 /// saved warnings are then restored for reporting.
 pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
-    let Some(previous) = build_state.previous_in_process.as_ref() else {
-        return false;
-    };
-    if !build_state.deleted_modules.is_empty() {
+    if build_state.previous_in_process.is_none() || !build_state.deleted_modules.is_empty() {
         return false;
     }
     let times = module_times(build_state);
-    times
+    let previous = build_state
+        .previous_in_process
+        .as_ref()
+        .expect("checked above");
+    let up_to_date = times
         .iter()
         .all(|(module_name, times)| {
             let module = &build_state.modules[module_name];
@@ -952,12 +970,14 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
             times.recorded
                 && times.output.is_some()
                 && times.newest_input.is_some_and(|newest| newest < started)
-        })
-        .then(|| {
-            restore_warnings(build_state, &|_| true);
-            carry_js_confirmed_at(build_state, &times, &|_| true);
-        })
-        .is_some()
+        });
+    if up_to_date {
+        restore_warnings(build_state, &|_| true);
+        carry_js_confirmed_at(build_state, &times, &|_| true);
+    } else {
+        build_state.module_times = Some(times);
+    }
+    up_to_date
 }
 
 /// Keep the recorded confirmation times of modules this build does not

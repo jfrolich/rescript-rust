@@ -321,6 +321,9 @@ pub struct BuildCommandState {
     // Each source file's modification time (`Module:impl` / `Module:intf`),
     // read before it is parsed; recorded with its dependencies.
     pub source_mtimes: AHashMap<String, i64>,
+    /// The incremental build's file facts, kept from the no-op check for the
+    /// plan (see `incremental::module_times`).
+    pub module_times: Option<AHashMap<String, super::incremental::ModuleTimes>>,
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -429,6 +432,7 @@ impl BuildCommandState {
             parse_warnings: Mutex::new(AHashMap::new()),
             js_confirmed_at: AHashMap::new(),
             source_mtimes: AHashMap::new(),
+            module_times: None,
         }
     }
 
