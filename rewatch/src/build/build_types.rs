@@ -160,10 +160,36 @@ pub struct StoredSignatureAst {
     pub source_len: usize,
 }
 
+/// A source file kept as its bytes until its module compiles. Parsing again
+/// from these bytes is cheap and yields the same AST, while the parsed form is
+/// about 50 times larger than the source; keeping every module's AST from the
+/// parse phase until it compiles dominated the peak memory of large builds.
+pub struct DeferredParse {
+    pub file_path: PathBuf,
+    pub source: Vec<u8>,
+    pub source_path_for_ast: String,
+    pub open_deps: Vec<String>,
+    pub options: rescript_compiler::driver::CompilerOptions,
+}
+
 #[derive(Clone)]
 pub enum StoredAst {
     Structure(Arc<StoredStructureAst>),
     Signature(Arc<StoredSignatureAst>),
+    /// Parsed once for its dependencies and warnings; parsed again from
+    /// the kept source when the module compiles.
+    Deferred(Arc<DeferredParse>),
+}
+
+impl StoredAst {
+    /// Length of the source the AST was parsed from.
+    pub fn source_len(&self) -> usize {
+        match self {
+            StoredAst::Structure(ast) => ast.source_len,
+            StoredAst::Signature(ast) => ast.source_len,
+            StoredAst::Deferred(deferred) => deferred.source.len(),
+        }
+    }
 }
 
 impl std::fmt::Debug for StoredAst {
@@ -171,6 +197,7 @@ impl std::fmt::Debug for StoredAst {
         match self {
             StoredAst::Structure(_) => write!(f, "StoredAst::Structure(..)"),
             StoredAst::Signature(_) => write!(f, "StoredAst::Signature(..)"),
+            StoredAst::Deferred(_) => write!(f, "StoredAst::Deferred(..)"),
         }
     }
 }

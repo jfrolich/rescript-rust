@@ -399,11 +399,10 @@ fn compute_module_costs(
         let impl_key = format!("{name}:impl");
         let intf_key = format!("{name}:intf");
         let mut source_len = 0usize;
-        if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
-            source_len = source_len.saturating_add(stored.source_len);
-        }
-        if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
-            source_len = source_len.saturating_add(stored.source_len);
+        for key in [&impl_key, &intf_key] {
+            if let Some(stored) = stored_asts.get(key) {
+                source_len = source_len.saturating_add(stored.source_len());
+            }
         }
         costs.insert(name.clone(), source_len.max(1) as i64);
     }
@@ -973,6 +972,12 @@ pub fn compile(
                         registry_only: registry_only.clone(),
                     };
                     scope.spawn(move |_| {
+                        // Parse deferred sources here, on the worker, so only
+                        // the ASTs of the modules being compiled are alive.
+                        let module_asts: AHashMap<String, StoredAst> = module_asts
+                            .into_iter()
+                            .map(|(key, ast)| (key, super::parse::materialize(ast)))
+                            .collect();
                         let msg = compile_one(
                             build_state_ref,
                             build_command_state_ref,
@@ -3783,9 +3788,9 @@ fn compile_module_in_process_to_js_boundary(
                     &local_registry,
                 )
             }
-            Some(StoredAst::Structure(_)) => {
+            Some(_) => {
                 return Err(anyhow!(
-                    "in-process invariant violated: expected signature AST for {}, found structure AST",
+                    "in-process invariant violated: expected signature AST for {}, found another AST",
                     intf_source_abs.display()
                 ));
             }
@@ -3951,8 +3956,8 @@ fn compile_module_in_process_to_js_boundary(
                         signature_hook,
                     )
                 }
-                Some(StoredAst::Signature(_)) => panic!(
-                    "in-process invariant violated: expected structure AST for {}, found signature AST",
+                Some(_) => panic!(
+                    "in-process invariant violated: expected structure AST for {}, found another AST",
                     source_abs.display()
                 ),
                 None => panic!(

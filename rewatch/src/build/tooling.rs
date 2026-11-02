@@ -186,6 +186,7 @@ impl<'a> WatchProject<'a> {
                     path,
                 }
             }
+            StoredAst::Deferred(_) => return Err(anyhow!("deferred AST for {}", filename)),
             StoredAst::Signature(ast) => {
                 let typed = rescript_compiler::driver::typecheck_signature_for_tooling(
                     &ast.arena,

@@ -92,6 +92,7 @@ pub fn generate_asts(
                                 state,
                                 state.get_warn_error_override(),
                                 &parse_span,
+                                true,
                             )
                             .map_err(|e| e.to_string());
 
@@ -103,6 +104,7 @@ pub fn generate_asts(
                                         state,
                                         state.get_warn_error_override(),
                                         &parse_span,
+                                        true,
                                     ) {
                                         Ok(v) => Ok(Some(v)),
                                         Err(e) => Err(e.to_string()),
@@ -317,6 +319,7 @@ pub(crate) fn parse_for_tooling(
         build_state,
         build_state.get_warn_error_override(),
         &tracing::Span::none(),
+        false,
     )?;
     generated
         .stored_ast
@@ -329,6 +332,7 @@ fn generate_ast(
     build_state: &BuildState,
     warn_error_override: Option<String>,
     parent_span: &tracing::Span,
+    defer: bool,
 ) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
 
@@ -403,19 +407,64 @@ fn generate_ast(
         tracing::Span::none().entered()
     };
 
-    parse_source(
+    // Sources rewritten by an external PPX keep their AST: parsing them
+    // again would run the PPX process again.
+    let kept_source = (defer && frontend_options.external_ppxs.is_empty()).then(|| source_bytes.clone());
+    let (stderr, stored_ast, deps) = parse_source(
         &file_path,
         source_bytes,
         &source_path_str,
         &open_deps,
         &frontend_options,
     )
-    .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))
-    .map(|(stderr, stored_ast, deps)| GeneratedAst {
+    .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))?;
+    let stored_ast = match kept_source {
+        Some(source) => {
+            drop(stored_ast);
+            StoredAst::Deferred(Arc::new(DeferredParse {
+                file_path,
+                source,
+                source_path_for_ast: source_path_str,
+                open_deps,
+                options: frontend_options,
+            }))
+        }
+        None => stored_ast,
+    };
+    Ok(GeneratedAst {
         stderr,
         stored_ast: Some(stored_ast),
         deps: Some(deps),
     })
+}
+
+/// The parsed AST of `ast`, parsing a deferred source again. Its warnings and
+/// dependencies were recorded by the first parse.
+pub(crate) fn materialize(ast: StoredAst) -> StoredAst {
+    let StoredAst::Deferred(deferred) = ast else {
+        return ast;
+    };
+    let deferred = Arc::try_unwrap(deferred).unwrap_or_else(|shared| DeferredParse {
+        file_path: shared.file_path.clone(),
+        source: shared.source.clone(),
+        source_path_for_ast: shared.source_path_for_ast.clone(),
+        open_deps: shared.open_deps.clone(),
+        options: shared.options.clone(),
+    });
+    let (_, stored_ast, _) = parse_source(
+        &deferred.file_path,
+        deferred.source,
+        &deferred.source_path_for_ast,
+        &deferred.open_deps,
+        &deferred.options,
+    )
+    .unwrap_or_else(|err| {
+        panic!(
+            "parsing {} again failed after it parsed: {err}",
+            deferred.file_path.display()
+        )
+    });
+    stored_ast
 }
 
 const SOURCE_TRIGGERED_PPXES: &[(&[&str], &str)] = &[
