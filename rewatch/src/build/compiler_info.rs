@@ -74,7 +74,10 @@ pub fn verify_compiler_info_with(
         .values()
         .par_bridge()
         .filter(|package| {
-            let Some(meta) = metas.get(&package.name).filter(|meta| meta.contains_key(BSC_HASH)) else {
+            let Some(meta) = metas
+                .get(&package.name)
+                .filter(|meta| meta.contains_key(BSC_HASH))
+            else {
                 // No recorded build: if the build folder holds a compiler log
                 // anyway, it came from a build we know nothing about.
                 return logs::does_ocaml_build_compiler_log_exist(package);

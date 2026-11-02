@@ -182,7 +182,8 @@ impl UnitDigests {
         module_name: &str,
         alias_rewrites: &[(String, rescript_compiler::types::path::Path)],
     ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
-        self.registry.encode_stored_module_parts(module_name, alias_rewrites)
+        self.registry
+            .encode_stored_module_parts(module_name, alias_rewrites)
     }
 
     /// The module's interface digest and item digests, `None` when it is not
@@ -366,25 +367,31 @@ pub fn current_record(
             Some(written) => {
                 record.reads_updates.insert(module_name.clone(), written.reads);
                 record.items_updates.insert(module_name.clone(), written.items);
-                (Some(written.digest), Some(state_db::Imports::new(written.imports)))
+                (
+                    Some(written.digest),
+                    Some(state_db::Imports::new(written.imports)),
+                )
             }
             None => recorded_row(build_state, module_name)
                 .filter(|_| !build_state.written_modules.contains(module_name))
                 .map_or((None, None), |row| {
                     let verified = build_state.verified_imports.lock().unwrap();
-                    let imports = row.imports.as_ref().map(|imports| match verified.get(module_name) {
-                        // Unchanged: keep the recorded (possibly undecoded) row.
-                        None => imports.clone(),
-                        Some(units) => state_db::Imports::new(
-                            imports
-                                .list()
-                                .iter()
-                                .map(|(unit, digest)| {
-                                    (unit.clone(), units.get(unit).copied().unwrap_or(*digest))
-                                })
-                                .collect(),
-                        ),
-                    });
+                    let imports = row
+                        .imports
+                        .as_ref()
+                        .map(|imports| match verified.get(module_name) {
+                            // Unchanged: keep the recorded (possibly undecoded) row.
+                            None => imports.clone(),
+                            Some(units) => state_db::Imports::new(
+                                imports
+                                    .list()
+                                    .iter()
+                                    .map(|(unit, digest)| {
+                                        (unit.clone(), units.get(unit).copied().unwrap_or(*digest))
+                                    })
+                                    .collect(),
+                            ),
+                        });
                     (row.interface_digest, imports)
                 }),
         };
@@ -398,18 +405,20 @@ pub fn current_record(
             (interface_digest, imports)
         };
         let row = ModuleRow {
-                js_confirmed_at: (!invalidated)
-                    .then(|| build_state.js_confirmed_at.get(module_name).copied())
-                    .flatten(),
-                implementation_warnings: source_file.implementation.compile_warnings.clone(),
-                interface_warnings: source_file
-                    .interface
-                    .as_ref()
-                    .and_then(|interface| interface.compile_warnings.clone()),
-                interface_digest,
-                imports,
+            js_confirmed_at: (!invalidated)
+                .then(|| build_state.js_confirmed_at.get(module_name).copied())
+                .flatten(),
+            implementation_warnings: source_file.implementation.compile_warnings.clone(),
+            interface_warnings: source_file
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.compile_warnings.clone()),
+            interface_digest,
+            imports,
         };
-        if record.partial && previous.and_then(|previous| previous.state.modules.get(module_name)) == Some(&row) {
+        if record.partial
+            && previous.and_then(|previous| previous.state.modules.get(module_name)) == Some(&row)
+        {
             continue;
         }
         record.modules.insert(module_name.clone(), row);
@@ -733,25 +742,28 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
     // Each module's extras (alias rewrites and GenType declarations) are
     // registered now; its core (signature and JS metadata) is read from the
     // database and decoded when a compile first looks the module up.
-    let extras: Vec<(String, Option<Vec<u8>>, rescript_compiler::cmi::persistent_env::CoreFetcher)> =
-        by_package
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .flat_map_iter(|(package_name, modules)| {
-                let Some(package) = build_state.get_package(package_name) else {
-                    return Vec::new();
-                };
-                let mut extras = state_db::read_interface_extras(package, &modules);
-                let cores = std::sync::Arc::new(state_db::InterfaceCores::new(package));
-                let fetch: rescript_compiler::cmi::persistent_env::CoreFetcher =
-                    std::sync::Arc::new(move |module: &str| cores.read(module));
-                modules
-                    .into_iter()
-                    .map(|module_name| (module_name.to_string(), extras.remove(module_name), fetch.clone()))
-                    .collect()
-            })
-            .collect();
+    let extras: Vec<(
+        String,
+        Option<Vec<u8>>,
+        rescript_compiler::cmi::persistent_env::CoreFetcher,
+    )> = by_package
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .flat_map_iter(|(package_name, modules)| {
+            let Some(package) = build_state.get_package(package_name) else {
+                return Vec::new();
+            };
+            let mut extras = state_db::read_interface_extras(package, &modules);
+            let cores = std::sync::Arc::new(state_db::InterfaceCores::new(package));
+            let fetch: rescript_compiler::cmi::persistent_env::CoreFetcher =
+                std::sync::Arc::new(move |module: &str| cores.read(module));
+            modules
+                .into_iter()
+                .map(|module_name| (module_name.to_string(), extras.remove(module_name), fetch.clone()))
+                .collect()
+        })
+        .collect();
     let mut loaded = AHashSet::new();
     let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
@@ -1066,25 +1078,18 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
         return false;
     }
     let times = module_times(build_state);
-    let previous = build_state
-        .previous_in_process
-        .as_ref()
-        .expect("checked above");
-    let up_to_date = times
-        .iter()
-        .all(|(module_name, times)| {
-            let module = &build_state.modules[module_name];
-            let Some(started) = previous
-                .packages
-                .get(&module.package_name)
-                .and_then(|record| record.clean_build_started_at)
-            else {
-                return false;
-            };
-            times.recorded
-                && times.output.is_some()
-                && times.newest_input.is_some_and(|newest| newest < started)
-        });
+    let previous = build_state.previous_in_process.as_ref().expect("checked above");
+    let up_to_date = times.iter().all(|(module_name, times)| {
+        let module = &build_state.modules[module_name];
+        let Some(started) = previous
+            .packages
+            .get(&module.package_name)
+            .and_then(|record| record.clean_build_started_at)
+        else {
+            return false;
+        };
+        times.recorded && times.output.is_some() && times.newest_input.is_some_and(|newest| newest < started)
+    });
     if up_to_date {
         restore_warnings(build_state, &|_| true);
         carry_js_confirmed_at(build_state, &times, &|_| true);
@@ -1187,11 +1192,11 @@ pub fn plan(build_state: &mut BuildCommandState) {
             });
             let import_removed = check_imports
                 && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
-                imports
-                    .list()
-                    .iter()
-                    .any(|(import, _)| !build_state.modules.contains_key(import))
-            });
+                    imports
+                        .list()
+                        .iter()
+                        .any(|(import, _)| !build_state.modules.contains_key(import))
+                });
             if own_stale || unknown_imports || references_new_module || import_removed {
                 stale.insert(module_name.clone());
                 continue;
@@ -1324,8 +1329,7 @@ fn imports_consistent(build_state: &BuildCommandState) -> bool {
         .find(|package| package.is_root)
         .and_then(|root| previous.packages.get(&root.name))
         .map(|record| &record.state.meta);
-    all_clean
-        && root_meta.and_then(|meta| meta.get(META_MODULE_SET)) == Some(&module_set_digest(build_state))
+    all_clean && root_meta.and_then(|meta| meta.get(META_MODULE_SET)) == Some(&module_set_digest(build_state))
 }
 
 /// Every module's recorded interface digest.

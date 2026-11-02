@@ -38,104 +38,108 @@ pub fn generate_asts(
     // Count dirty modules for the span attribute only when a subscriber is
     // listening. Otherwise iterating every module every parse phase is pure
     // waste on the hot path.
+    let dirty_modules = build_state
+        .modules
+        .values()
+        .filter(|m| match &m.source_type {
+            SourceType::SourceFile(sf) => {
+                sf.implementation.parse_dirty || sf.interface.as_ref().is_some_and(|i| i.parse_dirty)
+            }
+            SourceType::MlMap(mlmap) => mlmap.parse_dirty,
+        })
+        .count();
     let parse_span = if tracing::enabled!(tracing::Level::INFO) {
-        let dirty_modules = build_state
-            .modules
-            .values()
-            .filter(|m| match &m.source_type {
-                SourceType::SourceFile(sf) => {
-                    sf.implementation.parse_dirty || sf.interface.as_ref().is_some_and(|i| i.parse_dirty)
-                }
-                SourceType::MlMap(mlmap) => mlmap.parse_dirty,
-            })
-            .count();
         info_span!("build.parse", dirty_modules = dirty_modules)
     } else {
         tracing::Span::none()
     };
     let _span = parse_span.enter();
 
-    build_state
-        .modules
-        .par_iter()
-        .map(|(module_name, module)| {
-            let package = build_state
-                .get_package(&module.package_name)
-                .expect("Package not found");
-            match &module.source_type {
-                SourceType::MlMap(_mlmap) => (
-                    module_name.to_owned(),
-                    Ok(GeneratedAst {
-                        stderr: None,
-                        stored_ast: None,
-                        deps: None,
-                    }),
-                    Ok(None),
-                    false,
-                ),
+    let state: &BuildCommandState = build_state;
+    let parsed = super::pools::with_pool_for(dirty_modules, || {
+        state
+            .modules
+            .par_iter()
+            .map(|(module_name, module)| {
+                let package = state
+                    .get_package(&module.package_name)
+                    .expect("Package not found");
+                match &module.source_type {
+                    SourceType::MlMap(_mlmap) => (
+                        module_name.to_owned(),
+                        Ok(GeneratedAst {
+                            stderr: None,
+                            stored_ast: None,
+                            deps: None,
+                        }),
+                        Ok(None),
+                        false,
+                    ),
 
-                SourceType::SourceFile(source_file) => {
-                    let (ast_result, iast_result, dirty) = if source_file.implementation.parse_dirty
-                        || source_file
-                            .interface
-                            .as_ref()
-                            .map(|i| i.parse_dirty)
-                            .unwrap_or(false)
-                    {
-                        debug!("Generating AST for module: {module_name}");
-                        inc();
-                        let ast_result = generate_ast(
-                            package,
-                            &source_file.implementation.path,
-                            build_state,
-                            build_state.get_warn_error_override(),
-                            &parse_span,
-                        )
-                        .map_err(|e| e.to_string());
+                    SourceType::SourceFile(source_file) => {
+                        let (ast_result, iast_result, dirty) = if source_file.implementation.parse_dirty
+                            || source_file
+                                .interface
+                                .as_ref()
+                                .map(|i| i.parse_dirty)
+                                .unwrap_or(false)
+                        {
+                            debug!("Generating AST for module: {module_name}");
+                            inc();
+                            let ast_result = generate_ast(
+                                package,
+                                &source_file.implementation.path,
+                                state,
+                                state.get_warn_error_override(),
+                                &parse_span,
+                            )
+                            .map_err(|e| e.to_string());
 
-                        let iast_result = match source_file.interface.as_ref() {
-                            Some(interface) => {
-                                match generate_ast(
-                                    package,
-                                    &interface.path,
-                                    build_state,
-                                    build_state.get_warn_error_override(),
-                                    &parse_span,
-                                ) {
-                                    Ok(v) => Ok(Some(v)),
-                                    Err(e) => Err(e.to_string()),
+                            let iast_result = match source_file.interface.as_ref() {
+                                Some(interface) => {
+                                    match generate_ast(
+                                        package,
+                                        &interface.path,
+                                        state,
+                                        state.get_warn_error_override(),
+                                        &parse_span,
+                                    ) {
+                                        Ok(v) => Ok(Some(v)),
+                                        Err(e) => Err(e.to_string()),
+                                    }
                                 }
-                            }
-                            _ => Ok(None),
+                                _ => Ok(None),
+                            };
+
+                            (ast_result, iast_result, true)
+                        } else {
+                            (
+                                Ok(GeneratedAst {
+                                    stderr: None,
+                                    stored_ast: None,
+                                    deps: None,
+                                }),
+                                Ok(source_file.interface.as_ref().map(|_| GeneratedAst {
+                                    stderr: None,
+                                    stored_ast: None,
+                                    deps: None,
+                                })),
+                                false,
+                            )
                         };
 
-                        (ast_result, iast_result, true)
-                    } else {
-                        (
-                            Ok(GeneratedAst {
-                                stderr: None,
-                                stored_ast: None,
-                                deps: None,
-                            }),
-                            Ok(source_file.interface.as_ref().map(|_| GeneratedAst {
-                                stderr: None,
-                                stored_ast: None,
-                                deps: None,
-                            })),
-                            false,
-                        )
-                    };
-
-                    (module_name.to_owned(), ast_result, iast_result, dirty)
+                        (module_name.to_owned(), ast_result, iast_result, dirty)
+                    }
                 }
-            }
-        })
-        .collect::<Vec<(
-            String,
-            Result<GeneratedAst, String>,
-            Result<Option<GeneratedAst>, String>,
-            bool,
-        )>>()
+            })
+            .collect::<Vec<(
+                String,
+                Result<GeneratedAst, String>,
+                Result<Option<GeneratedAst>, String>,
+                bool,
+            )>>()
+    });
+    parsed
         .into_iter()
         .for_each(|(module_name, ast_result, iast_result, is_dirty)| {
             let Some(module) = build_state.build_state.modules.get_mut(&module_name) else {

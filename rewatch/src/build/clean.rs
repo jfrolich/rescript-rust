@@ -251,7 +251,10 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
 }
 
 pub fn cleanup_after_build(build_state: &BuildCommandState) {
-    write_in_process_record(build_state);
+    // Recording a large build encodes and hashes every module it compiled.
+    build::pools::with_pool_for(build_state.compiled_modules.len(), || {
+        write_in_process_record(build_state)
+    });
     crate::build::phase_mark("record-written");
 }
 

@@ -865,7 +865,10 @@ mod tests {
                 implementation_warnings: warning.map(str::to_string),
                 interface_warnings: None,
                 interface_digest: Some(u64::MAX - js),
-                imports: Some(Imports::new(vec![("B".to_string(), js), ("C".to_string(), u64::MAX)])),
+                imports: Some(Imports::new(vec![
+                    ("B".to_string(), js),
+                    ("C".to_string(), u64::MAX),
+                ])),
             },
         );
         state

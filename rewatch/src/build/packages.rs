@@ -644,8 +644,8 @@ fn get_source_files(
         return Ok((AHashMap::new(), None));
     }
 
-    let (map, dirs) =
-        read_folders_and_dirs(filter, package_dir, path_dir, recurse, is_type_dev).with_context(|| {
+    let (map, dirs) = read_folders_and_dirs(filter, package_dir, path_dir, recurse, is_type_dev)
+        .with_context(|| {
             format!(
                 "Could not read source folder {:?} specified by package {} at {:?}",
                 path_dir, package_name, package_dir
@@ -774,8 +774,15 @@ fn collect_gentype_source_dirs(
     }
 
     let sources: Vec<(&config::PackageSource, Option<&Vec<PathBuf>>)> = match walked {
-        Some(walked) => walked.iter().map(|(source, dirs)| (source, dirs.as_ref())).collect(),
-        None => package.source_folders.iter().map(|source| (source, None)).collect(),
+        Some(walked) => walked
+            .iter()
+            .map(|(source, dirs)| (source, dirs.as_ref()))
+            .collect(),
+        None => package
+            .source_folders
+            .iter()
+            .map(|source| (source, None))
+            .collect(),
     };
     for (source, dirs) in sources {
         let rel = PathBuf::from(&source.dir);
@@ -1869,8 +1876,9 @@ mod test {
             feature: None,
         };
         for subdirs in [true, false] {
-            let (_, walked) = super::read_folders_and_dirs(&None, pkg, std::path::Path::new("src"), subdirs, false)
-                .expect("read_folders");
+            let (_, walked) =
+                super::read_folders_and_dirs(&None, pkg, std::path::Path::new("src"), subdirs, false)
+                    .expect("read_folders");
             let mut package = create_package(CreatePackageArgs {
                 name: "p".to_string(),
                 bs_deps: vec![],

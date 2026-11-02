@@ -9,6 +9,7 @@ pub mod namespaces;
 pub mod packages;
 pub mod parse;
 pub mod plan;
+pub mod pools;
 pub mod qos;
 pub mod state_db;
 pub mod tooling;
@@ -285,7 +286,8 @@ pub fn initialize_build(
     // Read before `verify_compiler_info` may clean a package's build state.
     let metas = compiler_info::read_metas(&packages);
     let recorded_outputs = clean::recorded_outputs(&metas);
-    let compiler_check = compiler_info::verify_compiler_info_with(&packages, &compiler, &source_map_args, &metas);
+    let compiler_check =
+        compiler_info::verify_compiler_info_with(&packages, &compiler, &source_map_args, &metas);
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));
