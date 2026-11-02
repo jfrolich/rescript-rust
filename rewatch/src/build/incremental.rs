@@ -115,38 +115,55 @@ fn whole_and_items(items: ItemDigests) -> UnitDigest {
 pub struct UnitDigests {
     registry: rescript_compiler::cmi::persistent_env::ModuleRegistry,
     cache: std::sync::Mutex<AHashMap<String, Option<UnitDigest>>>,
-    /// Computed up front for every module (see [`UnitDigests::all`]).
-    all: Option<AHashMap<String, UnitDigest>>,
+    /// The recorded interface digests of the modules this build loaded from
+    /// their stored interface instead of compiling: what was recorded with
+    /// that interface, so they need not be decoded and hashed again.
+    recorded: AHashMap<String, u64>,
 }
 
 impl UnitDigests {
     pub fn new(build_state: &BuildCommandState) -> Self {
+        let recorded = build_state
+            .loaded_modules
+            .iter()
+            .filter(|module_name| !build_state.compiled_modules.contains(*module_name))
+            .filter_map(|module_name| {
+                Some((
+                    module_name.clone(),
+                    recorded_row(build_state, module_name)?.interface_digest?,
+                ))
+            })
+            .collect();
         Self {
             registry: build_state.snapshot_module_registry(),
             cache: std::sync::Mutex::new(AHashMap::new()),
-            all: None,
+            recorded,
         }
     }
 
-    /// The digests of every registered module of the build, computed in
-    /// parallel.
-    pub fn all(build_state: &BuildCommandState) -> Self {
-        let registry = build_state.snapshot_module_registry();
-        let all = build_state
-            .modules
+    /// [`UnitDigests::new`], with the digests of the modules this build
+    /// compiled computed up front, in parallel.
+    pub fn of_compiled(build_state: &BuildCommandState) -> Self {
+        let digests = Self::new(build_state);
+        let computed: Vec<(String, Option<UnitDigest>)> = build_state
+            .compiled_modules
             .par_iter()
-            .filter_map(|(module_name, _)| {
-                let digests = whole_and_items(registry.item_digests(module_name)?);
-                Some((module_name.clone(), digests))
+            .map(|module_name| {
+                let computed = digests.registry.item_digests(module_name).map(whole_and_items);
+                (module_name.clone(), computed)
             })
-            .collect::<Vec<_>>()
-            .into_iter()
             .collect();
-        Self {
-            registry,
-            cache: std::sync::Mutex::new(AHashMap::new()),
-            all: Some(all),
+        digests.cache.lock().unwrap().extend(computed);
+        digests
+    }
+
+    /// The module's interface digest: the recorded one for a module loaded
+    /// from its stored interface, `None` when it is not registered.
+    pub fn whole(&self, module_name: &str) -> Option<u64> {
+        if let Some(digest) = self.recorded.get(module_name) {
+            return Some(*digest);
         }
+        Some(self.get(module_name)?.0)
     }
 
     /// What the inlinable bodies of the items in `resolved` refer to (see
@@ -170,9 +187,6 @@ impl UnitDigests {
     /// The module's interface digest and item digests, `None` when it is not
     /// registered.
     pub fn get(&self, module_name: &str) -> Option<UnitDigest> {
-        if let Some(all) = &self.all {
-            return all.get(module_name).cloned();
-        }
         if let Some(known) = self.cache.lock().unwrap().get(module_name) {
             return known.clone();
         }
@@ -624,20 +638,19 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
             },
         )
         .collect();
-    let decoded: Vec<(String, rescript_compiler::cmi::stored_module::StoredModule)> = blobs
-        .into_par_iter()
-        .filter_map(|(module_name, data)| {
-            Some((module_name, rescript_compiler::cmi::stored_module::decode(&data)?))
-        })
-        .collect();
+    // Only the alias rewrites and GenType declarations are decoded now; a
+    // module's signature and JS metadata are decoded when a compile first
+    // looks the module up.
     let mut loaded = AHashSet::new();
     let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
-    for (module_name, module) in decoded {
-        if !module.alias_rewrites.is_empty() {
-            alias_rewrites.insert(module_name.clone(), module.alias_rewrites.clone());
+    for (module_name, data) in blobs {
+        let Some(aliases) = registry.register_stored_lazily(&module_name, &data) else {
+            continue;
+        };
+        if !aliases.is_empty() {
+            alias_rewrites.insert(module_name.clone(), aliases);
         }
-        registry.register_stored_module(&module_name, module);
         loaded.insert(module_name);
     }
     log::debug!(
@@ -646,6 +659,32 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
         modules.len()
     );
     loaded
+}
+
+/// Decode, in parallel, the stored interfaces of `loaded` that the last
+/// compile of a module of `round` read (its recorded imports): the compiles
+/// of the round would otherwise decode them one by one as they look them up.
+pub fn decode_recorded_imports(
+    build_state: &BuildCommandState,
+    round: &AHashSet<String>,
+    loaded: &AHashSet<String>,
+) {
+    let imports: AHashSet<&str> = round
+        .iter()
+        .filter_map(|module_name| recorded_row(build_state, module_name)?.imports.as_ref())
+        .flatten()
+        .map(|(import, _)| import.as_str())
+        .filter(|import| loaded.contains(*import))
+        .collect();
+    if imports.is_empty() {
+        return;
+    }
+    let registry = build_state.snapshot_module_registry();
+    imports
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .for_each(|module_name| registry.decode_stored(module_name));
 }
 
 /// Parse an incremental build in two rounds: first the source files that
@@ -1136,7 +1175,7 @@ pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -
         let changed: Vec<(String, u64)> = imports
             .iter()
             .filter_map(|(import, digest)| {
-                let now = digests.get(import)?.0;
+                let now = digests.whole(import)?;
                 let seen = checked.and_then(|units| units.get(import)).unwrap_or(digest);
                 (now != *seen).then(|| (import.clone(), now))
             })

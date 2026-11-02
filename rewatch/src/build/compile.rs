@@ -691,6 +691,7 @@ pub fn compile(
             pre_compile_runtime_modules(
                 &build_state.module_registry,
                 &build_state.build_state.compiler_info.runtime_path,
+                RuntimeStore::of_build(build_state).as_ref(),
             )
         })
         .and_then(join_runtime_precompile)
@@ -782,6 +783,7 @@ pub fn compile(
             let loadable =
                 super::incremental::stored_loadable(build_state, &round_dirty, &round_registry_only);
             let loaded = super::incremental::load_stored(build_state, &loadable);
+            super::incremental::decode_recorded_imports(build_state, &round_dirty, &loaded);
             // A stored interface that did not load: compile the module after
             // all (it was not parsed).
             let unloaded: AHashSet<String> = loadable.difference(&loaded).cloned().collect();
@@ -2822,13 +2824,117 @@ struct RuntimeCompletionMsg {
 /// in memory: what an in-process compile of a single file resolves against.
 pub fn runtime_registry(runtime_root: &Path) -> Result<ModuleRegistry> {
     let registry = Mutex::new(ModuleRegistry::new());
-    pre_compile_runtime_modules(&registry, runtime_root)?;
+    pre_compile_runtime_modules(&registry, runtime_root, None)?;
     Ok(registry.into_inner().unwrap())
+}
+
+/// Where a build keeps the runtime's compiled interfaces between processes:
+/// the root package's database (see `state_db::read_runtime_interfaces`),
+/// and the identity of the compiler that compiled them.
+pub(crate) struct RuntimeStore {
+    pub db: PathBuf,
+    pub compiler_hash: String,
+}
+
+impl RuntimeStore {
+    pub(crate) fn of_build(build_state: &BuildCommandState) -> Option<Self> {
+        let root = build_state.packages.values().find(|package| package.is_root)?;
+        Some(Self {
+            db: super::state_db::path(root),
+            compiler_hash: build_state.compiler_info.bsc_hash.to_hex().to_string(),
+        })
+    }
+
+    /// The key the runtime's interfaces are stored under: a digest of the
+    /// compiler, the runtime's configuration and the path, size and
+    /// modification time of every runtime source.
+    fn key(&self, runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.compiler_hash.as_bytes());
+        hasher.update(runtime_root.as_os_str().as_encoded_bytes());
+        for config in ["rescript.json", "bsconfig.json"] {
+            if let Ok(contents) = std::fs::read(runtime_root.join(config)) {
+                hasher.update(config.as_bytes());
+                hasher.update(&contents);
+            }
+        }
+        for (module_name, path) in runtime_paths {
+            hasher.update(module_name.as_bytes());
+            for source in [path.clone(), path.with_extension("resi")] {
+                let Ok(metadata) = std::fs::metadata(&source) else {
+                    continue;
+                };
+                let modified = metadata
+                    .modified()
+                    .map(super::state_db::nanos_from_time)
+                    .unwrap_or(0);
+                hasher.update(source.as_os_str().as_encoded_bytes());
+                hasher.update(&metadata.len().to_le_bytes());
+                hasher.update(&modified.to_le_bytes());
+            }
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+}
+
+/// The alias rewrites each runtime module published, by module.
+type RuntimeAliasRewrites = Mutex<AHashMap<String, Vec<(String, rescript_compiler::types::path::Path)>>>;
+
+/// Register the runtime interfaces `store` holds for these sources, without
+/// decoding their signatures (see `ModuleRegistry::register_stored_lazily`).
+/// Returns whether all of them were registered.
+fn load_runtime_interfaces(
+    registry: &Mutex<ModuleRegistry>,
+    store: &RuntimeStore,
+    key: &str,
+    runtime_paths: &[(String, PathBuf)],
+) -> bool {
+    let Some(stored) = super::state_db::read_runtime_interfaces(&store.db, key) else {
+        return false;
+    };
+    let mut registry = registry.lock().unwrap();
+    let mut registered = 0;
+    for (module_name, data) in &stored {
+        if registry.register_stored_lazily(module_name, data).is_some() {
+            registered += 1;
+        }
+    }
+    registered == stored.len() && registered == runtime_paths.len()
+}
+
+/// Store the runtime interfaces just compiled into `registry` (see
+/// [`load_runtime_interfaces`]).
+fn store_runtime_interfaces(
+    registry: &Mutex<ModuleRegistry>,
+    store: &RuntimeStore,
+    key: &str,
+    runtime_modules: &[RuntimeModuleSource],
+    published_aliases: RuntimeAliasRewrites,
+) {
+    let published_aliases = published_aliases.into_inner().unwrap();
+    let interfaces: Option<Vec<(String, Vec<u8>)>> = {
+        let registry = registry.lock().unwrap();
+        runtime_modules
+            .iter()
+            .map(|module| {
+                let aliases = published_aliases
+                    .get(&module.module_name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let data = registry.encode_stored_module(&module.module_name, aliases)?;
+                Some((module.module_name.clone(), data))
+            })
+            .collect()
+    };
+    if let Some(interfaces) = interfaces {
+        super::state_db::write_runtime_interfaces(&store.db, key, &interfaces);
+    }
 }
 
 pub(crate) fn pre_compile_runtime_modules(
     registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
+    store: Option<&RuntimeStore>,
 ) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled =
@@ -2848,10 +2954,21 @@ pub(crate) fn pre_compile_runtime_modules(
     let already_registered = {
         let registry = registry.lock().unwrap();
         runtime_paths.iter().all(|(module_name, _)| {
-            registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name)
+            registry.is_pending_stored(module_name)
+                || (registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name))
         })
     };
     if already_registered {
+        return Ok(());
+    }
+
+    // The interfaces the last build compiled stand in for compiling the
+    // runtime again while its sources and the compiler are the same.
+    let store_key = store.map(|store| (store, store.key(runtime_root, &runtime_paths)));
+    if let Some((store, key)) = &store_key
+        && load_runtime_interfaces(registry, store, key, &runtime_paths)
+    {
+        debug!("Loaded {} stored runtime interfaces", runtime_paths.len());
         return Ok(());
     }
 
@@ -2868,6 +2985,7 @@ pub(crate) fn pre_compile_runtime_modules(
     populate_runtime_deps(&mut runtime_modules);
 
     seed_runtime_registry(registry, &runtime_modules);
+    let published_aliases = RuntimeAliasRewrites::default();
     runtime_compile_pool.install(|| {
         compile_runtime_modules_parallel(
             registry,
@@ -2875,8 +2993,12 @@ pub(crate) fn pre_compile_runtime_modules(
             &runtime_path,
             &runtime_config,
             &runtime_modules,
+            &published_aliases,
         )
     })?;
+    if let Some((store, key)) = &store_key {
+        store_runtime_interfaces(registry, store, key, &runtime_modules, published_aliases);
+    }
 
     if let (Some(start), Some(before)) = (runtime_timing_start, runtime_timing_before) {
         let after = rescript_compiler::timing::snapshot();
@@ -2948,6 +3070,7 @@ fn compile_runtime_modules_parallel(
     runtime_path: &Path,
     runtime_config: &config::Config,
     runtime_modules: &[RuntimeModuleSource],
+    published_aliases: &RuntimeAliasRewrites,
 ) -> Result<()> {
     let (mut pending_deps, dependents) = runtime_dependency_graph(runtime_modules);
     let priorities = runtime_critical_path_priorities(runtime_modules, &dependents);
@@ -2987,6 +3110,7 @@ fn compile_runtime_modules_parallel(
                         runtime_config,
                         module,
                         registry_snapshot,
+                        published_aliases,
                     );
                     let _ = tx.send(RuntimeCompletionMsg { idx, result });
                 });
@@ -3034,6 +3158,7 @@ fn compile_runtime_modules_parallel(
             runtime_config,
             runtime_modules,
             &completed,
+            published_aliases,
         )?;
     }
 
@@ -3047,6 +3172,7 @@ fn compile_runtime_cycle_remainder_serial(
     runtime_config: &config::Config,
     runtime_modules: &[RuntimeModuleSource],
     completed: &[bool],
+    published_aliases: &RuntimeAliasRewrites,
 ) -> Result<()> {
     debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
     let worker_registry_template = registry.lock().unwrap().for_worker_snapshot();
@@ -3062,6 +3188,7 @@ fn compile_runtime_cycle_remainder_serial(
             runtime_config,
             &runtime_modules[idx],
             registry_snapshot,
+            published_aliases,
         )?;
     }
     Ok(())
@@ -3074,6 +3201,7 @@ fn compile_runtime_module_from_source(
     runtime_config: &config::Config,
     module: &RuntimeModuleSource,
     registry_snapshot: ModuleRegistry,
+    published_aliases: &RuntimeAliasRewrites,
 ) -> Result<()> {
     let options = runtime_compiler_options(
         runtime_root,
@@ -3143,6 +3271,19 @@ fn compile_runtime_module_from_source(
     .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
     .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
+    let published: &AHashMap<String, rescript_compiler::types::path::Path> = if has_runtime_interface {
+        &interface_alias_rewrites
+    } else {
+        &compile_result.new_alias_rewrites
+    };
+    if !published.is_empty() {
+        let mut aliases: Vec<_> = published.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        aliases.sort_by(|a, b| a.0.cmp(&b.0));
+        published_aliases
+            .lock()
+            .unwrap()
+            .insert(module.module_name.clone(), aliases);
+    }
     let mut shared_registry = registry.lock().unwrap();
     if has_runtime_interface {
         // OCaml compiler/ml/typemod.ml:1742-1758 checks the implementation

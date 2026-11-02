@@ -8,7 +8,9 @@
 //! - the in-process build record read by [`super::incremental`]: when the
 //!   last build started and whether it succeeded, every module's source
 //!   paths, when each module's JavaScript was last confirmed up to date, and
-//!   the warnings to report again for modules that are not recompiled.
+//!   the warnings to report again for modules that are not recompiled;
+//! - in the root package's database, the runtime's interfaces as the last
+//!   build compiled them (see [`read_runtime_interfaces`]).
 //!
 //! The database lives in the package's build directory, so cleaning a package
 //! removes its record with everything else. Any error reading it is treated
@@ -24,7 +26,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 10;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -42,6 +44,7 @@ CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NO
 CREATE TABLE reads (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE items (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE interfaces (module TEXT PRIMARY KEY, hash INTEGER NOT NULL, data BLOB NOT NULL);
+CREATE TABLE runtime_interfaces (module TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
 ";
 
 /// Files that earlier builds wrote instead of the database.
@@ -246,17 +249,20 @@ fn open_existing(path: &Path) -> Option<Connection> {
 }
 
 fn open_for_write(package: &Package) -> rusqlite::Result<Connection> {
+    open_path_for_write(&path(package))
+}
+
+fn open_path_for_write(path: &Path) -> rusqlite::Result<Connection> {
     ensure_sqlite_initialized();
-    let path = path(package);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut conn = Connection::open(&path)?;
+    let mut conn = Connection::open(path)?;
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version != SCHEMA_VERSION {
         drop(conn);
-        let _ = std::fs::remove_file(&path);
-        conn = Connection::open(&path)?;
+        let _ = std::fs::remove_file(path);
+        conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -366,6 +372,64 @@ pub fn read(package: &Package) -> Option<PackageState> {
         })
     };
     read().ok()
+}
+
+/// The metadata key of the runtime interfaces' key (see
+/// [`read_runtime_interfaces`]).
+const META_RUNTIME_KEY: &str = "runtime_key";
+
+/// The runtime's interfaces stored in the database at `db` (the root
+/// package's), by module, when they were stored under `key`: a digest of the
+/// runtime's sources and of the compiler, so they stand in for compiling the
+/// runtime. `None` when there are none for `key`.
+pub fn read_runtime_interfaces(db: &Path, key: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    let conn = open_existing(db)?;
+    let stored: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![META_RUNTIME_KEY],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if stored != key {
+        return None;
+    }
+    let mut stmt = conn.prepare("SELECT module, data FROM runtime_interfaces").ok()?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .ok()?;
+    (!rows.is_empty()).then_some(rows)
+}
+
+/// Replace the runtime interfaces stored in the database at `db` with
+/// `interfaces`, under `key` (see [`read_runtime_interfaces`]). A failure
+/// only costs compiling the runtime again, so it is not reported.
+pub fn write_runtime_interfaces(db: &Path, key: &str, interfaces: &[(String, Vec<u8>)]) {
+    let write = || -> rusqlite::Result<()> {
+        let mut conn = open_path_for_write(db)?;
+        conn.busy_timeout(Duration::from_secs(1))?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM runtime_interfaces", [])?;
+        {
+            let mut insert = tx.prepare("INSERT INTO runtime_interfaces (module, data) VALUES (?1, ?2)")?;
+            for (module, data) in interfaces {
+                insert.execute(params![module, data])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![META_RUNTIME_KEY, key],
+        )?;
+        tx.commit()
+    };
+    if let Err(err) = write() {
+        log::debug!(
+            "Could not store the runtime interfaces in {}: {err}",
+            db.display()
+        );
+    }
 }
 
 /// Set the given metadata keys, writing only when something changed.

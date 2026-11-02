@@ -85,7 +85,7 @@ pub fn write_in_process_record(build_state: &BuildCommandState) {
     if build_state.stopped_at_parse {
         return;
     }
-    let digests = build::incremental::UnitDigests::all(build_state);
+    let digests = build::incremental::UnitDigests::of_compiled(build_state);
     crate::build::phase_mark("record-digests");
     build_state
         .packages
