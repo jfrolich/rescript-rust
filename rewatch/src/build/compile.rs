@@ -782,6 +782,7 @@ pub fn compile(
             let loadable =
                 super::incremental::stored_loadable(build_state, &round_dirty, &round_registry_only);
             let loaded = super::incremental::load_stored(build_state, &loadable);
+            super::incremental::decode_recorded_imports(build_state, &round_dirty, &loaded);
             // A stored interface that did not load: compile the module after
             // all (it was not parsed).
             let unloaded: AHashSet<String> = loadable.difference(&loaded).cloned().collect();

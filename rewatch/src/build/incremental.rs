@@ -624,20 +624,19 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
             },
         )
         .collect();
-    let decoded: Vec<(String, rescript_compiler::cmi::stored_module::StoredModule)> = blobs
-        .into_par_iter()
-        .filter_map(|(module_name, data)| {
-            Some((module_name, rescript_compiler::cmi::stored_module::decode(&data)?))
-        })
-        .collect();
+    // Only the alias rewrites and GenType declarations are decoded now; a
+    // module's signature and JS metadata are decoded when a compile first
+    // looks the module up.
     let mut loaded = AHashSet::new();
     let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
-    for (module_name, module) in decoded {
-        if !module.alias_rewrites.is_empty() {
-            alias_rewrites.insert(module_name.clone(), module.alias_rewrites.clone());
+    for (module_name, data) in blobs {
+        let Some(aliases) = registry.register_stored_lazily(&module_name, &data) else {
+            continue;
+        };
+        if !aliases.is_empty() {
+            alias_rewrites.insert(module_name.clone(), aliases);
         }
-        registry.register_stored_module(&module_name, module);
         loaded.insert(module_name);
     }
     log::debug!(
@@ -646,6 +645,32 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
         modules.len()
     );
     loaded
+}
+
+/// Decode, in parallel, the stored interfaces of `loaded` that the last
+/// compile of a module of `round` read (its recorded imports): the compiles
+/// of the round would otherwise decode them one by one as they look them up.
+pub fn decode_recorded_imports(
+    build_state: &BuildCommandState,
+    round: &AHashSet<String>,
+    loaded: &AHashSet<String>,
+) {
+    let imports: AHashSet<&str> = round
+        .iter()
+        .filter_map(|module_name| recorded_row(build_state, module_name)?.imports.as_ref())
+        .flatten()
+        .map(|(import, _)| import.as_str())
+        .filter(|import| loaded.contains(*import))
+        .collect();
+    if imports.is_empty() {
+        return;
+    }
+    let registry = build_state.snapshot_module_registry();
+    imports
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .for_each(|module_name| registry.decode_stored(module_name));
 }
 
 /// Parse an incremental build in two rounds: first the source files that
