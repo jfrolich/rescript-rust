@@ -49,6 +49,11 @@ impl<'a> Checker<'a> {
 
     /// The work `structure_mapper` does for one item of the structure.
     pub(super) fn structure_mapper_item(&mut self, item: &StructureItem) -> PpxResult<()> {
+        // bs_builtin_ppx.ml structure_mapper `Pstr_raw`.
+        if let StructureItemDesc::Pstr_raw(raw) = &*item.pstr_desc {
+            check_raw_structure_node(raw, self.arena, &mut self.warnings);
+            return Ok(());
+        }
         if let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc {
             let ((ext_name, payload), _attrs) = &**inner;
             match self.arena.get_string(ext_name.txt) {
@@ -157,6 +162,7 @@ impl<'a> Checker<'a> {
                 self.attributes(attrs)?;
                 self.extension(extension)
             }
+            StructureItemDesc::Pstr_raw(raw) => self.attributes(&raw.attrs),
         }
     }
 
@@ -591,12 +597,6 @@ impl<'a> Checker<'a> {
         let pat = self.arena.get_pat(idx).clone();
         if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
             match &**constant {
-                Constant::Json(_) => {
-                    return Err(PpxError::at_loc(
-                        pat.ppat_loc,
-                        "Tagged template literals are not supported in patterns",
-                    ));
-                }
                 Constant::Integer(_, Some('l')) => return Ok(()),
                 _ => {}
             }
@@ -741,6 +741,8 @@ impl<'a> Checker<'a> {
             ExpressionDesc::Pexp_extension(extension) => {
                 self.expression_extension(expr.pexp_loc, extension)
             }
+            // bs_builtin_ppx.ml `Pexp_raw`: `handle_raw_node`.
+            ExpressionDesc::Pexp_raw(raw) => check_raw_node(raw, self.arena, &mut self.warnings),
             ExpressionDesc::Pexp_constant(constant) => match &**constant {
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
@@ -908,7 +910,6 @@ impl<'a> Checker<'a> {
         let (ext_name, payload) = extension;
         match self.arena.get_string(ext_name.txt) {
             "todo" => {
-                reject_json_literal_payload(payload, self.arena)?;
                 self.warnings.push(PpxWarning {
                     loc,
                     warning: Warning::BsTodo {
@@ -1098,7 +1099,8 @@ impl<'a> Checker<'a> {
             ExpressionDesc::Pexp_let(_)
             | ExpressionDesc::Pexp_fun(_)
             | ExpressionDesc::Pexp_apply(_)
-            | ExpressionDesc::Pexp_extension(_) => Ok(()),
+            | ExpressionDesc::Pexp_extension(_)
+            | ExpressionDesc::Pexp_raw(_) => Ok(()),
         }
     }
 

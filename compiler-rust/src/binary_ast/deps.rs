@@ -361,8 +361,8 @@ impl<'a> DependencyCollector<'a> {
             StructureItemDesc::Pstr_include(incl) => {
                 self.add_include_declaration(incl);
             }
-            StructureItemDesc::Pstr_attribute(_attr) => {
-                // Attributes don't contribute dependencies
+            StructureItemDesc::Pstr_attribute(_) | StructureItemDesc::Pstr_raw(_) => {
+                // Attributes and raw JavaScript don't contribute dependencies
             }
             StructureItemDesc::Pstr_extension(inner) => {
                 self.handle_extension(&inner.0);
@@ -748,6 +748,7 @@ impl<'a> DependencyCollector<'a> {
                     self.bound_modules.shift_remove(name);
                 }
             }
+            ExpressionDesc::Pexp_raw(_) => {}
             ExpressionDesc::Pexp_extension(ext) => {
                 // depend.ml:292-298: `[%extension_constructor C]` depends on
                 // the constructor path.

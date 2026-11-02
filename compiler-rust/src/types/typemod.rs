@@ -16137,7 +16137,8 @@ pub fn transl_signature<'a>(
                     val_prim,
                     val_kind,
                     val_loc: vd.pval_loc,
-                    val_attributes: vd.pval_attributes.clone(),
+                    // typedecl.ml transl_value_decl: the attributes as written.
+                    val_attributes: crate::ast_jsx_component::description_attributes(arena, vd),
                 })
             }
             PSigDesc::Psig_type(inner) => {
@@ -16702,7 +16703,11 @@ fn type_structure_item<'a>(
 
             // Add the external value to the environment
             let mut new_env = env.clone();
-            let val_attributes = parser_attrs_to_decl_attrs(arena, &vd.pval_attributes);
+            // typedecl.ml transl_value_decl: the attributes as written.
+            let val_attributes = parser_attrs_to_decl_attrs(
+                arena,
+                &crate::ast_jsx_component::description_attributes(arena, vd),
+            );
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
                 val_kind: crate::types::ValueKind::ValPrim(prim_desc),
@@ -16738,7 +16743,8 @@ fn type_structure_item<'a>(
                     val_prim,
                     val_kind,
                     val_loc: vd.pval_loc,
-                    val_attributes: vd.pval_attributes.clone(),
+                    // typedecl.ml transl_value_decl: the attributes as written.
+                    val_attributes: crate::ast_jsx_component::description_attributes(arena, vd),
                 });
             Ok((
                 StructureItem {
@@ -19967,6 +19973,11 @@ fn type_structure_item<'a>(
                 crate::types::typecore::builtin_extension_error(arena, extension),
             ))
         }
+        // typemod.ml: the built-in PPX lowers raw JavaScript before type
+        // checking.
+        ParsedStructureItemDesc::Pstr_raw(raw) => Err(TypeModError::CoreError(
+            crate::types::typecore::uninterpreted_raw_error(raw.name_loc, "raw"),
+        )),
     }
 }
 

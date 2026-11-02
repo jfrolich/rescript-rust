@@ -89,6 +89,10 @@ const SYNTHETIC_POSITION_BASE: u32 = 0x8000_0000;
 const SHARED_EXPRESSION_BASE: u32 = 0x8000_0000;
 /// First index of core types appended while the arena is shared.
 const SHARED_CORE_TYPE_BASE: u32 = 0x8000_0000;
+/// First index of strings appended through a shared arena
+/// ([`ParseArena::push_shared_string`]); above every interned and
+/// typechecker-synthetic string index.
+const SHARED_STRING_BASE: u32 = 0xC000_0000;
 
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
@@ -548,10 +552,19 @@ pub struct ParseArena {
     /// `SHARED_CORE_TYPE_BASE`: the tuples the type checker rebuilds from
     /// polymorphic variant payload groups (`Ast_helper.Typ.tuple`).
     shared_core_types: elsa::sync::FrozenVec<Box<CoreType>>,
+    /// Strings built through a shared arena, addressed from
+    /// `SHARED_STRING_BASE`: the payloads printers rebuild for `%raw`
+    /// (`Ast_raw.to_extension`).
+    shared_strings: elsa::sync::FrozenVec<Box<String>>,
     /// `Lident` of `true`, `false`, `null` and `undefined`, for those payloads.
     runtime_tag_lidents: [LidentIdx; 4],
     /// The attribute name `as`.
     as_attribute_name: StrIdx,
+    /// The JSX component attribute names `react.component`,
+    /// `react.componentWithProps`, `jsx.component` and
+    /// `jsx.componentWithProps`, which printers put back from the
+    /// `jsx_component` nodes (`Ast_helper.Jsx_component.to_attribute`).
+    jsx_component_attribute_names: [StrIdx; 4],
     /// Positions of typechecker-interned locations, addressed from
     /// `SYNTHETIC_POSITION_BASE`.
     synthetic_positions: elsa::sync::FrozenVec<Box<Position>>,
@@ -736,6 +749,13 @@ impl Default for ParseArena {
         // that can arrive from external CMIs so that round-tripping imported
         // attrs does not depend on local source text having mentioned them.
         let as_attribute_name = strings.intern("as");
+        let jsx_component_attribute_names = [
+            "react.component",
+            "react.componentWithProps",
+            "jsx.component",
+            "jsx.componentWithProps",
+        ]
+        .map(|name| strings.intern(name));
         let runtime_tag_lidents = ["true", "false", "null", "undefined"]
             .map(|name| longidents.push(Longident::Lident(strings.intern(name))));
         let _ = strings.intern("deprecated");
@@ -962,8 +982,10 @@ impl Default for ParseArena {
             synthetic_locations: elsa::sync::FrozenVec::new(),
             shared_expressions: elsa::sync::FrozenVec::new(),
             shared_core_types: elsa::sync::FrozenVec::new(),
+            shared_strings: elsa::sync::FrozenVec::new(),
             runtime_tag_lidents,
             as_attribute_name,
+            jsx_component_attribute_names,
             synthetic_positions: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
@@ -2004,7 +2026,11 @@ impl ParseArena {
     #[inline]
     pub fn get_string(&self, idx: StrIdx) -> &str {
         let raw = idx.raw();
-        if raw < self.synthetic_string_base {
+        if raw >= SHARED_STRING_BASE {
+            self.shared_strings
+                .get((raw - SHARED_STRING_BASE) as usize)
+                .expect("shared string read before it was pushed")
+        } else if raw < self.synthetic_string_base {
             self.strings.get(idx)
         } else {
             self.synthetic_strings
@@ -2060,6 +2086,14 @@ impl ParseArena {
         let slot = self.synthetic_longidents.len();
         self.synthetic_longidents.push(Box::new(longident));
         LidentIdx::from_u32(self.synthetic_longident_base + slot as u32)
+    }
+
+    /// Append a string through a shared arena, at any stage. Such strings are
+    /// not interned and are never marshalled.
+    pub fn push_shared_string(&self, string: String) -> StrIdx {
+        let slot = self.shared_strings.len();
+        self.shared_strings.push(Box::new(string));
+        StrIdx::from_raw(SHARED_STRING_BASE + slot as u32)
     }
 
     /// Append a typechecker-generated string to storage reserved before the
@@ -2302,6 +2336,22 @@ impl ParseArena {
     }
 
     /// The interned attribute name `as`.
+    /// The name of the attribute spelling a JSX component annotation.
+    pub fn jsx_component_attribute_name(
+        &self,
+        kind: &crate::parser::ast::JsxComponentKind,
+        namespace: crate::parser::ast::JsxComponentNamespace,
+    ) -> StrIdx {
+        use crate::parser::ast::{JsxComponentKind, JsxComponentNamespace};
+        let index = match (namespace, kind) {
+            (JsxComponentNamespace::React, JsxComponentKind::Labelled(_)) => 0,
+            (JsxComponentNamespace::React, JsxComponentKind::WithProps) => 1,
+            (JsxComponentNamespace::Jsx, JsxComponentKind::Labelled(_)) => 2,
+            (JsxComponentNamespace::Jsx, JsxComponentKind::WithProps) => 3,
+        };
+        self.jsx_component_attribute_names[index]
+    }
+
     pub fn as_attribute_name(&self) -> StrIdx {
         self.as_attribute_name
     }
@@ -2325,6 +2375,25 @@ impl ParseArena {
         let first_type = args.first().expect("Ptyp_arrow has arguments").typ;
         self.nary_arrow_args_by_first_type
             .insert(first_type, args.into_boxed_slice());
+    }
+
+    /// Remove the n-ary parameters recorded under `first_type`, so a caller
+    /// can rewrite them while also mutating the arena; put them back with
+    /// [`Self::restore_nary_arrow_args`].
+    pub fn take_nary_arrow_args(
+        &mut self,
+        first_type: CoreTypeIdx,
+    ) -> Option<Box<[crate::parser::ast::TypeArg]>> {
+        self.nary_arrow_args_by_first_type.remove(&first_type)
+    }
+
+    /// Put back parameters removed by [`Self::take_nary_arrow_args`].
+    pub fn restore_nary_arrow_args(
+        &mut self,
+        first_type: CoreTypeIdx,
+        args: Box<[crate::parser::ast::TypeArg]>,
+    ) {
+        self.nary_arrow_args_by_first_type.insert(first_type, args);
     }
 
     /// The n-ary parameters recorded for an arrow whose first parameter is
@@ -2795,6 +2864,16 @@ impl ParseArena {
                 .get((raw - SHARED_CORE_TYPE_BASE) as usize)
                 .expect("shared core type read before it was pushed")
         }
+    }
+
+    /// Get a mutable core type by index; shared core types are immutable.
+    #[inline]
+    pub fn get_core_type_mut(&mut self, idx: CoreTypeIdx) -> &mut CoreType {
+        assert!(
+            idx.0 < SHARED_CORE_TYPE_BASE,
+            "shared core types are immutable"
+        );
+        self.core_types.get_mut(idx)
     }
 
     /// Append a core type while the arena is shared.

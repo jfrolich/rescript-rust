@@ -864,6 +864,7 @@ fn generate_decoder(
                             let dict = ident(arena, "dict");
                             let value = apply(arena, untagged_fn, vec![tag_expr, dict]);
                             let binding = ValueBinding {
+                                pvb_jsx_component: None,
                                 pvb_pat: {
                                     let pat = pat_var_dummy(arena, "payload");
                                     arena.push_pat(pat)

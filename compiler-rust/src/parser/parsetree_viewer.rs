@@ -321,11 +321,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(c)
-            if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) =>
-        {
-            true
-        }
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Char { .. }) => true,
         ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -336,7 +332,6 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         _ if is_block_expr(arena, expr) => true,
         ExpressionDesc::Pexp_constant(c) => match &**c {
             Constant::String(payload) => is_multiline_text(payload.source()),
-            Constant::RawSource(source) => is_multiline_text(source),
             _ => false,
         },
         _ => false,
@@ -1004,8 +999,10 @@ pub struct TypeParameter<'a> {
     pub attrs: &'a Attributes,
     /// Parameter label.
     pub lbl: &'a ArgLabel,
-    /// Parameter type.
+    /// Parameter type; for a fixed argument, the `_` it is written with.
     pub typ: &'a CoreType,
+    /// OCaml `Parg_fixed`: the value of an `@as(value) _` argument.
+    pub fixed: Option<&'a crate::parser::ast::FixedArg>,
 }
 
 /// `Res_parsetree_viewer.arrow_type` (res_parsetree_viewer.ml:3-7): an arrow
@@ -1026,6 +1023,7 @@ pub fn arrow_type<'a>(
                     attrs: &param.attrs,
                     lbl: &param.lbl,
                     typ: arena.get_core_type(param.typ),
+                    fixed: param.fixed.as_deref(),
                 })
                 .collect();
             (&typ.ptyp_attributes, params, arena.get_core_type(*ret))

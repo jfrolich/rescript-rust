@@ -3,10 +3,6 @@
 use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::{Constant, Expression, ExpressionDesc, Payload, StructureItemDesc};
 
-/// OCaml `Ast_payload.json_literal_outside_external_message`.
-pub const JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE: &str =
-    "A `json` literal can only be used in an external attribute such as `@as`";
-
 /// OCaml `Ast_payload.unwrap_braces`: the expression under any explicit
 /// braces.
 pub fn unwrap_braces<'a>(arena: &'a ParseArena, expression: &'a Expression) -> &'a Expression {
@@ -39,25 +35,6 @@ pub fn unwrapped_payload_expression<'a>(
 pub struct PayloadError {
     pub loc: LocIdx,
     pub message: &'static str,
-}
-
-/// OCaml `Ast_payload.reject_json_literal_payload`: the location of a payload
-/// that is a single `json` literal, which callers must reject.
-pub fn reject_json_literal_payload(
-    arena: &ParseArena,
-    payload: &Payload,
-) -> Result<(), PayloadError> {
-    if let Some(expression) = unwrapped_payload_expression(arena, payload) {
-        if let ExpressionDesc::Pexp_constant(constant) = &*expression.pexp_desc
-            && let Constant::Json(_) = &**constant
-        {
-            return Err(PayloadError {
-                loc: expression.pexp_loc,
-                message: JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// OCaml `Ast_payload.semantic_string_of_expression`: the decoded value of an

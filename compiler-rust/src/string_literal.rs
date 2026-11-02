@@ -443,6 +443,35 @@ pub fn decode_raw_template_source(source: &str) -> String {
     }
 }
 
+/// OCaml `String_literal.encode_raw_template_source`, the inverse of
+/// [`decode_raw_template_source`]: escape backquotes, `${` and the
+/// backslashes that decoding would otherwise consume.
+pub fn encode_raw_template_source(source: &str) -> String {
+    let bytes = bytes_of(source);
+    let utf8_native = matches!(bytes, Cow::Borrowed(_));
+    let length = bytes.len();
+    let mut buffer = Vec::with_capacity(length);
+    for (index, &character) in bytes.iter().enumerate() {
+        let next = bytes.get(index + 1).copied();
+        match character {
+            b'`' => buffer.extend_from_slice(b"\\`"),
+            b'$' if next == Some(b'{') => buffer.extend_from_slice(b"\\$"),
+            b'\\' => match next {
+                None | Some(b'\\' | b'$' | b'`' | b'\n' | b'\r' | 0xe2) => {
+                    buffer.extend_from_slice(b"\\\\")
+                }
+                Some(_) => buffer.push(character),
+            },
+            _ => buffer.push(character),
+        }
+    }
+    if utf8_native {
+        String::from_utf8(buffer).expect("adding escapes keeps UTF-8 boundaries")
+    } else {
+        string_of_bytes(buffer)
+    }
+}
+
 /// OCaml `String_literal.encode_js_string`.
 pub fn encode_js_string(s: &str) -> String {
     encode_js(EncodeJsMode::String, s)

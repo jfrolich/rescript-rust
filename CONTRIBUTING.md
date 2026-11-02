@@ -283,6 +283,10 @@ npm install
 npm link rescript
 ```
 
+#### Use Local BSC with Existing ReScript Installation
+
+Both build systems have a compiler built in: `rescript` (Rust) links the Rust compiler, and `rescript-ocaml` compiles in-process with the OCaml compiler. To test a local compiler change, link the local package as shown above.
+
 ### Running Automatic Tests
 
 We provide different test suites for different levels of the compiler and build system infrastructure. Always make sure to locally build your compiler before running any tests.

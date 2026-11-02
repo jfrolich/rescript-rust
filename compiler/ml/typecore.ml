@@ -85,7 +85,6 @@ type error =
   | Polyvar_literal_overflow
   | Unknown_literal of string * char
   | Invalid_string_escape_sequence
-  | Json_literal_outside_external
   | Illegal_letrec_pat
   | Empty_record_literal
   | Uncurried_arity_mismatch of {
@@ -99,6 +98,7 @@ type error =
   | Type_params_not_supported of Longident.t
   | Field_access_on_dict_type
   | Jsx_not_enabled
+  | Jsx_component_without_make of Longident.t
   | Jsx_unboxed_props of type_expr
   | Tagged_template_non_tag of type_expr
   | Record_rest of Typecore_record_rest.error
@@ -198,7 +198,7 @@ let iter_expression f e =
     f e;
     match e.pexp_desc with
     | Pexp_braces {expr = inner} -> expr inner
-    | Pexp_extension _ (* we don't iterate under extension point *)
+    | Pexp_extension _ (* we don't iterate under extension point *) | Pexp_raw _
     | Pexp_ident _ | Pexp_constant _ ->
       ()
     | Pexp_fun {params; body} ->
@@ -289,7 +289,8 @@ let iter_expression f e =
     | Pstr_eval (e, _) -> expr e
     | Pstr_value (_, pel) -> List.iter binding pel
     | Pstr_primitive _ | Pstr_type _ | Pstr_typext _ | Pstr_exception _
-    | Pstr_modtype _ | Pstr_open _ | Pstr_attribute _ | Pstr_extension _ ->
+    | Pstr_modtype _ | Pstr_open _ | Pstr_attribute _ | Pstr_extension _
+    | Pstr_raw _ ->
       ()
     | Pstr_include {pincl_mod = me} | Pstr_module {pmb_expr = me} ->
       module_expr me
@@ -338,8 +339,6 @@ let constant : Parsetree.constant -> (Asttypes.constant, error) result =
   | Pconst_char {semantic} -> Ok (Const_char semantic)
   | Pconst_string payload ->
     Ok (Const_string (String_literal.string_semantic payload))
-  | Pconst_json _ -> Error Json_literal_outside_external
-  | Pconst_raw_source s -> Ok (Const_string s)
   | Pconst_float (f, None) -> Ok (Const_float f)
   | Pconst_float (f, Some c) -> Error (Unknown_literal (f, c))
 
@@ -1763,8 +1762,11 @@ and type_pat_aux ~constrs ~labels ~no_existentials ~mode ~explode ~env sp
         in
         pattern_variables_ref () := p1_variables;
         module_variables_ref () := p1_module_variables;
+        (* Without variables there is nothing to rename. Skipping the copy
+           keeps nested or-patterns, e.g. expanded character ranges, linear. *)
+        let p2 = if alpha_env = [] then p2 else alpha_pat alpha_env p2 in
         {
-          pat_desc = Tpat_or (p1, alpha_pat alpha_env p2, None);
+          pat_desc = Tpat_or (p1, p2, None);
           pat_loc = loc;
           pat_extra = [];
           pat_type = expected_ty;
@@ -2084,7 +2086,11 @@ let rec approx_type env sty =
     newty
       (Tarrow
          ( List.map
-             (fun ({lbl = p} : Parsetree.arg) ->
+             (fun (arg : Parsetree.arg) ->
+               let p =
+                 match arg with
+                 | Parg_type {lbl} | Parg_fixed {lbl} -> lbl
+               in
                {
                  Types.lbl = p;
                  typ =
@@ -2525,12 +2531,20 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
     {exp with exp_attributes = sexp.pexp_attributes @ exp.exp_attributes}
   | Pexp_ident lid ->
     let path, desc =
-      Typetexp.find_value
-        ?deprecated_context:
-          (match deprecated_context with
-          | None -> Some Reference
-          | v -> v)
-        env lid.loc lid.txt
+      try
+        Typetexp.find_value
+          ?deprecated_context:
+            (match deprecated_context with
+            | None -> Some Reference
+            | v -> v)
+          env lid.loc lid.txt
+      with
+      | Typetexp.Error (_, _, Unbound_value (Ldot (module_lid, "make")))
+      when context = Some JsxComponent
+      ->
+        (* [<Button />] refers to [Button.make]. The module exists (otherwise
+           the lookup reports it as unbound), but it defines no component. *)
+        raise (Error (lid.loc, env, Jsx_component_without_make module_lid))
     in
     let is_recarg =
       match (repr desc.val_type).desc with
@@ -3694,6 +3708,11 @@ and type_expect_ ?deprecated_context ~context ?(recarg = Rejected) env sexp
     | _ -> raise (Error (loc, env, Invalid_extension_constructor_payload)))
   | Pexp_extension ext ->
     raise (Error_forward (Builtin_attributes.error_of_extension ext))
+  | Pexp_raw {kind; name_loc} ->
+    (* The built-in PPX lowers raw JavaScript before type checking. *)
+    raise
+      (Error_forward
+         (Ast_raw.uninterpreted ~loc:name_loc (Ast_raw.extension_name kind)))
   | Pexp_await _ -> (* should be handled earlier *) assert false
   | Pexp_jsx_element _ ->
     raise (Error (sexp.pexp_loc, Env.empty, Jsx_not_enabled))
@@ -5021,7 +5040,8 @@ and type_let ~context ?(check = fun s -> Warnings.Unused_var s)
         {
           vb_pat = p;
           vb_expr = e;
-          vb_attributes = pvb.pvb_attributes;
+          (* As written, like a value description's in [Typedecl]. *)
+          vb_attributes = Ast_helper.Vb.binding_attributes pvb;
           vb_loc = pvb.pvb_loc;
         })
       l spat_sexp_list
@@ -5392,8 +5412,6 @@ let report_error env loc ppf error =
     fprintf ppf "Unknown modifier '%c' for literal %s%c" m n m
   | Invalid_string_escape_sequence ->
     fprintf ppf "Invalid string escape sequence"
-  | Json_literal_outside_external ->
-    fprintf ppf "%s" Ast_payload.json_literal_outside_external_message
   | Illegal_letrec_pat ->
     fprintf ppf "Only variables are allowed as left-hand side of `let rec`"
   | Empty_record_literal ->
@@ -5562,6 +5580,19 @@ let report_error env loc ppf error =
     fprintf ppf
       "Cannot compile JSX expression because JSX support is not enabled. Add \
        \"jsx\" settings to rescript.json to enable JSX support."
+  | Jsx_component_without_make module_lid ->
+    fprintf ppf
+      "@[<v>The module @{<info>%a@} can't be used as a JSX component, because \
+       it doesn't define @{<info>make@}.@,\
+       @,\
+       A component module defines its component as @{<info>make@}, for \
+       example:@,\
+       @,\
+      \  @{<info>@react.component@}@,\
+      \  let make = (~label) => ...@]"
+      longident module_lid;
+    ignore
+      (Typetexp.spellcheck_value ppf env (Longident.Ldot (module_lid, "make")))
   | Jsx_unboxed_props typ ->
     fprintf ppf
       "@[<v>The props of this JSX element have type %a, which is an \

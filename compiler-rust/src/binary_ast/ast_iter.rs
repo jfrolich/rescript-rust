@@ -407,6 +407,7 @@ pub fn walk_structure_item<V: AstIter + ?Sized>(
             v.extension(arena, ext);
             v.attributes(arena, attrs.as_slice());
         }
+        StructureItemDesc::Pstr_raw(raw) => v.attributes(arena, raw.attrs.as_slice()),
         StructureItemDesc::Pstr_attribute(attr) => v.attribute(arena, attr),
     }
 }
@@ -573,6 +574,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         ExpressionDesc::Pexp_pack(me) => v.module_expr(arena, *me),
         ExpressionDesc::Pexp_open(inner) => v.expr(arena, inner.2),
         ExpressionDesc::Pexp_extension(ext) => v.extension(arena, ext),
+        ExpressionDesc::Pexp_raw(_) => {}
         ExpressionDesc::Pexp_jsx_element(jsx) => match &**jsx {
             JsxElement::Fragment(fragment) => {
                 for child in &fragment.children {
@@ -664,7 +666,12 @@ pub fn walk_value_binding<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, vb
         v.typ(arena, constraint.pvc_type);
     }
     v.expr(arena, vb.pvb_expr);
-    v.attributes(arena, vb.pvb_attributes.as_slice());
+    // An iterator sees the component annotation as the attribute it was
+    // written as.
+    v.attributes(
+        arena,
+        crate::ast_jsx_component::binding_attributes(arena, vb).as_slice(),
+    );
 }
 
 pub fn walk_value_description<V: AstIter + ?Sized>(
@@ -673,7 +680,10 @@ pub fn walk_value_description<V: AstIter + ?Sized>(
     vd: &ValueDescription,
 ) {
     v.typ(arena, vd.pval_type);
-    v.attributes(arena, vd.pval_attributes.as_slice());
+    v.attributes(
+        arena,
+        crate::ast_jsx_component::description_attributes(arena, vd).as_slice(),
+    );
 }
 
 pub fn walk_module_binding<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, mb: &ModuleBinding) {

@@ -192,11 +192,6 @@ pub enum Constant {
     },
     /// An ordinary double-quoted string literal (OCaml `Pconst_string`).
     String(StringLiteral),
-    /// The JavaScript source inside a non-interpolated ``json`...` `` literal.
-    Json(Cow<'static, str>),
-    /// JavaScript source carried by a compiler extension such as `raw`,
-    /// `ffi` or `re`.
-    RawSource(Cow<'static, str>),
     /// Float constant with optional suffix.
     Float(Cow<'static, str>, Option<char>),
 }
@@ -478,8 +473,38 @@ pub struct TypeArg {
     pub attrs: Attributes,
     /// Argument label.
     pub lbl: ArgLabel,
-    /// Argument type (arena index).
+    /// Argument type (arena index). For a fixed argument this is the bare
+    /// `_` it is written with, located at that `_` (what OCaml
+    /// `Ast_external_process.arg_parts` types a `Parg_fixed` as).
     pub typ: CoreTypeIdx,
+    /// OCaml `Parg_fixed {value; loc}`: an external argument written
+    /// `@as(value) _`, whose value is fixed by the binding. `None` is
+    /// `Parg_type`.
+    pub fixed: Option<Box<FixedArg>>,
+}
+
+/// The payload of OCaml `Parg_fixed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedArg {
+    /// The fixed value as written.
+    pub value: FixedValue,
+    /// The location of the value: the `@as` payload.
+    pub value_loc: LocIdx,
+    /// The whole argument, from `@as` to `_`.
+    pub loc: LocIdx,
+}
+
+/// OCaml `Parsetree.fixed_value`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum FixedValue {
+    /// `@as(1)`: the integer literal's source.
+    Int(StringLoc),
+    /// `@as("s")`.
+    String(StringLiteral),
+    /// `@as(`s`)`: the source between the backquotes.
+    Template(StringLoc),
+    /// `@as(json`{}`)`: the JavaScript source between the backquotes.
+    Json(StringLoc),
 }
 
 /// Core type descriptions.
@@ -701,6 +726,45 @@ pub struct PexpTemplate {
     pub values: Vec<ExprIdx>,
 }
 
+/// OCaml `Pexp_raw {kind; name_loc; source}`. `name_loc` is the location of
+/// `%raw` or `%ffi`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpRaw {
+    pub kind: RawKind,
+    pub name_loc: LocIdx,
+    pub source: RawSource,
+}
+
+/// OCaml `Pstr_raw {name_loc; source; attrs}`. `name_loc` is the location of
+/// `%%raw`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PstrRaw {
+    pub name_loc: LocIdx,
+    pub source: RawSource,
+    pub attrs: Attributes,
+}
+
+/// OCaml `Parsetree.raw_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RawKind {
+    /// `%raw`: any JavaScript expression.
+    Expression,
+    /// `%ffi`: a JavaScript function.
+    Function,
+}
+
+/// OCaml `Parsetree.raw_source`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RawSource {
+    /// `%raw("...")`: the JavaScript source, which is also the text between
+    /// the quotes. The location is the string literal's.
+    String(StringLoc),
+    /// `%raw(`...`)`: the template source as written, from which
+    /// `String_literal.decode_raw_template_source` gives the JavaScript
+    /// source.
+    Template(StringLoc),
+}
+
 /// OCaml `Pexp_tagged_template {tag; raw_sources; values}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpTaggedTemplate {
@@ -806,6 +870,8 @@ pub enum ExpressionDesc {
     Pexp_open(Box<(OverrideFlag, Loc<LidentIdx>, ExprIdx)>),
     /// Extension: `[%id]`.
     Pexp_extension(Box<Extension>),
+    /// `%raw("...")` and `%ffi("...")`: JavaScript source.
+    Pexp_raw(Box<PexpRaw>),
     /// Await: `await E`.
     Pexp_await(ExprIdx),
     /// An ordinary backquoted template: `` `a ${b}` ``.
@@ -860,10 +926,42 @@ pub struct ValueBinding {
     pub pvb_pat: PatIdx,
     /// Expression (arena index).
     pub pvb_expr: ExprIdx,
+    /// The `@react.component` annotation, taken out of the attributes when
+    /// the binding is built (`Ast_helper.Vb.mk`).
+    pub pvb_jsx_component: Option<Box<JsxComponent>>,
     /// Attributes.
     pub pvb_attributes: Attributes,
     /// Location.
     pub pvb_loc: Location,
+}
+
+/// OCaml `Parsetree.jsx_component`: a JSX component definition,
+/// `@react.component`, `@jsx.component` or their `componentWithProps` forms
+/// on a `let`, an `external` or a signature item. The attribute is the
+/// surface syntax; this is what it means.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsxComponent {
+    pub pjc_kind: JsxComponentKind,
+    pub pjc_namespace: JsxComponentNamespace,
+    /// The attribute's own location.
+    pub pjc_loc: LocIdx,
+}
+
+/// OCaml `Parsetree.jsx_component_kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum JsxComponentKind {
+    /// `@react.component`: the props are the labelled arguments.
+    /// `@react.component(: t)` makes them share the props type `t`.
+    Labelled(Option<CoreTypeIdx>),
+    /// `@react.componentWithProps`: the function takes a props record.
+    WithProps,
+}
+
+/// OCaml `Parsetree.jsx_component_namespace`: how the attribute was spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JsxComponentNamespace {
+    React,
+    Jsx,
 }
 
 // ============================================================================
@@ -1078,6 +1176,8 @@ pub enum StructureItemDesc {
     Pstr_attribute(Box<Attribute>),
     /// Extension: `[%%id]`.
     Pstr_extension(Box<(Extension, Attributes)>),
+    /// `%%raw("...")`: JavaScript statements.
+    Pstr_raw(Box<PstrRaw>),
 }
 
 /// A signature item.
@@ -1158,6 +1258,9 @@ pub struct ValueDescription {
     pub pval_type: CoreTypeIdx,
     /// The primitive (for externals): `None` for `val x: T`.
     pub pval_prim: Option<PrimitiveRepr>,
+    /// The `@react.component` annotation, taken out of the attributes when
+    /// the description is built (`Ast_helper.Val.mk`).
+    pub pval_jsx_component: Option<Box<JsxComponent>>,
     /// Attributes.
     pub pval_attributes: Attributes,
     /// Location.

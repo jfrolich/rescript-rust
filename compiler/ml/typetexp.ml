@@ -321,31 +321,32 @@ and transl_type_aux env policy styp =
   | Ptyp_arrow {params; ret} ->
     let cparams =
       List.map
-        (fun (arg : Parsetree.arg) ->
-          let cty = transl_type env policy arg.typ in
-          let ty =
-            if Btype.is_optional arg.lbl then
-              newty (Tconstr (Predef.path_option, [cty.ctyp_type], ref Mnil))
-            else cty.ctyp_type
-          in
-          (arg, cty, ty))
+        (function
+          | Parsetree.Parg_type {attrs; lbl; typ} ->
+            let cty = transl_type env policy typ in
+            let ty =
+              if Btype.is_optional lbl then
+                newty (Tconstr (Predef.path_option, [cty.ctyp_type], ref Mnil))
+              else cty.ctyp_type
+            in
+            (attrs, lbl, cty, ty)
+          | Parsetree.Parg_fixed {loc} ->
+            (* External processing removes fixed arguments before typing. *)
+            Location.raise_errorf ~loc
+              "Fixed arguments are only allowed in external declarations")
         params
     in
     let cty2 = transl_type env policy ret in
     let ty =
       newty
         (Tarrow
-           ( List.map
-               (fun ((arg : Parsetree.arg), _, ty1) ->
-                 {Types.lbl = arg.lbl; typ = ty1})
-               cparams,
+           ( List.map (fun (_, lbl, _, ty1) -> {Types.lbl; typ = ty1}) cparams,
              cty2.ctyp_type ))
     in
     ctyp
       (Ttyp_arrow
          ( List.map
-             (fun ((arg : Parsetree.arg), cty1, _) ->
-               {Typedtree.attrs = arg.attrs; lbl = arg.lbl; typ = cty1})
+             (fun (attrs, lbl, cty1, _) -> {Typedtree.attrs; lbl; typ = cty1})
              cparams,
            cty2 ))
       ty
@@ -784,6 +785,8 @@ let super_spellcheck ppf fold env lid =
   | Longident.Lident s -> did_you_mean ppf (fun _ -> choices None s)
   | Longident.Ldot (r, s) -> did_you_mean ppf (fun _ -> choices (Some r) s)
 
+let spellcheck_value ppf env lid = super_spellcheck ppf Env.fold_values env lid
+
 let spellcheck ppf fold env lid =
   let choices ~path name =
     let env = fold (fun x xs -> x :: xs) path env [] in
@@ -889,7 +892,7 @@ let report_error env ppf = function
     | other_ident ->
       Format.fprintf ppf "The value %a can't be found" Printtyp.longident
         other_ident);
-    let did_spellcheck = super_spellcheck ppf Env.fold_values env lid in
+    let did_spellcheck = spellcheck_value ppf env lid in
     (* For cases such as when the user refers to something that's a value with 
       a lowercase identifier in JS but a module in ReScript.
       

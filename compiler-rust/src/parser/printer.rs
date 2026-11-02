@@ -956,25 +956,6 @@ fn interleave_template_parts(sources: Vec<Doc>, values: Vec<Doc>) -> Doc {
     Doc::concat(parts)
 }
 
-/// OCaml `raw_source_fits_double_quotes`.
-fn raw_source_fits_double_quotes(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => return false,
-            b'\\' => {
-                if index + 1 >= bytes.len() {
-                    return false;
-                }
-                index += 2;
-            }
-            _ => index += 1,
-        }
-    }
-    true
-}
-
 /// OCaml `print_constant`.
 pub fn print_constant(c: &Constant) -> Doc {
     match c {
@@ -987,23 +968,6 @@ pub fn print_constant(c: &Constant) -> Doc {
             print_string_contents(payload.source()),
             Doc::text("\""),
         ]),
-        Constant::Json(source) => Doc::concat(vec![
-            Doc::text("json`"),
-            print_string_contents(source),
-            Doc::text("`"),
-        ]),
-        Constant::RawSource(source) => {
-            let delimiter = if raw_source_fits_double_quotes(source) {
-                "\""
-            } else {
-                "`"
-            };
-            Doc::concat(vec![
-                Doc::text(delimiter),
-                print_string_contents(source),
-                Doc::text(delimiter),
-            ])
-        }
         Constant::Char { source, .. } => Doc::concat(vec![
             Doc::text("'"),
             Doc::text(source.clone()),
@@ -1454,6 +1418,18 @@ pub fn print_expression(
             print_object_literal(state, fields, e.pexp_loc, cmt_tbl, arena)
         }
         ExpressionDesc::Pexp_extension(ext) => print_extension(state, ext, false, cmt_tbl, arena),
+        ExpressionDesc::Pexp_raw(raw) => print_extension(
+            state,
+            &crate::ast_raw::to_extension(
+                arena,
+                crate::ast_raw::extension_name(raw.kind),
+                raw.name_loc,
+                &raw.source,
+            ),
+            false,
+            cmt_tbl,
+            arena,
+        ),
         ExpressionDesc::Pexp_regexp(regexp) => {
             Doc::text(format!("/{}/{}", regexp.pattern, regexp.flags))
         }
@@ -5995,7 +5971,9 @@ fn print_arrow_type(
             } else {
                 Doc::nil()
             };
-            let typ_doc = {
+            let typ_doc = if arg.fixed.is_some() {
+                print_type_parameter(state, arg, cmt_tbl, arena)
+            } else {
                 let doc = print_typ_expr(state, arg.typ, cmt_tbl, arena);
                 match &*arg.typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_arrow(_)
@@ -6076,7 +6054,21 @@ fn print_type_parameter(
         ArgLabel::Optional(_) => Doc::text("=?"),
         _ => Doc::nil(),
     };
-    let typ_doc = print_typ_expr(state, param.typ, cmt_tbl, arena);
+    let typ_doc = match param.fixed {
+        None => print_typ_expr(state, param.typ, cmt_tbl, arena),
+        // Comments go around `@as(...) _`, as for the `_` it is written with,
+        // whose location `typ` carries.
+        Some(fixed) => print_comments(
+            Doc::group(Doc::concat(vec![
+                print_fixed_value_attribute(state, &fixed.value, cmt_tbl, arena),
+                Doc::space(),
+                Doc::text("_"),
+            ])),
+            cmt_tbl,
+            param.typ.ptyp_loc,
+            arena,
+        ),
+    };
 
     let doc = Doc::group(Doc::concat(vec![attrs, label_doc, typ_doc]));
 
@@ -7725,15 +7717,15 @@ fn print_value_binding(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    // res_printer.ml: the attributes as written (`Ast_helper.Vb.binding_attributes`).
+    let written_attrs = crate::ast_jsx_component::binding_attributes(arena, vb);
     // Check for let.unwrap attribute
-    let has_unwrap = vb
-        .pvb_attributes
+    let has_unwrap = written_attrs
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == "let.unwrap");
 
     // Print attributes (filtering out let.unwrap)
-    let attrs: Vec<&Attribute> = vb
-        .pvb_attributes
+    let attrs: Vec<&Attribute> = written_attrs
         .iter()
         .filter(|attr| arena.get_string(attr.0.txt) != "let.unwrap")
         .collect();
@@ -8124,6 +8116,75 @@ fn print_extension(
         ext_name,
         print_payload(state, payload, cmt_tbl, arena),
     ]))
+}
+
+/// res_printer.ml prints a fixed argument's value as the attribute
+/// `Ast_fixed_arg.to_attribute {value with loc = Location.none}`, with an
+/// `@as` payload of one expression and no attributes.
+fn print_fixed_value_attribute(
+    state: &PrinterState,
+    value: &FixedValue,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let expression = |desc: ExpressionDesc, loc: LocIdx| Expression {
+        pexp_desc: Box::new(desc),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    };
+    let payload = match value {
+        // `Ast_fixed_arg.to_expression`: a `json` tagged template, whose tag
+        // is the identifier `json`.
+        FixedValue::Json(source) => print_single_expression_payload(
+            Doc::concat(vec![
+                Doc::text("json`"),
+                print_string_contents(arena.get_string(source.txt)),
+                Doc::text("`"),
+            ]),
+            false,
+        ),
+        _ => {
+            let expr = match value {
+                FixedValue::Int(source) => expression(
+                    ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
+                        arena.get_string(source.txt).to_string().into(),
+                        None,
+                    ))),
+                    source.loc,
+                ),
+                FixedValue::String(payload) => expression(
+                    ExpressionDesc::Pexp_constant(Box::new(Constant::String(payload.clone()))),
+                    LocIdx::none(),
+                ),
+                FixedValue::Template(source) => expression(
+                    ExpressionDesc::Pexp_template(Box::new(PexpTemplate {
+                        source_segments: vec![*source],
+                        values: vec![],
+                    })),
+                    LocIdx::none(),
+                ),
+                FixedValue::Json(_) => unreachable!(),
+            };
+            let expr_doc = print_expression_with_comments_and_parens(state, &expr, cmt_tbl, arena);
+            let should_hug = parsetree_viewer::is_huggable_expression(arena, &expr);
+            print_single_expression_payload(expr_doc, should_hug)
+        }
+    };
+    Doc::group(Doc::concat(vec![Doc::text("@as"), payload]))
+}
+
+/// `print_payload` for a payload of one expression without attributes.
+fn print_single_expression_payload(expr_doc: Doc, should_hug: bool) -> Doc {
+    if should_hug {
+        Doc::concat(vec![Doc::lparen(), expr_doc, Doc::rparen()])
+    } else {
+        Doc::concat(vec![
+            Doc::lparen(),
+            Doc::indent(Doc::concat(vec![Doc::soft_line(), expr_doc])),
+            Doc::soft_line(),
+            Doc::rparen(),
+        ])
+    }
 }
 
 /// Print a payload of an attribute or extension.
@@ -8530,6 +8591,7 @@ fn print_structure_item_sequential(
         | StructureItemDesc::Pstr_include(_)
         | StructureItemDesc::Pstr_attribute(_)
         | StructureItemDesc::Pstr_extension(_)
+        | StructureItemDesc::Pstr_raw(_)
         | StructureItemDesc::Pstr_eval(_) => {
             state.clear_pending_inline_record_definitions();
         }
@@ -8590,6 +8652,15 @@ fn print_structure_item_sequential(
             Doc::concat(vec![
                 attrs_doc,
                 print_extension(state, ext, true, cmt_tbl, arena),
+            ])
+        }
+
+        StructureItemDesc::Pstr_raw(raw) => {
+            let attrs_doc = print_attributes(state, &raw.attrs, cmt_tbl, arena);
+            let ext = crate::ast_raw::to_extension(arena, "raw", raw.name_loc, &raw.source);
+            Doc::concat(vec![
+                attrs_doc,
+                print_extension(state, &ext, true, cmt_tbl, arena),
             ])
         }
 
@@ -9194,7 +9265,8 @@ fn print_value_description(
     // Use value name location for proper attribute line breaking
     let attrs_doc = print_attributes_with_loc(
         state,
-        &val_desc.pval_attributes,
+        // res_printer.ml: `Ast_helper.Val.description_attributes`.
+        &crate::ast_jsx_component::description_attributes(arena, val_desc),
         Some(val_desc.pval_name.loc),
         cmt_tbl,
         arena,

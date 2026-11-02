@@ -71,6 +71,10 @@ let map_opt f = function
 
 let map_loc sub {loc; txt} = {loc = sub.location sub loc; txt}
 
+let map_raw_source sub : raw_source -> raw_source = function
+  | Raw_string source -> Raw_string (map_loc sub source)
+  | Raw_template source -> Raw_template (map_loc sub source)
+
 module T = struct
   (* Type expressions for the core language *)
 
@@ -100,7 +104,24 @@ module T = struct
     | Ptyp_arrow {params; ret} ->
       Typ.arrow ~loc ~attrs
         (List.map
-           (fun (arg : Parsetree.arg) -> {arg with typ = sub.typ sub arg.typ})
+           (function
+             | Parsetree.Parg_type arg ->
+               Parsetree.Parg_type {arg with typ = sub.typ sub arg.typ}
+             | Parsetree.Parg_fixed arg ->
+               let txt : Parsetree.fixed_value =
+                 match arg.value.txt with
+                 | Pfixed_int source -> Pfixed_int (map_loc sub source)
+                 | Pfixed_string _ as value -> value
+                 | Pfixed_template source ->
+                   Pfixed_template (map_loc sub source)
+                 | Pfixed_json source -> Pfixed_json (map_loc sub source)
+               in
+               Parsetree.Parg_fixed
+                 {
+                   arg with
+                   value = {txt; loc = sub.location sub arg.value.loc};
+                   loc = sub.location sub arg.loc;
+                 })
            params)
         (sub.typ sub ret)
     | Ptyp_tuple tyl -> Typ.tuple ~loc ~attrs (List.map (sub.typ sub) tyl)
@@ -270,6 +291,11 @@ module M = struct
     | Pstr_include x -> include_ ~loc (sub.include_declaration sub x)
     | Pstr_extension (x, attrs) ->
       extension ~loc (sub.extension sub x) ~attrs:(sub.attributes sub attrs)
+    | Pstr_raw {name_loc; source; attrs} ->
+      raw ~loc
+        ~name_loc:(sub.location sub name_loc)
+        (map_raw_source sub source)
+        ~attrs:(sub.attributes sub attrs)
     | Pstr_attribute x -> attribute ~loc (sub.attribute sub x)
 end
 
@@ -401,6 +427,11 @@ module E = struct
     | Pexp_open (ovf, lid, e) ->
       open_ ~loc ~attrs ovf (map_loc sub lid) (sub.expr sub e)
     | Pexp_extension x -> extension ~loc ~attrs (sub.extension sub x)
+    | Pexp_raw {kind; name_loc; source} ->
+      raw ~loc ~attrs
+        ~name_loc:(sub.location sub name_loc)
+        kind
+        (map_raw_source sub source)
     | Pexp_await e -> await ~loc ~attrs (sub.expr sub e)
     | Pexp_jsx_element
         (Jsx_fragment
@@ -507,9 +538,12 @@ let default_mapper =
     type_extension = T.map_type_extension;
     extension_constructor = T.map_extension_constructor;
     value_description =
-      (fun this {pval_name; pval_type; pval_prim; pval_loc; pval_attributes} ->
+      (fun this ({pval_name; pval_type; pval_prim; pval_loc} as vd) ->
+        (* The component annotation goes back into the attributes so that a
+           mapper sees [@react.component] where it has always been, and
+           [Val.mk] takes it out again. *)
         Val.mk (map_loc this pval_name) (this.typ this pval_type)
-          ~attrs:(this.attributes this pval_attributes)
+          ~attrs:(this.attributes this (Val.description_attributes vd))
           ~loc:(this.location this pval_loc)
           ?prim:pval_prim);
     pat = P.map;
@@ -550,7 +584,7 @@ let default_mapper =
           ~loc:(this.location this pincl_loc)
           ~attrs:(this.attributes this pincl_attributes));
     value_binding =
-      (fun this {pvb_pat; pvb_expr; pvb_constraint; pvb_attributes; pvb_loc} ->
+      (fun this ({pvb_pat; pvb_expr; pvb_constraint; pvb_loc} as vb) ->
         let pvb_pat = this.pat this pvb_pat in
         let constraint_ =
           Option.map
@@ -562,9 +596,11 @@ let default_mapper =
             pvb_constraint
         in
         let pvb_expr = this.expr this pvb_expr in
+        (* As for value descriptions, the component annotation goes back into
+           the attributes and [Vb.mk] takes it out again. *)
         Vb.mk pvb_pat pvb_expr ?constraint_
           ~loc:(this.location this pvb_loc)
-          ~attrs:(this.attributes this pvb_attributes));
+          ~attrs:(this.attributes this (Vb.binding_attributes vb)));
     constructor_declaration =
       (fun this ({pcd_name; pcd_args; pcd_res; pcd_loc} as cd) ->
         Type.constructor (map_loc this pcd_name)

@@ -986,6 +986,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             } else {
                 Vec::new()
             };
+        let mut keyed_groups: std::collections::HashMap<GroupKey, usize> =
+            std::collections::HashMap::new();
         // filter_rec
         let mut stack: Vec<Row> = pss.iter().rev().cloned().collect();
         while let Some(row) = stack.pop() {
@@ -999,9 +1001,22 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     stack.push(prepend(p1, ps));
                 }
                 Desc::Any | Desc::Var(_) => {}
-                _ => {
-                    // insert p ps env
-                    if let Some(group) = env.iter().position(|(q0, _)| self.simple_match(*q0, p)) {
+                desc => {
+                    // insert p ps: for int, char and string constants and
+                    // for polymorphic variants `simple_match` is equality,
+                    // so their groups are also found by hashing. This keeps
+                    // a column of many distinct heads, e.g. an expanded
+                    // character range, linear instead of quadratic.
+                    let key = match &desc {
+                        Desc::Constant(c) => const_key(c).map(GroupKey::Const),
+                        Desc::Variant { label, .. } => Some(GroupKey::Variant(label.to_string())),
+                        _ => None,
+                    };
+                    let group = match &key {
+                        Some(key) => keyed_groups.get(key).copied(),
+                        None => env.iter().position(|(q0, _)| self.simple_match(*q0, p)),
+                    };
+                    if let Some(group) = group {
                         let q0 = env[group].0;
                         let mut new_row = self.simple_match_args(q0, p);
                         new_row.extend_from_slice(ps);
@@ -1010,6 +1025,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         let q0 = self.normalize_pat(p);
                         let mut new_row = self.simple_match_args(q0, p);
                         new_row.extend_from_slice(ps);
+                        if let Some(key) = key {
+                            keyed_groups.insert(key, env.len());
+                        }
                         env.push((q0, std::collections::VecDeque::from(vec![new_row])));
                     }
                 }
@@ -2209,24 +2227,53 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         ps.iter().zip(qs).all(|(p, q)| self.le_pat(*p, *q))
     }
 
-    /// `get_mins le_pats ps` (parmatch.ml:1779-1787).
+    /// `get_mins_pats pss` (parmatch.ml): `get_mins le_pats pss`, but faster
+    /// for many rows starting with distinct constants, e.g. an expanded
+    /// character range. A row starting with an int, char or string constant
+    /// can only be covered by rows starting with the same constant or with
+    /// another kind of pattern, so only those are compared.
     fn get_mins(&mut self, ps: Vec<Row>) -> Vec<Row> {
         let once = self.select_rec(ps);
         self.select_rec(once)
     }
 
-    fn select_rec(&mut self, ps: Vec<Row>) -> Vec<Row> {
-        let mut r: Vec<Row> = Vec::new();
-        for i in 0..ps.len() {
-            let p = &ps[i];
-            let dominated = ps[i + 1..]
-                .iter()
-                .any(|p0| self.le_pats(&p0.clone(), &p.clone()));
+    /// `select_rec [] pss` of `get_mins le_pats`: drops each row covered by
+    /// a later row, and reverses the order.
+    fn select_rec(&mut self, pss: Vec<Row>) -> Vec<Row> {
+        let mut later: Vec<usize> = Vec::new();
+        let mut later_by_key: std::collections::HashMap<ConstKey, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut later_unkeyed: Vec<usize> = Vec::new();
+        let mut kept: Vec<usize> = Vec::new();
+        for i in (0..pss.len()).rev() {
+            let key = pss[i].first().and_then(|&p| match self.desc(p) {
+                Desc::Constant(c) => const_key(c),
+                _ => None,
+            });
+            let candidates: &[usize] = match &key {
+                None => &later,
+                Some(c) => later_by_key.get(c).map_or(&[], Vec::as_slice),
+            };
+            let mut dominated = candidates.iter().any(|&j| self.le_pats(&pss[j], &pss[i]));
+            if !dominated && key.is_some() {
+                dominated = later_unkeyed
+                    .iter()
+                    .any(|&j| self.le_pats(&pss[j], &pss[i]));
+            }
+            later.push(i);
+            match key {
+                None => later_unkeyed.push(i),
+                Some(c) => later_by_key.entry(c).or_default().push(i),
+            }
             if !dominated {
-                r.insert(0, p.clone());
+                kept.push(i);
             }
         }
-        r
+        // `kept` holds indices last-to-first, which is the reversed order.
+        let mut pss: Vec<Option<Row>> = pss.into_iter().map(Some).collect();
+        kept.into_iter()
+            .map(|i| pss[i].take().expect("each row is kept once"))
+            .collect()
     }
 }
 
@@ -3102,4 +3149,30 @@ fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
             }
         }
     }
+}
+
+/// A constant that `const_compare` only equates with itself, so it can key a
+/// hash table (parmatch.ml `filter_all`, `get_mins_pats`; matching.ml
+/// `divide_constant`). Floats and bigints compare by value, not spelling.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ConstKey {
+    Int(i64),
+    Char(i32),
+    String(String),
+}
+
+pub(crate) fn const_key(c: &Constant) -> Option<ConstKey> {
+    match c {
+        Constant::Int(i) => Some(ConstKey::Int(*i)),
+        Constant::Char(c) => Some(ConstKey::Char(*c)),
+        Constant::String(s) => Some(ConstKey::String(s.clone())),
+        Constant::Float(_) | Constant::BigInt(..) => None,
+    }
+}
+
+/// `filter_all`'s hashed groups: constants and polymorphic variant labels.
+#[derive(PartialEq, Eq, Hash)]
+enum GroupKey {
+    Const(ConstKey),
+    Variant(String),
 }

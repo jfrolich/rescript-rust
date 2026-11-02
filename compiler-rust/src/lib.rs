@@ -23,8 +23,11 @@
 
 pub mod analysis;
 pub mod arena;
+pub mod ast_fixed_arg;
 pub mod ast_helper_type;
+pub mod ast_jsx_component;
 pub mod ast_payload;
+pub mod ast_raw;
 pub mod binary_ast;
 pub mod binser;
 #[cfg(feature = "native")]

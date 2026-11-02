@@ -265,6 +265,7 @@ fn expression_has_string_literal(
             let (_, payload) = &**inner;
             payload_has_string_literal(payload, value, arena)
         }
+        ED::Pexp_raw(_) => false,
         ED::Pexp_ident(_) | ED::Pexp_break | ED::Pexp_continue | ED::Pexp_jsx_element(_) => false,
     }
 }
@@ -2391,6 +2392,24 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         },
+        TypeModError::CoreError(TypeCoreError::JsxComponentWithoutMake {
+            loc,
+            module_lid,
+            alternatives,
+        }) => {
+            let mut message = format!(
+                "The module {INFO}{module_lid}{RESET} can't be used as a JSX component, because it doesn't define {INFO}make{RESET}.\n\nA component module defines its component as {INFO}make{RESET}, for example:\n\n  {INFO}@react.component{RESET}\n  let make = (~label) => ..."
+            );
+            // typecore.ml report_error: `Typetexp.spellcheck_value`.
+            if let Some(hint) = super_spellcheck_hint("make", alternatives) {
+                message.push_str(&format!("\n\n{INFO}Hint: Did you mean {hint}?{RESET}"));
+            }
+            UserDiagnostic::new(
+                format_compiler_error_report(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::JsxNotEnabled { loc }) => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
@@ -2821,13 +2840,13 @@ fn type_mod_error_to_anyhow_styled(
             2,
         )
         .into(),
-        TypeModError::CoreError(TypeCoreError::JsonLiteralOutsideExternal { loc }) => UserDiagnostic::new(
+        TypeModError::CoreError(TypeCoreError::FixedArgumentOutsideExternal { loc }) => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
                 source,
                 filename,
                 *loc,
-                crate::ast_payload::JSON_LITERAL_OUTSIDE_EXTERNAL_MESSAGE,
+                "Fixed arguments are only allowed in external declarations",
             ),
             2,
         )
@@ -12448,14 +12467,7 @@ fn extract_file_directives_from_structure(
         if arena.get_string(attr.0.txt) != "directive" {
             continue;
         }
-        // ast_config.ml process_directives: reject a json payload, then read
-        // the payload's semantic string.
-        if let Err(err) = crate::ast_payload::reject_json_literal_payload(arena, &attr.1) {
-            return Err(DirectivePayloadError {
-                loc: err.loc,
-                message: err.message,
-            });
-        }
+        // ast_config.ml process_directives: read the payload's semantic string.
         let Some(directive) = extract_single_string_payload(&attr.1, arena) else {
             return Err(DirectivePayloadError {
                 loc: item.pstr_loc,

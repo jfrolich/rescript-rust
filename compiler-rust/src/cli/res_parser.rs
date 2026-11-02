@@ -258,12 +258,12 @@ fn run(args: Vec<String>) {
             "ast" => print_signature_ast(&signature, &mut io::stdout()),
             "binary" => {
                 // OCaml -print binary format (current parsetree):
-                // 1. Magic: "ResIntf01313" (raw string, not marshaled) for interfaces
+                // 1. Magic: "ResIntf01317" (raw string, not marshaled) for interfaces
                 // 2. Marshaled filename (using output_value)
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01313");
+                let _ = io::stdout().write_all(b"ResIntf01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -284,7 +284,7 @@ fn run(args: Vec<String>) {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01313");
+                let _ = io::stdout().write_all(b"ResIntf01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -401,12 +401,12 @@ fn run(args: Vec<String>) {
             "ast" => print_structure_ast(&structure, &mut io::stdout()),
             "binary" => {
                 // OCaml -print binary format (current parsetree):
-                // 1. Magic: "ResImpl01313" (raw string, not marshaled) for implementations
+                // 1. Magic: "ResImpl01317" (raw string, not marshaled) for implementations
                 // 2. Marshaled filename (using output_value)
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01313");
+                let _ = io::stdout().write_all(b"ResImpl01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -427,7 +427,7 @@ fn run(args: Vec<String>) {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01313");
+                let _ = io::stdout().write_all(b"ResImpl01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();

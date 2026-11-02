@@ -335,7 +335,7 @@ let arrow_type ct =
   let open Parsetree in
   match ct with
   | {ptyp_desc = Ptyp_arrow {params; ret}; ptyp_attributes = attrs} ->
-    (attrs, params |> List.map (fun (p : arg) -> (p.attrs, p.lbl, p.typ)), ret)
+    (attrs, params, ret)
   | typ -> ([], [], typ)
 
 (* TODO: avoiding the dependency on Parsetree_viewer here, is this a good idea? *)
@@ -524,6 +524,10 @@ and walk_structure_item si t comments =
     walk_module_type_declaration mod_typ_decl t comments
   | Pstr_attribute attribute -> walk_attribute attribute t comments
   | Pstr_extension (extension, _) -> walk_extension extension t comments
+  | Pstr_raw {name_loc; source} ->
+    walk_extension
+      (Ast_raw.to_extension ~name:"raw" ~name_loc source)
+      t comments
   | Pstr_include include_declaration ->
     walk_include_declaration include_declaration t comments
   | Pstr_exception extension_constructor ->
@@ -1126,6 +1130,12 @@ and walk_expression expr t comments =
            ExprRecordRow (Location.mkloc (Longident.Lident s.txt) s.loc, e)))
       t comments
   | Pexp_extension extension -> walk_extension extension t comments
+  | Pexp_raw {kind; name_loc; source} ->
+    walk_extension
+      (Ast_raw.to_extension
+         ~name:(Ast_raw.extension_name kind)
+         ~name_loc source)
+      t comments
   | Pexp_letexception (extension_constructor, expr2) ->
     let leading, comments = partition_leading_trailing comments expr.pexp_loc in
     attach t.leading
@@ -2244,21 +2254,34 @@ and walk_object_field field t comments =
 
 and walk_type_parameters type_parameters t comments =
   visit_list_but_continue_with_remaining_comments
-    ~get_loc:(fun (_, lbl, typexpr) ->
+    ~get_loc:(fun parameter ->
+      let lbl, end_loc =
+        match parameter with
+        | Parsetree.Parg_type {lbl; typ} -> (lbl, typ.ptyp_loc)
+        | Parsetree.Parg_fixed {lbl; loc} ->
+          (lbl, Ast_fixed_arg.underscore_loc loc)
+      in
       let lbl_loc = Asttypes.get_lbl_loc lbl in
-      if lbl_loc <> Location.none then
-        {lbl_loc with loc_end = typexpr.Parsetree.ptyp_loc.loc_end}
-      else typexpr.ptyp_loc)
+      if lbl_loc <> Location.none then {lbl_loc with loc_end = end_loc.loc_end}
+      else end_loc)
     ~walk_node:walk_type_parameter ~newline_delimited:false type_parameters t
     comments
 
-and walk_type_parameter (_attrs, _lbl, typexpr) t comments =
-  let before_typ, inside_typ, after_typ =
-    partition_by_loc comments typexpr.ptyp_loc
-  in
-  attach t.leading typexpr.ptyp_loc before_typ;
-  walk_core_type typexpr t inside_typ;
-  attach t.trailing typexpr.ptyp_loc after_typ
+and walk_type_parameter parameter t comments =
+  match parameter with
+  | Parsetree.Parg_type {typ = typexpr} ->
+    let before_typ, inside_typ, after_typ =
+      partition_by_loc comments typexpr.ptyp_loc
+    in
+    attach t.leading typexpr.ptyp_loc before_typ;
+    walk_core_type typexpr t inside_typ;
+    attach t.trailing typexpr.ptyp_loc after_typ
+  | Parsetree.Parg_fixed {loc} ->
+    (* Like the [_] it is written with, which is where its comments go. *)
+    let loc = Ast_fixed_arg.underscore_loc loc in
+    let before, after = partition_leading_trailing comments loc in
+    attach t.leading loc before;
+    attach t.trailing loc after
 
 and walk_package_type package_type t comments =
   let longident, package_constraints = package_type in

@@ -453,12 +453,6 @@ impl<'a> Mapper<'a> {
             current::Constant::String(payload) => {
                 pt0::Constant::String(payload.source().to_string(), Some("js".to_string()))
             }
-            current::Constant::RawSource(s) => {
-                pt0::Constant::String(s.to_string(), Some("js".to_string()))
-            }
-            current::Constant::Json(s) => {
-                pt0::Constant::String(s.to_string(), Some("json".to_string()))
-            }
             current::Constant::Float(s, opt) => pt0::Constant::Float(s.to_string(), *opt),
         }
     }
@@ -541,6 +535,48 @@ impl<'a> Mapper<'a> {
         }
     }
 
+    /// ast_mapper_to0.ml T.map `Parg_fixed`: v0 spells a fixed argument
+    /// `_ [@as value]`, with `json` as a `json`-delimited string, as before
+    /// `json` was an ordinary tagged template. `@as` and `_` get their own
+    /// locations, from which `Ast_fixed_arg` restores the argument's. `typ`
+    /// is the argument's `_`, already located at the underscore.
+    fn map_fixed_arg(&mut self, fixed: &current::FixedArg, typ: CoreTypeIdx) -> pt0::CoreType {
+        let as_loc = crate::ast_fixed_arg::as_name_loc(self.arena, fixed.loc);
+        let as_attr = match &fixed.value {
+            current::FixedValue::Json(source) => {
+                let name_loc = self.loc(as_loc);
+                let item_loc = self.loc(fixed.value_loc);
+                let source_loc = self.loc(source.loc);
+                let source = self.arena.get_string(source.txt).to_string();
+                (
+                    OldLocated::new("as".to_string(), name_loc),
+                    pt0::Payload::PStr(vec![pt0::StructureItem {
+                        pstr_desc: pt0::StructureItemDesc::Eval(
+                            pt0::Expression {
+                                pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::String(
+                                    source,
+                                    Some("json".to_string()),
+                                )),
+                                pexp_loc: source_loc,
+                                pexp_attributes: vec![],
+                            },
+                            vec![],
+                        ),
+                        pstr_loc: item_loc,
+                    }]),
+                )
+            }
+            value => {
+                let attr =
+                    crate::ast_fixed_arg::to_attribute(self.arena, value, fixed.value_loc, as_loc);
+                self.map_attribute(&attr)
+            }
+        };
+        let mut typ = self.map_core_type_idx(typ);
+        typ.ptyp_attributes = vec![as_attr];
+        typ
+    }
+
     fn build_arrow_chain(
         &mut self,
         params: &[current::TypeArg],
@@ -561,7 +597,10 @@ impl<'a> Mapper<'a> {
             attrs.extend(arg_attrs);
             attrs
         };
-        let arg_typ = self.map_core_type_idx(arg.typ);
+        let arg_typ = match &arg.fixed {
+            None => self.map_core_type_idx(arg.typ),
+            Some(fixed) => self.map_fixed_arg(fixed, arg.typ),
+        };
         let arrow_loc = if is_head {
             *loc
         } else {
@@ -1814,6 +1853,13 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_extension(ext) => {
                 pt0::ExpressionDesc::Extension(self.map_extension(ext))
             }
+            current::ExpressionDesc::Pexp_raw(raw) => {
+                pt0::ExpressionDesc::Extension(self.map_raw_extension(
+                    crate::ast_raw::extension_name(raw.kind),
+                    raw.name_loc,
+                    &raw.source,
+                ))
+            }
             current::ExpressionDesc::Pexp_await(e_idx) => {
                 // The complete inner expression receives [@res.await] in
                 // map_expression_with_owner, matching OCaml's mapper.
@@ -1913,7 +1959,11 @@ impl<'a> Mapper<'a> {
         pt0::ValueBinding {
             pvb_pat,
             pvb_expr,
-            pvb_attributes: self.map_attributes(&vb.pvb_attributes),
+            // v0 has no component node: PPXs see the `@react.component`
+            // attribute.
+            pvb_attributes: self.map_attributes(&crate::ast_jsx_component::binding_attributes(
+                self.arena, vb,
+            )),
             pvb_loc: self.loc(vb.pvb_loc),
         }
     }
@@ -2289,7 +2339,9 @@ impl<'a> Mapper<'a> {
                     )
                 }
             },
-            pval_attributes: self.map_attributes(&vd.pval_attributes),
+            pval_attributes: self.map_attributes(
+                &crate::ast_jsx_component::description_attributes(self.arena, vd),
+            ),
             pval_loc: self.loc(vd.pval_loc),
         }
     }
@@ -2366,7 +2418,42 @@ impl<'a> Mapper<'a> {
                     self.map_attributes(attrs),
                 )
             }
+            current::StructureItemDesc::Pstr_raw(raw) => pt0::StructureItemDesc::Extension(
+                self.map_raw_extension("raw", raw.name_loc, &raw.source),
+                self.map_attributes(&raw.attrs),
+            ),
         }
+    }
+
+    /// ast_mapper_to0.ml `raw_extension`: v0 spells raw JavaScript as the
+    /// extension it is written as, with the source in a `js`-delimited
+    /// string.
+    fn map_raw_extension(
+        &mut self,
+        name: &str,
+        name_loc: LocIdx,
+        source: &current::RawSource,
+    ) -> pt0::Extension {
+        let (s, attrs) = match source {
+            current::RawSource::String(s) => (s, vec![]),
+            current::RawSource::Template(s) => (s, vec![self.internal_attr("res.template")]),
+        };
+        let expression = pt0::Expression {
+            pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::String(
+                self.arena.get_string(s.txt).to_string(),
+                Some("js".to_string()),
+            )),
+            pexp_loc: self.loc(s.loc),
+            pexp_attributes: attrs,
+        };
+        let payload_loc = crate::ast_raw::payload_loc(self.arena, source);
+        (
+            OldLocated::new(name.to_string(), self.loc(name_loc)),
+            pt0::Payload::PStr(vec![pt0::StructureItem {
+                pstr_desc: pt0::StructureItemDesc::Eval(expression, vec![]),
+                pstr_loc: self.loc(payload_loc),
+            }]),
+        )
     }
 
     // ========== Signature items ==========
@@ -2518,7 +2605,5 @@ mod tests {
             crate::string_literal::string_from_source("a\\n").expect("valid string"),
         ));
         assert!(matches!(c3, pt0::Constant::String(s, Some(d)) if s == "a\\n" && d == "js"));
-        let c4 = mapper.map_constant(&current::Constant::Json(Cow::Borrowed("{}")));
-        assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "{}" && d == "json"));
     }
 }

@@ -6973,7 +6973,7 @@ x: {
 }
 
 #[test]
-fn source_json_template_with_interpolation_is_a_syntax_error_like_ocaml() {
+fn source_json_template_with_interpolation_is_a_plain_tagged_template_like_ocaml() {
     let source = r#"
 let x = json`some random ${"string"}`
 "#;
@@ -6982,9 +6982,12 @@ let x = json`some random ${"string"}`
         .unwrap_err()
         .to_string();
 
+    // Upstream #8875: `json` is no longer a literal, so an interpolated
+    // `json` template is an ordinary tagged template call
+    // (super_errors/expected/syntaxErrors_json_interpolation.res.expected).
     assert!(
-        error.contains("`json` literals do not support interpolation"),
-        "expected json interpolation syntax error, got:\n{error}"
+        error.contains("The value json can't be found"),
+        "expected an unbound `json` tag, got:\n{error}"
     );
 }
 

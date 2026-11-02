@@ -349,6 +349,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     let arg = TypeArg {
+                        fixed: None,
                         attrs: Attributes::new(),
                         lbl: ArgLabel::Nolabel,
                         typ: typ_idx,
@@ -546,6 +547,7 @@ pub(super) fn parse_arrow_type_rest(
 
     let param_type_idx = p.arena_mut().push_core_type(param_type);
     let arg = TypeArg {
+        fixed: None,
         attrs: Attributes::new(),
         lbl: ArgLabel::Nolabel,
         typ: param_type_idx,
@@ -659,6 +661,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let typ_idx = p.arena_mut().push_core_type(typ);
         let arg = TypeArg {
+            fixed: None,
             attrs,
             lbl,
             typ: typ_idx,
@@ -1446,6 +1449,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let typ_idx = p.arena_mut().push_core_type(typ);
         params.push((
             TypeArg {
+                fixed: None,
                 attrs: arrow_attrs,
                 lbl: label,
                 typ: typ_idx,
@@ -1509,6 +1513,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let unit_type_idx = p.arena_mut().push_core_type(unit_type);
         params.push((
             TypeArg {
+                fixed: None,
                 attrs: Attributes::new(),
                 lbl: ArgLabel::Nolabel,
                 typ: unit_type_idx,

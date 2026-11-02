@@ -465,7 +465,11 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 print_value_binding(f, arena, binding.pvb_pat, arena.get_expr(binding.pvb_expr));
                 f.close_box();
                 // Item attributes are OUTSIDE the box in OCaml
-                print_item_attributes(f, arena, &binding.pvb_attributes);
+                print_item_attributes(
+                    f,
+                    arena,
+                    &crate::ast_jsx_component::binding_attributes(arena, binding),
+                );
             }
         }
         StructureItemDesc::Pstr_primitive(vd) => {
@@ -484,7 +488,11 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_value_description_prim(f, arena, &vd.pval_prim);
             f.close_box();
             f.close_box();
-            print_item_attributes(f, arena, &vd.pval_attributes);
+            print_item_attributes(
+                f,
+                arena,
+                &crate::ast_jsx_component::description_attributes(arena, vd),
+            );
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
@@ -705,8 +713,18 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             }
             f.string("]");
         }
-        StructureItemDesc::Pstr_extension(inner) => {
-            let (ref ext, ref attrs) = **inner;
+        StructureItemDesc::Pstr_extension(_) | StructureItemDesc::Pstr_raw(_) => {
+            // pprintast.ml: `Pstr_raw` prints as `Ast_raw.to_extension`.
+            let raw_extension;
+            let (ext, attrs) = match &*item.pstr_desc {
+                StructureItemDesc::Pstr_extension(inner) => (&inner.0, &inner.1),
+                StructureItemDesc::Pstr_raw(raw) => {
+                    raw_extension =
+                        crate::ast_raw::to_extension(arena, "raw", raw.name_loc, &raw.source);
+                    (&raw_extension, &raw.attrs)
+                }
+                _ => unreachable!(),
+            };
             let (ref name, ref payload) = *ext;
             f.open_box(BoxKind::H, 2);
             f.string("[%%");
@@ -1482,7 +1500,11 @@ fn print_expression_inner<W: Write>(
                 print_value_binding(f, arena, binding.pvb_pat, arena.get_expr(binding.pvb_expr));
                 f.close_box();
                 // Item attributes are outside the binding box in OCaml
-                print_item_attributes(f, arena, &binding.pvb_attributes);
+                print_item_attributes(
+                    f,
+                    arena,
+                    &crate::ast_jsx_component::binding_attributes(arena, binding),
+                );
             }
             f.string(" in");
             f.break_(1, -2); // @;<1 -2> - space or newline with -2 indent offset
@@ -2326,8 +2348,23 @@ fn print_expression_inner<W: Write>(
                 f.string(")");
             }
         }
-        ExpressionDesc::Pexp_extension(ext_inner) => {
-            let (ref name, ref payload) = **ext_inner;
+        ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_raw(_) => {
+            // pprintast.ml: `Pexp_raw` prints as `Ast_raw.to_extension`.
+            let raw_extension;
+            let ext = match &*expr.pexp_desc {
+                ExpressionDesc::Pexp_extension(inner) => &**inner,
+                ExpressionDesc::Pexp_raw(raw) => {
+                    raw_extension = crate::ast_raw::to_extension(
+                        arena,
+                        crate::ast_raw::extension_name(raw.kind),
+                        raw.name_loc,
+                        &raw.source,
+                    );
+                    &raw_extension
+                }
+                _ => unreachable!(),
+            };
+            let (ref name, ref payload) = *ext;
             // OCaml: @[<2>[%%%s@ %a]@] — structural box with indent 2
             f.open_box(BoxKind::Box, 2);
             f.string("[%");
@@ -3318,16 +3355,6 @@ fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant) {
             f.string(payload.source());
             f.string("|js}");
         }
-        Constant::Json(source) => {
-            f.string("{json|");
-            f.string(source);
-            f.string("|json}");
-        }
-        Constant::RawSource(source) => {
-            f.string("{js|");
-            f.string(source);
-            f.string("|js}");
-        }
         Constant::Float(s, suffix) => {
             f.string(s);
             if let Some(c) = suffix {
@@ -4116,7 +4143,11 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_value_description_prim(f, arena, &vd.pval_prim);
             f.close_box();
             f.close_box();
-            print_item_attributes(f, arena, &vd.pval_attributes);
+            print_item_attributes(
+                f,
+                arena,
+                &crate::ast_jsx_component::description_attributes(arena, vd),
+            );
         }
         SignatureItemDesc::Psig_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;

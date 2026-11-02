@@ -641,17 +641,6 @@ let interleave_template_parts sources values =
   in
   loop Doc.nil sources values
 
-let raw_source_fits_double_quotes source =
-  let rec loop index =
-    if index >= String.length source then true
-    else
-      match String.unsafe_get source index with
-      | '"' -> false
-      | '\\' -> index + 1 < String.length source && loop (index + 2)
-      | _ -> loop (index + 1)
-  in
-  loop 0
-
 let print_constant c =
   match c with
   | Parsetree.Pconst_integer (s, suffix) -> (
@@ -665,14 +654,6 @@ let print_constant c =
         print_string_contents (String_literal.string_source payload);
         Doc.text "\"";
       ]
-  | Pconst_json source ->
-    Doc.concat [Doc.text "json`"; print_string_contents source; Doc.text "`"]
-  | Pconst_raw_source source ->
-    let delimiter =
-      if raw_source_fits_double_quotes source then "\"" else "`"
-    in
-    Doc.concat
-      [Doc.text delimiter; print_string_contents source; Doc.text delimiter]
   | Pconst_char {source} ->
     Doc.concat [Doc.text "'"; Doc.text source; Doc.text "'"]
   | Pconst_float (s, _) -> Doc.text s
@@ -758,6 +739,15 @@ and print_structure_item ~state ?(protect_regexp = false)
   | Pstr_attribute attr ->
     clear_pending ();
     fst (print_attribute ~state ~standalone:true attr cmt_tbl)
+  | Pstr_raw {name_loc; source; attrs} ->
+    clear_pending ();
+    Doc.concat
+      [
+        print_attributes ~state attrs cmt_tbl;
+        print_extension ~state ~at_module_lvl:true
+          (Ast_raw.to_extension ~name:"raw" ~name_loc source)
+          cmt_tbl;
+      ]
   | Pstr_extension (extension, attrs) ->
     clear_pending ();
     Doc.concat
@@ -1314,7 +1304,8 @@ and print_value_description ~state value_description cmt_tbl =
   in
   let attrs =
     print_attributes ~state ~loc:value_description.pval_name.loc
-      value_description.pval_attributes cmt_tbl
+      (Ast_helper.Val.description_attributes value_description)
+      cmt_tbl
   in
   let header = if is_external then "external " else "let " in
   let inline_record_definitions =
@@ -1993,7 +1984,10 @@ and print_typ_expr ?inline_record_definitions ~(state : State.t)
     in
     match args with
     | [] -> Doc.nil
-    | [{attrs = []; lbl = Nolabel; typ}] ->
+    | [
+     (( Parg_type {attrs = []; lbl = Nolabel}
+      | Parg_fixed {attrs = []; lbl = Nolabel} ) as arg);
+    ] ->
       let has_attrs_before = not (attrs_before = []) in
       let attrs =
         if has_attrs_before then
@@ -2001,12 +1995,16 @@ and print_typ_expr ?inline_record_definitions ~(state : State.t)
         else Doc.nil
       in
       let typ_doc =
-        let doc =
-          print_typ_expr ?inline_record_definitions ~state typ cmt_tbl
-        in
-        match typ.ptyp_desc with
-        | Ptyp_arrow _ | Ptyp_tuple _ | Ptyp_alias _ -> add_parens doc
-        | _ -> doc
+        match arg with
+        | Parg_type {typ} -> (
+          let doc =
+            print_typ_expr ?inline_record_definitions ~state typ cmt_tbl
+          in
+          match typ.ptyp_desc with
+          | Ptyp_arrow _ | Ptyp_tuple _ | Ptyp_alias _ -> add_parens doc
+          | _ -> doc)
+        | Parg_fixed _ ->
+          print_type_parameter ?inline_record_definitions ~state arg cmt_tbl
       in
       Doc.group
         (Doc.concat
@@ -2398,8 +2396,29 @@ and print_object_field ~state (field : Parsetree.object_field) cmt_tbl =
 (* es6 arrow type arg
  * type t = (~foo: string, ~bar: float=?, unit) => unit
  * i.e. ~foo: string, ~bar: float *)
-and print_type_parameter ?inline_record_definitions ~state {attrs; lbl; typ}
-    cmt_tbl =
+and print_type_parameter ?inline_record_definitions ~state parameter cmt_tbl =
+  let attrs, lbl, value_doc, end_loc =
+    match parameter with
+    | Parsetree.Parg_type {attrs; lbl; typ} ->
+      ( attrs,
+        lbl,
+        print_typ_expr ?inline_record_definitions ~state typ cmt_tbl,
+        typ.ptyp_loc )
+    | Parsetree.Parg_fixed {attrs; lbl; value; loc} ->
+      (* Comments go around [@as(...) _], as for the [_] it is written with. *)
+      let loc = Ast_fixed_arg.underscore_loc loc in
+      let as_doc, _ =
+        print_attribute ~state
+          (Ast_fixed_arg.to_attribute {value with loc = Location.none})
+          cmt_tbl
+      in
+      ( attrs,
+        lbl,
+        print_comments
+          (Doc.group (Doc.concat [as_doc; Doc.space; Doc.text "_"]))
+          cmt_tbl loc,
+        loc )
+  in
   (* Converting .ml code to .res requires processing uncurried attributes *)
   let attrs = print_attributes ~state attrs cmt_tbl in
   let label =
@@ -2415,16 +2434,8 @@ and print_type_parameter ?inline_record_definitions ~state {attrs; lbl; typ}
     | Nolabel | Labelled _ -> Doc.nil
     | Optional _ -> Doc.text "=?"
   in
-  let loc = {(Asttypes.get_lbl_loc lbl) with loc_end = typ.ptyp_loc.loc_end} in
-  let doc =
-    Doc.group
-      (Doc.concat
-         [
-           attrs;
-           label;
-           print_typ_expr ?inline_record_definitions ~state typ cmt_tbl;
-         ])
-  in
+  let loc = {(Asttypes.get_lbl_loc lbl) with loc_end = end_loc.loc_end} in
+  let doc = Doc.group (Doc.concat [attrs; label; value_doc]) in
   (* [loc] ends before [=?]. *)
   print_comments_before_marker doc cmt_tbl loc optional_indicator
 
@@ -2432,7 +2443,7 @@ and print_value_binding ~state ~rec_flag (vb : Parsetree.value_binding) cmt_tbl
     i =
   let has_unwrap = ref false in
   let attrs =
-    vb.pvb_attributes
+    Ast_helper.Vb.binding_attributes vb
     |> List.filter_map (function
       | {Asttypes.txt = "let.unwrap"}, _ ->
         has_unwrap := true;
@@ -3530,6 +3541,12 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
            ])
     | Pexp_extension extension ->
       print_extension ~state ~at_module_lvl:false extension cmt_tbl
+    | Pexp_raw {kind; name_loc; source} ->
+      print_extension ~state ~at_module_lvl:false
+        (Ast_raw.to_extension
+           ~name:(Ast_raw.extension_name kind)
+           ~name_loc source)
+        cmt_tbl
     | Pexp_regexp {pattern; flags} -> Doc.text ("/" ^ pattern ^ "/" ^ flags)
     | Pexp_template {source_segments; values} ->
       print_template_literal ~state ~source_segments ~values cmt_tbl

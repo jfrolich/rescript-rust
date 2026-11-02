@@ -741,6 +741,7 @@ fn mk_type_arrow_with_arity(
 ) -> CoreType {
     let arg_type_idx = arena.push_core_type(arg_type);
     let arg = TypeArg {
+        fixed: None,
         attrs: Attributes::new(),
         lbl: ArgLabel::Nolabel,
         typ: arg_type_idx,
@@ -1754,6 +1755,7 @@ fn codecs_generate_codecs_for(
                         let e_pat = pat_var(arena, "e", e_loc);
                         let pat = pat_tuple(vec![e_pat, pat_any(arena)], arena);
                         let vb = ValueBinding {
+                            pvb_jsx_component: None,
                             pvb_pat: arena.push_pat(pat),
                             pvb_expr: arena.push_expr(expr.clone()),
                             pvb_attributes: Attributes::new(),
@@ -1769,6 +1771,7 @@ fn codecs_generate_codecs_for(
                         let d_pat = pat_var(arena, "d", d_loc);
                         let pat = pat_tuple(vec![pat_any(arena), d_pat], arena);
                         let vb = ValueBinding {
+                            pvb_jsx_component: None,
                             pvb_pat: arena.push_pat(pat),
                             pvb_expr: arena.push_expr(expr),
                             pvb_attributes: Attributes::new(),
@@ -2939,6 +2942,7 @@ fn variants_generate_decoder_case(
             let decoded = expr_let(
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
+                    pvb_jsx_component: None,
                     pvb_pat: payload_pattern,
                     pvb_expr: arena.push_expr(payload_value),
                     pvb_attributes: Attributes::new(),
@@ -4135,6 +4139,7 @@ fn generate_codec_decls(
                 Attributes::new()
             };
             vbs.push(ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(pat),
                 pvb_expr: arena.push_expr(expr),
                 pvb_attributes: attributes,
@@ -4172,6 +4177,7 @@ fn generate_codec_decls(
         let name = format!("{}{}", type_name, DECODER_FUNC_SUFFIX);
         let pat = pat_var_dynamic(arena, &name, arena.none_loc());
         vbs.push(ValueBinding {
+            pvb_jsx_component: None,
             pvb_pat: arena.push_pat(pat),
             pvb_expr: arena.push_expr(expr),
             pvb_attributes: Attributes::new(),
@@ -4518,7 +4524,8 @@ fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseAr
         | StructureItemDesc::Pstr_exception(_)
         | StructureItemDesc::Pstr_open(_)
         | StructureItemDesc::Pstr_attribute(_)
-        | StructureItemDesc::Pstr_extension(_) => false,
+        | StructureItemDesc::Pstr_extension(_)
+        | StructureItemDesc::Pstr_raw(_) => false,
     }
 }
 
@@ -4582,6 +4589,13 @@ impl<'a> LocCloner<'a> {
         }
         let position = *self.arena.get_position(*pos);
         *pos = self.arena.push_position(position);
+    }
+
+    fn raw_source(&mut self, source: &mut crate::parser::ast::RawSource) {
+        match source {
+            crate::parser::ast::RawSource::String(s)
+            | crate::parser::ast::RawSource::Template(s) => self.located(s),
+        }
     }
 
     fn located<T>(&mut self, loc: &mut Located<T>) {
@@ -5198,6 +5212,10 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(expr);
             }
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
+            ExpressionDesc::Pexp_raw(raw) => {
+                self.loc(&mut raw.name_loc);
+                self.raw_source(&mut raw.source);
+            }
             ExpressionDesc::Pexp_await(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_jsx_element(element) => self.jsx_element(element),
         }
@@ -5477,6 +5495,11 @@ impl<'a> LocCloner<'a> {
                 self.extension(ext);
                 self.attributes(attrs);
             }
+            StructureItemDesc::Pstr_raw(raw) => {
+                self.loc(&mut raw.name_loc);
+                self.raw_source(&mut raw.source);
+                self.attributes(&mut raw.attrs);
+            }
         }
     }
 
@@ -5667,6 +5690,7 @@ fn generate_sig_decls(
             let name = format!("{}{}", type_name, suffix);
             let name_idx = arena.push_string(name);
             let vd = ValueDescription {
+                pval_jsx_component: None,
                 pval_name: Located::new(name_idx, arena.none_loc()),
                 pval_type: arena.push_core_type(ty),
                 pval_prim: None,
@@ -5690,6 +5714,7 @@ fn generate_sig_decls(
         let name = format!("{}{}", type_name, DECODER_FUNC_SUFFIX);
         let name_idx = arena.push_string(name);
         let vd = ValueDescription {
+            pval_jsx_component: None,
             pval_name: Located::new(name_idx, arena.none_loc()),
             pval_type: arena.push_core_type(ty),
             pval_prim: None,

@@ -353,10 +353,24 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             let payload = parse_payload_region(p);
             let payload = raw_source_extension_payload(p, &id, payload);
             parse_newline_or_semicolon_structure(p);
-            Some(StructureItemDesc::Pstr_extension(Box::new((
-                (id, payload),
-                attrs,
-            ))))
+            // res_core.ml parse_structure_item_region: `%%raw` with a plain
+            // string or template payload is a raw node.
+            let source = if p.arena().get_string(id.txt) == "raw" {
+                crate::ast_raw::of_payload(p.arena_mut(), &payload)
+            } else {
+                None
+            };
+            match source {
+                Some(source) => Some(StructureItemDesc::Pstr_raw(Box::new(PstrRaw {
+                    name_loc: id.loc,
+                    source,
+                    attrs,
+                }))),
+                None => Some(StructureItemDesc::Pstr_extension(Box::new((
+                    (id, payload),
+                    attrs,
+                )))),
+            }
         }
         _ => {
             // Could be an expression
@@ -2151,9 +2165,12 @@ fn parse_let_binding_body(
         p.arena_mut()
             .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc);
     }
+    // `Ast_helper.Vb.mk` takes the JSX component annotation out of `attrs`.
+    let (pvb_jsx_component, attrs) = crate::ast_jsx_component::take(p.arena(), attrs);
     let binding = ValueBinding {
         pvb_pat: pat_idx,
         pvb_expr: expr_idx,
+        pvb_jsx_component,
         pvb_attributes: attrs,
         pvb_loc: vb_loc,
     };
@@ -2327,6 +2344,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
             let arrow = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                     Box::new(TypeArg {
+                        fixed: None,
                         attrs: Attributes::new(),
                         lbl: ArgLabel::Nolabel,
                         typ: param_idx,
@@ -3452,7 +3470,9 @@ fn parse_external_value_description(
     p.inline_types_params = vec![];
     p.inline_types_collect_free_type_vars = true;
 
-    let typ_ct = typ::parse_external_type_expr(p);
+    let mut typ_ct = typ::parse_external_type_expr(p);
+    // res_core.ml parse_external_def: `|> Ast_fixed_arg.normalize_external_type`.
+    crate::ast_fixed_arg::normalize_external_type(p.arena_mut(), &mut typ_ct);
     let inline_types_found = p.inline_types_found.take().unwrap_or_default();
 
     p.in_external = was_in_external;
@@ -3487,10 +3507,13 @@ fn parse_external_value_description(
     };
 
     let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
+    // `Ast_helper.Val.mk` takes the JSX component annotation out of `attrs`.
+    let (pval_jsx_component, attrs) = crate::ast_jsx_component::take(p.arena(), attrs);
     let vd = ValueDescription {
         pval_name: name,
         pval_type: typ,
         pval_prim: prim,
+        pval_jsx_component,
         pval_attributes: attrs,
         pval_loc: loc,
     };
@@ -3524,10 +3547,13 @@ fn parse_sign_let_desc(p: &mut Parser<'_>, attrs: Attributes) -> ValueDescriptio
     let typ = typ::parse_poly_type_expr(p);
     let typ = p.arena_mut().push_core_type(typ);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    // `Ast_helper.Val.mk` takes the JSX component annotation out of `attrs`.
+    let (pval_jsx_component, attrs) = crate::ast_jsx_component::take(p.arena(), attrs);
     ValueDescription {
         pval_name: name,
         pval_type: typ,
         pval_prim: None,
+        pval_jsx_component,
         pval_attributes: attrs,
         pval_loc: loc,
     }
@@ -4129,22 +4155,6 @@ pub(super) fn raw_source_extension_payload(
                 "The %re extension has been removed. Use a regexp literal such as /abc/i.",
             ),
         );
-    }
-    if !matches!(p.arena().get_string(id.txt), "raw" | "ffi") {
-        return payload;
-    }
-    if let Payload::PStr(items) = &payload
-        && let [item] = items.as_slice()
-        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
-    {
-        let expr_idx = eval.0;
-        let expr = p.arena_mut().get_expr_mut(expr_idx);
-        if let ExpressionDesc::Pexp_constant(constant) = &mut *expr.pexp_desc
-            && let Constant::String(literal) = &**constant
-        {
-            let source = literal.source().to_string();
-            **constant = Constant::RawSource(Cow::Owned(source));
-        }
     }
     payload
 }

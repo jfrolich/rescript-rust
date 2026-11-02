@@ -143,8 +143,6 @@ impl std::error::Error for JsxPreprocessorError {}
 
 pub type JsxPreprocessorResult<T> = Result<T, JsxPreprocessorError>;
 
-const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
-    "Only one JSX component call can exist on a component at one time";
 const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
 const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
@@ -331,13 +329,12 @@ fn transform_structure_item_multi(
 
     // Handle Pstr_primitive (external) with potential @react.component
     if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
-        let component_attr_count = count_react_component_attrs(arena, &vd.pval_attributes);
-        let component_with_props_attr_count =
-            count_react_component_with_props_attrs(arena, &vd.pval_attributes);
-
-        match (component_attr_count, component_with_props_attr_count) {
-            (0, 0) => {}
-            (_, 1) => {
+        if reject_leftover_component_attrs(arena, &vd.pval_attributes, config) {
+            return vec![item];
+        }
+        match vd.pval_jsx_component.as_deref().map(|c| &c.pjc_kind) {
+            None => {}
+            Some(JsxComponentKind::WithProps) => {
                 set_fatal_error_with_style(
                     config,
                     item.pstr_loc,
@@ -346,17 +343,13 @@ fn transform_structure_item_multi(
                 );
                 return vec![item];
             }
-            (1, 0) => {
+            Some(JsxComponentKind::Labelled(_)) => {
                 return transform_react_component_external(
                     (**vd).clone(),
                     &item.pstr_loc,
                     config,
                     arena,
                 );
-            }
-            _ => {
-                set_fatal_error(config, item.pstr_loc, DUPLICATE_REACT_COMPONENT_ATTR_MSG);
-                return vec![item];
             }
         }
     }
@@ -416,7 +409,17 @@ fn transform_value_bindings(
     let mut new_bindings = vec![];
 
     for binding in bindings {
-        if has_react_component_attr(arena, &binding.pvb_attributes) {
+        // jsx_v4.ml map_binding: reject leftover annotations, then dispatch
+        // on the binding's component node.
+        if reject_leftover_component_attrs(arena, &binding.pvb_attributes, config) {
+            transformed_bindings.push(binding);
+            continue;
+        }
+        let kind = binding
+            .pvb_jsx_component
+            .as_deref()
+            .map(|c| c.pjc_kind.clone());
+        if let Some(JsxComponentKind::Labelled(_)) = kind {
             // Transform @react.component binding
             let (props_type, transformed, new_binding) =
                 transform_react_component_binding(binding, rec_flag, loc, config, arena, warnings);
@@ -428,7 +431,7 @@ fn transform_value_bindings(
             if let Some(nb) = new_binding {
                 new_bindings.push(nb);
             }
-        } else if has_react_component_with_props_attr(arena, &binding.pvb_attributes) {
+        } else if let Some(JsxComponentKind::WithProps) = kind {
             // Transform @react.componentWithProps binding
             let (transformed, new_binding) =
                 transform_react_component_with_props_binding(binding, rec_flag, loc, config, arena);
@@ -568,7 +571,7 @@ fn transform_react_component_binding(
     let named_args_expr = modified_binding_old_expr(arena, binding.pvb_expr);
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(arena, &binding.pvb_attributes);
+    let core_type_of_attr = core_type_of_component(arena, binding.pvb_jsx_component.as_deref());
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr
         .as_ref()
         .map(|typ| typ_vars_of_core_type(arena, typ))
@@ -583,12 +586,7 @@ fn transform_react_component_binding(
     let is_async = is_async_function(arena, binding.pvb_expr);
 
     // Filter out @react.component attribute
-    let filtered_attrs: Attributes = binding
-        .pvb_attributes
-        .iter()
-        .filter(|attr| !is_react_component_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = binding.pvb_attributes.clone();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
     let (args, mut newtypes, _, jsx_warnings, named_args_error) =
@@ -839,6 +837,7 @@ fn transform_react_component_binding(
             binding_expr_attrs,
         );
         let inner_binding = ValueBinding {
+            pvb_jsx_component: None,
             pvb_pat: arena.push_pat(Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                     txt: binding_name_idx,
@@ -907,6 +906,7 @@ fn transform_react_component_binding(
     // function while the following binding shadows it with the component value.
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let transformed_binding = ValueBinding {
+        pvb_jsx_component: None,
         pvb_pat: arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
@@ -923,6 +923,7 @@ fn transform_react_component_binding(
     let new_binding = if !full_module_name.is_empty() {
         let fn_name_idx = arena.push_interned_string(&fn_name);
         Some(ValueBinding {
+            pvb_jsx_component: None,
             pvb_pat: arena.push_pat(Pattern {
                 ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                     txt: fn_name_idx,
@@ -969,12 +970,7 @@ fn transform_react_component_with_props_binding(
     let is_async = is_async_function(arena, binding.pvb_expr);
 
     // Filter out @react.componentWithProps attribute
-    let filtered_attrs: Attributes = binding
-        .pvb_attributes
-        .iter()
-        .filter(|attr| !is_react_component_with_props_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = binding.pvb_attributes.clone();
 
     // Create props pattern based on the original function's pattern
     let binding_expr = arena.get_expr(binding.pvb_expr).clone();
@@ -1051,6 +1047,7 @@ fn transform_react_component_with_props_binding(
         pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
             RecFlag::Nonrecursive,
             vec![ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                         txt: full_module_name_idx,
@@ -1087,6 +1084,7 @@ fn transform_react_component_with_props_binding(
     // (jsx_v4.ml:872-874) gives only the name the `empty_loc` location.
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let new_binding = ValueBinding {
+        pvb_jsx_component: None,
         pvb_pat: arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
@@ -1108,6 +1106,7 @@ fn transform_react_component_with_props_binding(
             let original_expr = arena.get_expr(binding.pvb_expr).clone();
             let transformed_original = transform_expression(original_expr, config, arena);
             let modified_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                         txt: internal_fn_name_idx,
@@ -1134,6 +1133,7 @@ fn transform_react_component_with_props_binding(
                 ..constrained_expr
             };
             let modified_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: binding.pvb_pat,
                 pvb_expr: arena.push_expr(constrained_expr),
                 pvb_attributes: filtered_attrs,
@@ -1738,6 +1738,7 @@ fn add_default_value_matches(
             // Outer binding: let __<label>_value = match __<label> { ... }
             let resolved_str_idx = arena.push_string(resolved_name.clone());
             let value_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
                         txt: resolved_str_idx,
@@ -1763,6 +1764,7 @@ fn add_default_value_matches(
                 pexp_attributes: Attributes::new(),
             });
             let inner_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(arg.pattern.clone()),
                 pvb_expr: resolved_ident_idx,
                 pvb_attributes: Attributes::new(),
@@ -1819,20 +1821,15 @@ fn transform_signature_item_multi(
 
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
-        match count_react_component_attrs(arena, &vd.pval_attributes) {
-            0 => {}
-            1 => {
-                return transform_react_component_sig(
-                    (**vd).clone(),
-                    &item.psig_loc,
-                    config,
-                    arena,
-                );
-            }
-            _ => {
-                set_fatal_error(config, item.psig_loc, DUPLICATE_REACT_COMPONENT_ATTR_MSG);
-                return vec![item];
-            }
+        if reject_leftover_component_attrs(arena, &vd.pval_attributes, config) {
+            return vec![item];
+        }
+        // `@react.componentWithProps` on a signature item has always been
+        // left alone.
+        if let Some(JsxComponentKind::Labelled(_)) =
+            vd.pval_jsx_component.as_deref().map(|c| &c.pjc_kind)
+        {
+            return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
         }
     }
 
@@ -1859,7 +1856,7 @@ fn transform_react_component_sig(
     }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
+    let core_type_of_attr = core_type_of_component(arena, vd.pval_jsx_component.as_deref());
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr
         .as_ref()
         .map(|typ| typ_vars_of_core_type(arena, typ))
@@ -1895,12 +1892,7 @@ fn transform_react_component_sig(
     };
 
     // Filter attributes
-    let filtered_attrs: Attributes = vd
-        .pval_attributes
-        .iter()
-        .filter(|attr| !is_react_component_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = vd.pval_attributes.clone();
 
     // Create props type ref with appropriate type params
     // For sharedProps without type variables: no type args
@@ -1971,6 +1963,7 @@ fn transform_react_component_sig(
     };
 
     let new_vd = ValueDescription {
+        pval_jsx_component: None,
         pval_name: vd.pval_name,
         pval_type: arena.push_core_type(component_type),
         pval_prim: vd.pval_prim,
@@ -2000,7 +1993,7 @@ fn transform_react_component_external(
     }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
+    let core_type_of_attr = core_type_of_component(arena, vd.pval_jsx_component.as_deref());
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr
         .as_ref()
         .map(|typ| typ_vars_of_core_type(arena, typ))
@@ -2037,12 +2030,7 @@ fn transform_react_component_external(
     };
 
     // Filter attributes (remove @react.component)
-    let filtered_attrs: Attributes = vd
-        .pval_attributes
-        .iter()
-        .filter(|attr| !is_react_component_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = vd.pval_attributes.clone();
 
     // Create props type ref with appropriate type params
     // For sharedProps without type variables: no type args
@@ -2107,6 +2095,7 @@ fn transform_react_component_external(
     };
 
     let new_vd = ValueDescription {
+        pval_jsx_component: None,
         pval_name: vd.pval_name,
         pval_type: arena.push_core_type(component_type),
         pval_prim: vd.pval_prim,
@@ -2250,7 +2239,8 @@ fn collect_prop_types_rec(
         let args = arena.nary_arrow_args(first_arg, *arity);
         let last = args.len().saturating_sub(1);
         for (index, arg) in args.iter().enumerate() {
-            if is_labelled(&arg.lbl) || is_optional(&arg.lbl) {
+            // jsx_v4.ml skips fixed arguments (`Parg_fixed`).
+            if arg.fixed.is_none() && (is_labelled(&arg.lbl) || is_optional(&arg.lbl)) {
                 // jsx_v4.ml uses the final return location only for the last
                 // argument of the final arrow group; all other arguments keep
                 // their own type location.
@@ -2272,40 +2262,40 @@ fn collect_prop_types_rec(
 // Helper Functions
 // ============================================================================
 
-fn has_react_component_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| is_react_component_attr(arena, attr))
-}
-
-fn is_react_component_attr(arena: &ParseArena, attr: &Attribute) -> bool {
-    let name = arena.get_string(attr.0.txt);
-    matches!(name, "react.component" | "jsx.component")
-}
-
-fn has_react_component_with_props_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| is_react_component_with_props_attr(arena, attr))
-}
-
-fn is_react_component_with_props_attr(arena: &ParseArena, attr: &Attribute) -> bool {
-    let name = arena.get_string(attr.0.txt);
-    matches!(name, "react.componentWithProps" | "jsx.componentWithProps")
-}
-
-fn count_react_component_attrs(arena: &ParseArena, attrs: &Attributes) -> usize {
-    attrs
-        .iter()
-        .filter(|attr| is_react_component_attr(arena, attr))
-        .count()
-}
-
-fn count_react_component_with_props_attrs(arena: &ParseArena, attrs: &Attributes) -> usize {
-    attrs
-        .iter()
-        .filter(|attr| is_react_component_with_props_attr(arena, attr))
-        .count()
+/// jsx_common.ml `reject_leftover_component_attrs`: `Ast_helper` takes the
+/// first `@react.component`, or failing that the first
+/// `@react.componentWithProps`, into the binding's or description's
+/// component node. One still among the attributes is a second annotation, or
+/// one with a payload the node cannot hold; it stays an attribute so that
+/// formatting keeps it, and the JSX transform rejects it here. Returns
+/// whether it raised.
+fn reject_leftover_component_attrs(
+    arena: &ParseArena,
+    attrs: &Attributes,
+    config: &mut JsxConfig,
+) -> bool {
+    for attr in attrs.iter() {
+        let name = arena.get_string(attr.0.txt);
+        if !matches!(
+            name,
+            "react.component"
+                | "jsx.component"
+                | "react.componentWithProps"
+                | "jsx.componentWithProps"
+        ) {
+            continue;
+        }
+        let message = if crate::ast_jsx_component::of_attribute(arena, attr).is_some() {
+            "A definition can have only one JSX component annotation.".to_string()
+        } else if matches!(name, "react.component" | "jsx.component") {
+            format!("@{name} takes no payload, or the props type to share, as in @{name}(: props).")
+        } else {
+            format!("@{name} takes no payload.")
+        };
+        set_fatal_error(config, attr.0.loc, &message);
+        return true;
+    }
+    false
 }
 
 fn check_multiple_components(config: &mut JsxConfig, loc: Location) {
@@ -2340,18 +2330,15 @@ fn set_fatal_error_with_style(
     }
 }
 
-/// Extract core type from @react.component(:sharedProps<T>) attribute
-/// Returns Some(CoreType) if the attribute has a type payload
-fn core_type_of_attrs(arena: &ParseArena, attrs: &Attributes) -> Option<CoreType> {
-    attrs.iter().find_map(|(loc, payload)| {
-        let name = arena.get_string(loc.txt);
-        match (name, payload) {
-            ("react.component" | "jsx.component", Payload::PTyp(core_type_idx)) => {
-                Some(arena.get_core_type(*core_type_idx).clone())
-            }
-            _ => None,
-        }
-    })
+/// The props type shared by `@react.component(: sharedProps<T>)`.
+fn core_type_of_component(
+    arena: &ParseArena,
+    component: Option<&JsxComponent>,
+) -> Option<CoreType> {
+    match component?.pjc_kind {
+        JsxComponentKind::Labelled(Some(typ)) => Some(arena.get_core_type(typ).clone()),
+        JsxComponentKind::Labelled(None) | JsxComponentKind::WithProps => None,
+    }
 }
 
 /// Extract type variables from a core type (for sharedProps<'a, 'b>)
@@ -3942,6 +3929,7 @@ fn transform_value_binding(
 ) -> ValueBinding {
     let pvb_expr = transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
     ValueBinding {
+        pvb_jsx_component: binding.pvb_jsx_component,
         pvb_pat: binding.pvb_pat,
         pvb_expr: arena.push_expr(pvb_expr),
         pvb_attributes: binding.pvb_attributes,
@@ -5090,7 +5078,8 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_jsx_element(_)
         | ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_extension(_) => true,
+        | ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_raw(_) => true,
     }
 }
 

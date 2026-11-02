@@ -263,6 +263,37 @@ fn map_variance(v: pt0::Variance) -> current::Variance {
 
 // ========== Constant conversion ==========
 
+/// The shape `raw_source_from0` accepts: a lone string constant without eval
+/// attributes, carrying no attributes (a string) or only `res.template` ones
+/// (a template).
+fn raw_source_shape0(payload: &pt0::Payload) -> Option<(&pt0::Expression, bool)> {
+    let pt0::Payload::PStr(items) = payload else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let pt0::StructureItemDesc::Eval(expr, eval_attrs) = &item.pstr_desc else {
+        return None;
+    };
+    if !eval_attrs.is_empty()
+        || !matches!(
+            expr.pexp_desc,
+            pt0::ExpressionDesc::Constant(pt0::Constant::String(..))
+        )
+    {
+        return None;
+    }
+    let attrs = &expr.pexp_attributes;
+    if attrs.is_empty() {
+        Some((expr, false))
+    } else if attrs.iter().all(|(name, _)| name.txt == "res.template") {
+        Some((expr, true))
+    } else {
+        None
+    }
+}
+
 fn has_template_attr0(attrs: &[pt0::Attribute]) -> bool {
     attrs.iter().any(|(name, _)| name.txt == "res.template")
 }
@@ -617,7 +648,9 @@ impl<'a> Mapper<'a> {
             }
             // Ast0 stores only the code point; reconstruct a canonical spelling.
             pt0::Constant::Char(semantic) => current::Constant::char(*semantic),
-            pt0::Constant::String(s, Some(delim)) if delim == "js" || delim == "*j" => {
+            pt0::Constant::String(s, Some(delim))
+                if delim == "js" || delim == "*j" || delim == "json" =>
+            {
                 match crate::string_literal::string_from_source(s) {
                     Some(payload) => current::Constant::String(payload),
                     None => {
@@ -627,9 +660,6 @@ impl<'a> Mapper<'a> {
                 }
             }
             pt0::Constant::String(s, None) => current::Constant::string(s),
-            pt0::Constant::String(s, Some(delim)) if delim == "json" => {
-                current::Constant::Json(Cow::Owned(s.clone()))
-            }
             // Other v0 quotation delimiters are syntax, not part of the value.
             pt0::Constant::String(semantic, Some(_)) => current::Constant::string(semantic),
             pt0::Constant::Float(s, suffix) => {
@@ -820,6 +850,23 @@ impl<'a> Mapper<'a> {
         (self.map_string_loc(&ext.0), payload)
     }
 
+    /// ast_mapper_from0.ml `raw_source_from0`: the source of a plain v0
+    /// `%raw`, `%ffi` or `%%raw` payload, a string or a template marked as
+    /// such. Other payloads stay extensions.
+    fn raw_source_from0(&mut self, payload: &pt0::Payload) -> Option<current::RawSource> {
+        let (expr, is_template) = raw_source_shape0(payload)?;
+        let pt0::ExpressionDesc::Constant(pt0::Constant::String(s, delimiter)) = &expr.pexp_desc
+        else {
+            unreachable!("raw_source_shape0 matched a string constant")
+        };
+        Some(if is_template {
+            let source = template_source_from0(s, delimiter.as_deref());
+            current::RawSource::Template(self.mk_string_loc(&source, &expr.pexp_loc))
+        } else {
+            current::RawSource::String(self.mk_string_loc(s, &expr.pexp_loc))
+        })
+    }
+
     /// ast_mapper_from0.ml `map_raw_source_payload`.
     fn map_raw_source_payload(&mut self, payload: &pt0::Payload) -> Option<current::Payload> {
         let pt0::Payload::PStr(items) = payload else {
@@ -835,11 +882,22 @@ impl<'a> Mapper<'a> {
         else {
             return None;
         };
+        // A braced string or a template is mapped as usual.
+        if expr
+            .pexp_attributes
+            .iter()
+            .any(|(name, _)| name.txt == "res.template" || name.txt == "res.braces")
+        {
+            return None;
+        }
+        // The payload is JavaScript source: keep it as the string's spelling.
+        let payload = crate::string_literal::string_from_source(source)
+            .unwrap_or_else(|| crate::string_literal::string_from_semantic(source));
         let expr_loc = self.loc(&expr.pexp_loc);
         let expr_attrs = self.map_attributes(&expr.pexp_attributes);
         let expression = self.arena.push_expr(current::Expression {
             pexp_desc: Box::new(current::ExpressionDesc::Pexp_constant(Box::new(
-                current::Constant::RawSource(Cow::Owned(source.clone())),
+                current::Constant::String(payload),
             ))),
             pexp_loc: expr_loc,
             pexp_attributes: expr_attrs,
@@ -893,6 +951,7 @@ impl<'a> Mapper<'a> {
                 let ret_idx = self.push_core_type(t2);
                 let typ_idx = self.push_core_type(t1);
                 let arg = current::TypeArg {
+                    fixed: None,
                     attrs: arg_attrs,
                     lbl,
                     typ: typ_idx,
@@ -1546,9 +1605,31 @@ impl<'a> Mapper<'a> {
             pt0::ExpressionDesc::Ident(lid) => {
                 current::ExpressionDesc::Pexp_ident(self.map_longident_loc(lid))
             }
+            // ast_mapper_from0.ml: a `json`-delimited v0 string is a `json`
+            // tagged template.
+            pt0::ExpressionDesc::Constant(pt0::Constant::String(source, Some(delim)))
+                if delim == "json" =>
+            {
+                let lid = self.arena.push_lident_static("json");
+                let tag = self.arena.push_expr(current::Expression {
+                    pexp_desc: Box::new(current::ExpressionDesc::Pexp_ident(Located {
+                        txt: lid,
+                        loc,
+                    })),
+                    pexp_loc: loc,
+                    pexp_attributes: Default::default(),
+                });
+                let txt = self.arena.intern(source);
+                current::ExpressionDesc::Pexp_tagged_template(Box::new(
+                    current::PexpTaggedTemplate {
+                        tag,
+                        raw_sources: vec![Located { txt, loc }],
+                        values: vec![],
+                    },
+                ))
+            }
             pt0::ExpressionDesc::Constant(pt0::Constant::String(text, delimiter))
-                if has_template_attr0(&expr.pexp_attributes)
-                    && delimiter.as_deref() != Some("json") =>
+                if has_template_attr0(&expr.pexp_attributes) =>
             {
                 attrs = self.remove_template_attr(attrs);
                 let source = template_source_from0(text, delimiter.as_deref());
@@ -2291,6 +2372,22 @@ impl<'a> Mapper<'a> {
                     }
                 }
             }
+            // ast_mapper_from0.ml: `%raw` and `%ffi` with a plain payload are
+            // raw nodes.
+            pt0::ExpressionDesc::Extension((name, payload))
+                if crate::ast_raw::kind_of_name(&name.txt).is_some()
+                    && raw_source_shape0(payload).is_some() =>
+            {
+                let kind = crate::ast_raw::kind_of_name(&name.txt).expect("checked by the guard");
+                let source = self
+                    .raw_source_from0(payload)
+                    .expect("checked by the guard");
+                current::ExpressionDesc::Pexp_raw(Box::new(current::PexpRaw {
+                    kind,
+                    name_loc: self.loc(&name.loc),
+                    source,
+                }))
+            }
             pt0::ExpressionDesc::Extension(ext) => {
                 current::ExpressionDesc::Pexp_extension(Box::new(self.map_extension(ext)))
             }
@@ -2625,17 +2722,28 @@ impl<'a> Mapper<'a> {
             };
             self.arena
                 .set_value_constraint(pvb_pat, constraint, pvb_expr, pvb_loc);
+            // `Ast_helper.Vb.mk` takes the JSX component annotation out of
+            // the attributes.
+            let attrs = self.map_attributes(&vb.pvb_attributes);
+            let (pvb_jsx_component, pvb_attributes) =
+                crate::ast_jsx_component::take(self.arena, attrs);
             return current::ValueBinding {
                 pvb_pat,
                 pvb_expr,
-                pvb_attributes: self.map_attributes(&vb.pvb_attributes),
+                pvb_jsx_component,
+                pvb_attributes,
                 pvb_loc,
             };
         }
+        let pvb_pat = self.push_pat(&vb.pvb_pat);
+        let pvb_expr = self.push_expr(&vb.pvb_expr);
+        let attrs = self.map_attributes(&vb.pvb_attributes);
+        let (pvb_jsx_component, pvb_attributes) = crate::ast_jsx_component::take(self.arena, attrs);
         current::ValueBinding {
-            pvb_pat: self.push_pat(&vb.pvb_pat),
-            pvb_expr: self.push_expr(&vb.pvb_expr),
-            pvb_attributes: self.map_attributes(&vb.pvb_attributes),
+            pvb_pat,
+            pvb_expr,
+            pvb_jsx_component,
+            pvb_attributes,
             pvb_loc: self.loc(&vb.pvb_loc),
         }
     }
@@ -2841,6 +2949,19 @@ impl<'a> Mapper<'a> {
             }
             pt0::StructureItemDesc::Include(id) => {
                 current::StructureItemDesc::Pstr_include(Box::new(self.map_include_declaration(id)))
+            }
+            // ast_mapper_from0.ml: `%%raw` with a plain payload is a raw node.
+            pt0::StructureItemDesc::Extension((name, payload), attrs)
+                if name.txt == "raw" && raw_source_shape0(payload).is_some() =>
+            {
+                let source = self
+                    .raw_source_from0(payload)
+                    .expect("checked by the guard");
+                current::StructureItemDesc::Pstr_raw(Box::new(current::PstrRaw {
+                    name_loc: self.loc(&name.loc),
+                    source,
+                    attrs: self.map_attributes(attrs),
+                }))
             }
             pt0::StructureItemDesc::Extension(ext, attrs) => {
                 current::StructureItemDesc::Pstr_extension(Box::new((
@@ -3115,11 +3236,25 @@ impl<'a> Mapper<'a> {
                 None
             }
         };
+        // ast_mapper_from0.ml: like the parser, read an external's
+        // `@as(value) _` arguments as fixed arguments.
+        let mut pval_type = self.map_core_type(&vd.pval_type);
+        if pval_prim.is_some() {
+            crate::ast_fixed_arg::normalize_external_type(self.arena, &mut pval_type);
+        }
+        let pval_name = self.map_string_loc(&vd.pval_name);
+        let pval_type = self.arena.push_core_type(pval_type);
+        // `Ast_helper.Val.mk` takes the JSX component annotation out of the
+        // attributes.
+        let attrs = self.map_attributes(&vd.pval_attributes);
+        let (pval_jsx_component, pval_attributes) =
+            crate::ast_jsx_component::take(self.arena, attrs);
         current::ValueDescription {
-            pval_name: self.map_string_loc(&vd.pval_name),
-            pval_type: self.push_core_type(&vd.pval_type),
+            pval_name,
+            pval_type,
             pval_prim,
-            pval_attributes: self.map_attributes(&vd.pval_attributes),
+            pval_jsx_component,
+            pval_attributes,
             pval_loc: self.loc(&vd.pval_loc),
         }
     }

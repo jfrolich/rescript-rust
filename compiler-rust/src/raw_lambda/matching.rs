@@ -30,6 +30,7 @@ use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::decl::{ConstructorDescription, LabelDescription, RecordRepresentation};
+use crate::types::parmatch::ConstKey;
 use crate::types::type_expr::TypeExprRef;
 use crate::types::type_expr::{RowDesc, RowField};
 use crate::types::typedtree::Partial;
@@ -2888,13 +2889,48 @@ pub fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 /// Equivalent to OCaml's `as_matrix`.
 pub fn as_matrix<'p>(cases: &[Clause<'p>]) -> Matrix<'p> {
     let rows: Vec<&Vec<&'p Pattern>> = cases.iter().map(|(ps, _)| ps).collect();
-    get_mins(
-        |a: &&Vec<&'p Pattern>, b: &&Vec<&'p Pattern>| le_pats(a, b),
-        rows,
-    )
-    .into_iter()
-    .cloned()
-    .collect()
+    get_mins_pats(rows).into_iter().cloned().collect()
+}
+
+/// parmatch.ml `get_mins_pats`: `get_mins le_pats pss`, but faster for many
+/// rows starting with distinct constants, e.g. an expanded character range.
+/// A row starting with an int, char or string constant can only be covered
+/// by rows starting with the same constant or with another kind of pattern,
+/// so only those are compared.
+fn get_mins_pats<'r, 'p>(pss: Vec<&'r Vec<&'p Pattern>>) -> Vec<&'r Vec<&'p Pattern>> {
+    // `select_rec [] pss` of `get_mins le_pats`: drops each row covered by a
+    // later row, and reverses the order.
+    fn select<'r, 'p>(pss: &[&'r Vec<&'p Pattern>]) -> Vec<&'r Vec<&'p Pattern>> {
+        let mut later: Vec<usize> = Vec::new();
+        let mut later_by_key: HashMap<ConstKey, Vec<usize>> = HashMap::default();
+        let mut later_unkeyed: Vec<usize> = Vec::new();
+        let mut kept = Vec::new();
+        for i in (0..pss.len()).rev() {
+            let ps = pss[i];
+            let key = ps.first().and_then(|p| match &p.pat_desc {
+                PatternDesc::Tpat_constant(c) => crate::types::parmatch::const_key(c),
+                _ => None,
+            });
+            let below = |j: &usize| le_pats(pss[*j], ps);
+            let dominated = match &key {
+                None => later.iter().any(below),
+                Some(c) => {
+                    later_by_key.get(c).is_some_and(|js| js.iter().any(below))
+                        || later_unkeyed.iter().any(below)
+                }
+            };
+            later.push(i);
+            match key {
+                None => later_unkeyed.push(i),
+                Some(c) => later_by_key.entry(c).or_default().push(i),
+            }
+            if !dominated {
+                kept.push(ps);
+            }
+        }
+        kept
+    }
+    select(&select(&pss))
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
@@ -3149,21 +3185,48 @@ pub fn explode_or_pat<'p, F>(
 where
     F: Fn(&[Ident]) -> RawLambda,
 {
+    // OCaml conses each expanded row onto `rem`. Keep the list reversed so a
+    // cons is a push: prepending to a vector made an or-pattern of many
+    // alternatives (an expanded character range) quadratic.
+    let mut acc = rem;
+    acc.reverse();
+    explode_or_pat_rev(
+        ctx_ref, pa, arg, patl, mk_action, &mut acc, vars, aliases, pat,
+    )?;
+    acc.reverse();
+    Ok(acc)
+}
+
+/// `explode_or_pat` onto `acc`, which holds the result list reversed.
+fn explode_or_pat_rev<'p, F>(
+    ctx_ref: Option<&TypeContext>,
+    pa: &'p PatArena,
+    arg: &Option<Ident>,
+    patl: &[&'p Pattern],
+    mk_action: &F,
+    acc: &mut Vec<Clause<'p>>,
+    vars: &IdentSet,
+    aliases: &[Ident],
+    pat: &'p Pattern,
+) -> Result<(), CannotFlatten>
+where
+    F: Fn(&[Ident]) -> RawLambda,
+{
     match &pat.pat_desc {
         PatternDesc::Tpat_or(p1, p2, _) => {
-            let rem = explode_or_pat(ctx_ref, pa, arg, patl, mk_action, rem, vars, aliases, p2)?;
-            explode_or_pat(ctx_ref, pa, arg, patl, mk_action, rem, vars, aliases, p1)
+            explode_or_pat_rev(ctx_ref, pa, arg, patl, mk_action, acc, vars, aliases, p2)?;
+            explode_or_pat_rev(ctx_ref, pa, arg, patl, mk_action, acc, vars, aliases, p1)
         }
         PatternDesc::Tpat_alias(p, id, _) => {
             let mut new_aliases = vec![*id];
             new_aliases.extend_from_slice(aliases);
-            explode_or_pat(
+            explode_or_pat_rev(
                 ctx_ref,
                 pa,
                 arg,
                 patl,
                 mk_action,
-                rem,
+                acc,
                 vars,
                 &new_aliases,
                 p,
@@ -3176,18 +3239,16 @@ where
             let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
             let mut row = vec![omega()];
             row.extend_from_slice(patl);
-            let mut result = vec![(row, MatchAction::new(mk_action(&new_ids)))];
-            result.extend(rem);
-            Ok(result)
+            acc.push((row, MatchAction::new(mk_action(&new_ids))));
+            Ok(())
         }
         _ => {
             let env = mk_alpha_env(ctx_ref, arg, aliases, vars)?;
             let new_ids: Vec<Ident> = env.iter().map(|(_, id)| *id).collect();
             let mut row: Vec<&'p Pattern> = vec![pa.alloc(alpha_pat(&env, pat))];
             row.extend_from_slice(patl);
-            let mut result = vec![(row, MatchAction::new(mk_action(&new_ids)))];
-            result.extend(rem);
-            Ok(result)
+            acc.push((row, MatchAction::new(mk_action(&new_ids))));
+            Ok(())
         }
     }
 }
@@ -3683,6 +3744,11 @@ fn split_naive<'p>(
 }
 
 /// Split on extension constructors (naive).
+// `split_exc`, `split_noexc`, `split_ex` and `split_noex` (matching.ml
+// split_or/split_constr) cons rows onto `yes`/`no` and `List.rev` them when
+// done. Rust pushes instead, so the vectors are already in source order; a
+// shifting `insert(0, ..)` per row made a column of many distinct constants
+// (an expanded character range) quadratic.
 fn split_exc<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
@@ -3696,32 +3762,28 @@ fn split_exc<'p>(
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
     match rest.split_first() {
-        None => {
-            let yes = rev_vec(yes);
-            (
-                PmHalfCompiledInfo {
-                    me: PmHalfCompiled::Pm(PatternMatching {
-                        cases: yes.clone(),
-                        args: args.clone(),
-                        default: def.clone(),
-                    }),
-                    matrix: as_matrix(&yes),
-                    top_default: def,
-                },
-                k,
-            )
-        }
+        None => (
+            PmHalfCompiledInfo {
+                me: PmHalfCompiled::Pm(PatternMatching {
+                    cases: yes.clone(),
+                    args: args.clone(),
+                    default: def.clone(),
+                }),
+                matrix: as_matrix(&yes),
+                top_default: def,
+            },
+            k,
+        ),
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if group_constructor(p) => {
                 let cstr = pat_as_constr(p);
                 if same_constructor(cstr, cstr0) {
                     let mut new_yes = yes;
-                    new_yes.insert(0, cl.clone());
+                    new_yes.push(cl.clone());
                     split_exc(
                         ctx_ref, pa, arena, cstr0, new_yes, rem, args, def, k, next_raise,
                     )
                 } else {
-                    let yes = rev_vec(yes);
                     let (info, nexts) = split_exc(
                         ctx_ref,
                         pa,
@@ -3758,7 +3820,6 @@ fn split_exc<'p>(
                 }
             }
             Some(_) => {
-                let yes = rev_vec(yes);
                 let (info, nexts) = split_noexc(
                     ctx_ref,
                     pa,
@@ -3810,13 +3871,9 @@ fn split_noexc<'p>(
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
     match rest.split_first() {
-        None => {
-            let yes = rev_vec(yes);
-            precompile_var(ctx_ref, pa, arena, args, yes, def, k, next_raise)
-        }
+        None => precompile_var(ctx_ref, pa, arena, args, yes, def, k, next_raise),
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if group_constructor(p) => {
-                let yes = rev_vec(yes);
                 let (info, nexts) = split_exc(
                     ctx_ref,
                     pa,
@@ -3852,7 +3909,7 @@ fn split_noexc<'p>(
             }
             Some(_) => {
                 let mut new_yes = yes;
-                new_yes.insert(0, cl.clone());
+                new_yes.push(cl.clone());
                 split_noexc(ctx_ref, pa, arena, new_yes, rem, args, def, k, next_raise)
             }
             None => panic!("split_noexc: empty pattern row"),
@@ -3935,8 +3992,6 @@ fn split_ex<'p>(
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
     match rest.split_first() {
         None => {
-            let yes = rev_vec(yes);
-            let no = rev_vec(no);
             match no.split_first() {
                 None => (
                     PmHalfCompiledInfo {
@@ -4008,14 +4063,14 @@ fn split_ex<'p>(
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
-                new_yes.insert(0, cl.clone());
+                new_yes.push(cl.clone());
                 split_ex(
                     ctx_ref, pa, arena, group, new_yes, no, rem, args, def, k, next_raise,
                 )
             }
             _ => {
                 let mut new_no = no;
-                new_no.insert(0, cl.clone());
+                new_no.push(cl.clone());
                 split_ex(
                     ctx_ref, pa, arena, group, yes, new_no, rem, args, def, k, next_raise,
                 )
@@ -4039,48 +4094,44 @@ fn split_noex<'p>(
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
     match rest.split_first() {
-        None => {
-            let yes = rev_vec(yes);
-            let no = rev_vec(no);
-            match no.split_first() {
-                None => precompile_var(ctx_ref, pa, arena, args, yes, def, k, next_raise),
-                Some((no_cl, no_rem)) => {
-                    let (info, nexts) = split_ex(
-                        ctx_ref,
-                        pa,
-                        arena,
-                        group,
-                        vec![no_cl.clone()],
-                        Vec::new(),
-                        no_rem,
-                        args,
-                        def.clone(),
-                        k,
-                        next_raise,
-                    );
-                    let idef = bump_raise_count(next_raise);
-                    let PmHalfCompiledInfo {
-                        me: next,
-                        matrix,
-                        top_default,
-                    } = info;
-                    precompile_var(
-                        ctx_ref,
-                        pa,
-                        arena,
-                        args,
-                        yes,
-                        cons_default(matrix, idef, top_default),
-                        {
-                            let mut new_nexts = vec![(idef, next)];
-                            new_nexts.extend(nexts);
-                            new_nexts
-                        },
-                        next_raise,
-                    )
-                }
+        None => match no.split_first() {
+            None => precompile_var(ctx_ref, pa, arena, args, yes, def, k, next_raise),
+            Some((no_cl, no_rem)) => {
+                let (info, nexts) = split_ex(
+                    ctx_ref,
+                    pa,
+                    arena,
+                    group,
+                    vec![no_cl.clone()],
+                    Vec::new(),
+                    no_rem,
+                    args,
+                    def.clone(),
+                    k,
+                    next_raise,
+                );
+                let idef = bump_raise_count(next_raise);
+                let PmHalfCompiledInfo {
+                    me: next,
+                    matrix,
+                    top_default,
+                } = info;
+                precompile_var(
+                    ctx_ref,
+                    pa,
+                    arena,
+                    args,
+                    yes,
+                    cons_default(matrix, idef, top_default),
+                    {
+                        let mut new_nexts = vec![(idef, next)];
+                        new_nexts.extend(nexts);
+                        new_nexts
+                    },
+                    next_raise,
+                )
             }
-        }
+        },
         Some((_cl, _rem)) if rest.len() == 1 => {
             // Check for the special case: last row is all variables and yes is non-empty
             let cl = &rest[0];
@@ -4088,7 +4139,7 @@ fn split_noex<'p>(
                 // This enables an extra division in some frequent cases:
                 // last row is made of variables only
                 let mut new_no = no;
-                new_no.insert(0, cl.clone());
+                new_no.push(cl.clone());
                 split_noex(
                     ctx_ref,
                     pa,
@@ -4108,7 +4159,7 @@ fn split_noex<'p>(
                 match cl.0.first() {
                     Some(p) if !group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
                         let mut new_yes = yes;
-                        new_yes.insert(0, cl.clone());
+                        new_yes.push(cl.clone());
                         split_noex(
                             ctx_ref,
                             pa,
@@ -4125,7 +4176,7 @@ fn split_noex<'p>(
                     }
                     _ => {
                         let mut new_no = no;
-                        new_no.insert(0, cl.clone());
+                        new_no.push(cl.clone());
                         split_noex(
                             ctx_ref,
                             pa,
@@ -4146,14 +4197,14 @@ fn split_noex<'p>(
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if !group(p) && up_ok(ctx_ref, &cl.0, &cl.1, &no) => {
                 let mut new_yes = yes;
-                new_yes.insert(0, cl.clone());
+                new_yes.push(cl.clone());
                 split_noex(
                     ctx_ref, pa, arena, group, new_yes, no, rem, args, def, k, next_raise,
                 )
             }
             _ => {
                 let mut new_no = no;
-                new_no.insert(0, cl.clone());
+                new_no.push(cl.clone());
                 split_noex(
                     ctx_ref, pa, arena, group, yes, new_no, rem, args, def, k, next_raise,
                 )
@@ -4435,16 +4486,9 @@ pub fn split_precompile<'p>(
     (info.me, nexts)
 }
 
-/// Reverse a vector — equivalent to OCaml's `List.rev`.
-///
-/// OCaml compiler/ml/matching.ml:814-846 accumulates rows with `::` and restores
-/// source order with `List.rev`; callers use `VecDeque::push_front` for the
-/// same asymptotic behavior.
-fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
-    v.reverse();
-    v
-}
-
+/// OCaml compiler/ml/matching.ml:814-846 accumulates rows with `::` and
+/// restores source order with `List.rev`; callers use `VecDeque::push_front`
+/// for the same asymptotic behavior.
 fn rev_deque_to_vec<T>(v: VecDeque<T>) -> Vec<T> {
     let mut v: Vec<T> = v.into_iter().collect();
     v.reverse();
@@ -4490,7 +4534,11 @@ fn add<'p, K>(
 /// conses the current case with `add` (`compiler/ml/matching.ml:1100-1108`).
 /// Iterating from the tail, pushing, and reversing once preserves the same
 /// group/case order without Rust `Vec::insert(0, ...)` shifting every element.
+///
+/// Cells whose key has a `hashable` key are also found by hashing, which must
+/// agree with `eq_key`. This keeps a column of many distinct keys linear.
 fn divide<'p, K>(
+    hashable: impl Fn(&K) -> Option<ConstKey>,
     make: impl Fn(&'p Pattern, &DefaultEnv<'p>, &[Ctx<'p>], &MatchArgs) -> MatchCell<'p>,
     eq_key: impl Fn(&K, &K) -> bool,
     get_key: impl Fn(&'p Pattern) -> K,
@@ -4499,17 +4547,28 @@ fn divide<'p, K>(
     pm: &PatternMatching<'p>,
 ) -> Vec<(K, MatchCell<'p>)> {
     let mut division: Vec<(K, MatchCell<'p>)> = Vec::new();
+    let mut cells: HashMap<ConstKey, usize> = HashMap::default();
 
     for (patl, action) in pm.cases.iter().rev() {
         let Some((p, rest_patl)) = patl.split_first() else {
             division.clear();
+            cells.clear();
             continue;
         };
 
         let key = get_key(p);
         let patl_action = (get_args(p, rest_patl), action.clone());
 
-        if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
+        if let Some(hash_key) = hashable(&key) {
+            if let Some(&pos) = cells.get(&hash_key) {
+                division[pos].1.pm.cases.push(patl_action);
+            } else {
+                let mut cell = make(p, &pm.default, ctx, &pm.args);
+                cell.pm.cases.push(patl_action);
+                cells.insert(hash_key, division.len());
+                division.push((key, cell));
+            }
+        } else if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
             division[pos].1.pm.cases.push(patl_action);
         } else {
             let mut cell = make(p, &pm.default, ctx, &pm.args);
@@ -4641,6 +4700,7 @@ fn divide_constant<'p>(
     m: &PatternMatching<'p>,
 ) -> Vec<(Constant, MatchCell<'p>)> {
     divide(
+        crate::types::parmatch::const_key,
         |p, d, c, a| make_constant_matching(pa, p, d, c, a),
         |c, d| const_compare(c, d) == std::cmp::Ordering::Equal,
         |p| get_key_constant("divide", p),
@@ -4960,6 +5020,7 @@ fn divide_constructor<'p>(
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
     divide(
+        |_| None,
         |p, def, ctx_inner, args| make_constr_matching(ctx_ref, pa, arena, p, def, ctx_inner, args),
         |left, right| same_constructor(left, right),
         get_key_constr,
@@ -5654,6 +5715,7 @@ fn divide_array<'p>(
     pm: &PatternMatching<'p>,
 ) -> Vec<(usize, MatchCell<'p>)> {
     divide(
+        |_| None,
         |p, d, c, a| make_array_matching(pa, arena, p, d, c, a),
         |a, b| a == b,
         get_key_array,

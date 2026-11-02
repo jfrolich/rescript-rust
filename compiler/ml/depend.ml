@@ -99,7 +99,11 @@ let rec add_type bv ty =
   | Ptyp_any -> ()
   | Ptyp_var _ -> ()
   | Ptyp_arrow {params; ret} ->
-    List.iter (fun arg -> add_type bv arg.typ) params;
+    List.iter
+      (function
+        | Parg_type {typ} -> add_type bv typ
+        | Parg_fixed _ -> ())
+      params;
     add_type bv ret
   | Ptyp_tuple tl -> List.iter (add_type bv) tl
   | Ptyp_constr (c, tl) ->
@@ -316,6 +320,7 @@ let rec add_expr bv exp =
     | Pstr_eval ({pexp_desc = Pexp_construct (c, {txt = []})}, _) -> add bv c
     | _ -> handle_extension e)
   | Pexp_extension e -> handle_extension e
+  | Pexp_raw _ -> ()
   | Pexp_await e -> add_expr bv e
   | Pexp_jsx_element (Jsx_fragment {jsx_fragment_children = children}) ->
     add_jsx_children bv children
@@ -535,7 +540,7 @@ and add_struct_item (bv, m) item : _ String_map.t * _ String_map.t =
     add_names s;
     let add = String_map.fold String_map.add m' in
     (add bv, add m)
-  | Pstr_attribute _ -> (bv, m)
+  | Pstr_attribute _ | Pstr_raw _ -> (bv, m)
   | Pstr_extension (e, _) ->
     handle_extension e;
     (bv, m)

@@ -952,6 +952,12 @@ fn walk_structure_item(
             let (ref ext, _) = **inner;
             walk_extension(ext, t, comments, arena)
         }
+        StructureItemDesc::Pstr_raw(raw) => walk_extension(
+            &crate::ast_raw::to_extension(arena, "raw", raw.name_loc, &raw.source),
+            t,
+            comments,
+            arena,
+        ),
         StructureItemDesc::Pstr_include(id) => walk_include_declaration(id, t, comments, arena),
         StructureItemDesc::Pstr_exception(ec) => walk_extension_constructor(ec, t, comments, arena),
         StructureItemDesc::Pstr_typext(te) => walk_type_extension(te, t, comments, arena),
@@ -1788,6 +1794,17 @@ fn walk_expression(
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_extension(ext) => walk_extension(ext, t, comments, arena),
+        ExpressionDesc::Pexp_raw(raw) => walk_extension(
+            &crate::ast_raw::to_extension(
+                arena,
+                crate::ast_raw::extension_name(raw.kind),
+                raw.name_loc,
+                &raw.source,
+            ),
+            t,
+            comments,
+            arena,
+        ),
         ExpressionDesc::Pexp_letexception(inner) => {
             let (ref ext, ref body_idx) = **inner;
             // Safety: arena is append-only, expression won't be invalidated

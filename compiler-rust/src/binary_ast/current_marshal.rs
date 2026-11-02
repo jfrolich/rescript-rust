@@ -310,7 +310,7 @@ fn is_external_raw_expansion_body(expr: &Expression, w: &MarshalWriter<'_>) -> b
     let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
         &*arg_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::RawSource(_))
+        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_))
     )
 }
 
@@ -842,16 +842,8 @@ impl Marshal for Constant {
                 w.write_block_header(2, 1);
                 marshal_string_literal(payload, w);
             }
-            Constant::Json(source) => {
-                w.write_block_header(3, 1);
-                w.write_str(source);
-            }
-            Constant::RawSource(source) => {
-                w.write_block_header(4, 1);
-                w.write_str(source);
-            }
             Constant::Float(s, suffix) => {
-                w.write_block_header(5, 2);
+                w.write_block_header(3, 2);
                 w.write_str(s);
                 suffix.marshal(w);
             }
@@ -865,7 +857,35 @@ impl Marshal for Constant {
 
 impl Marshal for TypeArg {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        // arg = { attrs: attributes; lbl: arg_label; typ: core_type }
+        if let Some(fixed) = &self.fixed {
+            // Parg_fixed of {attrs; lbl; value: fixed_value loc; loc}
+            w.write_block_header(1, 4);
+            self.attrs.marshal(w);
+            self.lbl.marshal(w);
+            w.write_block_header(0, 2);
+            match &fixed.value {
+                crate::parser::ast::FixedValue::Int(source) => {
+                    w.write_block_header(0, 1);
+                    source.marshal(w);
+                }
+                crate::parser::ast::FixedValue::String(payload) => {
+                    w.write_block_header(1, 1);
+                    marshal_string_literal(payload, w);
+                }
+                crate::parser::ast::FixedValue::Template(source) => {
+                    w.write_block_header(2, 1);
+                    source.marshal(w);
+                }
+                crate::parser::ast::FixedValue::Json(source) => {
+                    w.write_block_header(3, 1);
+                    source.marshal(w);
+                }
+            }
+            fixed.value_loc.marshal(w);
+            fixed.loc.marshal(w);
+            return;
+        }
+        // Parg_type of { attrs: attributes; lbl: arg_label; typ: core_type }
         w.write_block_header(0, 3);
         // In parser-generated ES6 arrow type args, empty attribute payloads
         // (`[@attr]` -> `PStr []`) reuse a shared payload object in OCaml.
@@ -1472,7 +1492,7 @@ impl Marshal for ExpressionDesc {
                 inner.2.marshal(w);
             }
             ExpressionDesc::Pexp_regexp(regexp) => {
-                w.write_block_header(36, 2);
+                w.write_block_header(37, 2);
                 w.write_str(&regexp.pattern);
                 w.write_str(&regexp.flags);
             }
@@ -1647,15 +1667,10 @@ impl Marshal for ExpressionDesc {
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_coerce(inner) => {
-                let (ref e, ref _middle, ref t) = **inner;
-                let _from_type = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().coerce_from_type(owner));
-                // Pexp_coerce of expression * unit * core_type
-                // The middle field in Rust is Option<CoreType> but OCaml uses unit
-                w.write_block_header(22, 3);
+                // Pexp_coerce of expression * core_type
+                let (ref e, _, ref t) = **inner;
+                w.write_block_header(22, 2);
                 e.marshal(w);
-                w.write_int(0); // unit = ()
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_object_get(inner) => {
@@ -1714,35 +1729,45 @@ impl Marshal for ExpressionDesc {
                 w.write_block_header(31, 1);
                 marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
             }
+            ExpressionDesc::Pexp_raw(raw) => {
+                // Pexp_raw of {kind; name_loc; source}
+                w.write_block_header(32, 3);
+                w.write_int(match raw.kind {
+                    crate::parser::ast::RawKind::Expression => 0,
+                    crate::parser::ast::RawKind::Function => 1,
+                });
+                raw.name_loc.marshal(w);
+                marshal_raw_source(&raw.source, w);
+            }
             ExpressionDesc::Pexp_await(e) => {
-                w.write_block_header(32, 1);
+                w.write_block_header(33, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_jsx_element(jsx) => {
-                w.write_block_header(33, 1);
+                w.write_block_header(34, 1);
                 jsx.marshal(w);
             }
             ExpressionDesc::Pexp_for_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(34, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
-            ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (ref pat, ref iterable, ref body) = **inner;
                 w.write_block_header(35, 3);
                 pat.marshal(w);
                 iterable.marshal(w);
                 body.marshal(w);
             }
+            ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(36, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
+            }
             ExpressionDesc::Pexp_template(template) => {
-                w.write_block_header(37, 2);
+                w.write_block_header(38, 2);
                 template.source_segments.marshal(w);
                 template.values.marshal(w);
             }
             ExpressionDesc::Pexp_tagged_template(template) => {
-                w.write_block_header(38, 3);
+                w.write_block_header(39, 3);
                 template.tag.marshal(w);
                 template.raw_sources.marshal(w);
                 template.values.marshal(w);
@@ -1782,14 +1807,15 @@ impl Marshal for ValueConstraint {
 impl Marshal for ValueBinding {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         // value_binding = { pvb_pat; pvb_expr; pvb_constraint;
-        //                   pvb_attributes; pvb_loc }
-        w.write_block_header(0, 5);
+        //                   pvb_jsx_component; pvb_attributes; pvb_loc }
+        w.write_block_header(0, 6);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
         w.get_arena()
             .value_constraint(self.pvb_pat)
             .cloned()
             .marshal(w);
+        marshal_jsx_component(self.pvb_jsx_component.as_deref(), w);
         let share_empty_pstr = if has_attr(&self.pvb_attributes, w, &["res.braces", "res.ternary"])
         {
             Some(EmptyPayloadShareKind::ParserAttr)
@@ -2159,7 +2185,9 @@ impl Marshal for ValueDescription {
             None
         };
 
-        w.write_block_header(0, 5);
+        // value_description = { pval_name; pval_type; pval_prim;
+        //                       pval_jsx_component; pval_attributes; pval_loc }
+        w.write_block_header(0, 6);
 
         let name_obj_idx = w.obj_counter();
         if let Some((obj_idx, _)) = shared_name_type {
@@ -2182,6 +2210,7 @@ impl Marshal for ValueDescription {
         }
 
         marshal_prim(&self.pval_prim, w);
+        marshal_jsx_component(self.pval_jsx_component.as_deref(), w);
         marshal_attributes(&self.pval_attributes, w, false, false, None);
         self.pval_loc.marshal(w);
     }
@@ -2375,6 +2404,13 @@ impl Marshal for StructureItemDesc {
             StructureItemDesc::Pstr_attribute(attr) => {
                 w.write_block_header(11, 1);
                 attr.marshal(w);
+            }
+            StructureItemDesc::Pstr_raw(raw) => {
+                // Pstr_raw of {name_loc; source; attrs}
+                w.write_block_header(13, 3);
+                raw.name_loc.marshal(w);
+                marshal_raw_source(&raw.source, w);
+                raw.attrs.marshal(w);
             }
             StructureItemDesc::Pstr_extension(inner) => {
                 let (ref ext, ref attrs) = **inner;
@@ -2579,4 +2615,44 @@ impl Marshal for JsxProp {
             }
         }
     }
+}
+
+/// `Parsetree.raw_source`: `Raw_string of string loc | Raw_template of
+/// string loc`.
+fn marshal_raw_source(source: &crate::parser::ast::RawSource, w: &mut MarshalWriter<'_>) {
+    let (tag, s) = match source {
+        crate::parser::ast::RawSource::String(s) => (0, s),
+        crate::parser::ast::RawSource::Template(s) => (1, s),
+    };
+    w.write_block_header(tag, 1);
+    s.marshal(w);
+}
+
+/// `jsx_component option`, where
+/// `jsx_component = { pjc_kind; pjc_namespace; pjc_loc }`,
+/// `jsx_component_kind = Pjc_labelled of core_type option | Pjc_with_props`
+/// and `jsx_component_namespace = Pjc_react | Pjc_jsx`.
+fn marshal_jsx_component(
+    component: Option<&crate::parser::ast::JsxComponent>,
+    w: &mut MarshalWriter<'_>,
+) {
+    use crate::parser::ast::{JsxComponentKind, JsxComponentNamespace};
+    let Some(component) = component else {
+        w.write_int(0);
+        return;
+    };
+    w.write_block_header(0, 1);
+    w.write_block_header(0, 3);
+    match &component.pjc_kind {
+        JsxComponentKind::Labelled(typ) => {
+            w.write_block_header(0, 1);
+            typ.marshal(w);
+        }
+        JsxComponentKind::WithProps => w.write_int(0),
+    }
+    w.write_int(match component.pjc_namespace {
+        JsxComponentNamespace::React => 0,
+        JsxComponentNamespace::Jsx => 1,
+    });
+    component.pjc_loc.marshal(w);
 }

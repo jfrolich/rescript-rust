@@ -467,6 +467,7 @@ mod tests {
             pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
+                    pvb_jsx_component: None,
                     pvb_pat: pat_idx,
                     pvb_expr: expr_idx,
                     pvb_attributes: Attributes::new(),

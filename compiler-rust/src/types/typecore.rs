@@ -144,6 +144,16 @@ fn extension_error(
     })
 }
 
+/// OCaml `Ast_raw.uninterpreted`: raw JavaScript that reached the type
+/// checker, which the built-in PPX lowers before type checking.
+pub fn uninterpreted_raw_error(name_loc: LocIdx, name: &str) -> TypeCoreError {
+    TypeCoreError::ExtensionError(BuiltinExtensionError {
+        loc: name_loc,
+        message: format!("Uninterpreted extension '{name}'."),
+        sub: Vec::new(),
+    })
+}
+
 pub fn builtin_extension_error(
     arena: &ParseArena,
     extension: &crate::parser::ast::Extension,
@@ -823,9 +833,11 @@ pub enum TypeCoreError {
 
     /// A template segment with an invalid escape sequence.
     InvalidStringEscapeSequence { loc: LocIdx },
+    /// typetexp.ml `Ptyp_arrow`: `Location.raise_errorf` for a fixed argument
+    /// (`Parg_fixed`), which external processing removes before typing.
+    FixedArgumentOutsideExternal { loc: LocIdx },
 
     /// A `json` literal outside an external payload.
-    JsonLiteralOutsideExternal { loc: LocIdx },
 
     /// Illegal let-rec pattern.
     IllegalLetrecPat { loc: LocIdx },
@@ -886,6 +898,15 @@ pub enum TypeCoreError {
 
     /// JSX not enabled.
     JsxNotEnabled { loc: LocIdx },
+
+    /// typecore.ml `Jsx_component_without_make`: a JSX element names a
+    /// module that defines no `make`.
+    JsxComponentWithoutMake {
+        loc: LocIdx,
+        module_lid: String,
+        /// `Typetexp.spellcheck_value` candidates for `module_lid.make`.
+        alternatives: Vec<String>,
+    },
 
     /// An extension point reached the typechecker without being handled by a PPX.
     ExtensionError(BuiltinExtensionError),
@@ -2273,8 +2294,6 @@ pub fn convert_constant(
         }),
         ParsedConstant::Char { semantic, .. } => Ok(Constant::Char(*semantic)),
         ParsedConstant::String(payload) => Ok(Constant::String(payload.semantic().to_string())),
-        ParsedConstant::Json(_) => Err(TypeCoreError::JsonLiteralOutsideExternal { loc }),
-        ParsedConstant::RawSource(s) => Ok(Constant::String(s.to_string())),
         ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
         ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral {
             loc,
@@ -2901,6 +2920,9 @@ fn transl_type_inner(
             let mut typed_args = Vec::with_capacity(source_args.len());
             let mut type_args = Vec::with_capacity(source_args.len());
             for source_arg in source_args {
+                if let Some(fixed) = &source_arg.fixed {
+                    return Err(TypeCoreError::FixedArgumentOutsideExternal { loc: fixed.loc });
+                }
                 let (typed, mut typ) =
                     transl_type_inner(tctx, env, tctx.arena.get_core_type(source_arg.typ))?;
                 if source_arg.lbl.is_optional() {
@@ -4734,7 +4756,14 @@ fn type_pattern_inner(
                         // - alpha-rename branch 2 onto branch 1's ids,
                         // - keep only branch 1's bindings live after typing the or-pattern.
                         let alpha_env = merge_or_pattern_variables(tctx, loc, &p1_vars, &p2_vars)?;
-                        let typed_p2 = alpha_pattern(&alpha_env, &typed_p2);
+                        // Without variables there is nothing to rename. Skipping
+                        // the copy keeps nested or-patterns, e.g. expanded
+                        // character ranges, linear.
+                        let typed_p2 = if alpha_env.is_empty() {
+                            typed_p2
+                        } else {
+                            alpha_pattern(&alpha_env, &typed_p2)
+                        };
                         state.restore_binding_checkpoint(initial_state);
                         state.pattern_variables.extend(p1_vars.iter().cloned());
                         state
@@ -7815,6 +7844,21 @@ fn type_expect_with_recarg_unscoped<'a>(
                     if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
                         return Err(err);
                     }
+                    // typecore.ml Pexp_ident: `<Button />` refers to
+                    // `Button.make`. The module exists (otherwise the lookup
+                    // reports it as unbound), but it defines no component.
+                    if let Longident::Ldot(module_lid, last) = longident
+                        && matches!(context, Some(TypeClashContext::JsxComponent))
+                        && tctx.arena.get_string(*last) == "make"
+                    {
+                        let module_lid = tctx.longident_to_string(module_lid);
+                        let alternatives = unbound_value_alternatives(tctx, env, longident);
+                        return Err(TypeCoreError::JsxComponentWithoutMake {
+                            loc: lid.loc,
+                            module_lid,
+                            alternatives,
+                        });
+                    }
                     return Err(unbound_value_error(tctx, env, lid.loc, longident));
                 }
             };
@@ -8703,6 +8747,13 @@ fn type_expect_with_recarg_unscoped<'a>(
                 &expr.pexp_attributes,
             )
         }
+
+        // typecore.ml: the built-in PPX lowers raw JavaScript before type
+        // checking.
+        ED::Pexp_raw(raw) => Err(uninterpreted_raw_error(
+            raw.name_loc,
+            crate::ast_raw::extension_name(raw.kind),
+        )),
 
         ED::Pexp_extension(extension) => {
             // Extension: [%id]
@@ -11891,7 +11942,8 @@ fn collect_lident_idents_in_module_expr(
                     | SID::Pstr_modtype(_)
                     | SID::Pstr_open(_)
                     | SID::Pstr_attribute(_)
-                    | SID::Pstr_extension(_) => {}
+                    | SID::Pstr_extension(_)
+                    | SID::Pstr_raw(_) => {}
                 }
             }
         }
@@ -11926,7 +11978,11 @@ fn collect_lident_idents_in_expression(
                 out.push(arena.get_string(*id).to_string());
             }
         }
-        ED::Pexp_constant(_) | ED::Pexp_extension(_) | ED::Pexp_break | ED::Pexp_continue => {}
+        ED::Pexp_constant(_)
+        | ED::Pexp_extension(_)
+        | ED::Pexp_raw(_)
+        | ED::Pexp_break
+        | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
             for binding in inner.1.iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);
@@ -12637,6 +12693,7 @@ fn desugar_nary_function_defaults(
                 Some(crate::parser::ast::ValueBinding {
                     pvb_pat: param.p_pat,
                     pvb_expr: match_expr,
+                    pvb_jsx_component: None,
                     pvb_attributes: Attributes::new(),
                     pvb_loc: arena.none_loc(),
                 }),
@@ -20846,7 +20903,9 @@ fn type_let_bindings(
                 typed_pat,
                 typed_expr,
                 binding.pvb_loc,
-                binding.pvb_attributes.clone(),
+                // typecore.ml type_let: as written, like a value
+                // description's in `Typedecl`.
+                crate::ast_jsx_component::binding_attributes(arena, binding),
             ));
         }
 

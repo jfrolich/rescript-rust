@@ -463,7 +463,7 @@ fn read_cmt(cmt_file: &str) -> ! {
             );
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
-        Ok(data) if data.starts_with(b"Caml1999I036") => {
+        Ok(data) if data.starts_with(b"Caml1999I038") => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         _ => {

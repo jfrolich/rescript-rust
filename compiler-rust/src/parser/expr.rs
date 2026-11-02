@@ -1508,8 +1508,23 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             let payload = super::module::raw_source_extension_payload(p, &name, payload);
 
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            // res_core.ml parse_atomic_expr: `%raw` and `%ffi` with a plain
+            // string or template payload are raw nodes.
+            let kind = crate::ast_raw::kind_of_name(p.arena().get_string(name.txt));
+            let source = match kind {
+                Some(_) => crate::ast_raw::of_payload(p.arena_mut(), &payload),
+                None => None,
+            };
+            let pexp_desc = match (kind, source) {
+                (Some(kind), Some(source)) => ExpressionDesc::Pexp_raw(Box::new(PexpRaw {
+                    kind,
+                    name_loc: name.loc,
+                    source,
+                })),
+                _ => ExpressionDesc::Pexp_extension(Box::new((name, payload))),
+            };
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((name, payload)))),
+                pexp_desc: Box::new(pexp_desc),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -4786,7 +4801,6 @@ fn parse_template_literal_with_prefix(
     let mut sources: Vec<StringLoc> = Vec::with_capacity(parts.len());
     let mut source_texts: Vec<Cow<'static, str>> = Vec::with_capacity(parts.len());
     let mut values: Vec<Expression> = Vec::new();
-    let only_part = parts.len() == 1 && parts[0].2.is_none();
     for (text, loc, value) in parts {
         let txt = p.arena_mut().intern_string(&text);
         sources.push(Located { txt, loc });
@@ -4797,22 +4811,6 @@ fn parse_template_literal_with_prefix(
     }
 
     match prefix {
-        Some((lid_idx, _)) if p.arena().is_lident(lid_idx, "json") => {
-            if !only_part && !source_texts.is_empty() {
-                let start = p.loc_start(template_loc);
-                let end = p.loc_end(template_loc);
-                p.err_at(
-                    start,
-                    end,
-                    DiagnosticCategory::Message(
-                        "`json` literals do not support interpolation".to_string(),
-                    ),
-                );
-            }
-            let source = source_texts.into_iter().next().unwrap_or(Cow::Borrowed(""));
-            let loc = sources.first().map_or(LocIdx::none(), |s| s.loc);
-            ast_helper::make_constant(Constant::Json(source), loc)
-        }
         None => {
             for (text, source) in source_texts.iter().zip(sources.iter()) {
                 if crate::string_literal::decode_js_template_escapes(text).is_none() {

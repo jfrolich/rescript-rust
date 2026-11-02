@@ -138,9 +138,6 @@ module Sexp_ast = struct
             string (String_literal.string_source payload);
             string (String_literal.string_semantic payload);
           ]
-      | Pconst_json source -> Sexp.list [Sexp.atom "Pconst_json"; string source]
-      | Pconst_raw_source source ->
-        Sexp.list [Sexp.atom "Pconst_raw_source"; string source]
       | Pconst_float (txt, tag) ->
         Sexp.list [Sexp.atom "Pconst_float"; string txt; opt_char tag]
     in
@@ -192,6 +189,11 @@ module Sexp_ast = struct
         Sexp.list [Sexp.atom "Pstr_attribute"; attribute attr]
       | Pstr_extension (ext, attrs) ->
         Sexp.list [Sexp.atom "Pstr_extension"; extension ext; attributes attrs]
+      | Pstr_raw {name_loc; source; attrs} ->
+        Sexp.list
+          ([Sexp.atom "Pstr_raw"]
+          @ (ignore name_loc; [])
+          @ [raw_source source; attributes attrs])
     in
     Sexp.list [Sexp.atom "structure_item"; desc]
 
@@ -394,7 +396,7 @@ module Sexp_ast = struct
 
   and value_binding vb =
     Sexp.list
-      [
+      ([
         Sexp.atom "value_binding";
         pattern vb.pvb_pat;
         (match vb.pvb_constraint with
@@ -412,10 +414,11 @@ module Sexp_ast = struct
         expression vb.pvb_expr;
         attributes vb.pvb_attributes;
       ]
+      @ jsx_component vb.pvb_jsx_component)
 
   and value_description vd =
     Sexp.list
-      [
+      ([
         Sexp.atom "value_description";
         string vd.pval_name.Asttypes.txt;
         core_type vd.pval_type;
@@ -427,6 +430,7 @@ module Sexp_ast = struct
           | Some (Prim_inline_const _) -> [string "<inline const>"]);
         attributes vd.pval_attributes;
       ]
+      @ jsx_component vd.pval_jsx_component)
 
   and type_declaration td =
     Sexp.list
@@ -807,6 +811,11 @@ module Sexp_ast = struct
           ]
       | Pexp_extension ext ->
         Sexp.list [Sexp.atom "Pexp_extension"; extension ext]
+      | Pexp_raw {kind; name_loc; source} ->
+        Sexp.list
+          ([Sexp.atom "Pexp_raw"; raw_kind kind]
+          @ (ignore name_loc; [])
+          @ [raw_source source])
       | Pexp_regexp {pattern; flags} ->
         Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
       | Pexp_template {source_segments; values} ->
@@ -1008,6 +1017,48 @@ module Sexp_ast = struct
              package_constraints);
       ]
 
+  and fixed_value (v : Parsetree.fixed_value) =
+    match v with
+    | Pfixed_int {txt} -> Sexp.list [Sexp.atom "Pfixed_int"; string txt]
+    | Pfixed_string payload ->
+      Sexp.list
+        [
+          Sexp.atom "Pfixed_string";
+          string (String_literal.string_source payload);
+          string (String_literal.string_semantic payload);
+        ]
+    | Pfixed_template {txt} -> Sexp.list [Sexp.atom "Pfixed_template"; string txt]
+    | Pfixed_json {txt} -> Sexp.list [Sexp.atom "Pfixed_json"; string txt]
+
+  and raw_kind (k : Parsetree.raw_kind) =
+    match k with
+    | Raw_expression -> Sexp.atom "Raw_expression"
+    | Raw_function -> Sexp.atom "Raw_function"
+
+  and raw_source (s : Parsetree.raw_source) =
+    match s with
+    | Raw_string {txt} -> Sexp.list [Sexp.atom "Raw_string"; string txt]
+    | Raw_template {txt} -> Sexp.list [Sexp.atom "Raw_template"; string txt]
+
+  and jsx_component (c : Parsetree.jsx_component option) =
+    match c with
+    | None -> []
+    | Some {pjc_kind; pjc_namespace} ->
+      [
+        Sexp.list
+          [
+            Sexp.atom "jsx_component";
+            (match pjc_kind with
+            | Pjc_labelled None -> Sexp.atom "Pjc_labelled"
+            | Pjc_labelled (Some t) ->
+              Sexp.list [Sexp.atom "Pjc_labelled"; core_type t]
+            | Pjc_with_props -> Sexp.atom "Pjc_with_props");
+            (match pjc_namespace with
+            | Pjc_react -> Sexp.atom "Pjc_react"
+            | Pjc_jsx -> Sexp.atom "Pjc_jsx");
+          ];
+      ]
+
   and core_type typexpr =
     let desc =
       match typexpr.ptyp_desc with
@@ -1020,7 +1071,16 @@ module Sexp_ast = struct
             Sexp.list
               (map_empty
                  ~f:(fun (p : Parsetree.arg) ->
-                   Sexp.list [arg_label_loc p.lbl; core_type p.typ])
+                   match p with
+                   | Parg_type {lbl; typ} ->
+                     Sexp.list [arg_label_loc lbl; core_type typ]
+                   | Parg_fixed {lbl; value} ->
+                     Sexp.list
+                       [
+                         Sexp.atom "Parg_fixed";
+                         arg_label_loc lbl;
+                         fixed_value value.txt;
+                       ])
                  params);
             core_type ret;
           ]
@@ -1226,10 +1286,6 @@ module SexpAstWithLocs = struct
             string_literal (String_literal.string_source payload);
             string_literal (String_literal.string_semantic payload);
           ]
-      | Pconst_json source ->
-        Sexp.list [Sexp.atom "Pconst_json"; string_literal source]
-      | Pconst_raw_source source ->
-        Sexp.list [Sexp.atom "Pconst_raw_source"; string_literal source]
       | Pconst_float (txt, tag) ->
         Sexp.list [Sexp.atom "Pconst_float"; string txt; opt_char tag]
     in
@@ -1281,6 +1337,11 @@ module SexpAstWithLocs = struct
         Sexp.list [Sexp.atom "Pstr_attribute"; attribute attr]
       | Pstr_extension (ext, attrs) ->
         Sexp.list [Sexp.atom "Pstr_extension"; extension ext; attributes attrs]
+      | Pstr_raw {name_loc; source; attrs} ->
+        Sexp.list
+          ([Sexp.atom "Pstr_raw"]
+          @ [location name_loc]
+          @ [raw_source source; attributes attrs])
     in
     Sexp.list [Sexp.atom "structure_item"; location si.pstr_loc; desc]
 
@@ -1502,7 +1563,7 @@ module SexpAstWithLocs = struct
 
   and value_binding vb =
     Sexp.list
-      [
+      ([
         Sexp.atom "value_binding";
         location vb.pvb_loc;
         pattern vb.pvb_pat;
@@ -1522,10 +1583,11 @@ module SexpAstWithLocs = struct
         expression vb.pvb_expr;
         attributes vb.pvb_attributes;
       ]
+      @ jsx_component vb.pvb_jsx_component)
 
   and value_description vd =
     Sexp.list
-      [
+      ([
         Sexp.atom "value_description";
         location vd.pval_loc;
         string vd.pval_name.Asttypes.txt;
@@ -1537,6 +1599,7 @@ module SexpAstWithLocs = struct
              | Some prim -> Ffi_debug.primitive_repr prim));
         attributes vd.pval_attributes;
       ]
+      @ jsx_component vd.pval_jsx_component)
 
   and type_declaration td =
     Sexp.list
@@ -1920,6 +1983,11 @@ module SexpAstWithLocs = struct
         Sexp.list [Sexp.atom "Pexp_regexp"; string pattern; string flags]
       | Pexp_extension ext ->
         Sexp.list [Sexp.atom "Pexp_extension"; extension ext]
+      | Pexp_raw {kind; name_loc; source} ->
+        Sexp.list
+          ([Sexp.atom "Pexp_raw"; raw_kind kind]
+          @ [location name_loc]
+          @ [raw_source source])
       | Pexp_template {source_segments; values} ->
         Sexp.list
           [
@@ -2131,6 +2199,54 @@ module SexpAstWithLocs = struct
              package_constraints);
       ]
 
+  and fixed_value (v : Parsetree.fixed_value) =
+    match v with
+    | Pfixed_int {txt; loc} ->
+      Sexp.list [Sexp.atom "Pfixed_int"; string_literal txt; location loc]
+    | Pfixed_string payload ->
+      Sexp.list
+        [
+          Sexp.atom "Pfixed_string";
+          string_literal (String_literal.string_source payload);
+          string_literal (String_literal.string_semantic payload);
+        ]
+    | Pfixed_template {txt; loc} ->
+      Sexp.list [Sexp.atom "Pfixed_template"; string_literal txt; location loc]
+    | Pfixed_json {txt; loc} ->
+      Sexp.list [Sexp.atom "Pfixed_json"; string_literal txt; location loc]
+
+  and raw_kind (k : Parsetree.raw_kind) =
+    match k with
+    | Raw_expression -> Sexp.atom "Raw_expression"
+    | Raw_function -> Sexp.atom "Raw_function"
+
+  and raw_source (s : Parsetree.raw_source) =
+    match s with
+    | Raw_string {txt; loc} ->
+      Sexp.list [Sexp.atom "Raw_string"; string_literal txt; location loc]
+    | Raw_template {txt; loc} ->
+      Sexp.list [Sexp.atom "Raw_template"; string_literal txt; location loc]
+
+  and jsx_component (c : Parsetree.jsx_component option) =
+    match c with
+    | None -> []
+    | Some {pjc_kind; pjc_namespace; pjc_loc} ->
+      [
+        Sexp.list
+          [
+            Sexp.atom "jsx_component";
+            location pjc_loc;
+            (match pjc_kind with
+            | Pjc_labelled None -> Sexp.atom "Pjc_labelled"
+            | Pjc_labelled (Some t) ->
+              Sexp.list [Sexp.atom "Pjc_labelled"; core_type t]
+            | Pjc_with_props -> Sexp.atom "Pjc_with_props");
+            (match pjc_namespace with
+            | Pjc_react -> Sexp.atom "Pjc_react"
+            | Pjc_jsx -> Sexp.atom "Pjc_jsx");
+          ];
+      ]
+
   and core_type typexpr =
     let desc =
       match typexpr.ptyp_desc with
@@ -2143,8 +2259,19 @@ module SexpAstWithLocs = struct
             Sexp.list
               (List.map
                  (fun (p : Parsetree.arg) ->
-                   Sexp.list
-                     [arg_label_loc p.lbl; attributes p.attrs; core_type p.typ])
+                   match p with
+                   | Parg_type {attrs; lbl; typ} ->
+                     Sexp.list [arg_label_loc lbl; attributes attrs; core_type typ]
+                   | Parg_fixed {attrs; lbl; value; loc} ->
+                     Sexp.list
+                       [
+                         Sexp.atom "Parg_fixed";
+                         arg_label_loc lbl;
+                         attributes attrs;
+                         fixed_value value.txt;
+                         location value.loc;
+                         location loc;
+                       ])
                  params);
             core_type ret;
           ]
