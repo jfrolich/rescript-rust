@@ -2271,7 +2271,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads: Vec<P> = pss.iter().map(|r| r.active[0]).collect();
                 let q0 = self.discr_pat(q, &heads);
-                let mut piece = |this: &mut Self, q0: P| {
+                let piece = |this: &mut Self, q0: P| {
                     let filtered = this.filter_one_rows(q0, pss);
                     let mut active = this.simple_match_args(q0, q);
                     active.extend_from_slice(rem);

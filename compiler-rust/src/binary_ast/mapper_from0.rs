@@ -821,7 +821,24 @@ impl<'a> Mapper<'a> {
     // ========== Attribute mapping ==========
 
     fn map_attribute(&mut self, attr: &pt0::Attribute) -> current::Attribute {
-        (self.map_string_loc(&attr.0), self.map_payload(&attr.1))
+        (self.map_builtin_name(&attr.0), self.map_payload(&attr.1))
+    }
+
+    /// ast_mapper_from0.ml `bare_builtin_name`: PPXs built on OCaml tooling
+    /// spell builtin attributes and extensions with an `ocaml.` prefix
+    /// (ppxlib reports errors as `%ocaml.error` and lint warnings as
+    /// `@@@ocaml.ppwarning`). The compiler reads only the bare names.
+    fn map_builtin_name(&mut self, name: &OldLocated<String>) -> Located<StrIdx> {
+        let bare = match name.txt.as_str() {
+            "ocaml.error" => "error",
+            "ocaml.warning" => "warning",
+            "ocaml.ppwarning" => "ppwarning",
+            other => other,
+        };
+        Located {
+            txt: self.arena.intern(bare),
+            loc: self.loc(&name.loc),
+        }
     }
 
     fn map_attributes(&mut self, attrs: &[pt0::Attribute]) -> Attributes {
@@ -847,7 +864,7 @@ impl<'a> Mapper<'a> {
         } else {
             self.map_payload(&ext.1)
         };
-        (self.map_string_loc(&ext.0), payload)
+        (self.map_builtin_name(&ext.0), payload)
     }
 
     /// ast_mapper_from0.ml `raw_source_from0`: the source of a plain v0
@@ -2627,7 +2644,7 @@ impl<'a> Mapper<'a> {
         };
         let items = vec![str_item(self, msg), str_item(self, "")];
         (
-            self.mk_string_loc("ocaml.error", loc),
+            self.mk_string_loc("error", loc),
             current::Payload::PStr(Box::new(items)),
         )
     }

@@ -3642,6 +3642,26 @@ fn is_reserved_word(s: &str) -> bool {
     )
 }
 
+/// `Js_reserved_map.is_js_keyword`.
+pub(crate) fn is_js_keyword(s: &str) -> bool {
+    is_reserved_word(s)
+        || matches!(
+            s,
+            "let"
+                | "static"
+                | "yield"
+                | "await"
+                | "implements"
+                | "interface"
+                | "package"
+                | "private"
+                | "protected"
+                | "public"
+                | "arguments"
+                | "eval"
+        )
+}
+
 pub(crate) fn is_js_keyword_or_global(s: &str) -> bool {
     is_reserved_word(s)
         || matches!(

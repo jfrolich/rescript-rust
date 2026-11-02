@@ -7880,12 +7880,27 @@ fn compile_orhandlers<'p>(
     ctx: &[Ctx<'p>],
     to_catch: &[(Matrix<'p>, i32, Vec<Ident>, PatternMatching<'p>)],
 ) -> (RawLambda, Jumps<'p>) {
+    /// `add_raised_exits raised lam`: adds the static exits `lam` jumps to.
+    /// Exits cannot leave a function, so function bodies are skipped.
+    fn add_raised_exits(raised: &mut std::collections::HashSet<i32>, lam: &RawLambda) {
+        match lam {
+            RawLambda::Lfunction(_) => {}
+            RawLambda::LstaticRaise(i, _) => {
+                raised.insert(*i);
+                lam.for_each_child(&mut |child| add_raised_exits(raised, child));
+            }
+            _ => lam.for_each_child(&mut |child| add_raised_exits(raised, child)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn do_rec<'p>(
         pa: &'p PatArena,
         compile_fun: &mut dyn FnMut(
             &[Ctx<'p>],
             &PatternMatching<'p>,
         ) -> Result<(RawLambda, Jumps<'p>), Unused>,
+        raised: &mut std::collections::HashSet<i32>,
         r: RawLambda,
         total_r: Jumps<'p>,
         ctx: &[Ctx<'p>],
@@ -7893,10 +7908,17 @@ fn compile_orhandlers<'p>(
     ) -> (RawLambda, Jumps<'p>) {
         match to_catch.split_first() {
             None => (r, total_r),
+            // The or-pattern is unreachable, e.g. after a wildcard. Its
+            // handler is not compiled: with a guard and no default, its
+            // failure has no exit.
+            Some(((_, i, _, _), rem)) if !raised.contains(i) => {
+                do_rec(pa, compile_fun, raised, r, total_r, ctx, rem)
+            }
             Some(((mat, i, vars, pm), rem)) => {
                 let ctx_i = select_columns(pa, mat, ctx);
                 match compile_fun(&ctx_i, pm) {
                     Ok((handler_i, total_i)) => {
+                        add_raised_exits(raised, &handler_i);
                         match raw_static_raise(&r) {
                             Some((j, args)) if j == *i => {
                                 let body = vars
@@ -7909,6 +7931,7 @@ fn compile_orhandlers<'p>(
                                 do_rec(
                                     pa,
                                     compile_fun,
+                                    raised,
                                     body,
                                     jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i),
                                     ctx,
@@ -7920,11 +7943,12 @@ fn compile_orhandlers<'p>(
                                 // skips a handler when `raw_action r` is a
                                 // different static raise.
                                 drop(args);
-                                do_rec(pa, compile_fun, r, total_r, ctx, rem)
+                                do_rec(pa, compile_fun, raised, r, total_r, ctx, rem)
                             }
                             None => do_rec(
                                 pa,
                                 compile_fun,
+                                raised,
                                 RawLambda::LstaticCatch(
                                     Box::new(r),
                                     (*i, vars.clone()),
@@ -7942,6 +7966,7 @@ fn compile_orhandlers<'p>(
                     Err(Unused) => do_rec(
                         pa,
                         compile_fun,
+                        raised,
                         RawLambda::LstaticCatch(
                             Box::new(r),
                             (*i, vars.clone()),
@@ -7956,7 +7981,10 @@ fn compile_orhandlers<'p>(
         }
     }
 
-    do_rec(pa, compile_fun, lambda1, total1, ctx, to_catch)
+    // The exits of the match and of the handlers compiled so far.
+    let mut raised = std::collections::HashSet::new();
+    add_raised_exits(&mut raised, &lambda1);
+    do_rec(pa, compile_fun, &mut raised, lambda1, total1, ctx, to_catch)
 }
 
 /// Check if v approximately appears in lam.

@@ -2588,32 +2588,6 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::InvalidExtensionConstructorPayload { loc }) => {
-            UserDiagnostic::new(
-                format_compiler_error_report(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    "Invalid [%extension_constructor] payload, a constructor is expected.",
-                ),
-                2,
-            )
-            .into()
-        }
-        TypeModError::CoreError(TypeCoreError::NotAnExtensionConstructor { loc }) => {
-            UserDiagnostic::new(
-                format_compiler_error_report(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    "This constructor is not an extension constructor.",
-                ),
-                2,
-            )
-            .into()
-        }
         TypeModError::CoreError(TypeCoreError::CannotApplyModule { loc, mty, origin }) => {
             UserDiagnostic::new(
                 format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty, origin.as_ref()),
@@ -3924,17 +3898,6 @@ fn type_mod_error_to_anyhow_styled(
             )
             .into()
         }
-        TypeModError::BoxedAndUnboxed { loc } => UserDiagnostic::new(
-            format_compiler_error_report(
-                arena,
-                source,
-                filename,
-                *loc,
-                "A type cannot be boxed and unboxed at the same time.",
-            ),
-            2,
-        )
-        .into(),
         TypeModError::BadImmediateAttribute { loc } => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
@@ -10332,6 +10295,13 @@ pub fn run_implementation_frontend(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(parser, source, filename));
     }
+    // cmd_ppx_apply.ml `apply_rewriters_str`: with external PPXs configured,
+    // the removed `ocaml.` spellings are rejected before the bridge renames
+    // them.
+    if !options.external_ppxs.is_empty() {
+        ppx::check_removed_ocaml_spellings_structure(&structure, parser.arena())
+            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
+    }
     let structure =
         apply_external_structure_ppxs(options, filename, parser.arena_mut(), structure)?;
     let frontend_warnings =
@@ -11459,6 +11429,11 @@ pub fn run_interface_frontend(
         format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(parser, source, filename));
+    }
+    // cmd_ppx_apply.ml `apply_rewriters_sig`.
+    if !options.external_ppxs.is_empty() {
+        ppx::check_removed_ocaml_spellings_signature(&signature, parser.arena())
+            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     }
     let signature =
         apply_external_signature_ppxs(options, filename, parser.arena_mut(), signature)?;

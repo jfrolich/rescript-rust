@@ -83,7 +83,12 @@ fn main() {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("{:#}", err);
-            1
+            // A dependency that cannot be resolved exits with 2.
+            if err.is::<rescript::build::packages::DependencyError>() {
+                2
+            } else {
+                1
+            }
         }
     };
     rescript::build::phase_mark("run-main-end");

@@ -100,12 +100,6 @@ jobs:
             node-target: linux-arm64
             rust-target: aarch64-unknown-linux-musl
             dune-profile: static
-          - os: macos-26-intel # x64
-            ocaml_compiler: 5.5.1
-            upload_binaries: true
-            node-target: darwin-x64
-            rust-target: x86_64-apple-darwin
-            dune-profile: release
           - os: macos-26 # ARM
             ocaml_compiler: 5.5.1
             upload_binaries: true
@@ -582,7 +576,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-26-intel
           - os: macos-26
           - os: ubuntu-26.04
           - os: ubuntu-26.04-arm
@@ -648,7 +641,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-26-intel
           - os: macos-26
           - os: ubuntu-26.04
           - os: ubuntu-26.04-arm

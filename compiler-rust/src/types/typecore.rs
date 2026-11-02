@@ -103,7 +103,7 @@ fn extension_error(
     extension: &crate::parser::ast::Extension,
 ) -> Option<BuiltinExtensionError> {
     let name = arena.get_string(extension.0.txt);
-    if matches!(name, "error" | "ocaml.error") {
+    if name == "error" {
         return match &extension.1 {
             crate::parser::ast::Payload::PStr(items) => {
                 let Some(item) = items.first() else {
@@ -334,12 +334,9 @@ fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<
 }
 
 fn has_warn_on_literal_pattern_attribute(attrs: &[crate::types::decl::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        matches!(
-            attr.attr_name.txt.as_str(),
-            "ocaml.warn_on_literal_pattern" | "warn_on_literal_pattern"
-        )
-    })
+    attrs
+        .iter()
+        .any(|attr| matches!(attr.attr_name.txt.as_str(), "warn_on_literal_pattern"))
 }
 
 fn is_dict_type_path(path: &Path) -> bool {
@@ -805,12 +802,6 @@ pub enum TypeCoreError {
 
     /// Inlined record expected.
     InlinedRecordExpected { loc: LocIdx },
-
-    /// Invalid extension constructor payload.
-    InvalidExtensionConstructorPayload { loc: LocIdx },
-
-    /// Not an extension constructor.
-    NotAnExtensionConstructor { loc: LocIdx },
 
     /// Break outside a directly enclosing loop body.
     BreakOutsideLoop { loc: LocIdx },
@@ -7491,12 +7482,9 @@ fn deprecated_warning_from_attrs(
 
 /// `Builtin_attributes.deprecated_of_attrs` (builtin_attributes.ml:76-80).
 fn deprecated_of_decl_attrs(attrs: &[crate::types::decl::Attribute]) -> Option<String> {
-    let attr = attrs.iter().find(|attr| {
-        matches!(
-            attr.attr_name.txt.as_str(),
-            "deprecated" | "ocaml.deprecated"
-        )
-    })?;
+    let attr = attrs
+        .iter()
+        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated"))?;
     Some(match &attr.attr_payload {
         // `string_of_opt_payload` (builtin_attributes.ml:28-31): the record
         // form has no string payload.
@@ -7569,7 +7557,7 @@ fn persistent_path_components(path: &Path) -> Option<(String, Vec<String>)> {
 
 fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&str, bool)> {
     for attr in attrs {
-        if attr.attr_name.txt != "deprecated" && attr.attr_name.txt != "ocaml.deprecated" {
+        if attr.attr_name.txt != "deprecated" {
             continue;
         }
         return Some(match &attr.attr_payload {
@@ -7596,12 +7584,10 @@ fn record_deprecated_used(
     context: Option<crate::types::context::DeprecatedContext>,
 ) {
     use crate::types::decl::AttributePayload;
-    let Some(attr) = attrs.iter().find(|attr| {
-        matches!(
-            attr.attr_name.txt.as_str(),
-            "deprecated" | "ocaml.deprecated"
-        )
-    }) else {
+    let Some(attr) = attrs
+        .iter()
+        .find(|attr| matches!(attr.attr_name.txt.as_str(), "deprecated"))
+    else {
         return;
     };
     let (text, migrate, migrate_in_pipe_chain) = match &attr.attr_payload {
@@ -7664,37 +7650,6 @@ fn deprecated_warning_for_type(
         reason,
         can_be_automigrated,
     ))
-}
-
-fn deprecated_mutable_warning_for_label(
-    name: &str,
-    label: &crate::types::LabelDescription,
-) -> Option<Warning> {
-    for attr in &label.lbl_attributes {
-        if attr.attr_name.txt != "deprecated_mutable"
-            && attr.attr_name.txt != "ocaml.deprecated_mutable"
-        {
-            continue;
-        }
-        let reason = match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Deprecated { reason, .. }
-            | crate::types::decl::AttributePayload::Str(reason) => reason.as_str(),
-            crate::types::decl::AttributePayload::Empty => "",
-            _ => "",
-        };
-        let message = if reason.is_empty() {
-            format!("mutating field {name}")
-        } else {
-            format!("mutating field {name}\n  {reason}")
-        };
-        return Some(Warning::Deprecated {
-            message,
-            def_loc: Location::none(),
-            use_loc: Location::none(),
-            can_be_automigrated: false,
-        });
-    }
-    None
 }
 
 /// Type check an expression against an expected type.
@@ -8724,15 +8679,9 @@ fn type_expect_with_recarg_unscoped<'a>(
         )),
 
         ED::Pexp_extension(extension) => {
-            // Extension: [%id]
-            type_extension_expr(
-                tctx,
-                env,
-                loc,
-                extension,
-                expected_ty,
-                &expr.pexp_attributes,
-            )
+            // Extension: [%id]. typecore.ml `Pexp_extension ext ->
+            // raise (Error_forward (Builtin_attributes.error_of_extension ext))`.
+            Err(builtin_extension_error(tctx.arena, extension))
         }
 
         ED::Pexp_letmodule(inner) => {
@@ -10778,8 +10727,7 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_variant(_, None)
         | ExpressionDesc::Texp_break
-        | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_extension_constructor(_, _) => {}
+        | ExpressionDesc::Texp_continue => {}
     }
 }
 
@@ -16603,9 +16551,6 @@ fn type_setfield(
             },
         );
     }
-    if let Some(warning) = deprecated_mutable_warning_for_label(&field_context_name, &label_desc) {
-        tctx.report_warning(field_lid.loc, warning);
-    }
 
     // OCaml typecore.ml:2961-2969: `rue { ... exp_type = instance_def
     // Predef.type_unit }`, i.e. `unify_exp env exp (instance env ty_expected)`.
@@ -17621,86 +17566,6 @@ fn type_letexception(
         tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
-}
-
-/// Type check extension expression.
-fn type_extension_expr(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    loc: LocIdx,
-    extension: &crate::parser::ast::Extension,
-    expected_ty: TypeExprRef,
-    attributes: &[crate::parser::ast::Attribute],
-) -> TypeCoreResult<Expression> {
-    let extension_name = tctx.arena.get_string(extension.0.txt);
-    if extension_name == "extension_constructor" || extension_name == "ocaml.extension_constructor"
-    {
-        let constructor_lid = match &extension.1 {
-            crate::parser::ast::Payload::PStr(items) => {
-                let [item] = items.as_slice() else {
-                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
-                };
-                let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
-                else {
-                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
-                };
-                let expr = tctx.arena.get_expr(eval.0);
-                let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args) =
-                    &*expr.pexp_desc
-                else {
-                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
-                };
-                if !args.txt.is_empty() {
-                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
-                };
-                *lid
-            }
-            _ => return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc }),
-        };
-
-        let longident = tctx.resolve_lid(constructor_lid.txt).clone();
-        let constructor_name = tctx.longident_last_name(&longident);
-        let constructor = if matches!(longident, Longident::Ldot(..)) {
-            lookup_constructor_in_module(
-                &longident,
-                tctx.arena,
-                env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-                None,
-            )
-            .map(|(_, desc)| desc)
-        } else {
-            env.find_constructor(&constructor_name).ok().cloned()
-        };
-        // `Typetexp.find_constructor env lid.loc lid.txt` (typecore.ml:3452).
-        let Some(constructor) = constructor else {
-            return Err(unbound_constructor_lookup_error(
-                tctx,
-                env,
-                constructor_lid.loc,
-                &longident,
-            ));
-        };
-        let crate::types::ConstructorKind::Extension(path) = constructor.cstr_kind else {
-            return Err(TypeCoreError::NotAnExtensionConstructor {
-                loc: constructor_lid.loc,
-            });
-        };
-
-        let ctx = tctx.type_ctx;
-        let ty = ctx.new_generic_constr(crate::types::predef::path_extension_constructor(), vec![]);
-        rue_unify(tctx, loc, ty, expected_ty, None)?;
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_extension_constructor(constructor_lid, path),
-            loc,
-            ty,
-            ctx.store_typed_env(env),
-            attributes.to_vec().into(),
-        ));
-    }
-
-    Err(builtin_extension_error(tctx.arena, extension))
 }
 
 fn letmodule_path_root_is_module(path: &Path, module_id: &Ident) -> bool {
@@ -19739,8 +19604,7 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
         }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
-        | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_extension_constructor(_, _) => false,
+        | ExpressionDesc::Texp_continue => false,
     }
 }
 
@@ -20024,7 +19888,6 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         | ExpressionDesc::Texp_for_await_of(_, _, _, _)
         | ExpressionDesc::Texp_pack(_)
         | ExpressionDesc::Texp_function { .. }
-        | ExpressionDesc::Texp_extension_constructor(_, _)
         | ExpressionDesc::Texp_break
         | ExpressionDesc::Texp_continue => RecExpressionClass::Static,
         ExpressionDesc::Texp_apply { funct, .. } => {
@@ -20263,8 +20126,7 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
         ),
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
-        | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_extension_constructor(_, _) => RecUse::default(),
+        | ExpressionDesc::Texp_continue => RecUse::default(),
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             if matches!(&funct.exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc))
                 && args.len() == 1

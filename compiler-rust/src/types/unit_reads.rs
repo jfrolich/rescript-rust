@@ -136,7 +136,6 @@ impl TastIterator for Collector<'_> {
                     self.label(ld);
                 }
             }
-            ExpressionDesc::Texp_extension_constructor(_, path) => self.path(path, Kind::Extension),
             _ => {}
         }
         self.ty(e.exp_type);

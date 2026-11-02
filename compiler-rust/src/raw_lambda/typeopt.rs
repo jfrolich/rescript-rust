@@ -392,21 +392,10 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     }
     match id.name() {
         "option" | "unit" | "unknown" => BuiltinPathTest::ForSureNo,
-        "int"
-        | "char"
-        | "float"
-        | "bool"
-        | "exn"
-        | "array"
-        | "list"
-        | "result"
-        | "dict"
-        | "bigint"
-        | "string"
-        | "extension_constructor"
-        | "promise"
-        | "iterable"
-        | "asyncIterable" => BuiltinPathTest::ForSureYes,
+        "int" | "char" | "float" | "bool" | "exn" | "array" | "list" | "result" | "dict"
+        | "bigint" | "string" | "promise" | "iterable" | "asyncIterable" => {
+            BuiltinPathTest::ForSureYes
+        }
         _ => BuiltinPathTest::NotApplicable,
     }
 }

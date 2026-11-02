@@ -96,9 +96,7 @@ impl<'a> DependencyCollector<'a> {
 
     /// OCaml `Depend.handle_extension` (depend.ml:92-96).
     fn handle_extension(&mut self, ext: &Extension) {
-        if self.error_extension.is_none()
-            && matches!(self.arena.get_string(ext.0.txt), "error" | "ocaml.error")
-        {
+        if self.error_extension.is_none() && self.arena.get_string(ext.0.txt) == "error" {
             self.error_extension = Some(ext.clone());
         }
     }
@@ -749,38 +747,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_raw(_) => {}
-            ExpressionDesc::Pexp_extension(ext) => {
-                // depend.ml:292-298: `[%extension_constructor C]` depends on
-                // the constructor path.
-                let constructor = match &ext.1 {
-                    Payload::PStr(items)
-                        if items.len() == 1
-                            && matches!(
-                                self.arena.get_string(ext.0.txt),
-                                "ocaml.extension_constructor" | "extension_constructor"
-                            ) =>
-                    {
-                        match items[0].pstr_desc.as_ref() {
-                            StructureItemDesc::Pstr_eval(inner) => {
-                                match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
-                                    ExpressionDesc::Pexp_construct(c, args)
-                                        if args.txt.is_empty() =>
-                                    {
-                                        Some(c.txt)
-                                    }
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                match constructor {
-                    Some(c) => self.add_lident_idx(c),
-                    None => self.handle_extension(ext),
-                }
-            }
+            ExpressionDesc::Pexp_extension(ext) => self.handle_extension(ext),
             ExpressionDesc::Pexp_await(expr) => {
                 // expr is ExprIdx
                 let expr = *expr;

@@ -62,9 +62,8 @@ fn deprecated_inclusion_warning(
     def_loc: &Location,
     use_loc: &Location,
 ) -> Option<Warning> {
-    let impl_payload =
-        deprecated_payload_from_attrs(impl_attrs, &["deprecated", "ocaml.deprecated"])?;
-    if deprecated_payload_from_attrs(sig_attrs, &["deprecated", "ocaml.deprecated"]).is_some() {
+    let impl_payload = deprecated_payload_from_attrs(impl_attrs, &["deprecated"])?;
+    if deprecated_payload_from_attrs(sig_attrs, &["deprecated"]).is_some() {
         return None;
     }
     let reason = deprecated_payload_reason(impl_payload);
@@ -72,39 +71,6 @@ fn deprecated_inclusion_warning(
         name.to_string()
     } else {
         format!("{name}\n  {reason}")
-    };
-    Some(Warning::Deprecated {
-        message,
-        def_loc: *def_loc,
-        use_loc: *use_loc,
-        can_be_automigrated: false,
-    })
-}
-
-fn deprecated_mutable_inclusion_warning(
-    name: &str,
-    impl_attrs: &[Attribute],
-    sig_attrs: &[Attribute],
-    def_loc: &Location,
-    use_loc: &Location,
-) -> Option<Warning> {
-    let impl_payload = deprecated_payload_from_attrs(
-        impl_attrs,
-        &["deprecated_mutable", "ocaml.deprecated_mutable"],
-    )?;
-    if deprecated_payload_from_attrs(
-        sig_attrs,
-        &["deprecated_mutable", "ocaml.deprecated_mutable"],
-    )
-    .is_some()
-    {
-        return None;
-    }
-    let reason = deprecated_payload_reason(impl_payload);
-    let message = if reason.is_empty() {
-        format!("mutating field {name}")
-    } else {
-        format!("mutating field {name}\n  {reason}")
     };
     Some(Warning::Deprecated {
         message,
@@ -1823,7 +1789,6 @@ fn check_paired_signature_items(
                     impl_ext_constr,
                     sig_ext_constr,
                     subst,
-                    warnings,
                 )?;
                 coercions.push((pair.runtime_pos, ModuleCoercion::Tcoerce_none));
             }
@@ -2977,7 +2942,6 @@ pub(crate) fn type_declarations(
                 &sig_decl.type_params,
                 impl_labels,
                 sig_labels,
-                warnings,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
             }
@@ -3105,7 +3069,6 @@ fn compare_record_declarations(
     sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
-    warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
     compare_record_declarations_with_param_map(
@@ -3116,7 +3079,6 @@ fn compare_record_declarations(
         sig_params,
         impl_labels,
         sig_labels,
-        warnings,
     )
 }
 
@@ -3128,7 +3090,6 @@ fn compare_record_declarations_with_param_map(
     sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
-    warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     // OCaml compiler/ml/includecore.ml:396 starts record comparison at 1,
     // so diagnostics report declaration field positions as 1-based.
@@ -3157,15 +3118,6 @@ fn compare_record_declarations_with_param_map(
                 "The optional attribute of field {} is different.",
                 impl_label.ld_id.name()
             ));
-        }
-        if let Some(warning) = deprecated_mutable_inclusion_warning(
-            impl_label.ld_id.name(),
-            &impl_label.ld_attributes,
-            &sig_label.ld_attributes,
-            &impl_label.ld_loc,
-            &sig_label.ld_loc,
-        ) {
-            warnings.push(warning);
         }
         let impl_runtime_name = impl_label.declaration_name();
         let sig_runtime_name = sig_label.declaration_name();
@@ -3212,18 +3164,6 @@ fn compare_record_declarations_with_param_map(
     let mut prior_impl = impl_params.to_vec();
     let mut prior_sig = sig_params.to_vec();
     for (impl_label, sig_label) in impl_labels.iter().zip(sig_labels) {
-        // The slow pass re-runs `aux` (includecore.ml:284-312), so
-        // `check_deprecated_mutable_inclusion` warns again for each field up
-        // to the one that is blamed.
-        if let Some(warning) = deprecated_mutable_inclusion_warning(
-            impl_label.ld_id.name(),
-            &impl_label.ld_attributes,
-            &sig_label.ld_attributes,
-            &impl_label.ld_loc,
-            &sig_label.ld_loc,
-        ) {
-            warnings.push(warning);
-        }
         prior_impl.insert(0, impl_label.ld_type);
         prior_sig.insert(0, sig_label.ld_type);
         if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
@@ -3711,7 +3651,6 @@ fn compare_variant_declarations(
                     &arg_sig_params,
                     impl_labels,
                     sig_labels,
-                    warnings,
                 ) {
                     return Some(detail);
                 }
@@ -4324,7 +4263,6 @@ fn extension_constructors(
     impl_ext: &ExtensionConstructor,
     sig_ext: &ExtensionConstructor,
     subst: &InclusionSubst,
-    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     // includecore.ml:461-466: `Env.mark_extension_used usage env ext1
     // (Ident.name id)`.
@@ -4390,7 +4328,6 @@ fn extension_constructors(
         &param_map,
         &impl_ext.ext_args,
         &sig_ext.ext_args,
-        warnings,
     ) {
         return Err(mismatch());
     }
@@ -4426,7 +4363,6 @@ fn constructor_arguments_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_args: &ConstructorArguments,
     sig_args: &ConstructorArguments,
-    warnings: &mut Vec<Warning>,
 ) -> bool {
     match (impl_args, sig_args) {
         (
@@ -4451,8 +4387,7 @@ fn constructor_arguments_equal_for_inclusion(
             ConstructorArguments::CstrRecord(impl_labels),
             ConstructorArguments::CstrRecord(sig_labels),
         ) => {
-            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels, warnings)
-                .is_none()
+            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels).is_none()
         }
         _ => false,
     }
@@ -4857,7 +4792,6 @@ mod tests {
             &extension,
             &extension,
             &InclusionSubst::default(),
-            &mut Vec::new(),
         );
 
         assert!(result.is_ok());

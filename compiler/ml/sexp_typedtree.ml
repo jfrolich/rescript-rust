@@ -555,8 +555,6 @@ and expression_desc ~with_locs desc =
   | Texp_pack me ->
     let me_sexp = module_expr ~with_locs me in
     Sexp.list [Sexp.atom "Texp_pack"; me_sexp]
-  | Texp_extension_constructor (li, p) ->
-    Sexp.list [Sexp.atom "Texp_extension_constructor"; longident_loc li; path p]
   | Texp_break -> Sexp.list [Sexp.atom "Texp_break"]
   | Texp_continue -> Sexp.list [Sexp.atom "Texp_continue"]
   | Texp_for_of _ -> Sexp.list [Sexp.atom "Texp_for_of"]

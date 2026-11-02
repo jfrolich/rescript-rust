@@ -484,8 +484,12 @@ impl LambdaCompiler {
                     )
                 }
                 Some((first_scope, rest_scopes)) => {
+                    // A leading "default" scope is the module's default
+                    // export: import it as such, like
+                    // `external x: t = "default"`.
+                    let default = first_scope == "default";
                     let mut expr = Expression::qualified(
-                        self.external_module_id(module_name, false, false),
+                        self.external_module_id(module_name, default, false),
                         Some(first_scope.clone()),
                     );
                     for scope in rest_scopes {

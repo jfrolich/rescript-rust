@@ -36,7 +36,9 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 
 use super::spice_ppx;
-use crate::parser::ast::{PexpBraces, PexpRaw, PrimitiveRepr, PstrRaw, RawKind, RawSource};
+use crate::parser::ast::{
+    Extension, PexpBraces, PexpRaw, PrimitiveRepr, PstrRaw, RawKind, RawSource,
+};
 use crate::types::external_ffi_types::{
     Attr, Cst, DeclKind, ExternalDecl, ExternalFfi, ExternalModuleName, ImportAttributes,
     InlineConst, Label, LabelNoname, ModuleBindName, ModuleSource, ObjParam, Param, ReturnWrapper,
@@ -986,8 +988,8 @@ fn collect_builtin_warning_attribute(
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     match attr_name {
-        "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
-            let errflag = matches!(attr_name, "warnerror" | "ocaml.warnerror");
+        "warning" | "warnerror" => {
+            let errflag = attr_name == "warnerror";
             if let Some(spec) = payload_semantic_string(payload, arena) {
                 if !warning_spec_parse_ok(&spec, errflag) {
                     warnings.push(PpxWarning {
@@ -1008,7 +1010,7 @@ fn collect_builtin_warning_attribute(
                 });
             }
         }
-        "ppwarning" | "ocaml.ppwarning" => {
+        "ppwarning" => {
             if let Some(message) = payload_semantic_string(payload, arena) {
                 // builtin_attributes.ml:202-212 reports at the item's `pstr_loc`.
                 let Payload::PStr(items) = payload else {
@@ -1031,11 +1033,11 @@ fn builtin_warning_attribute_spec(
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     match attr_name {
-        "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
+        "warning" | "warnerror" => {
             let spec = payload_semantic_string(payload, arena)?;
             Some(WarningAttributeSpec {
                 spec,
-                as_error: matches!(attr_name, "warnerror" | "ocaml.warnerror"),
+                as_error: attr_name == "warnerror",
             })
         }
         _ => None,
@@ -1128,7 +1130,46 @@ fn is_bs_unused_attribute_candidate(name: &str) -> bool {
     )
 }
 
-/// OCaml `Bs_ast_invariant.warn_unused_attribute` (bs_ast_invariant.ml:36-45).
+/// OCaml `Bs_ast_invariant.removed_ocaml_attribute`: OCaml spellings of
+/// builtin attributes the compiler used to accept, with the hint to show.
+fn removed_ocaml_attribute(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "ocaml.deprecated" => "use `@deprecated` instead.",
+        "ocaml.unboxed" => "use `@unboxed` instead.",
+        "ocaml.immediate" => "use `@immediate` instead.",
+        "ocaml.warnerror" => "use `@warnerror` instead.",
+        "ocaml.boxed" => "remove it: types are boxed unless marked `@unboxed`.",
+        "ocaml.deprecated_mutable" => "remove it.",
+        "ocaml.text" => "use a doc comment instead.",
+        "ocaml.warning" => "use `@warning` instead.",
+        "ocaml.ppwarning" => "use `@ppwarning` instead.",
+        _ => return None,
+    })
+}
+
+/// OCaml `Bs_ast_invariant.check_removed_ocaml_attribute`.
+fn check_removed_ocaml_attribute(attr: &Attribute, arena: &ParseArena) -> Option<PpxError> {
+    let name = arena.get_string(attr.0.txt);
+    removed_ocaml_attribute(name).map(|hint| {
+        PpxError::at_loc(
+            attr.0.loc,
+            format!("`@{name}` is no longer supported, {hint}"),
+        )
+    })
+}
+
+/// OCaml `Bs_ast_invariant.check_removed_ocaml_extension`.
+fn check_removed_ocaml_extension(ext: &Extension, arena: &ParseArena) -> Option<PpxError> {
+    (arena.get_string(ext.0.txt) == "ocaml.error").then(|| {
+        PpxError::at_loc(
+            ext.0.loc,
+            "`%ocaml.error` is no longer supported, use `%error` instead.",
+        )
+    })
+}
+
+/// OCaml `Bs_ast_invariant.warn_unused_attribute` (bs_ast_invariant.ml:36-45),
+/// without its leading `check_removed_ocaml_attribute`, which callers run.
 pub(crate) fn warn_unused_attribute(
     attr: &Attribute,
     arena: &ParseArena,
@@ -1270,9 +1311,27 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
         // `attribute = fun _ attr -> warn_unused_attribute attr`: payloads are
         // not traversed.
-        if !self.stopped {
-            warn_unused_attribute(attr, arena, self.warnings);
+        if self.stopped {
+            return;
         }
+        if let Some(error) = check_removed_ocaml_attribute(attr, arena) {
+            self.stopped = true;
+            self.error = Some(error);
+            return;
+        }
+        warn_unused_attribute(attr, arena, self.warnings);
+    }
+
+    fn extension(&mut self, arena: &ParseArena, ext: &Extension) {
+        if self.stopped {
+            return;
+        }
+        if let Some(error) = check_removed_ocaml_extension(ext, arena) {
+            self.stopped = true;
+            self.error = Some(error);
+            return;
+        }
+        super::ast_iter::walk_extension(self, arena, ext);
     }
 
     fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
@@ -1287,14 +1346,14 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
-        // `Pexp_constant` and hash-number `Pexp_variant (s, None)` only run
-        // literal checks and do not call `super.expr`, so their attributes
-        // are never swept (bs_ast_invariant.ml:90-100).
+        // `Pexp_constant` runs the literal check and then sweeps only its
+        // attributes, without `super.expr` (bs_ast_invariant.ml).
         let expr = arena.get_expr(idx);
         match &*expr.pexp_desc {
             ExpressionDesc::Pexp_constant(constant) => {
                 if !self.stopped {
                     check_constant(expr.pexp_loc, constant, self.warnings);
+                    self.attributes(arena, expr.pexp_attributes.as_slice());
                 }
             }
             _ => super::ast_iter::walk_expr(self, arena, idx),
@@ -1302,11 +1361,13 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 
     fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
-        // `Ppat_constant` only runs `check_constant` (bs_ast_invariant.ml:143-147).
+        // `Ppat_constant` runs `check_constant` and then sweeps only its
+        // attributes (bs_ast_invariant.ml).
         let pat = arena.get_pat(idx);
         if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
             if !self.stopped {
                 check_constant(pat.ppat_loc, constant, self.warnings);
+                self.attributes(arena, pat.ppat_attributes.as_slice());
             }
         } else {
             super::ast_iter::walk_pat(self, arena, idx);
@@ -1387,6 +1448,55 @@ pub fn collect_unused_attribute_warnings_structure(
     super::ast_iter::walk_structure(&mut sweep, arena, items);
     let error = sweep.error.take();
     (warnings, error)
+}
+
+/// OCaml `Bs_ast_invariant.removed_ocaml_spellings`: the PPX bridge renames
+/// the `ocaml.`-prefixed builtins a PPX emits to their bare names, so source
+/// written with them is checked before it reaches the bridge.
+struct RemovedOcamlSpellings {
+    error: Option<PpxError>,
+}
+
+impl super::ast_iter::AstIter for RemovedOcamlSpellings {
+    fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
+        if self.error.is_some() {
+            return;
+        }
+        self.error = check_removed_ocaml_attribute(attr, arena);
+        if self.error.is_none() {
+            super::ast_iter::walk_attribute(self, arena, attr);
+        }
+    }
+
+    fn extension(&mut self, arena: &ParseArena, ext: &Extension) {
+        if self.error.is_some() {
+            return;
+        }
+        self.error = check_removed_ocaml_extension(ext, arena);
+        if self.error.is_none() {
+            super::ast_iter::walk_extension(self, arena, ext);
+        }
+    }
+}
+
+/// OCaml `Bs_ast_invariant.check_removed_ocaml_spellings_on_structure`.
+pub fn check_removed_ocaml_spellings_structure(
+    items: &[StructureItem],
+    arena: &ParseArena,
+) -> Result<(), PpxError> {
+    let mut check = RemovedOcamlSpellings { error: None };
+    super::ast_iter::walk_structure(&mut check, arena, items);
+    check.error.map_or(Ok(()), Err)
+}
+
+/// OCaml `Bs_ast_invariant.check_removed_ocaml_spellings_on_signature`.
+pub fn check_removed_ocaml_spellings_signature(
+    items: &[SignatureItem],
+    arena: &ParseArena,
+) -> Result<(), PpxError> {
+    let mut check = RemovedOcamlSpellings { error: None };
+    super::ast_iter::walk_signature(&mut check, arena, items);
+    check.error.map_or(Ok(()), Err)
 }
 
 /// OCaml `Bs_ast_invariant.emit_external_warnings_on_signature`.

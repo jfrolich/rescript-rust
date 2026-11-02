@@ -23,6 +23,25 @@ enum CompileType {
     None,
 }
 
+fn compile_type_for_source_event(kind: EventKind, initialization_failed: bool) -> CompileType {
+    match kind {
+        EventKind::Remove(_)
+        | EventKind::Any
+        | EventKind::Create(_)
+        | EventKind::Modify(ModifyKind::Name(_)) => CompileType::Full,
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any) => {
+            if initialization_failed {
+                CompileType::Full
+            } else {
+                CompileType::Incremental
+            }
+        }
+        EventKind::Access(_)
+        | EventKind::Other
+        | EventKind::Modify(ModifyKind::Metadata(_) | ModifyKind::Other) => CompileType::None,
+    }
+}
+
 type WatchPaths = Vec<(PathBuf, RecursiveMode)>;
 type StartupBuildResult = (
     BuildCommandState,
@@ -279,6 +298,20 @@ fn update_watches(
     kept
 }
 
+fn watch_paths_after_initialization_error(current: &[RegisteredWatch], error: &anyhow::Error) -> WatchPaths {
+    let mut next: WatchPaths = current
+        .iter()
+        .map(|watch| (watch.path.clone(), watch.mode))
+        .collect();
+    if let Some(error) = error.downcast_ref::<build::packages::DependencyError>()
+        && let Some(package_path) = &error.package_path
+        && !next.iter().any(|(path, _)| path == package_path)
+    {
+        next.push((package_path.clone(), RecursiveMode::NonRecursive));
+    }
+    next
+}
+
 fn carry_forward_compile_state(previous: &BuildCommandState, next: &mut BuildCommandState) {
     for (module_name, next_module) in next.build_state.modules.iter_mut() {
         let Some(previous_module) = previous.build_state.modules.get(module_name) else {
@@ -426,6 +459,7 @@ fn watch_loop(
 ) -> Result<()> {
     let mut build_state = initial_build_state;
     let mut needs_compile_type = CompileType::None;
+    let mut initialization_failed = false;
     loop {
         serve_tooling_requests(&build_state, tooling_requests.as_ref());
         if ctrlc_pressed.load(Ordering::SeqCst) {
@@ -486,38 +520,37 @@ fn watch_loop(
                 .filter(|path| matches_filter(path, filter));
             for path in paths {
                 let path_buf = path.to_path_buf();
+                let source_compile_type = compile_type_for_source_event(event.kind, initialization_failed);
+                log::debug!(
+                    "received {:?} for {path:?} -> {source_compile_type:?} (pending: {needs_compile_type:?})",
+                    event.kind
+                );
 
-                match (needs_compile_type, event.kind) {
+                match (needs_compile_type, source_compile_type) {
                     (
                         CompileType::Incremental | CompileType::None,
-                        // when we have a name change, create or remove event we need to do a full compile
-                        EventKind::Remove(_)
-                        | EventKind::Any
-                        | EventKind::Create(_)
-                        | EventKind::Modify(ModifyKind::Name(_)),
+                        // Structural changes and edits after failed initialization need a full scan.
+                        CompileType::Full,
                     ) => {
                         // if we are going to do a full compile, we don't need to bother marking
                         // files dirty because we do a full scan anyway
-                        log::debug!("received {:?} while needs_compile_type was {needs_compile_type:?} -> full compile", event.kind);
                         needs_compile_type = CompileType::Full;
                     }
 
                     (
                         CompileType::None | CompileType::Incremental,
-                        // when we have a data change event, we can do an incremental compile
-                        EventKind::Modify(ModifyKind::Data(_)) |
-                        // windows sends ModifyKind::Any on file content changes
-                        EventKind::Modify(ModifyKind::Any),
+                        // Content edits can compile incrementally while initialization is valid.
+                        CompileType::Incremental,
                     ) => {
                         // if we are going to compile incrementally, we need to mark the exact files
                         // dirty
-                        log::debug!("received {:?} while needs_compile_type was {needs_compile_type:?} -> incremental compile", event.kind);
                         if let Ok(canonicalized_path_buf) = path_buf
                             .canonicalize()
                             .map(StrippedVerbatimPath::to_stripped_verbatim_path)
                         {
-                            let build::build_types::BuildState { modules, packages, .. } =
-                                &mut build_state.build_state;
+                            let build::build_types::BuildState {
+                                modules, packages, ..
+                            } = &mut build_state.build_state;
                             for module in modules.values_mut() {
                                 let package = packages.get(&module.package_name).expect("Package not found");
                                 let SourceType::SourceFile(ref mut source_file) = module.source_type else {
@@ -557,10 +590,7 @@ fn watch_loop(
                     (
                         CompileType::None | CompileType::Incremental,
                         // these are not relevant events for compilation
-                        EventKind::Access(_)
-                        | EventKind::Other
-                        | EventKind::Modify(ModifyKind::Metadata(_))
-                        | EventKind::Modify(ModifyKind::Other),
+                        CompileType::None,
                     ) => (),
                     // if we already need a full compile, we don't need to check for other events
                     (CompileType::Full, _) => (),
@@ -619,13 +649,14 @@ fn watch_loop(
                 let timing_total = Instant::now();
                 // Reinitialization runs cleanup for previous build artifacts, so full rebuilds need
                 // the same build lock boundary as regular `rescript build`.
-                let rebuild =
-                    build::with_build_lock(path, || -> anyhow::Result<build::CompilationOutcome> {
+                let rebuild = build::with_build_lock(
+                    path,
+                    || -> anyhow::Result<Result<build::CompilationOutcome, String>> {
                         // Reinitialization compares the sources and outputs on disk with the
                         // recorded build to remove what deleted sources and configuration
                         // changes left behind: record the builds this watcher made first.
                         clean::write_in_process_record(&build_state);
-                        let mut next_build_state = match build::initialize_build(
+                        let mut next_build_state = build::initialize_build(
                             None,
                             filter,
                             show_progress,
@@ -635,14 +666,9 @@ fn watch_loop(
                             prod,
                             features.clone(),
                             SourceMapCommand::Watch,
-                        ) {
-                            Ok(build_state) => build_state,
-                            Err(error) => {
-                                return Err(anyhow::anyhow!(
-                                    "Could not reinitialize build after config change: {error:#}"
-                                ));
-                            }
-                        };
+                        )
+                        .context("Could not initialize build")?;
+                        initialization_failed = false;
 
                         // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
                         // Preserve warning state for unchanged modules so their warnings are re-emitted after the
@@ -664,10 +690,11 @@ fn watch_loop(
                             plain_output,
                         );
                         clean::remove_obsolete_outputs_of_build(&build_state);
-                        result.map_err(|e| anyhow::anyhow!("{e}"))
-                    });
+                        Ok(result.map_err(|e| e.to_string()))
+                    },
+                );
                 match rebuild {
-                    Ok(result) => {
+                    Ok(Ok(result)) => {
                         finish_successful_watch_compile(
                             after_build.clone(),
                             timing_total,
@@ -678,8 +705,24 @@ fn watch_loop(
                             result,
                         );
                     }
+                    Ok(Err(error)) => {
+                        log::error!("{error}");
+                        if should_clear_screen(clear_screen, show_progress, plain_output) {
+                            print_build_failed_footer();
+                        }
+                    }
                     Err(error) => {
-                        log::error!("{error:#}");
+                        // Keep source edits on the full initialization path until the current
+                        // configuration can be loaded. Never compile against the stale state.
+                        initialization_failed = true;
+                        let recovery_watch_paths =
+                            watch_paths_after_initialization_error(&current_watches, &error);
+                        current_watches = update_watches(
+                            watcher,
+                            std::mem::take(&mut current_watches),
+                            &recovery_watch_paths,
+                        );
+                        eprintln!("{error:#}");
                         if should_clear_screen(clear_screen, show_progress, plain_output) {
                             print_build_failed_footer();
                         }
@@ -940,6 +983,72 @@ mod tests {
             deps_dirty: false,
             is_type_dev: false,
         }
+    }
+
+    #[test]
+    fn source_edits_retry_failed_initialization() {
+        for kind in [
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            EventKind::Modify(ModifyKind::Any),
+        ] {
+            assert_eq!(
+                compile_type_for_source_event(kind, false),
+                CompileType::Incremental
+            );
+            assert_eq!(compile_type_for_source_event(kind, true), CompileType::Full);
+        }
+
+        let metadata = EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any));
+        assert_eq!(compile_type_for_source_event(metadata, true), CompileType::None);
+    }
+
+    #[test]
+    fn watches_new_dependency_after_config_read_fails() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap().to_stripped_verbatim_path();
+        let dependency = root.join("node_modules/parent/node_modules/new-dependency");
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::write(
+            root.join("rescript.json"),
+            r#"{"name":"root","dependencies":["parent"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("node_modules/parent/rescript.json"),
+            r#"{"name":"parent","dependencies":["new-dependency"]}"#,
+        )
+        .unwrap();
+        std::fs::write(dependency.join("rescript.json"), r#"{"name":"#).unwrap();
+
+        let context = ProjectContext::new(&root).unwrap();
+        let error = build::packages::make(&None, &context, false, false, None)
+            .unwrap_err()
+            .context("Could not initialize build");
+        assert!(format!("{error:#}").contains("Failed to parse rescript.json"));
+
+        let mut current = vec![RegisteredWatch {
+            path: root.clone(),
+            mode: RecursiveMode::NonRecursive,
+            identity: dir_identity(&root),
+        }];
+        let paths = watch_paths_after_initialization_error(&current, &error);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&(root, RecursiveMode::NonRecursive)));
+        assert!(paths.contains(&(dependency.clone(), RecursiveMode::NonRecursive)));
+
+        // A config error in an already watched source directory must retain its recursive mode.
+        current.push(RegisteredWatch {
+            path: dependency.clone(),
+            mode: RecursiveMode::Recursive,
+            identity: dir_identity(&dependency),
+        });
+        let paths = watch_paths_after_initialization_error(&current, &error);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&(dependency.clone(), RecursiveMode::Recursive)));
+
+        std::fs::write(dependency.join("rescript.json"), r#"{"name":"new-dependency"}"#).unwrap();
+        let recovered = build::packages::make(&None, &context, false, false, None).unwrap();
+        assert!(recovered.contains_key("new-dependency"));
     }
 
     #[test]

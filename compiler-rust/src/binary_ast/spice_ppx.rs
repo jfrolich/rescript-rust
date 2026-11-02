@@ -4084,7 +4084,7 @@ fn unused_value_warning_attribute(arena: &mut ParseArena) -> Attribute {
         pstr_loc: arena.dummy_loc(),
     };
     (
-        Located::new(arena.intern_string("ocaml.warning"), arena.dummy_loc()),
+        Located::new(arena.intern_string("warning"), arena.dummy_loc()),
         Payload::PStr(Box::new(vec![item])),
     )
 }

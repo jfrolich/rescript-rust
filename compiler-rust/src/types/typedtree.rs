@@ -494,9 +494,6 @@ pub enum ExpressionDesc {
 
     /// Pack: `(module M : MT)`.
     Texp_pack(Box<ModuleExpr>),
-
-    /// Extension constructor: `[%extension_constructor C]`.
-    Texp_extension_constructor(Loc<LidentIdx>, Path),
 }
 
 // DirectionFlag and Arity are re-exported from parser::ast

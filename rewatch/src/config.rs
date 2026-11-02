@@ -710,6 +710,16 @@ fn namespace_from_package_name(package_name: &str) -> String {
     buf
 }
 
+/// A module name as the ReScript scanner reads an upper-case identifier
+/// (compiler/syntax/src/res_scanner.ml): an ASCII capital, then letters,
+/// digits, '_', '\'' and '$'.
+fn is_module_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '$'))
+}
+
 impl Config {
     /// Try to convert a config from a certain path to a config struct
     pub fn new(path: &Path) -> Result<Self> {
@@ -717,7 +727,34 @@ impl Config {
             fs::read_to_string(path).map_err(|e| anyhow!("Could not read '{}': {}", path.display(), e))?;
         let mut config = Config::new_from_json_string(&read)?;
         config.set_path(path.to_path_buf())?;
+        config.validate_namespace()?;
         Ok(config)
+    }
+
+    /// The namespace becomes a module, so a name the scanner cannot read as one
+    /// is rejected here instead of producing unusable compiler arguments.
+    fn validate_namespace(&self) -> Result<()> {
+        let namespace = match self.get_namespace() {
+            packages::Namespace::NoNamespace => return Ok(()),
+            packages::Namespace::Namespace(namespace)
+            | packages::Namespace::NamespaceWithEntry { namespace, .. } => namespace,
+        };
+        if is_module_name(&namespace) {
+            return Ok(());
+        }
+        let (source, fix) = match &self.namespace {
+            Some(NamespaceConfig::String(value)) if value != "true" => {
+                (format!("\"namespace\" value \"{value}\""), "")
+            }
+            _ => (
+                format!("package name \"{}\"", self.name),
+                " or rename the package",
+            ),
+        };
+        Err(anyhow!(
+            "{}: namespace \"{namespace}\" derived from {source} is not a valid module name; set \"namespace\" to a valid module name{fix}",
+            self.path.display()
+        ))
     }
 
     /// Try to convert a config from a string to a config struct
@@ -778,6 +815,14 @@ impl Config {
         config.handle_deprecations()?;
         config.unknown_fields = unknown_fields;
 
+        if let Some(version) = config.jsx.as_ref().and_then(|jsx| jsx.version)
+            && version != 4
+        {
+            return Err(anyhow!(
+                "JSX version {version} is unsupported; jsx.version must be 4"
+            ));
+        }
+
         Ok(config)
     }
 
@@ -828,10 +873,9 @@ impl Config {
     pub fn get_jsx_args(&self) -> Vec<String> {
         match &self.jsx {
             Some(jsx) => match &jsx.version {
-                Some(version) if *version == 4 => {
+                Some(version) => {
                     vec!["-bs-jsx".to_string(), version.to_string()]
                 }
-                Some(version) => panic!("JSX version {version} is unsupported"),
                 None => vec![],
             },
             None => vec![],
@@ -1644,6 +1688,12 @@ pub mod tests {
     }
 
     #[test]
+    fn test_unsupported_jsx_version_is_a_config_error() {
+        let error = Config::new_from_json_string(r#"{"name":"test","jsx":{"version":3}}"#).unwrap_err();
+        assert!(error.to_string().contains("JSX version 3 is unsupported"));
+    }
+
+    #[test]
     fn test_other_jsx_module() {
         let json = r#"
         {
@@ -2438,6 +2488,22 @@ pub mod tests {
         assert!(
             error.contains(path.to_string_lossy().as_ref()),
             "Error should include the missing config path, got: {error}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_namespace_module_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("rescript.json");
+        std::fs::write(&path, r#"{ "name": "_", "namespace": true }"#).expect("write");
+
+        let error = Config::new(&path).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!(
+                "{}: namespace \"_\" derived from package name \"_\" is not a valid module name; set \"namespace\" to a valid module name or rename the package",
+                path.display()
+            )
         );
     }
 

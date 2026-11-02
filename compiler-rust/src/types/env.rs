@@ -2435,12 +2435,6 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     );
     add_type_with_constrs(
         &mut env,
-        predef::ident_extension_constructor(),
-        decl_abstr(0, false),
-        ctx,
-    );
-    add_type_with_constrs(
-        &mut env,
         predef::ident_exn(),
         TypeDeclaration {
             type_kind: TypeKind::TypeOpen,
@@ -2625,7 +2619,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 let path = Path::pident(id);
                 let warn_on_literal_pattern_attr = crate::types::decl::Attribute {
                     attr_name: crate::types::asttypes::Located::noloc(
-                        "ocaml.warn_on_literal_pattern".to_string(),
+                        "warn_on_literal_pattern".to_string(),
                     ),
                     attr_payload: crate::types::decl::AttributePayload::Structure(vec![]),
                     attr_loc: Location::none(),

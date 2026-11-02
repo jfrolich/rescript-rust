@@ -738,8 +738,8 @@ fn apply_warning_attribute_with_ppwarning(
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     match attr_name {
-        "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
-            let errflag = matches!(attr_name, "warnerror" | "ocaml.warnerror");
+        "warning" | "warnerror" => {
+            let errflag = attr_name == "warnerror";
             let Some((spec, _loc)) = parser_warning_attribute_payload(arena, payload) else {
                 tctx.report_warning(
                     name.loc,
@@ -774,7 +774,7 @@ fn apply_warning_attribute_with_ppwarning(
                 tctx.apply_warning_spec(&spec);
             }
         }
-        "ppwarning" | "ocaml.ppwarning" if ppwarning => {
+        "ppwarning" if ppwarning => {
             if let Some((message, loc)) = parser_warning_attribute_payload(arena, payload) {
                 tctx.report_warning(
                     loc,
@@ -845,10 +845,7 @@ fn exit_warning_scope(tctx: &mut TypeCheckContext<'_>, previous: Option<WarningC
 /// one parser attribute: `Some (string_of_opt_payload p)` for `deprecated`.
 fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Option<String> {
     let (name, payload) = attr;
-    if !matches!(
-        arena.get_string(name.txt),
-        "deprecated" | "ocaml.deprecated"
-    ) {
+    if !matches!(arena.get_string(name.txt), "deprecated") {
         return None;
     }
     // `string_of_opt_payload` (builtin_attributes.ml:23-31).
@@ -984,9 +981,7 @@ fn parser_deprecated_payload_to_decl_payload(
 }
 
 fn decl_attrs_mark_immediate(attrs: &[crate::types::decl::Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| matches!(attr.attr_name.txt.as_str(), "immediate" | "ocaml.immediate"))
+    attrs.iter().any(|attr| attr.attr_name.txt == "immediate")
 }
 
 fn type_expr_is_immediate(
@@ -3506,8 +3501,6 @@ pub enum TypeModError {
     InvalidAttribute { loc: LocIdx, message: String },
     /// `@unboxed` was used on a declaration shape that cannot be unboxed.
     BadUnboxedAttribute { loc: LocIdx, message: String },
-    /// Both `@boxed` and `@unboxed` were used on the same type declaration.
-    BoxedAndUnboxed { loc: LocIdx },
     /// `@immediate` was used on a type that can contain pointer values.
     BadImmediateAttribute { loc: LocIdx },
     /// A declaration constructor extends a private extensible type.
@@ -4990,16 +4983,9 @@ fn parser_attrs_have_name(arena: &ParseArena, attrs: &Attributes, name: &str) ->
         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == name)
 }
 
-/// OCaml `Builtin_attributes.has_unboxed` (builtin_attributes.ml:252).
+/// OCaml `Builtin_attributes.has_unboxed`.
 fn parser_attrs_have_unboxed(arena: &ParseArena, attrs: &Attributes) -> bool {
-    parser_attrs_have_name(arena, attrs, "ocaml.unboxed")
-        || parser_attrs_have_name(arena, attrs, "unboxed")
-}
-
-/// OCaml `Builtin_attributes.has_boxed` (builtin_attributes.ml:254).
-fn parser_attrs_have_boxed(arena: &ParseArena, attrs: &Attributes) -> bool {
-    parser_attrs_have_name(arena, attrs, "ocaml.boxed")
-        || parser_attrs_have_name(arena, attrs, "boxed")
+    parser_attrs_have_name(arena, attrs, "unboxed")
 }
 
 fn check_untagged_variant_constructor_arities(
@@ -5057,13 +5043,6 @@ fn check_unboxed_type_attributes(
     decl: &crate::parser::ast::TypeDeclaration,
 ) -> TypeModResult<()> {
     let has_unboxed = parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
-    let has_boxed = parser_attrs_have_boxed(arena, &decl.ptype_attributes);
-
-    if has_boxed && has_unboxed {
-        return Err(TypeModError::BoxedAndUnboxed {
-            loc: decl.ptype_loc,
-        });
-    }
 
     if !has_unboxed {
         return Ok(());
@@ -16634,9 +16613,31 @@ fn type_structure_item<'a>(
 
             let (typed_bindings, new_env) = type_binding(tctx, env, *rec_flag, bindings)?;
 
+            // typemod.ml type_structure: the environment keeps let-bound
+            // values without attributes, so uses in this module do not warn.
+            // The signature carries their `deprecated` attributes, so uses
+            // from other modules do.
             let mut sig_items = Vec::new();
             for vb in &typed_bindings {
+                let start = sig_items.len();
                 push_sig_values_from_env_pattern(&new_env, &vb.vb_pat, &mut sig_items);
+                let deprecated: Attributes = vb
+                    .vb_attributes
+                    .iter()
+                    .filter(|(name, _)| arena.get_string(name.txt) == "deprecated")
+                    .cloned()
+                    .collect();
+                if deprecated.is_empty() {
+                    continue;
+                }
+                let deprecated = parser_attrs_to_decl_attrs(arena, &deprecated);
+                for item in &mut sig_items[start..] {
+                    if let crate::types::decl::SignatureItem::SigValue(_, vd) = item {
+                        let mut attrs = deprecated.clone();
+                        attrs.append(&mut vd.val_attributes);
+                        vd.val_attributes = attrs;
+                    }
+                }
             }
 
             let desc = StructureItemDesc::Tstr_value(*rec_flag, typed_bindings);

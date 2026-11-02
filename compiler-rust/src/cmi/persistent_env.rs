@@ -2040,8 +2040,8 @@ impl PersistentEnv {
         self.in_memory_info_with(name, |_| ()).is_some()
     }
 
-    /// `Config_util.find_opt`: the load-path file, trying the uncapitalized
-    /// name first.
+    /// `Config_util.find_opt`: the load-path file, trying the name as written
+    /// before its uncapitalized form.
     pub fn find_in_load_path_uncap(&self, filename: &str) -> Option<String> {
         self.find_in_path_uncap(filename)
     }
@@ -2601,8 +2601,20 @@ impl PersistentEnv {
             .next()
             .filter(char::is_ascii_uppercase)
             .map(|first_char| format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]));
+        // config_util.ml `find_in_path_uncap`: try the name as written before
+        // its uncapitalized form. On a case-insensitive file system both
+        // match, and the result is shown in error messages and used in
+        // generated import paths.
         for (index, dir) in self.load_path.iter().enumerate() {
             let display_dir = self.load_path_display.get(index).unwrap_or(dir);
+            let exact = dir.join(filename);
+            if exact.exists() {
+                return Some((
+                    exact.to_string_lossy().into_owned(),
+                    display_dir.join(filename).to_string_lossy().into_owned(),
+                ));
+            }
+
             if let Some(uncap) = &uncap {
                 let uncap_path = dir.join(uncap);
                 if uncap_path.exists() {
@@ -2611,14 +2623,6 @@ impl PersistentEnv {
                         display_dir.join(uncap).to_string_lossy().into_owned(),
                     ));
                 }
-            }
-
-            let exact = dir.join(filename);
-            if exact.exists() {
-                return Some((
-                    exact.to_string_lossy().into_owned(),
-                    display_dir.join(filename).to_string_lossy().into_owned(),
-                ));
             }
         }
         None

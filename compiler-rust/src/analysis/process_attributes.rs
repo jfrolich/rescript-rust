@@ -40,7 +40,7 @@ pub fn flatten_long_ident(arena: &ParseArena, lid: &Longident) -> ModulePathList
 }
 
 fn is_doc_name(name: &str) -> bool {
-    matches!(name, "ocaml.doc" | "ocaml.text" | "ns.doc" | "res.doc")
+    matches!(name, "ocaml.doc" | "ns.doc" | "res.doc")
 }
 
 /// `find_doc_attribute`.

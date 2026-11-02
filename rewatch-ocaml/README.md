@@ -91,7 +91,6 @@ These are intentional:
 - Configuration errors use the compiler-style form `path: message`, and JSON
   syntax errors use `path:line:column: message`. Messages name the field and
   the accepted values instead of the parser's internal types.
-- `rescript clean` also removes out-of-source JavaScript outputs.
 - The CLI uses Cmdliner:
   - help is rendered as a man page;
   - `--no-timing` takes no value;
@@ -105,6 +104,8 @@ These are intentional:
   own process group.
 - `format -v` and `compiler-args -v` write their logs to stderr, so stdout
   remains formatted source or JSON. Rust writes them to stdout.
+- While the root configuration is invalid, only configuration changes trigger
+  recovery attempts here. Rust also retries initialization on watched source edits.
 - Watch mode also notices a missing dependency being installed into an
   existing `node_modules` of an ancestor directory, where the dependency
   lookup finds it.

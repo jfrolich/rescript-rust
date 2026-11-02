@@ -5610,8 +5610,8 @@ impl<'a> RawLambdaConverter<'a> {
         attr: &crate::parser::ast::Attribute,
     ) -> Option<(bool, String)> {
         let name = self.arena.get_string(attr.0.txt);
-        let is_error = matches!(name, "warnerror" | "ocaml.warnerror");
-        if !is_error && !matches!(name, "warning" | "ocaml.warning") {
+        let is_error = name == "warnerror";
+        if !is_error && name != "warning" {
             return None;
         }
         let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
@@ -5642,10 +5642,7 @@ impl<'a> RawLambdaConverter<'a> {
         // an unusable payload is reported, a usable one updates the state.
         for attr in attrs.iter().rev() {
             let name = self.arena.get_string(attr.0.txt);
-            if !matches!(
-                name,
-                "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror"
-            ) {
+            if !matches!(name, "warning" | "warnerror") {
                 continue;
             }
             let Some((is_error, spec)) = self.warning_attribute_spec(attr) else {
@@ -6047,9 +6044,6 @@ impl<'a> RawLambdaConverter<'a> {
                 self.transl_extension_constructor_raw(None, ext),
                 self.convert_expr_raw(body),
             ),
-            ExpressionDesc::Texp_extension_constructor(_, path) => {
-                self.translate_extension_path_raw(path, self.loc(expr.exp_loc))
-            }
             ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_for_pack_raw(modl),
             ExpressionDesc::Texp_assert(inner_expr) => {
                 if matches!(

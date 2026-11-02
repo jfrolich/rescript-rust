@@ -431,7 +431,7 @@ pub fn emit_code_item(
             let make = "make";
             let name = match original_name == default {
                 true => crate::gentype::runtime::DEFAULT.to_string(),
-                false => resolved_name_str,
+                false => crate::gentype::runtime::ts_binding_name(&resolved_name_str),
             };
 
             let (type_, hook_type) = match type_ {

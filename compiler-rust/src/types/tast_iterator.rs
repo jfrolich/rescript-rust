@@ -291,8 +291,7 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
         ExpressionDesc::Texp_ident(..)
         | ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
-        | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_extension_constructor(..) => {}
+        | ExpressionDesc::Texp_continue => {}
         ExpressionDesc::Texp_let(rec_flag, vbs, body) => {
             sub.value_bindings(rec_flag, vbs);
             sub.expr(body);

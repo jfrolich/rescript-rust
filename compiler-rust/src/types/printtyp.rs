@@ -1128,7 +1128,7 @@ impl<'a> Printtyp<'a> {
         let immediate = decl
             .type_attributes
             .iter()
-            .any(|attr| matches!(attr.attr_name.txt.as_str(), "immediate" | "ocaml.immediate"));
+            .any(|attr| attr.attr_name.txt == "immediate");
         self.inlined_types = saved_inlined;
         OutTypeDecl {
             name: id.name().to_string(),

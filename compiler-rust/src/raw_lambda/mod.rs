@@ -226,6 +226,72 @@ impl RawLambda {
         }
     }
 
+    /// Apply `f` to each direct child expression, including the action a
+    /// shared match action stands for (`Lambda_traverse.iter`).
+    pub fn for_each_child(&self, f: &mut impl FnMut(&RawLambda)) {
+        match self {
+            RawLambda::Lvar(_)
+            | RawLambda::LglobalModule(_)
+            | RawLambda::Lconst(_)
+            | RawLambda::Lbreak
+            | RawLambda::Lcontinue => {}
+            RawLambda::Lapply(apply) => {
+                f(&apply.ap_func);
+                apply.ap_args.iter().for_each(&mut *f);
+            }
+            RawLambda::Lfunction(func) => f(&func.body),
+            RawLambda::Llet(_, _, value, body) => {
+                f(value);
+                f(body);
+            }
+            RawLambda::Lletrec(bindings, body) => {
+                bindings.iter().for_each(|(_, value)| f(value));
+                f(body);
+            }
+            RawLambda::Lprim(info) => info.args.iter().for_each(&mut *f),
+            RawLambda::Lswitch(arg, sw) => {
+                f(arg);
+                sw.sw_consts.iter().for_each(|(_, act)| f(act));
+                sw.sw_blocks.iter().for_each(|(_, act)| f(act));
+                if let Some(fail) = &sw.sw_failaction {
+                    f(fail);
+                }
+            }
+            RawLambda::LstringSwitch(arg, cases, default) => {
+                f(arg);
+                cases.iter().for_each(|(_, act)| f(act));
+                if let Some(default) = default {
+                    f(default);
+                }
+            }
+            RawLambda::LstaticRaise(_, args) => args.iter().for_each(&mut *f),
+            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+                f(body);
+                f(handler);
+            }
+            RawLambda::LifThenElse(cond, ifso, ifnot) => {
+                f(cond);
+                f(ifso);
+                f(ifnot);
+            }
+            RawLambda::Lsequence(first, second) | RawLambda::Lwhile(first, second) => {
+                f(first);
+                f(second);
+            }
+            RawLambda::Lfor(_, start, finish, _, body) => {
+                f(start);
+                f(finish);
+                f(body);
+            }
+            RawLambda::Lfor_of(_, iterable, body) | RawLambda::Lfor_await_of(_, iterable, body) => {
+                f(iterable);
+                f(body);
+            }
+            RawLambda::Lassign(_, value) => f(value),
+            RawLambda::Lshared(inner) => f(inner),
+        }
+    }
+
     /// Create a variable reference.
     pub fn var(id: Ident) -> Self {
         RawLambda::Lvar(id)

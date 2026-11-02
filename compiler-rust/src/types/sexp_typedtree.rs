@@ -1293,11 +1293,6 @@ fn sexp_expression_desc(
             Sexp::atom("Texp_pack"),
             sexp_module_expr(arena, ctx, with_locs, me),
         ]),
-        ExpressionDesc::Texp_extension_constructor(lid, path) => Sexp::list(vec![
-            Sexp::atom("Texp_extension_constructor"),
-            sexp_longident_idx(arena, ctx, lid.txt),
-            sexp_path(path),
-        ]),
     }
 }
 
