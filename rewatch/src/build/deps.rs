@@ -104,8 +104,24 @@ fn rebuild_dependents(modules: &mut ahash::AHashMap<String, Module>) {
 }
 
 pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<String>) {
-    let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
-    let in_memory_deps = build_state.snapshot_in_memory_deps();
+    // Nothing to resolve again: every module's dependencies are known and
+    // the set of modules they resolve against is the same.
+    if build_state.deps_initialized
+        && deleted_modules.is_empty()
+        && !build_state.modules.values().any(|module| module.deps_dirty)
+    {
+        return;
+    }
+    let with_deleted: AHashSet<String>;
+    let all_mod = if deleted_modules.is_empty() {
+        &build_state.module_names
+    } else {
+        with_deleted = build_state.module_names.union(deleted_modules).cloned().collect();
+        &with_deleted
+    };
+    // Borrowed under the lock: nothing the resolution below runs takes it.
+    let in_memory_deps_guard = build_state.in_memory_deps.lock().unwrap();
+    let in_memory_deps: &AHashMap<String, Dependencies> = &in_memory_deps_guard;
     let allowed_dependencies: AHashMap<&str, AHashSet<String>> = build_state
         .packages
         .iter()
@@ -119,11 +135,11 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
             (name.as_str(), allowed)
         })
         .collect();
-    build_state
+    let resolved = build_state
         .modules
         .par_iter()
-        .map(|(module_name, module)| match &module.source_type {
-            SourceType::MlMap(_) => (module_name.to_string(), module.deps.to_owned()),
+        .filter_map(|(module_name, module)| match &module.source_type {
+            SourceType::MlMap(_) => None,
             SourceType::SourceFile(source_file) => {
                 let package = build_state
                     .get_package(&module.package_name)
@@ -153,21 +169,27 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                         _ => (),
                     }
                     deps.remove(module_name);
-                    (module_name.to_string(), deps)
+                    Some((module_name.to_string(), deps))
                 } else {
-                    (module_name.to_string(), module.deps.to_owned())
+                    None
                 }
             }
         })
-        .collect::<Vec<(String, AHashSet<String>)>>()
-        .into_iter()
-        .for_each(|(module_name, deps)| {
-            if let Some(module) = build_state.modules.get_mut(&module_name) {
-                module.deps = deps;
-                module.deps_dirty = false;
-            }
-        });
-    rebuild_dependents(&mut build_state.modules);
+        .collect::<Vec<(String, AHashSet<String>)>>();
+    drop(in_memory_deps_guard);
+    let mut changed = !build_state.deps_initialized;
+    for (module_name, deps) in resolved {
+        if let Some(module) = build_state.modules.get_mut(&module_name) {
+            changed |= module.deps != deps;
+            module.deps = deps;
+        }
+    }
+    for module in build_state.modules.values_mut() {
+        module.deps_dirty = false;
+    }
+    if changed {
+        rebuild_dependents(&mut build_state.modules);
+    }
     build_state.deps_initialized = true;
 }
 

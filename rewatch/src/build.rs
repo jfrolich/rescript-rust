@@ -9,13 +9,14 @@ pub mod namespaces;
 pub mod packages;
 pub mod parse;
 pub mod plan;
+pub mod pools;
 pub mod qos;
 pub mod state_db;
 pub mod tooling;
 
 use self::parse::parser_args;
 use crate::build::compile::mark_modules_with_deleted_deps_dirty;
-use crate::build::compiler_info::{CompilerCheckResult, verify_compiler_info, write_compiler_info};
+use crate::build::compiler_info::{CompilerCheckResult, write_compiler_info};
 use crate::config::SourceMapCommand;
 use crate::helpers::emojis::*;
 use crate::helpers::{self};
@@ -181,13 +182,59 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
+/// The content hash of the executable at `path`. Hashing the whole binary
+/// (tens of megabytes) on every build is a noticeable part of a small
+/// rebuild, so the hash is kept in a file in the temporary directory with the
+/// executable's size, modification and change times and inode, and reused
+/// while those are the same (replacing or rewriting the binary changes them).
+fn executable_hash(path: &Path) -> Option<blake3::Hash> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mut stamp = format!(
+        "{}\n{}\n{}",
+        path.display(),
+        metadata.len(),
+        metadata
+            .modified()
+            .ok()
+            .map(state_db::nanos_from_time)
+            .unwrap_or(0)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        stamp.push_str(&format!(
+            "\n{}\n{}.{}",
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        ));
+    }
+    let cache = std::env::temp_dir().join(format!(
+        "rescript-exe-{}.hash",
+        &blake3::hash(path.as_os_str().as_encoded_bytes()).to_hex()[..16]
+    ));
+    if let Ok(cached) = std::fs::read_to_string(&cache)
+        && let Some((cached_stamp, hash)) = cached.rsplit_once('\n')
+        && cached_stamp == stamp
+        && let Ok(hash) = blake3::Hash::from_hex(hash)
+    {
+        return Some(hash);
+    }
+    let hash = helpers::compute_file_hash(path)?;
+    let tmp = cache.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, format!("{stamp}\n{}", hash.to_hex())).is_ok() {
+        let _ = std::fs::rename(&tmp, &cache);
+    }
+    Some(hash)
+}
+
 pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
     // Builds compile with the compiler linked into this executable, so its
     // identity invalidates previous builds.
     let bsc_path = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .context("Could not resolve the rescript executable")?;
-    let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
+    let bsc_hash = executable_hash(&bsc_path).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
     ))?;
@@ -238,8 +285,10 @@ pub fn initialize_build(
         .get_root_config()
         .get_source_map_args(source_map_command);
     // Read before `verify_compiler_info` may clean a package's build state.
-    let recorded_outputs = clean::recorded_outputs(&packages);
-    let compiler_check = verify_compiler_info(&packages, &compiler, &source_map_args);
+    let metas = compiler_info::read_metas(&packages);
+    let recorded_outputs = clean::recorded_outputs(&metas);
+    let compiler_check =
+        compiler_info::verify_compiler_info_with(&packages, &compiler, &source_map_args, &metas);
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));
@@ -498,9 +547,11 @@ pub fn incremental_build_without_lock(
         compile::prepare_registry_for_runtime_precompile(build_state);
         let registry = std::mem::take(&mut build_state.module_registry);
         let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
+        let runtime_store = compile::RuntimeStore::of_build(build_state);
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
             let handle = compile::spawn_runtime_precompile(scope, || {
-                let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
+                let result =
+                    compile::pre_compile_runtime_modules(&registry, &runtime_root, runtime_store.as_ref());
                 phase_mark("runtime-precompile-done");
                 result
             });

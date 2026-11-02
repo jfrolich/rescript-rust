@@ -230,31 +230,15 @@ fn run_main(otel_enabled: bool) -> Result<()> {
 }
 
 fn configure_rayon_for_in_process() {
-    let mut builder = rayon::ThreadPoolBuilder::new();
-    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-        builder = builder.num_threads(default_in_process_threads());
-    }
-    builder
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(rescript::build::pools::global_threads())
         .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
         .stack_size(IN_PROCESS_STACK_SIZE)
         .build_global()
         .expect("failed to configure in-process Rayon worker pool");
 }
 
-fn default_in_process_threads() -> usize {
-    let logical = num_cpus::get().max(1);
-    let target = logical.saturating_mul(8).div_ceil(5);
-    let scaling_cap = logical.saturating_add(8);
-    // In-process compilation publishes signatures before JS is emitted so
-    // dependents can type-check early. Those workers can later block before JS
-    // while waiting for dependency cmj metadata, so a CPU-sized pool leaves
-    // runnable modules stranded behind parked workers. A small oversubscription
-    // keeps that overlap, while a scaling cap avoids limiting larger builders
-    // to the core count of this development machine.
-    target.min(scaling_cap)
-}
-
-const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
+const IN_PROCESS_STACK_SIZE: usize = rescript::build::pools::STACK_SIZE;
 
 fn run_with_in_process_stack<T, F>(f: F) -> T
 where

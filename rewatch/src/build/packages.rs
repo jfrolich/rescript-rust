@@ -119,6 +119,8 @@ fn matches_filter(filter: &Option<regex::Regex>, path: &str) -> bool {
     }
 }
 
+/// The source files of a source folder (see [`read_folders_and_dirs`]).
+#[cfg(test)]
 fn read_folders(
     filter: &Option<regex::Regex>,
     package_dir: &Path,
@@ -126,10 +128,27 @@ fn read_folders(
     recurse: bool,
     is_type_dev: bool,
 ) -> Result<AHashMap<PathBuf, SourceFileMeta>> {
+    read_folders_and_dirs(filter, package_dir, path, recurse, is_type_dev).map(|(map, _)| map)
+}
+
+/// The source files under `path` with their metadata, and the folders the
+/// walk visited without going through a symlink, in the order
+/// [`collect_gentype_source_dirs`] lists them (the folder, then each
+/// subfolder's list in directory-entry order), so GenType need not walk the
+/// tree again.
+fn read_folders_and_dirs(
+    filter: &Option<regex::Regex>,
+    package_dir: &Path,
+    path: &Path,
+    recurse: bool,
+    is_type_dev: bool,
+) -> Result<(AHashMap<PathBuf, SourceFileMeta>, Vec<PathBuf>)> {
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
+    let mut dirs = vec![path.to_path_buf()];
     let path_buf = PathBuf::from(path);
     fs::metadata(package_dir.join(path))?;
-    let mut subdirs: Vec<PathBuf> = Vec::new();
+    // Each subfolder, and whether it is reached through a symlink.
+    let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
 
     for entry in fs::read_dir(package_dir.join(&path_buf))? {
         let entry = entry?;
@@ -159,7 +178,7 @@ fn read_folders(
 
         let path_ext = entry_path_buf.extension().and_then(|x| x.to_str());
         if is_dir && recurse {
-            subdirs.push(path_buf.join(&name));
+            subdirs.push((path_buf.join(&name), followed.is_some()));
         }
 
         match path_ext {
@@ -187,15 +206,19 @@ fn read_folders(
 
     // Large source trees dominate package discovery; walk sibling folders in
     // parallel.
-    let nested: Vec<Result<AHashMap<PathBuf, SourceFileMeta>>> = subdirs
+    let nested: Vec<Result<(AHashMap<PathBuf, SourceFileMeta>, Vec<PathBuf>)>> = subdirs
         .par_iter()
-        .map(|subdir| read_folders(filter, package_dir, subdir, recurse, is_type_dev))
+        .map(|(subdir, _)| read_folders_and_dirs(filter, package_dir, subdir, recurse, is_type_dev))
         .collect();
-    for folder in nested {
-        map.extend(folder?);
+    for (folder, (_, through_symlink)) in nested.into_iter().zip(&subdirs) {
+        let (folder, folder_dirs) = folder?;
+        map.extend(folder);
+        if !through_symlink {
+            dirs.extend(folder_dirs);
+        }
     }
 
-    Ok(map)
+    Ok((map, dirs))
 }
 
 /// Given a projects' root folder and a `config::Source`, this recursively creates all the
@@ -605,9 +628,7 @@ fn get_source_files(
     filter: &Option<regex::Regex>,
     source: &config::PackageSource,
     build_dev_deps: bool,
-) -> Result<AHashMap<PathBuf, SourceFileMeta>> {
-    let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
-
+) -> Result<(AHashMap<PathBuf, SourceFileMeta>, Option<Vec<PathBuf>>)> {
     let recurse = match source {
         config::PackageSource {
             subdirs: Some(config::Subdirs::Recurse(subdirs)),
@@ -620,19 +641,18 @@ fn get_source_files(
     let is_type_dev = source.is_type_dev();
 
     if !build_dev_deps && is_type_dev {
-        return Ok(map);
+        return Ok((AHashMap::new(), None));
     }
 
-    map.extend(
-        read_folders(filter, package_dir, path_dir, recurse, is_type_dev).with_context(|| {
+    let (map, dirs) = read_folders_and_dirs(filter, package_dir, path_dir, recurse, is_type_dev)
+        .with_context(|| {
             format!(
                 "Could not read source folder {:?} specified by package {} at {:?}",
                 path_dir, package_name, package_dir
             )
-        })?,
-    );
+        })?;
 
-    Ok(map)
+    Ok((map, Some(dirs)))
 }
 
 /// This takes the tree of packages, and finds all the source files for each, adding them to the
@@ -645,8 +665,8 @@ fn extend_with_children(
     for (_key, package) in build.iter_mut() {
         let _span = info_span!("build.load_package_sources", package = %package.name).entered();
         let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
-        let source_maps = package
-            .source_folders
+        let sources: Vec<config::PackageSource> = package.source_folders.iter().cloned().collect();
+        let source_maps = sources
             .par_iter()
             .map(|source| {
                 get_source_files(
@@ -658,8 +678,10 @@ fn extend_with_children(
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        for source_map in source_maps {
+        let mut walked_dirs = Vec::with_capacity(source_maps.len());
+        for (source, (source_map, dirs)) in sources.into_iter().zip(source_maps) {
             map.extend(source_map);
+            walked_dirs.push((source, dirs));
         }
 
         let mut modules = AHashSet::from_iter(
@@ -683,7 +705,7 @@ fn extend_with_children(
         });
         package.dirs = Some(dirs);
         if package.config.gentype_config.is_some() {
-            package.gentype_dirs = Some(collect_gentype_source_dirs(package));
+            package.gentype_dirs = Some(collect_gentype_source_dirs(package, Some(&walked_dirs)));
         }
         package.source_files = Some(map);
     }
@@ -695,7 +717,14 @@ fn extend_with_children(
 /// root. Gentype needs every such directory — including ones containing only
 /// `.ts` shims — to resolve cross-file imports, so `package.dirs` (which
 /// tracks only dirs with `.res` source files) isn't enough.
-fn collect_gentype_source_dirs(package: &Package) -> Vec<PathBuf> {
+///
+/// `walked` pairs each source folder with the folders the source walk listed
+/// for it (see [`read_folders_and_dirs`]), `None` for one it did not walk;
+/// without it, every source folder is walked here.
+fn collect_gentype_source_dirs(
+    package: &Package,
+    walked: Option<&[(config::PackageSource, Option<Vec<PathBuf>>)]>,
+) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let root = &package.path;
 
@@ -744,8 +773,26 @@ fn collect_gentype_source_dirs(package: &Package) -> Vec<PathBuf> {
             .collect()
     }
 
-    for source in &package.source_folders {
+    let sources: Vec<(&config::PackageSource, Option<&Vec<PathBuf>>)> = match walked {
+        Some(walked) => walked
+            .iter()
+            .map(|(source, dirs)| (source, dirs.as_ref()))
+            .collect(),
+        None => package
+            .source_folders
+            .iter()
+            .map(|source| (source, None))
+            .collect(),
+    };
+    for (source, dirs) in sources {
         let rel = PathBuf::from(&source.dir);
+        // The source walk read the same folders, except that it follows
+        // symlinked folders, which it leaves out of this list; it only lists
+        // subfolders for `subdirs: true`.
+        if let Some(dirs) = dirs {
+            out.extend(dirs.iter().cloned());
+            continue;
+        }
         match &source.subdirs {
             Some(config::Subdirs::Recurse(true)) => walk_recursive(root, &rel, &mut out),
             _ => {
@@ -1820,5 +1867,32 @@ mod test {
         let shallow =
             super::read_folders(&None, pkg, std::path::Path::new("src"), false, false).expect("read_folders");
         assert_eq!(shallow.len(), 3);
+
+        // The folders the walk lists for GenType are those its own walk finds.
+        let source = |subdirs| config::PackageSource {
+            dir: "src".to_string(),
+            subdirs: Some(config::Subdirs::Recurse(subdirs)),
+            type_: None,
+            feature: None,
+        };
+        for subdirs in [true, false] {
+            let (_, walked) =
+                super::read_folders_and_dirs(&None, pkg, std::path::Path::new("src"), subdirs, false)
+                    .expect("read_folders");
+            let mut package = create_package(CreatePackageArgs {
+                name: "p".to_string(),
+                bs_deps: vec![],
+                build_dev_deps: vec![],
+                allowed_dependents: None,
+            });
+            package.path = pkg.to_path_buf();
+            package.source_folders = AHashSet::from_iter([source(subdirs)]);
+            let expected = super::collect_gentype_source_dirs(&package, None);
+            assert!(expected.len() > 1 || !subdirs);
+            assert_eq!(
+                super::collect_gentype_source_dirs(&package, Some(&[(source(subdirs), Some(walked))])),
+                expected,
+            );
+        }
     }
 }

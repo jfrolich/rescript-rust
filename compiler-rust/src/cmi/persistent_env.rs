@@ -78,12 +78,17 @@ fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -
 #[derive(Debug)]
 struct SharedRegistryMap<V> {
     inner: Arc<RwLock<HashMap<String, V>>>,
+    /// Stored modules registered without decoding their signature and JS
+    /// metadata (see [`ModuleRegistry::register_stored_lazily`]): a lookup
+    /// that misses decodes the module's entry first.
+    lazy: Option<Arc<LazyStoredModules>>,
 }
 
 impl<V> Clone for SharedRegistryMap<V> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            lazy: self.lazy.clone(),
         }
     }
 }
@@ -92,11 +97,98 @@ impl<V> Default for SharedRegistryMap<V> {
     fn default() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            lazy: None,
         }
     }
 }
 
+/// The stored modules of a registry whose signature and JS metadata are not
+/// decoded yet, with the registry maps that decoding one fills. An entry is
+/// decoded once, by the first lookup of its name; until then the module
+/// costs only its encoded bytes.
+pub struct LazyStoredModules {
+    pending: Mutex<HashMap<String, Arc<Mutex<Option<PendingCore>>>>>,
+    cached_modules: Arc<RwLock<HashMap<String, Arc<PortablePersStruct>>>>,
+    module_info: Arc<RwLock<HashMap<String, InMemoryModuleInfo>>>,
+}
+
+impl std::fmt::Debug for LazyStoredModules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyStoredModules").finish_non_exhaustive()
+    }
+}
+
+/// Reads the encoded core (see [`super::stored_module`]) of a stored module
+/// by name, `None` when it cannot.
+pub type CoreFetcher = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
+/// The not yet decoded core of a stored module: its bytes, or how to read
+/// them, so a module the build never looks up is never read either.
+pub enum PendingCore {
+    /// The encoded core.
+    Bytes(Vec<u8>),
+    /// Reads the encoded core when the module is first looked up.
+    Fetch(CoreFetcher),
+}
+
+impl LazyStoredModules {
+    /// Decode the pending entry of `name`, or of its first-character case
+    /// variant, into the registry maps. Returns whether there was one.
+    fn materialize_case(&self, name: &str) -> bool {
+        self.materialize(name)
+            || first_char_case_variant(name).is_some_and(|variant| self.materialize(&variant))
+    }
+
+    fn materialize(&self, name: &str) -> bool {
+        self.materialize_with(name, None)
+    }
+
+    /// [`Self::materialize`], from `bytes` when given (read ahead by the
+    /// caller) instead of the entry's own.
+    fn materialize_with(&self, name: &str, bytes: Option<Vec<u8>>) -> bool {
+        let Some(entry) = self.pending.lock().unwrap().get(name).cloned() else {
+            return false;
+        };
+        // Concurrent lookups of the same module wait here for the first to
+        // fill the maps.
+        let mut pending = entry.lock().unwrap();
+        let Some(core) = pending.take() else {
+            return true;
+        };
+        let data = match (bytes, core) {
+            (Some(bytes), _) | (None, PendingCore::Bytes(bytes)) => Some(bytes),
+            (None, PendingCore::Fetch(fetch)) => fetch(name),
+        };
+        if let Some(core) = data.as_deref().and_then(super::stored_module::decode_core) {
+            if let Some(pers) = core.pers_struct {
+                self.cached_modules
+                    .write()
+                    .unwrap()
+                    .insert(name.to_string(), Arc::new(pers));
+            }
+            self.module_info
+                .write()
+                .unwrap()
+                .insert(name.to_string(), core.info);
+        }
+        drop(pending);
+        self.pending.lock().unwrap().remove(name);
+        true
+    }
+
+    fn remove(&self, name: &str) {
+        self.pending.lock().unwrap().remove(name);
+    }
+}
+
 impl<V> SharedRegistryMap<V> {
+    /// Decode `name`'s pending stored module, if any; whether there was one.
+    fn materialize_case(&self, name: &str) -> bool {
+        self.lazy
+            .as_ref()
+            .is_some_and(|lazy| lazy.materialize_case(name))
+    }
+
     fn insert(&self, key: String, value: V) {
         self.inner.write().unwrap().insert(key, value);
     }
@@ -121,16 +213,34 @@ impl<V> SharedRegistryMap<V> {
     }
 
     fn contains_key(&self, key: &str) -> bool {
-        self.inner.read().unwrap().contains_key(key)
+        if self.inner.read().unwrap().contains_key(key) {
+            return true;
+        }
+        self.lazy.as_ref().is_some_and(|lazy| lazy.materialize(key))
+            && self.inner.read().unwrap().contains_key(key)
     }
 }
 
 impl<V: Clone> SharedRegistryMap<V> {
     fn get_cloned(&self, key: &str) -> Option<V> {
+        if let Some(value) = self.inner.read().unwrap().get(key).cloned() {
+            return Some(value);
+        }
+        if !self.lazy.as_ref().is_some_and(|lazy| lazy.materialize(key)) {
+            return None;
+        }
         self.inner.read().unwrap().get(key).cloned()
     }
 
     fn get_case_cloned(&self, name: &str) -> Option<(String, V)> {
+        let found = self.get_case_cloned_now(name);
+        if found.is_some() || !self.materialize_case(name) {
+            return found;
+        }
+        self.get_case_cloned_now(name)
+    }
+
+    fn get_case_cloned_now(&self, name: &str) -> Option<(String, V)> {
         let map = self.inner.read().unwrap();
         if let Some((key, value)) = map.get_key_value(name) {
             return Some((key.clone(), value.clone()));
@@ -151,6 +261,14 @@ impl<V: Clone> SharedRegistryMap<V> {
 
 impl<V> SharedRegistryMap<V> {
     fn get_case_with<R>(&self, name: &str, mut f: impl FnMut(&str, &V) -> R) -> Option<R> {
+        let found = self.get_case_with_now(name, &mut f);
+        if found.is_some() || !self.materialize_case(name) {
+            return found;
+        }
+        self.get_case_with_now(name, &mut f)
+    }
+
+    fn get_case_with_now<R>(&self, name: &str, mut f: impl FnMut(&str, &V) -> R) -> Option<R> {
         let map = self.inner.read().unwrap();
         if let Some((key, value)) = map.get_key_value(name) {
             return Some(f(key, value));
@@ -619,23 +737,104 @@ impl ModuleRegistry {
         ))
     }
 
-    /// Register a stored module's interface, as compiling it would.
-    pub fn register_stored_module(
+    /// [`Self::encode_stored_module`] as its extras, `None` when it has none,
+    /// and core (see [`super::stored_module::encode_parts`]).
+    pub fn encode_stored_module_parts(
+        &self,
+        name: &str,
+        alias_rewrites: &[(String, Path)],
+    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+        let (pers, info) = self.registered(name);
+        let info = info?;
+        let gentype_declarations = crate::gentype::main::type_declarations_of_module(name);
+        Some(super::stored_module::encode_parts(
+            &super::stored_module::StoredModuleRef {
+                pers_struct: pers.as_deref(),
+                info: &info,
+                alias_rewrites,
+                gentype_declarations: &gentype_declarations,
+            },
+        ))
+    }
+
+    /// Register a stored module's interface (see
+    /// [`super::stored_module::encode`]), as compiling it would. Its alias
+    /// rewrites and GenType declarations are registered now; its signature
+    /// and JS metadata are decoded by the first lookup of the module, so a
+    /// build that registers many stored modules pays only for those its
+    /// compiles read. Returns the module's alias rewrites, or `None`,
+    /// registering nothing, when the data does not decode.
+    pub fn register_stored_lazily(
         &mut self,
         name: &str,
-        module: super::stored_module::StoredModule,
-    ) {
-        let alias_rewrites = module.alias_rewrite_map();
-        crate::gentype::main::restore_type_declarations(name, module.gentype_declarations);
-        match module.pers_struct {
-            Some(pers) => {
-                self.register_module_arc(name, Arc::new(pers), module.info, alias_rewrites)
-            }
-            None => {
-                self.insert_module_info(name.to_string(), module.info);
-                self.extend_alias_rewrites(alias_rewrites);
-            }
+        data: &[u8],
+    ) -> Option<Vec<(String, Path)>> {
+        let (extras, core) = super::stored_module::split(data)?;
+        self.register_stored_parts(name, Some(extras), PendingCore::Bytes(core.to_vec()))
+    }
+
+    /// [`Self::register_stored_lazily`] for a module stored as its encoded
+    /// extras (`None` for none) and core (see
+    /// [`super::stored_module::encode_parts`]), the core possibly still to be
+    /// read.
+    pub fn register_stored_parts(
+        &mut self,
+        name: &str,
+        extras: Option<&[u8]>,
+        core: PendingCore,
+    ) -> Option<Vec<(String, Path)>> {
+        assert!(
+            !self.write_to_local,
+            "stored modules are registered in the shared registry"
+        );
+        let extras = match extras {
+            Some(extras) => super::stored_module::decode_extras(extras)?,
+            None => super::stored_module::StoredExtras::default(),
+        };
+        let lazy = self.lazy_stored_modules();
+        self.extend_alias_rewrites(extras.alias_rewrite_map());
+        crate::gentype::main::restore_type_declarations(name, extras.gentype_declarations);
+        lazy.pending
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), Arc::new(Mutex::new(Some(core))));
+        Some(extras.alias_rewrites)
+    }
+
+    /// Decode `name`'s stored module now if it is registered with
+    /// [`Self::register_stored_lazily`] and not decoded yet, so a build can
+    /// decode the modules it knows its compiles will read in parallel. With
+    /// `core`, from those bytes (read ahead) instead of the entry's own.
+    pub fn decode_stored(&self, name: &str, core: Option<Vec<u8>>) {
+        if let Some(lazy) = &self.cached_modules.lazy {
+            lazy.materialize_with(name, core);
         }
+    }
+
+    /// Whether `name` is a stored module registered with
+    /// [`Self::register_stored_lazily`] and not decoded yet.
+    pub fn is_pending_stored(&self, name: &str) -> bool {
+        self.cached_modules
+            .lazy
+            .as_ref()
+            .is_some_and(|lazy| lazy.pending.lock().unwrap().contains_key(name))
+    }
+
+    /// The registry's pending stored modules, created on first use and
+    /// attached to the maps decoding fills, so every later snapshot and
+    /// `PersistentEnv` of the registry decodes on lookup.
+    fn lazy_stored_modules(&mut self) -> Arc<LazyStoredModules> {
+        if let Some(lazy) = &self.cached_modules.lazy {
+            return lazy.clone();
+        }
+        let lazy = Arc::new(LazyStoredModules {
+            pending: Mutex::new(HashMap::new()),
+            cached_modules: self.cached_modules.inner.clone(),
+            module_info: self.module_info.inner.clone(),
+        });
+        self.cached_modules.lazy = Some(lazy.clone());
+        self.module_info.lazy = Some(lazy.clone());
+        lazy
     }
 
     pub fn register_disk_module(&mut self, name: &str, info: InMemoryModuleInfo) {
@@ -647,6 +846,11 @@ impl ModuleRegistry {
         self.local_cached_modules.is_empty()
             && self.cached_modules.len() == 0
             && self.disk_modules.len() == 0
+            && self
+                .cached_modules
+                .lazy
+                .as_ref()
+                .is_none_or(|lazy| lazy.pending.lock().unwrap().is_empty())
     }
 
     pub fn module_info_is_runtime(&self, name: &str) -> bool {
@@ -744,6 +948,9 @@ impl ModuleRegistry {
     /// Purges cached signature, module info, source fallback, and any alias
     /// rewrites that reference this module.
     pub fn purge_module(&mut self, name: &str) {
+        if let Some(lazy) = &self.cached_modules.lazy {
+            lazy.remove(name);
+        }
         self.cached_modules.remove(name);
         self.local_cached_modules.remove(name);
         self.disk_modules.remove(name);
@@ -785,6 +992,10 @@ impl ModuleRegistry {
         if self.write_to_local {
             self.local_cached_modules.insert(name, portable);
         } else {
+            // A compiled module replaces a stored one not decoded yet.
+            if let Some(lazy) = &self.cached_modules.lazy {
+                lazy.remove(&name);
+            }
             self.cached_modules.insert(name, portable);
         }
     }
@@ -7479,6 +7690,72 @@ mod resolution_view_tests {
         assert!(Arc::ptr_eq(&original.cache, &hidden.cache));
         assert!(Arc::ptr_eq(&original.last_error, &registered.last_error));
         assert!(Arc::ptr_eq(&original.crc_units, &registered.crc_units));
+    }
+
+    #[test]
+    fn stored_modules_register_lazily_and_decode_on_first_lookup() {
+        let portable = PortablePersStruct {
+            ps_name: "Stored".to_string(),
+            ps_filename: "Stored.res".to_string(),
+            ps_deprecated: None,
+            ps_crcs: Vec::new(),
+            ps_sig: vec![],
+            raw_ps_sig: None,
+            cmi_longident_names: vec![],
+            type_graph: portable_types::PortableTypeGraph {
+                entries: vec![],
+                variant_layouts: vec![],
+                mutabilities: vec![],
+            },
+            raw_type_graph: None,
+            fingerprint: 7,
+        };
+        let mut compiled = ModuleRegistry::new();
+        compiled.register_module(
+            "Stored",
+            portable,
+            InMemoryModuleInfo::new(PathBuf::from("Stored.res"), true, HashMap::new(), true),
+            HashMap::new(),
+        );
+        let alias = (
+            "Stored__Flat".to_string(),
+            Path::pident(Ident::create_persistent("Stored")),
+        );
+        let data = compiled
+            .encode_stored_module("Stored", std::slice::from_ref(&alias))
+            .unwrap();
+
+        let mut registry = ModuleRegistry::new();
+        assert!(registry.register_stored_lazily("Bad", &data[..3]).is_none());
+        let aliases = registry.register_stored_lazily("Stored", &data).unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert!(registry.is_pending_stored("Stored"));
+        assert!(!registry.is_empty());
+        // Alias rewrites are registered up front.
+        let env = PersistentEnv::from_registry(&registry);
+        assert!(
+            env.qualified_alias_path_for_flattened_head("Stored__Flat")
+                .is_some()
+        );
+        assert!(registry.is_pending_stored("Stored"));
+        // A lookup through any snapshot decodes the module into the shared maps.
+        let snapshot = registry.for_worker_snapshot();
+        assert!(
+            env.in_memory_info("Stored")
+                .is_some_and(|info| info.is_runtime)
+        );
+        assert!(!registry.is_pending_stored("Stored"));
+        assert_eq!(snapshot.registered("Stored").0.unwrap().fingerprint, 7);
+        // A compiled module replaces a pending one.
+        assert!(registry.register_stored_lazily("Other", &data).is_some());
+        registry.register_module(
+            "Other",
+            PortablePersStruct::clone(&snapshot.registered("Stored").0.unwrap()),
+            InMemoryModuleInfo::new(PathBuf::from("Other.res"), false, HashMap::new(), false),
+            HashMap::new(),
+        );
+        assert!(!registry.is_pending_stored("Other"));
+        assert!(!registry.module_info_is_runtime("Other"));
     }
 
     #[test]
