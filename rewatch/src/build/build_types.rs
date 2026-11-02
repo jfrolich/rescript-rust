@@ -321,6 +321,9 @@ pub struct BuildCommandState {
     // Each source file's modification time (`Module:impl` / `Module:intf`),
     // read before it is parsed; recorded with its dependencies.
     pub source_mtimes: AHashMap<String, i64>,
+    /// The incremental build's file facts, kept from the no-op check for the
+    /// plan (see `incremental::module_times`).
+    pub module_times: Option<AHashMap<String, super::incremental::ModuleTimes>>,
 }
 
 impl std::fmt::Debug for BuildCommandState {
@@ -429,6 +432,7 @@ impl BuildCommandState {
             parse_warnings: Mutex::new(AHashMap::new()),
             js_confirmed_at: AHashMap::new(),
             source_mtimes: AHashMap::new(),
+            module_times: None,
         }
     }
 
@@ -633,14 +637,6 @@ impl BuildCommandState {
     /// Returns None if no deps have been stored (e.g., not in --in-process mode).
     pub fn get_in_memory_deps(&self, key: &str) -> Option<Dependencies> {
         self.in_memory_deps.lock().unwrap().get(key).cloned()
-    }
-
-    /// Clone the complete parse-phase dependency table once for a dependency
-    /// resolution pass. In-process builds resolve all module deps after parsing,
-    /// so the table is stable and parallel workers should not contend on the
-    /// mutex for every module lookup.
-    pub fn snapshot_in_memory_deps(&self) -> AHashMap<String, Dependencies> {
-        self.in_memory_deps.lock().unwrap().clone()
     }
 
     /// Clone the parse-phase AST table once for an in-process compile wave.

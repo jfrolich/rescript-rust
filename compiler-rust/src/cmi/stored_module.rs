@@ -46,7 +46,7 @@ struct CoreRef<'a> {
 pub type GentypeDeclarations = std::sync::Arc<Vec<crate::gentype::code_item::TypeDeclaration>>;
 
 /// The part of a stored module registered up front.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 pub struct StoredExtras {
     /// The alias rewrites the module registered (flattened name to path).
     pub alias_rewrites: Vec<(String, Path)>,
@@ -72,21 +72,37 @@ pub struct StoredCore {
 
 /// Encode a module as the build stores it (see the module documentation).
 pub fn encode(module: &StoredModuleRef<'_>) -> Vec<u8> {
-    let extras = crate::binser::to_vec(&ExtrasRef {
-        alias_rewrites: module.alias_rewrites,
-        gentype_declarations: module.gentype_declarations,
-    })
-    .expect("encoding to memory cannot fail");
-    let core = crate::binser::to_vec(&CoreRef {
-        pers_struct: module.pers_struct,
-        info: module.info,
-    })
-    .expect("encoding to memory cannot fail");
+    let extras = encode_extras(module);
+    let core = encode_core(module);
     let mut out = Vec::with_capacity(4 + extras.len() + core.len());
     out.extend_from_slice(&(extras.len() as u32).to_le_bytes());
     out.extend_from_slice(&extras);
     out.extend_from_slice(&core);
     out
+}
+
+fn encode_extras(module: &StoredModuleRef<'_>) -> Vec<u8> {
+    crate::binser::to_vec(&ExtrasRef {
+        alias_rewrites: module.alias_rewrites,
+        gentype_declarations: module.gentype_declarations,
+    })
+    .expect("encoding to memory cannot fail")
+}
+
+fn encode_core(module: &StoredModuleRef<'_>) -> Vec<u8> {
+    crate::binser::to_vec(&CoreRef {
+        pers_struct: module.pers_struct,
+        info: module.info,
+    })
+    .expect("encoding to memory cannot fail")
+}
+
+/// A module's extras, `None` when it has none, and core, encoded
+/// separately so a build can store the core where it reads it only on demand.
+pub fn encode_parts(module: &StoredModuleRef<'_>) -> (Option<Vec<u8>>, Vec<u8>) {
+    let extras = (!module.alias_rewrites.is_empty() || !module.gentype_declarations.is_empty())
+        .then(|| encode_extras(module));
+    (extras, encode_core(module))
 }
 
 /// The encoded extras and core of a stored module, `None` when `bytes` is

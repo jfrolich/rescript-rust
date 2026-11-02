@@ -752,7 +752,8 @@ pub fn compile(
     // job per thread beyond the running ones: a worker that finishes then
     // starts its next job at once instead of idling until this dispatcher
     // has received its message and spawned a replacement.
-    let capacity = 2 * rayon::current_num_threads().max(1);
+    // Set per round, by the pool the round compiles in.
+    let mut capacity;
     let mut scheduler_counters =
         std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").map(|_| InProcessSchedulerCounters::default());
     // Critical-path placement: the highest-priority ready typecheck units get
@@ -867,7 +868,10 @@ pub fn compile(
         let mut deferred_clean: AHashSet<String> = AHashSet::new();
         let mut metadata_same: AHashMap<String, bool> = AHashMap::new();
 
-        rayon::in_place_scope(|scope| {
+        // A round of many modules compiles in the large pool (see
+        // `pools::pool_for`).
+        capacity = 2 * super::pools::threads_for(compile_universe_count).max(1);
+        super::pools::in_place_scope_for(compile_universe_count, |scope| {
             let mut in_flight: usize = 0;
             loop {
                 if let Some(counters) = scheduler_counters.as_mut() {
@@ -1216,7 +1220,7 @@ pub fn compile(
             .filter(|module_name| !all_registry_only.contains(*module_name))
             .cloned()
             .collect();
-        let mut next = super::incremental::next_round(build_state, &written);
+        let mut next = super::incremental::next_round(build_state, &written, &compiled_this_build);
         // After errors, still compile the modules a full build would: those
         // that do not depend on a failed module (a failed module is not
         // compiled again).
@@ -2972,7 +2976,7 @@ pub(crate) fn pre_compile_runtime_modules(
         return Ok(());
     }
 
-    let runtime_compile_threads = rayon::current_num_threads().max(2);
+    let runtime_compile_threads = super::pools::compile_threads().max(2);
     // Runtime module compilation runs inside Rayon workers, so the outer
     // precompile thread stack is not enough for very large runtime IR cleanup.
     let runtime_compile_pool = rayon::ThreadPoolBuilder::new()

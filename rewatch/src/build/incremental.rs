@@ -175,13 +175,15 @@ impl UnitDigests {
         self.registry.lambda_reads(resolved)
     }
 
-    /// The module's interface encoded for storage.
-    pub fn encode(
+    /// The module's interface encoded for storage, as its extras (`None` for
+    /// none) and core.
+    pub fn encode_parts(
         &self,
         module_name: &str,
         alias_rewrites: &[(String, rescript_compiler::types::path::Path)],
-    ) -> Option<Vec<u8>> {
-        self.registry.encode_stored_module(module_name, alias_rewrites)
+    ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+        self.registry
+            .encode_stored_module_parts(module_name, alias_rewrites)
     }
 
     /// The module's interface digest and item digests, `None` when it is not
@@ -247,10 +249,32 @@ pub fn current_record(
     digests: &UnitDigests,
 ) -> PackageState {
     let mut record = PackageState::default();
-    record.meta.insert(
-        state_db::META_OUTPUTS.to_string(),
-        expected_outputs(build_state, package_name).join("\n"),
-    );
+    let previous = build_state
+        .previous_in_process
+        .as_ref()
+        .and_then(|previous| previous.packages.get(package_name));
+    let changed = previous.and_then(|previous| changed_modules(build_state, package_name, previous));
+    record.partial = changed.is_some();
+    let outputs = match previous
+        .filter(|previous| record.partial && outputs_as_recorded(build_state, package_name, previous))
+    {
+        Some(previous) => previous
+            .state
+            .meta
+            .get(state_db::META_OUTPUTS)
+            .cloned()
+            .unwrap_or_default(),
+        None => expected_outputs(build_state, package_name).join("\n"),
+    };
+    record.meta.insert(state_db::META_OUTPUTS.to_string(), outputs);
+    if build_state
+        .get_package(package_name)
+        .is_some_and(|package| package.is_root)
+    {
+        record
+            .meta
+            .insert(META_MODULE_SET.to_string(), module_set_digest(build_state));
+    }
     if let Some(started) = build_state.build_started_at {
         record.meta.insert(
             state_db::META_BUILD_STARTED_AT.to_string(),
@@ -269,7 +293,17 @@ pub fn current_record(
         .as_ref()
         .and_then(|previous| previous.packages.get(package_name))
         .map(|record| &record.state.stored_interfaces);
-    let alias_rewrites = build_state.module_alias_rewrites.lock().unwrap().clone();
+    // Copied out: the lock must not be held across the parallel encoding
+    // (packages record in parallel, and a worker may steal another
+    // package's record that takes the same lock).
+    let alias_rewrites: AHashMap<&String, Vec<(String, rescript_compiler::types::path::Path)>> = {
+        let all = build_state.module_alias_rewrites.lock().unwrap();
+        build_state
+            .compiled_modules
+            .iter()
+            .filter_map(|module_name| Some((module_name, all.get(module_name)?.clone())))
+            .collect()
+    };
     record.interface_updates = build_state
         .compiled_modules
         .par_iter()
@@ -280,13 +314,23 @@ pub fn current_record(
         })
         .filter_map(|module_name| {
             let aliases = alias_rewrites.get(module_name).map(Vec::as_slice).unwrap_or(&[]);
-            let data = digests.encode(module_name, aliases)?;
-            let hash = blake3::hash(&data);
+            let (extras, core) = digests.encode_parts(module_name, aliases)?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&core);
+            if let Some(extras) = &extras {
+                hasher.update(extras);
+            }
+            let hash = hasher.finalize();
             let content = u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
             if stored.and_then(|stored| stored.get(module_name)) == Some(&content) {
                 return None;
             }
-            Some((module_name.clone(), (content, data)))
+            let interface = state_db::StoredInterface {
+                hash: content,
+                extras,
+                core,
+            };
+            Some((module_name.clone(), interface))
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -301,18 +345,28 @@ pub fn current_record(
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    for (module_name, module) in build_state.modules.iter() {
+    let modules: Box<dyn Iterator<Item = (&String, &Module)>> = match &changed {
+        Some(changed) => Box::new(
+            changed
+                .iter()
+                .filter_map(|module_name| build_state.modules.get_key_value(*module_name)),
+        ),
+        None => Box::new(build_state.modules.iter()),
+    };
+    for (module_name, module) in modules {
         if module.package_name != package_name {
             continue;
         }
         let SourceType::SourceFile(source_file) = &module.source_type else {
             continue;
         };
-        record
-            .sources
-            .insert(source_file.implementation.path.clone(), module_name.clone());
-        if let Some(interface) = &source_file.interface {
-            record.sources.insert(interface.path.clone(), module_name.clone());
+        if !record.partial {
+            record
+                .sources
+                .insert(source_file.implementation.path.clone(), module_name.clone());
+            if let Some(interface) = &source_file.interface {
+                record.sources.insert(interface.path.clone(), module_name.clone());
+            }
         }
         // A module this build did not write keeps what its last written
         // compile read and published, with the imports this build checked
@@ -321,22 +375,31 @@ pub fn current_record(
             Some(written) => {
                 record.reads_updates.insert(module_name.clone(), written.reads);
                 record.items_updates.insert(module_name.clone(), written.items);
-                (Some(written.digest), Some(written.imports))
+                (
+                    Some(written.digest),
+                    Some(state_db::Imports::new(written.imports)),
+                )
             }
             None => recorded_row(build_state, module_name)
                 .filter(|_| !build_state.written_modules.contains(module_name))
                 .map_or((None, None), |row| {
                     let verified = build_state.verified_imports.lock().unwrap();
-                    let imports = row.imports.clone().map(|imports| {
-                        imports
-                            .into_iter()
-                            .map(|(unit, digest)| {
-                                let now = verified.get(module_name).and_then(|units| units.get(&unit));
-                                let digest = now.copied().unwrap_or(digest);
-                                (unit, digest)
-                            })
-                            .collect()
-                    });
+                    let imports = row
+                        .imports
+                        .as_ref()
+                        .map(|imports| match verified.get(module_name) {
+                            // Unchanged: keep the recorded (possibly undecoded) row.
+                            None => imports.clone(),
+                            Some(units) => state_db::Imports::new(
+                                imports
+                                    .list()
+                                    .iter()
+                                    .map(|(unit, digest)| {
+                                        (unit.clone(), units.get(unit).copied().unwrap_or(*digest))
+                                    })
+                                    .collect(),
+                            ),
+                        });
                     (row.interface_digest, imports)
                 }),
         };
@@ -349,28 +412,46 @@ pub fn current_record(
         } else {
             (interface_digest, imports)
         };
-        record.modules.insert(
-            module_name.clone(),
-            ModuleRow {
-                js_confirmed_at: (!invalidated)
-                    .then(|| build_state.js_confirmed_at.get(module_name).copied())
-                    .flatten(),
-                implementation_warnings: source_file.implementation.compile_warnings.clone(),
-                interface_warnings: source_file
-                    .interface
-                    .as_ref()
-                    .and_then(|interface| interface.compile_warnings.clone()),
-                interface_digest,
-                imports,
-            },
-        );
+        let row = ModuleRow {
+            js_confirmed_at: (!invalidated)
+                .then(|| build_state.js_confirmed_at.get(module_name).copied())
+                .flatten(),
+            implementation_warnings: source_file.implementation.compile_warnings.clone(),
+            interface_warnings: source_file
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.compile_warnings.clone()),
+            interface_digest,
+            imports,
+        };
+        if record.partial
+            && previous.and_then(|previous| previous.state.modules.get(module_name)) == Some(&row)
+        {
+            continue;
+        }
+        record.modules.insert(module_name.clone(), row);
     }
-    let previous = build_state
-        .previous_in_process
-        .as_ref()
-        .and_then(|previous| previous.packages.get(package_name));
     let in_memory_deps = build_state.in_memory_deps.lock().unwrap();
-    for (module_name, module) in build_state.modules.iter() {
+    // A partial record sets the rows of the sources this build parsed; the
+    // others are as recorded.
+    let parsed: Option<AHashSet<String>> = record.partial.then(|| {
+        build_state
+            .stored_asts
+            .lock()
+            .unwrap()
+            .keys()
+            .filter_map(|key| Some(key.rsplit_once(':')?.0.to_string()))
+            .collect()
+    });
+    let modules: Box<dyn Iterator<Item = (&String, &Module)>> = match &parsed {
+        Some(parsed) => Box::new(
+            parsed
+                .iter()
+                .filter_map(|module_name| build_state.modules.get_key_value(module_name)),
+        ),
+        None => Box::new(build_state.modules.iter()),
+    };
+    for (module_name, module) in modules {
         if module.package_name != package_name {
             continue;
         }
@@ -384,6 +465,14 @@ pub fn current_record(
         };
         for kind in kinds {
             let key = format!("{module_name}:{kind}");
+            // A partial record keeps the rows of sources not parsed since
+            // they were recorded (same modification time).
+            if record.partial
+                && let Some(previous) = previous.and_then(|previous| previous.state.deps.get(&key))
+                && build_state.source_mtimes.get(&key) == Some(&previous.mtime)
+            {
+                continue;
+            }
             let row = match (in_memory_deps.get(&key), build_state.source_mtimes.get(&key)) {
                 (Some(deps), Some(mtime)) => Some(SourceDeps {
                     mtime: *mtime,
@@ -407,6 +496,79 @@ pub fn current_record(
         .map(|(key, (_, text))| (key.clone(), text.clone()))
         .collect::<BTreeMap<_, _>>();
     record
+}
+
+/// Whether `package_name`'s outputs are those `previous` recorded, for a
+/// partial record (the same sources): the outputs follow from the sources
+/// and the package's and root configuration, so they are the same when
+/// neither configuration changed since the recorded build started.
+fn outputs_as_recorded(
+    build_state: &BuildCommandState,
+    package_name: &str,
+    previous: &PackageRecord,
+) -> bool {
+    let Some(started) = previous.clean_build_started_at else {
+        return false;
+    };
+    let Some(package) = build_state.get_package(package_name) else {
+        return false;
+    };
+    [&build_state.get_root_config().path, &package.config.path]
+        .into_iter()
+        .all(|config| mtime(config).is_some_and(|modified| modified < started))
+        && previous.state.meta.contains_key(state_db::META_OUTPUTS)
+}
+
+/// For a one-shot build that kept `package_name`'s sources as `previous`
+/// recorded them, the modules of the package whose recorded row may differ
+/// from `previous`: those this build compiled, wrote, invalidated or left
+/// dirty, those whose imports it verified, and those without a recorded
+/// row. Every other module's row is the recorded one: the build restored its
+/// warnings and confirmation time and kept its digests. `None` when the
+/// whole record must be rebuilt (watch mode, which records several builds at
+/// once, or changed sources).
+fn changed_modules<'a>(
+    build_state: &'a BuildCommandState,
+    package_name: &str,
+    previous: &PackageRecord,
+) -> Option<AHashSet<&'a String>> {
+    if build_state.build_state.source_map_command == SourceMapCommand::Watch {
+        return None;
+    }
+    let mut source_count = 0;
+    let mut changed = AHashSet::new();
+    for (module_name, module) in build_state.modules.iter() {
+        if module.package_name != package_name || !matches!(module.source_type, SourceType::SourceFile(_)) {
+            continue;
+        }
+        if !recorded_as_is(module_name, module, Some(previous)) {
+            return None;
+        }
+        source_count += source_paths(module).map_or(0, |paths| paths.len());
+        if module.compile_dirty || !previous.state.modules.contains_key(module_name) {
+            changed.insert(module_name);
+        }
+    }
+    if source_count != previous.state.sources.len() {
+        return None;
+    }
+    let verified = build_state.verified_imports.lock().unwrap();
+    for set in [
+        &build_state.written_modules,
+        &build_state.compiled_modules,
+        &build_state.invalidated_modules,
+    ] {
+        changed.extend(set.iter().filter(|module_name| {
+            build_state
+                .get_module(module_name)
+                .is_some_and(|module| module.package_name == package_name)
+        }));
+    }
+    changed.extend(verified.keys().filter_map(|module_name| {
+        let (key, module) = build_state.modules.get_key_value(module_name)?;
+        (module.package_name == package_name).then_some(key)
+    }));
+    Some(changed)
 }
 
 /// The saved parse warnings, restored for a build that parses nothing:
@@ -477,20 +639,18 @@ fn source_keys<'a>(module_name: &str, module: &'a Module) -> Vec<(String, &'a Pa
 
 /// Read every source file's modification time, before anything is parsed.
 pub fn collect_source_mtimes(build_state: &mut BuildCommandState) {
-    let mtimes: Vec<(String, i64)> = build_state
+    let mtimes: AHashMap<String, i64> = build_state
         .modules
-        .par_iter()
-        .flat_map_iter(|(module_name, module)| {
-            let package = build_state.get_package(&module.package_name).expect("package");
+        .iter()
+        .flat_map(|(module_name, module)| {
             source_keys(module_name, module)
                 .into_iter()
-                .filter_map(|(key, path)| {
-                    mtime(&package.path.join(path)).map(|time| (key, state_db::nanos_from_time(time)))
-                })
-                .collect::<Vec<_>>()
+                .map(|(key, _)| key)
+                .zip(source_times(module).unwrap_or_default())
+                .map(|(key, time)| (key, state_db::nanos_from_time(time)))
         })
         .collect();
-    build_state.source_mtimes = mtimes.into_iter().collect();
+    build_state.source_mtimes = mtimes;
 }
 
 /// Use the recorded module references of every source file that has not
@@ -627,25 +787,37 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
                 .push(module_name.as_str());
         }
     }
-    let blobs: Vec<(String, Vec<u8>)> = by_package
+    // Each module's extras (alias rewrites and GenType declarations) are
+    // registered now; its core (signature and JS metadata) is read from the
+    // database and decoded when a compile first looks the module up.
+    let extras: Vec<(
+        String,
+        Option<Vec<u8>>,
+        rescript_compiler::cmi::persistent_env::CoreFetcher,
+    )> = by_package
         .into_iter()
         .collect::<Vec<_>>()
         .into_par_iter()
-        .flat_map_iter(
-            |(package_name, modules)| match build_state.get_package(package_name) {
-                Some(package) => state_db::read_interfaces(package, &modules),
-                None => Vec::new(),
-            },
-        )
+        .flat_map_iter(|(package_name, modules)| {
+            let Some(package) = build_state.get_package(package_name) else {
+                return Vec::new();
+            };
+            let mut extras = state_db::read_interface_extras(package, &modules);
+            let cores = std::sync::Arc::new(state_db::InterfaceCores::new(package));
+            let fetch: rescript_compiler::cmi::persistent_env::CoreFetcher =
+                std::sync::Arc::new(move |module: &str| cores.read(module));
+            modules
+                .into_iter()
+                .map(|module_name| (module_name.to_string(), extras.remove(module_name), fetch.clone()))
+                .collect()
+        })
         .collect();
-    // Only the alias rewrites and GenType declarations are decoded now; a
-    // module's signature and JS metadata are decoded when a compile first
-    // looks the module up.
     let mut loaded = AHashSet::new();
     let mut alias_rewrites = build_state.module_alias_rewrites.lock().unwrap();
     let mut registry = build_state.module_registry.lock().unwrap();
-    for (module_name, data) in blobs {
-        let Some(aliases) = registry.register_stored_lazily(&module_name, &data) else {
+    for (module_name, extras, fetch) in extras {
+        let core = rescript_compiler::cmi::persistent_env::PendingCore::Fetch(fetch);
+        let Some(aliases) = registry.register_stored_parts(&module_name, extras.as_deref(), core) else {
             continue;
         };
         if !aliases.is_empty() {
@@ -672,7 +844,7 @@ pub fn decode_recorded_imports(
     let imports: AHashSet<&str> = round
         .iter()
         .filter_map(|module_name| recorded_row(build_state, module_name)?.imports.as_ref())
-        .flatten()
+        .flat_map(state_db::Imports::list)
         .map(|(import, _)| import.as_str())
         .filter(|import| loaded.contains(*import))
         .collect();
@@ -684,7 +856,7 @@ pub fn decode_recorded_imports(
         .into_iter()
         .collect::<Vec<_>>()
         .into_par_iter()
-        .for_each(|module_name| registry.decode_stored(module_name));
+        .for_each(|module_name| registry.decode_stored(module_name, None));
 }
 
 /// Parse an incremental build in two rounds: first the source files that
@@ -813,6 +985,20 @@ fn mtime(path: &Path) -> Option<SystemTime> {
         .ok()
 }
 
+/// The modification times of the source files a module is compiled from, as
+/// the package scan read them (`packages::read_folders`, which follows
+/// symlinks like [`mtime`]).
+fn source_times(module: &Module) -> Option<Vec<SystemTime>> {
+    let SourceType::SourceFile(source_file) = &module.source_type else {
+        return None;
+    };
+    let mut times = vec![source_file.implementation.last_modified];
+    if let Some(interface) = &source_file.interface {
+        times.push(interface.last_modified);
+    }
+    Some(times)
+}
+
 /// The source files a module is compiled from, relative to its package.
 fn source_paths(module: &Module) -> Option<Vec<&Path>> {
     let SourceType::SourceFile(source_file) = &module.source_type else {
@@ -828,14 +1014,10 @@ fn source_paths(module: &Module) -> Option<Vec<&Path>> {
 /// The newest of a module's own inputs: its sources and `config_time`, the
 /// newer of its package's and the root configuration. `None` if one is
 /// unreadable.
-fn newest_own_input(
-    module: &Module,
-    package: &Package,
-    config_time: Option<SystemTime>,
-) -> Option<SystemTime> {
+fn newest_own_input(module: &Module, config_time: Option<SystemTime>) -> Option<SystemTime> {
     let mut newest = config_time?;
-    for path in source_paths(module)? {
-        newest = newest.max(mtime(&package.path.join(path))?);
+    for time in source_times(module)? {
+        newest = newest.max(time);
     }
     Some(newest)
 }
@@ -869,7 +1051,7 @@ fn recorded_as_is(module_name: &str, module: &Module, record: Option<&PackageRec
 }
 
 /// Facts about one source module, gathered from the file system.
-struct ModuleTimes {
+pub struct ModuleTimes {
     recorded: bool,
     newest_input: Option<SystemTime>,
     /// When the JavaScript was last known to be up to date: the oldest output
@@ -879,7 +1061,16 @@ struct ModuleTimes {
     js_confirmed_at: Option<SystemTime>,
 }
 
-fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes> {
+/// [`compute_module_times`], once per build: the no-op check and the plan
+/// both read them, and nothing between the two changes the files they read.
+fn module_times(build_state: &mut BuildCommandState) -> AHashMap<String, ModuleTimes> {
+    match build_state.module_times.take() {
+        Some(times) => times,
+        None => compute_module_times(build_state),
+    }
+}
+
+fn compute_module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes> {
     let previous = build_state.previous_in_process.as_ref();
     let root_config = build_state.get_root_config();
     let root_config_time = mtime(&root_config.path);
@@ -914,7 +1105,7 @@ fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes
                 .map(|oldest| js_confirmed_at.map_or(oldest, |confirmed| oldest.max(confirmed)));
             let times = ModuleTimes {
                 recorded: true,
-                newest_input: newest_own_input(module, package, config_times[&module.package_name]),
+                newest_input: newest_own_input(module, config_times[&module.package_name]),
                 output,
                 js_confirmed_at,
             };
@@ -931,33 +1122,29 @@ fn module_times(build_state: &BuildCommandState) -> AHashMap<String, ModuleTimes
 /// input was last modified, and every JavaScript output still exists. The
 /// saved warnings are then restored for reporting.
 pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
-    let Some(previous) = build_state.previous_in_process.as_ref() else {
-        return false;
-    };
-    if !build_state.deleted_modules.is_empty() {
+    if build_state.previous_in_process.is_none() || !build_state.deleted_modules.is_empty() {
         return false;
     }
     let times = module_times(build_state);
-    times
-        .iter()
-        .all(|(module_name, times)| {
-            let module = &build_state.modules[module_name];
-            let Some(started) = previous
-                .packages
-                .get(&module.package_name)
-                .and_then(|record| record.clean_build_started_at)
-            else {
-                return false;
-            };
-            times.recorded
-                && times.output.is_some()
-                && times.newest_input.is_some_and(|newest| newest < started)
-        })
-        .then(|| {
-            restore_warnings(build_state, &|_| true);
-            carry_js_confirmed_at(build_state, &times, &|_| true);
-        })
-        .is_some()
+    let previous = build_state.previous_in_process.as_ref().expect("checked above");
+    let up_to_date = times.iter().all(|(module_name, times)| {
+        let module = &build_state.modules[module_name];
+        let Some(started) = previous
+            .packages
+            .get(&module.package_name)
+            .and_then(|record| record.clean_build_started_at)
+        else {
+            return false;
+        };
+        times.recorded && times.output.is_some() && times.newest_input.is_some_and(|newest| newest < started)
+    });
+    if up_to_date {
+        restore_warnings(build_state, &|_| true);
+        carry_js_confirmed_at(build_state, &times, &|_| true);
+    } else {
+        build_state.module_times = Some(times);
+    }
+    up_to_date
 }
 
 /// Keep the recorded confirmation times of modules this build does not
@@ -1027,7 +1214,17 @@ pub fn plan(build_state: &mut BuildCommandState) {
         // whose interface its compile read now has a different digest.
         // Dependents of a recompiled module are decided once its new digest
         // is known (see `next_round`).
-        let digests = recorded_digests(build_state);
+        // After a build that succeeded in every package, with the same
+        // modules, every recorded import is consistent: it names an existing
+        // module, with that module's recorded digest (the build compiled or
+        // verified every module whose imports changed). Only a build after a
+        // failed one, or with modules added or removed, compares them.
+        let check_imports = !imports_consistent(build_state);
+        let digests = if check_imports {
+            recorded_digests(build_state)
+        } else {
+            AHashMap::new()
+        };
         let mut import_candidates: Vec<(String, Vec<(String, u64)>)> = Vec::new();
         for (module_name, own) in &times {
             let own_stale = !own.recorded
@@ -1041,19 +1238,24 @@ pub fn plan(build_state: &mut BuildCommandState) {
                     .iter()
                     .any(|dep| times.get(dep).is_some_and(|times| !times.recorded))
             });
-            let import_removed = row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
-                imports
-                    .iter()
-                    .any(|(import, _)| !build_state.modules.contains_key(import))
-            });
+            let import_removed = check_imports
+                && row.and_then(|row| row.imports.as_ref()).is_some_and(|imports| {
+                    imports
+                        .list()
+                        .iter()
+                        .any(|(import, _)| !build_state.modules.contains_key(import))
+                });
             if own_stale || unknown_imports || references_new_module || import_removed {
                 stale.insert(module_name.clone());
+                continue;
+            }
+            if !check_imports {
                 continue;
             }
             let changed: Vec<(String, u64)> = row
                 .and_then(|row| row.imports.as_ref())
                 .into_iter()
-                .flatten()
+                .flat_map(state_db::Imports::list)
                 .filter_map(|(import, digest)| {
                     let current = *digests.get(import)?;
                     (current != *digest).then(|| (import.clone(), current))
@@ -1141,6 +1343,43 @@ fn recorded_row<'a>(build_state: &'a BuildCommandState, module_name: &str) -> Op
         .get(module_name)
 }
 
+/// The metadata key, in the root package's record, of [`module_set_digest`].
+const META_MODULE_SET: &str = "module_set";
+
+/// A digest of the names of every module of the build.
+fn module_set_digest(build_state: &BuildCommandState) -> String {
+    let mut names: Vec<&String> = build_state.modules.keys().collect();
+    names.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for name in names {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex()[..16].to_string()
+}
+
+/// Whether the previous build left every recorded import consistent (see
+/// `plan`): it finished without errors in every package of this build, and
+/// built the same modules.
+fn imports_consistent(build_state: &BuildCommandState) -> bool {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return false;
+    };
+    let all_clean = build_state.packages.keys().all(|package_name| {
+        previous
+            .packages
+            .get(package_name)
+            .is_some_and(|record| record.clean_build_started_at.is_some())
+    });
+    let root_meta = build_state
+        .packages
+        .values()
+        .find(|package| package.is_root)
+        .and_then(|root| previous.packages.get(&root.name))
+        .map(|record| &record.state.meta);
+    all_clean && root_meta.and_then(|meta| meta.get(META_MODULE_SET)) == Some(&module_set_digest(build_state))
+}
+
 /// Every module's recorded interface digest.
 fn recorded_digests(build_state: &BuildCommandState) -> AHashMap<String, u64> {
     let Some(previous) = build_state.previous_in_process.as_ref() else {
@@ -1158,8 +1397,26 @@ fn recorded_digests(build_state: &BuildCommandState) -> AHashMap<String, u64> {
 /// written whose recorded imports include a module that now has a different
 /// interface digest. A module's current digest is the registry's when this
 /// build registered it, the recorded one otherwise.
-pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -> AHashSet<String> {
+///
+/// After the plan, every module not compiled records, for each unit it
+/// imports, the unit's recorded digest (the plan made the others stale or
+/// verified their imports). So only a module `compiled` this build whose
+/// digest now differs from its recorded one can change what an import
+/// reads; when there is none, as for an edit that keeps the interface, no
+/// module needs checking.
+pub fn next_round(
+    build_state: &BuildCommandState,
+    written: &AHashSet<String>,
+    compiled: &AHashSet<String>,
+) -> AHashSet<String> {
     let digests = UnitDigests::new(build_state);
+    let interface_changed = compiled.iter().any(|module_name| {
+        let recorded = recorded_row(build_state, module_name).and_then(|row| row.interface_digest);
+        recorded.is_none() || digests.whole(module_name) != recorded
+    });
+    if !interface_changed {
+        return AHashSet::new();
+    }
     let mut candidates = Vec::new();
     for (module_name, module) in build_state.modules.iter() {
         if written.contains(module_name) || module.is_mlmap() {
@@ -1173,6 +1430,7 @@ pub fn next_round(build_state: &BuildCommandState, written: &AHashSet<String>) -
         let checked = verified.get(module_name);
         // Units this build did not compile are as recorded.
         let changed: Vec<(String, u64)> = imports
+            .list()
             .iter()
             .filter_map(|(import, digest)| {
                 let now = digests.whole(import)?;

@@ -48,11 +48,36 @@ pub fn verify_compiler_info(
     compiler: &CompilerInfo,
     source_map_args: &[String],
 ) -> CompilerCheckResult {
+    verify_compiler_info_with(packages, compiler, source_map_args, &read_metas(packages))
+}
+
+/// Every package's recorded metadata, for the packages that have a record.
+pub fn read_metas(
+    packages: &AHashMap<String, packages::Package>,
+) -> AHashMap<String, std::collections::BTreeMap<String, String>> {
+    packages
+        .par_iter()
+        .filter_map(|(name, package)| Some((name.clone(), state_db::read_meta(package)?)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// [`verify_compiler_info`] against the metadata [`read_metas`] read.
+pub fn verify_compiler_info_with(
+    packages: &AHashMap<String, packages::Package>,
+    compiler: &CompilerInfo,
+    source_map_args: &[String],
+    metas: &AHashMap<String, std::collections::BTreeMap<String, String>>,
+) -> CompilerCheckResult {
     let mismatched_packages = packages
         .values()
         .par_bridge()
         .filter(|package| {
-            let Some(meta) = state_db::read_meta(package).filter(|meta| meta.contains_key(BSC_HASH)) else {
+            let Some(meta) = metas
+                .get(&package.name)
+                .filter(|meta| meta.contains_key(BSC_HASH))
+            else {
                 // No recorded build: if the build folder holds a compiler log
                 // anyway, it came from a build we know nothing about.
                 return logs::does_ocaml_build_compiler_log_exist(package);
@@ -95,7 +120,14 @@ pub fn write_compiler_info(build_state: &BuildCommandState) {
     build_state.packages.par_iter().for_each(|(_, package)| {
         if let Some(mut entries) = current_entries(package, &build_state.compiler_info, &source_map_args) {
             entries.push((VERSION, env!("CARGO_PKG_VERSION").to_string()));
-            state_db::write_meta(package, &entries);
+            // The record read at the start of the build holds the package's
+            // metadata, unless the package was cleaned since.
+            let recorded = build_state
+                .previous_in_process
+                .as_ref()
+                .and_then(|previous| previous.packages.get(&package.name))
+                .map(|record| &record.state.meta);
+            state_db::write_meta_over(package, recorded, &entries);
         }
     });
 }
