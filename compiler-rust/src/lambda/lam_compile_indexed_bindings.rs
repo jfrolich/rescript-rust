@@ -145,10 +145,10 @@ impl IndexedJsConsumer<'_> {
             ));
         }
         props.reverse();
-        let mut expr = Expression::new(ExpressionDesc::Object(
-            Some(Box::new(init.value.expect("record initializer"))),
+        let mut expr = Expression::new(ExpressionDesc::Object(crate::js_ir::object_entries(
+            Some(init.value.expect("record initializer")),
             props,
-        ));
+        )));
         expr.source_loc = (self.compiler.source_loc(&loc)).map(Box::new);
         Some(Output::of_block_and_expression(continuation, block, expr))
     }

@@ -153,6 +153,15 @@ fn expression_has_string_literal(
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => items
             .iter()
             .any(|item| expression_has_string_literal(arena.get_expr(*item), value, arena)),
+        ED::Pexp_dict(entries) => entries.iter().any(|entry| match entry {
+            crate::parser::ast::DictEntry::Pdict_entry(key, e) => {
+                arena.get_string(key.txt) == value
+                    || expression_has_string_literal(arena.get_expr(*e), value, arena)
+            }
+            crate::parser::ast::DictEntry::Pdict_spread(e) => {
+                expression_has_string_literal(arena.get_expr(*e), value, arena)
+            }
+        }),
         ED::Pexp_construct(_, args) => args
             .txt
             .iter()
@@ -325,6 +334,9 @@ fn pattern_has_string_literal(
             rows.iter()
                 .any(|row| pattern_has_string_literal(arena.get_pat(row.pat), value, arena))
         }
+        PD::Ppat_dict(entries) => entries.iter().any(|entry| {
+            pattern_has_string_literal(arena.get_pat(entry.pdp_pattern), value, arena)
+        }),
         PD::Ppat_extension(inner) => {
             let (_, payload) = &**inner;
             payload_has_string_literal(payload, value, arena)
@@ -3470,6 +3482,34 @@ fn type_mod_error_to_anyhow_styled(
             UserDiagnostic::new(
                 format_field_not_optional_report(
                     type_ctx, arena, source, filename, *loc, name, *typ,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::RecordSyntaxOnDictType { loc, key }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "Record syntax can't be used on a dict. Use dict{{...}} instead, e.g. dict{{\"{key}\": ...}}."
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::DictKeyMultiplyDefined { loc, key }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("The key \"{key}\" is matched several times in this dict pattern"),
                 ),
                 2,
             )
@@ -10743,6 +10783,7 @@ fn compile_source_to_js_with_options_inner(
         options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs,
     );
     raw_converter.set_no_assert_false(options.no_assert_false);
+    raw_converter.set_jsx_preserve(jsx_preserve);
     raw_converter.set_noassert(options.noassert);
     raw_converter.set_warning_config(tctx.warning_config.clone());
     if let Some(persistent_env) = tctx.persistent_env.clone() {
@@ -12250,7 +12291,6 @@ fn bsc_flag_arity(flag: &str) -> Option<BscFlagArity> {
         | "-e"
         | "-reprint-source"
         | "-format"
-        | "-pp"
         | "-enable-experimental"
         | "-runtime-path"
         | "-warn-error" => BscFlagArity::String,
@@ -14081,6 +14121,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
         );
         raw_converter.set_no_assert_false(options.no_assert_false);
+        raw_converter.set_jsx_preserve(jsx_preserve);
         raw_converter.set_noassert(options.noassert);
         raw_converter.set_warning_config(tctx.warning_config.clone());
         if let Some(persistent_env) = tctx.persistent_env.clone() {

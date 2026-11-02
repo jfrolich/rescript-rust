@@ -16,7 +16,7 @@ use ahash::AHashMap;
 
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{
-    SMALL_INLINE_SIZE, lfunction_can_be_inlined, no_side_effects, size,
+    SMALL_INLINE_SIZE, lfunction_can_be_inlined, no_side_effects, size_upto,
 };
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
@@ -433,7 +433,7 @@ fn function_payload_needed(func: &LFunction) -> bool {
         InlineAttribute::Always => true,
         InlineAttribute::Never => false,
         InlineAttribute::Default => {
-            let body_size = size(&func.body);
+            let body_size = size_upto(10, &func.body);
             body_size < SMALL_INLINE_SIZE
                 || body_size < 10 && no_side_effects(&func.body)
                 || param_driven_destructuring_may_inline(func)

@@ -180,7 +180,6 @@ pub fn simple_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> O
                 ap_func: Box::new(new_func),
                 ap_args: new_args,
                 ap_info: apply.ap_info.clone(),
-                ap_transformed_jsx: apply.ap_transformed_jsx,
             }));
 
             // Add sequences for unused arguments
@@ -514,7 +513,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 .iter()
                 .map(|arg| rewrite_bounded_vars(substitution, arg, id_gen))
                 .collect();
-            Lambda::apply(func, args, apply.ap_info.clone(), apply.ap_transformed_jsx)
+            Lambda::apply(func, args, apply.ap_info.clone())
         }
         Lambda::Lfunction(func) => {
             let params = func
@@ -892,7 +891,6 @@ mod tests {
                     prim_name: name.to_string(),
                     arg_types: vec![],
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                    transformed_jsx: false,
                 },
                 vec![],
                 Location::none(),
@@ -987,7 +985,6 @@ mod tests {
                     prim_name: "exec".to_string(),
                     arg_types: vec![],
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                    transformed_jsx: false,
                 },
                 vec![Lambda::const_(Constant::string("subject"))],
                 Location::none(),

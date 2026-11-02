@@ -235,12 +235,27 @@ pub enum PatternDesc {
         Option<Box<RecordPatternRest>>,
     ),
 
+    /// Dict: `dict{"k1": P1, ..., "kn": ?Pn}`.
+    /// Entries are in source order, and their keys are distinct.
+    Tpat_dict(Vec<DictPatternEntry>),
+
     /// Array: `[| P1, ..., Pn |]`.
     Tpat_array(Vec<Pattern>),
 
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
     Tpat_or(Box<Pattern>, Box<Pattern>, Option<Box<RowDesc>>),
+}
+
+/// An entry of a dict pattern (compiler/ml/typedtree.mli `dict_pattern_entry`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DictPatternEntry {
+    pub tdp_key: Loc<String>,
+    /// Matches the key's value as an option, `None` when the key is absent:
+    /// `Some(P)` for `"k": P`, and `P` itself for `"k": ?P`.
+    pub tdp_pattern: Pattern,
+    /// Whether the entry is written `"k": ?P`.
+    pub tdp_optional: bool,
 }
 
 /// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
@@ -392,6 +407,9 @@ pub enum ExpressionDesc {
 
     /// Array literal: `[E1, ..., En]`.
     Texp_array(Vec<Expression>),
+
+    /// Dict literal: `dict{"k1": E1, ...E2}`.
+    Texp_dict(Vec<DictEntry>),
 
     /// If-then-else: `if E1 then E2 else E3`.
     Texp_ifthenelse(Box<Expression>, Box<Expression>, Option<Box<Expression>>),
@@ -1289,4 +1307,13 @@ mod node_size_tests {
         assert_eq!(size_of::<super::ExpressionDesc>(), 72);
         assert_eq!(size_of::<super::Expression>(), 112);
     }
+}
+
+/// An entry of a dict literal (compiler/ml/typedtree.mli `dict_entry`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DictEntry {
+    /// `"k": E`
+    Tdict_entry(Loc<String>, Expression),
+    /// `...E`
+    Tdict_spread(Expression),
 }

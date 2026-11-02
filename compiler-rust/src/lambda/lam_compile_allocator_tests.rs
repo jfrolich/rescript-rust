@@ -119,12 +119,11 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
             loc: Location::new_for_error("caller.res", 10, 20),
             status: ApplyStatus::Na,
         },
-        true,
     );
     let mut context = IndexedLambdaContext::from_lambda(application, []);
     let application_root = context.current_root();
     let argument_root = match context.store().snapshot(application_root) {
-        NodeSnapshot::Apply(_, args, _, _) => args[0],
+        NodeSnapshot::Apply(_, args, _) => args[0],
         _ => unreachable!(),
     };
     context.register_backend_roots([application_root]);
@@ -179,7 +178,6 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
             loc: Location::none(),
             status: ApplyStatus::Na,
         },
-        false,
     );
     let mut context = IndexedLambdaContext::from_lambda(application, []);
     let application_root = context.current_root();
@@ -209,7 +207,6 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
         field_name,
         args,
         info,
-        transformed_jsx,
         known_arity,
     } = prepared
     else {
@@ -219,7 +216,6 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
     assert_eq!(field_name, "run");
     assert_eq!(args.len(), 1);
     assert_eq!(info.status, ApplyStatus::Na);
-    assert!(!transformed_jsx);
     assert!(known_arity.is_none());
     assert!(
         compiler.cmj_arity_cache.contains_key(module.name()),

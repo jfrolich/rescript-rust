@@ -74,8 +74,6 @@ pub struct RawApply {
     pub ap_args: Vec<RawLambda>,
     /// Application metadata.
     pub ap_info: ApInfo,
-    /// Whether this was transformed from JSX.
-    pub ap_transformed_jsx: bool,
 }
 
 /// Raw Lambda IR expression.
@@ -383,7 +381,6 @@ impl RawLambda {
                     .map(RawLambda::from_lowered)
                     .collect(),
                 ap_info: apply.ap_info,
-                ap_transformed_jsx: apply.ap_transformed_jsx,
             })),
             Lambda::Lfunction(func) => RawLambda::Lfunction(Box::new(RawLFunction {
                 arity: func.arity,
@@ -505,7 +502,6 @@ impl RawLambda {
                     .map(RawLambda::into_lowered)
                     .collect(),
                 ap_info: apply.ap_info,
-                ap_transformed_jsx: apply.ap_transformed_jsx,
             })),
             RawLambda::Lfunction(func) => Lambda::Lfunction(Box::new(crate::lambda::LFunction {
                 arity: func.arity,

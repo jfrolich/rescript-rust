@@ -274,7 +274,6 @@ pub(crate) struct ApplyInput<'a> {
     pub(crate) function: LambdaInput<'a>,
     pub(crate) args: LambdaInputs<'a>,
     pub(crate) info: &'a ApInfo,
-    pub(crate) transformed_jsx: bool,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct FunctionInput<'a> {
@@ -338,7 +337,6 @@ impl<'a> LambdaInput<'a> {
                     function: LambdaInput::Recursive(&a.ap_func),
                     args: LambdaInputs::Recursive(&a.ap_args),
                     info: &a.ap_info,
-                    transformed_jsx: a.ap_transformed_jsx,
                 }),
                 Lambda::Lfunction(f) => LambdaInputView::Function(FunctionInput {
                     arity: f.arity,
@@ -426,11 +424,10 @@ impl<'a> LambdaInput<'a> {
                 NodeView::Var(id) => LambdaInputView::Var(id),
                 NodeView::GlobalModule(id) => LambdaInputView::GlobalModule(id),
                 NodeView::Const(c) => LambdaInputView::Const(c),
-                NodeView::Apply(f, a, i, j) => LambdaInputView::Apply(ApplyInput {
+                NodeView::Apply(f, a, i) => LambdaInputView::Apply(ApplyInput {
                     function: Self::Indexed { store, node: f },
                     args: LambdaInputs::Indexed { store, nodes: a },
                     info: i,
-                    transformed_jsx: j,
                 }),
                 NodeView::Function(arity, p, b, a, _) => LambdaInputView::Function(FunctionInput {
                     arity,

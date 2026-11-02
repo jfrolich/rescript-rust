@@ -91,7 +91,7 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
     }
 
     // Check for parsing attrs
-    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
+    if !expr.pexp_attributes.is_empty() {
         return ParenKind::Parenthesized;
     }
 
@@ -149,7 +149,7 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
+    if !expr.pexp_attributes.is_empty() {
         return ParenKind::Parenthesized;
     }
 
@@ -206,9 +206,7 @@ pub fn binary_expr_operand(arena: &ParseArena, is_lhs: bool, expr: &Expression) 
         _ if parsetree_viewer::is_ternary_expr(expr) => ParenKind::Parenthesized,
         ExpressionDesc::Pexp_assert(_) if is_lhs => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
-        _ if parsetree_viewer::has_printable_attributes(arena, &expr.pexp_attributes) => {
-            ParenKind::Parenthesized
-        }
+        _ if !expr.pexp_attributes.is_empty() => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
     }
 }
@@ -423,7 +421,7 @@ fn assert_or_await_expr_rhs_inner(
     in_await: bool,
     expr: &Expression,
 ) -> ParenKind {
-    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
+    if !expr.pexp_attributes.is_empty() {
         return ParenKind::Parenthesized;
     }
 
@@ -483,7 +481,7 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         return kind;
     }
 
-    if parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()) {
+    if !expr.pexp_attributes.is_empty() {
         return ParenKind::Parenthesized;
     }
 
@@ -665,17 +663,11 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
 /// Check if binary expression needs parentheses/braces.
 pub fn binary_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
-    binary_expr_with_attrs(arena, expr, !expr.pexp_attributes.is_empty())
-}
-
-/// [`binary_expr`] for `expr` with its attributes replaced by a list that is
-/// non-empty iff `has_attrs`; only that emptiness is read.
-pub fn binary_expr_with_attrs(arena: &ParseArena, expr: &Expression, has_attrs: bool) -> ParenKind {
     if let Some(kind) = braces_from_attr(arena, expr) {
         return kind;
     }
 
-    if has_attrs && parsetree_viewer::is_binary_expression(arena, expr) {
+    if !expr.pexp_attributes.is_empty() && parsetree_viewer::is_binary_expression(arena, expr) {
         ParenKind::Parenthesized
     } else {
         ParenKind::Nothing
@@ -722,15 +714,15 @@ pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
 /// A constraint that needs parens where `M: S` would not parse or would mean
 /// something else, e.g. after `include` or `module type of`. With attributes
 /// it prints its own.
-pub fn mod_constraint(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
+pub fn mod_constraint(mod_expr: &ModuleExpr) -> bool {
     matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(_, _))
-        && !parsetree_viewer::mod_expr_has_attributes(arena, mod_expr)
+        && !parsetree_viewer::mod_expr_has_attributes(mod_expr)
 }
 
 /// An applied module expression that needs parens: `(M: S)(X)`,
 /// `((Y) => M)(X)`, `(%ext)(X)`, `(await M)(X)`, and with attributes, which
 /// would otherwise apply to the whole application.
-pub fn mod_apply_callee(arena: &ParseArena, callee: &ModuleExpr) -> bool {
+pub fn mod_apply_callee(callee: &ModuleExpr) -> bool {
     match &*callee.pmod_desc {
         ModuleExprDesc::Pmod_constraint(..)
         | ModuleExprDesc::Pmod_functor(..)
@@ -738,7 +730,7 @@ pub fn mod_apply_callee(arena: &ParseArena, callee: &ModuleExpr) -> bool {
         ModuleExprDesc::Pmod_extension(ext) if matches!(&ext.1, Payload::PStr(items) if items.is_empty()) => {
             true
         }
-        _ => parsetree_viewer::mod_expr_has_attributes(arena, callee),
+        _ => parsetree_viewer::mod_expr_has_attributes(callee),
     }
 }
 

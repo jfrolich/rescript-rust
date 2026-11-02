@@ -880,10 +880,11 @@ pub struct TypeContext {
         crate::fast_hash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>,
     >,
 
-    /// Synthetic dict-pattern labels created by type-directed label lookup.
-    /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
-    /// pattern field is resolved; we model that with an append-only side table.
-    dict_pattern_labels_cache: RefCell<Vec<CachedRecordLabel>>,
+    /// The `lbl_all` arrays of labels built outside a type declaration
+    /// (`Dict_pattern.labels_of_keys`): `LabelArrayRef(n)` for `n >= 1` is
+    /// entry `n - 1`. Labels of declared records keep `LabelArrayRef(0)` and
+    /// resolve their array through the declaration.
+    label_arrays: RefCell<Vec<Vec<super::decl::LabelDescription>>>,
 
     /// Lident indices synthesized while filling omitted optional record fields.
     /// This avoids repeated reverse scans through the parse arena for large JSX
@@ -1224,7 +1225,7 @@ impl TypeContext {
                 crate::fast_hash::AHashMap::new(),
             ),
             qualified_record_label_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
-            dict_pattern_labels_cache: RefCell::new(Vec::new()),
+            label_arrays: RefCell::new(Vec::new()),
             synthesized_record_lidents: RefCell::new(crate::fast_hash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -3352,20 +3353,26 @@ impl TypeContext {
             .or_insert(lid);
     }
 
-    /// Replace the synthetic dict-pattern label cache.
-    pub fn set_dict_pattern_labels(&self, labels: Vec<CachedRecordLabel>) {
-        self.poison_store_build_for("set_dict_pattern_labels");
-        *self.dict_pattern_labels_cache.borrow_mut() = labels;
+    /// Store the labels built by `build`, which receives the `lbl_all`
+    /// reference they share (OCaml ties that knot by mutating `lbl_all`).
+    pub fn alloc_label_array(
+        &self,
+        build: impl FnOnce(super::decl::LabelArrayRef) -> Vec<super::decl::LabelDescription>,
+    ) -> Vec<super::decl::LabelDescription> {
+        self.poison_store_build_for("alloc_label_array");
+        let lbl_all = super::decl::LabelArrayRef(self.label_arrays.borrow().len() as u32 + 1);
+        let labels = build(lbl_all);
+        self.label_arrays.borrow_mut().push(labels.clone());
+        labels
     }
 
-    /// Number of synthetic dict-pattern labels created so far.
-    pub fn dict_pattern_label_count(&self) -> usize {
-        self.dict_pattern_labels_cache.borrow().len()
-    }
-
-    /// Snapshot the synthetic dict-pattern labels created so far.
-    pub fn get_dict_pattern_labels(&self) -> Vec<CachedRecordLabel> {
-        self.dict_pattern_labels_cache.borrow().clone()
+    /// The labels of `lbl_all` when it was stored by `alloc_label_array`.
+    pub fn label_all(
+        &self,
+        lbl_all: super::decl::LabelArrayRef,
+    ) -> Option<Vec<super::decl::LabelDescription>> {
+        let index = (lbl_all.0 as usize).checked_sub(1)?;
+        self.label_arrays.borrow().get(index).cloned()
     }
 
     // ========================================================================

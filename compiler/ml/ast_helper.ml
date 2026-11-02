@@ -138,6 +138,7 @@ module Pat = struct
   let construct ?loc ?attrs a b = mk ?loc ?attrs (Ppat_construct (a, b))
   let variant ?loc ?attrs a b = mk ?loc ?attrs (Ppat_variant (a, b))
   let record ?loc ?attrs ?rest a b = mk ?loc ?attrs (Ppat_record (a, b, rest))
+  let dict ?loc ?attrs a = mk ?loc ?attrs (Ppat_dict a)
   let array ?loc ?attrs a = mk ?loc ?attrs (Ppat_array a)
   let or_ ?loc ?attrs a b = mk ?loc ?attrs (Ppat_or (a, b))
   let constraint_ ?loc ?attrs a b = mk ?loc ?attrs (Ppat_constraint (a, b))
@@ -176,6 +177,7 @@ module Exp = struct
   let field ?loc ?attrs a b = mk ?loc ?attrs (Pexp_field (a, b))
   let setfield ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_setfield (a, b, c))
   let array ?loc ?attrs a = mk ?loc ?attrs (Pexp_array a)
+  let dict ?loc ?attrs a = mk ?loc ?attrs (Pexp_dict a)
   let ifthenelse ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_ifthenelse (a, b, c))
   let ternary ?loc ?attrs condition consequent alternate =
     mk ?loc ?attrs (Pexp_ternary (condition, consequent, alternate))

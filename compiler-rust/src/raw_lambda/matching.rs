@@ -733,6 +733,9 @@ fn normalize_pat_owned(q: &Pattern) -> Pattern {
             q.pat_env,
         ),
         PatternDesc::Tpat_or(..) => crate::misc::fatal_error("Parmatch.normalize_pat"),
+        PatternDesc::Tpat_dict(_) => {
+            crate::misc::fatal_error("Parmatch.normalize_pat: dict pattern")
+        }
     }
 }
 
@@ -943,46 +946,14 @@ fn record_all_labels(
     // compiler/ml/matching.ml:218-224 and 540-563.
 
     ctx_ref.and_then(|ctx| {
-        resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
-            .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
-            .or_else(|| {
-                resolve_labels_from_type(ctx, pat_type, pat_env)
-                    .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
-            })
-            .or_else(|| {
-                let cached = ctx.get_dict_pattern_labels();
-                if cached.is_empty() {
-                    return None;
-                }
-                let matches_cached = lbls.iter().all(|(_, lbl, _, _)| {
-                    cached
-                        .iter()
-                        .any(|(name, pos, _, _, _)| name == &lbl.lbl_name && *pos == lbl.lbl_pos)
-                });
-                if !matches_cached {
-                    return None;
-                }
-                Some(
-                    cached
-                        .into_iter()
-                        .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                            lbl_name: name.clone(),
-                            // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                            lbl_runtime_name: name,
-                            lbl_res: TypeExprRef(0),
-                            lbl_arg: TypeExprRef(0),
-                            lbl_mut: mutflag,
-                            lbl_optional: true,
-                            lbl_pos: pos,
-                            lbl_all: crate::types::decl::LabelArrayRef(0),
-                            lbl_repres: repr,
-                            lbl_private: crate::types::asttypes::PrivateFlag::Public,
-                            lbl_loc: crate::location::Location::none(),
-                            lbl_attributes: attrs,
-                        })
-                        .collect(),
-                )
-            })
+        ctx.label_all(first_lbl.lbl_all).or_else(|| {
+            resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
+                .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
+                .or_else(|| {
+                    resolve_labels_from_type(ctx, pat_type, pat_env)
+                        .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
+                })
+        })
     })
 }
 
@@ -1902,7 +1873,6 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                         loc: Location::none(),
                         ..ap.ap_info.clone()
                     },
-                    ap_transformed_jsx: ap.ap_transformed_jsx,
                 })))
             }
             RawLambda::Llet(LetKind::Alias, x, ex, body) => {
@@ -2183,7 +2153,7 @@ impl MakeKeyWriter {
                 self.write_raw(&ap.ap_func, out)?;
                 out.push_str(",[");
                 self.write_raw_list(&ap.ap_args, out)?;
-                write!(out, "],{:?},{})", ap.ap_info.status, ap.ap_transformed_jsx).ok()?;
+                write!(out, "],{:?})", ap.ap_info.status).ok()?;
                 Some(())
             }
             RawLambda::Llet(kind, x, ex, body) => {
@@ -3083,6 +3053,9 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
             }
             lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
         }
+        PatternDesc::Tpat_dict(entries) => entries
+            .iter()
+            .fold(r, |r, entry| extract_vars(r, &entry.tdp_pattern)),
         PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, extract_vars),
         PatternDesc::Tpat_array(pats) => pats.iter().fold(r, extract_vars),
         PatternDesc::Tpat_variant(_, Some(p), _) => extract_vars(r, p),
@@ -3106,6 +3079,9 @@ fn pattern_binds_vars(p: &Pattern) -> bool {
         PatternDesc::Tpat_record(lpats, _, rest) => {
             rest.is_some() || lpats.iter().any(|(_, _, pat, _)| pattern_binds_vars(pat))
         }
+        PatternDesc::Tpat_dict(entries) => entries
+            .iter()
+            .any(|entry| pattern_binds_vars(&entry.tdp_pattern)),
         PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_or(p, _, _) => {
             pattern_binds_vars(p)
         }
@@ -8303,6 +8279,9 @@ fn resolve_all_record_labels(
     }
 
     let first_lbl = &fields[0].1;
+    if let Some(all_labels) = ctx_ref.label_all(first_lbl.lbl_all) {
+        return all_labels;
+    }
 
     // OCaml passes `lbl.lbl_all` from the typed pattern directly to
     // `divide_record` (compiler/ml/matching.ml:2564-2568). Rust reconstructs
@@ -8394,32 +8373,6 @@ fn resolve_labels_from_type(
         _ => return None,
     };
     drop(desc);
-
-    if path.same(&crate::types::predef::path_dict()) {
-        let cached = ctx_ref.get_dict_pattern_labels();
-        if !cached.is_empty() {
-            return Some(
-                cached
-                    .into_iter()
-                    .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
-                        lbl_name: name.clone(),
-                        // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                        lbl_runtime_name: name,
-                        lbl_res: TypeExprRef(0),
-                        lbl_arg: TypeExprRef(0),
-                        lbl_mut: mutflag,
-                        lbl_optional: true,
-                        lbl_pos: pos,
-                        lbl_all: crate::types::decl::LabelArrayRef(0),
-                        lbl_repres: repr,
-                        lbl_private: crate::types::asttypes::PrivateFlag::Public,
-                        lbl_loc: crate::location::Location::none(),
-                        lbl_attributes: attrs,
-                    })
-                    .collect(),
-            );
-        }
-    }
 
     if let Some(labels) = ctx_ref.get_record_label_descriptions(&path) {
         return Some(labels.as_ref().clone());
@@ -8681,6 +8634,9 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
         PatternDesc::Tpat_record(lpats, _, _) => {
             lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p))
         }
+        PatternDesc::Tpat_dict(entries) => entries
+            .iter()
+            .any(|entry| find_in_pat(pred, &entry.tdp_pattern)),
         PatternDesc::Tpat_or(p, q, _) => find_in_pat(pred, p) || find_in_pat(pred, q),
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_var(_, _)
@@ -8920,6 +8876,25 @@ pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
 
 /// Compile a match for a function body.
 /// Equivalent to OCaml's `for_function`.
+/// `Matching.lower_dict_patterns`: run `f` on the cases with the dict
+/// patterns of the match lowered to record patterns, see `Dict_pattern`.
+/// `lower_dict_patterns pat_act_list`, passed to `f`.
+pub(crate) fn with_lowered_dict_patterns<R>(
+    ctx_ref: &TypeContext,
+    pat_act_list: Vec<(&Pattern, CaseAction)>,
+    f: impl FnOnce(Vec<(&Pattern, CaseAction)>) -> R,
+) -> R {
+    let pats: Vec<&Pattern> = pat_act_list.iter().map(|(pat, _)| *pat).collect();
+    let lowering = crate::types::dict_pattern::Lowering::new(ctx_ref, &pats);
+    let lowered: Vec<std::borrow::Cow<'_, Pattern>> =
+        pats.iter().map(|pat| lowering.lower(pat)).collect();
+    f(lowered
+        .iter()
+        .zip(pat_act_list)
+        .map(|(pat, (_, act))| (pat.as_ref(), act))
+        .collect())
+}
+
 pub fn for_function(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
@@ -8930,15 +8905,17 @@ pub fn for_function(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let loc_clone = loc;
-    compile_matching(
-        ctx_ref,
-        arena,
-        || partial_function(arena, loc_clone),
-        param,
-        pat_act_list,
-        partial,
-        next_raise_count,
-    )
+    with_lowered_dict_patterns(ctx_ref, pat_act_list, |pat_act_list| {
+        compile_matching(
+            ctx_ref,
+            arena,
+            || partial_function(arena, loc_clone),
+            param,
+            pat_act_list,
+            partial,
+            next_raise_count,
+        )
+    })
 }
 
 /// Compile a match for a try-with handler.
@@ -8951,21 +8928,23 @@ pub fn for_trywith(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let param_clone = param.clone();
-    compile_matching(
-        ctx_ref,
-        arena,
-        || {
-            RawLambda::Lprim(Box::new(RawPrimInfo {
-                primitive: Primitive::Praise,
-                args: vec![param_clone],
-                loc: Location::none(),
-            }))
-        },
-        param,
-        pat_act_list,
-        Partial::Partial,
-        next_raise_count,
-    )
+    with_lowered_dict_patterns(ctx_ref, pat_act_list, |pat_act_list| {
+        compile_matching(
+            ctx_ref,
+            arena,
+            || {
+                RawLambda::Lprim(Box::new(RawPrimInfo {
+                    primitive: Primitive::Praise,
+                    args: vec![param_clone],
+                    loc: Location::none(),
+                }))
+            },
+            param,
+            pat_act_list,
+            Partial::Partial,
+            next_raise_count,
+        )
+    })
 }
 
 /// Simple let matching.
@@ -8980,14 +8959,20 @@ pub fn simple_for_let(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let loc_clone = loc;
-    compile_matching(
+    with_lowered_dict_patterns(
         ctx_ref,
-        arena,
-        || partial_function(arena, loc_clone),
-        param,
         vec![(pat, CaseAction::unguarded(body))],
-        Partial::Partial,
-        next_raise_count,
+        |pat_act_list| {
+            compile_matching(
+                ctx_ref,
+                arena,
+                || partial_function(arena, loc_clone),
+                param,
+                pat_act_list,
+                Partial::Partial,
+                next_raise_count,
+            )
+        },
     )
 }
 
@@ -9420,6 +9405,28 @@ fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
 /// Compile a multiple match expression.
 /// Equivalent to OCaml's `for_multiple_match`.
 pub fn for_multiple_match(
+    ctx_ref: &TypeContext,
+    arena: &ParseArena,
+    loc: Location,
+    paraml: Vec<RawLambda>,
+    pat_act_list: Vec<(&Pattern, CaseAction)>,
+    partial: Partial,
+    next_raise_count: &mut i32,
+) -> RawLambda {
+    with_lowered_dict_patterns(ctx_ref, pat_act_list, |pat_act_list| {
+        for_multiple_match_lowered(
+            ctx_ref,
+            arena,
+            loc,
+            paraml,
+            pat_act_list,
+            partial,
+            next_raise_count,
+        )
+    })
+}
+
+fn for_multiple_match_lowered(
     ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,

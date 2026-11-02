@@ -620,12 +620,6 @@ pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
     (mknoloc(str_idx), Payload::PStr(Box::default()))
 }
 
-/// Create the dict-spread attribute `@res.dictSpread` (upstream #8369).
-pub fn dict_spread_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.dictSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
 // ============================================================================
 // Parsing Context
 // ============================================================================

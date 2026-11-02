@@ -1167,9 +1167,10 @@ impl<'a> Printtyp<'a> {
                 Some(crate::types::VariantLiteralTag::Undefined) => {
                     Some("@as(undefined)".to_string())
                 }
-                Some(crate::types::VariantLiteralTag::String(s)) => {
-                    Some(format!("@as(\"{}\")", ocaml_string_escaped(&s)))
-                }
+                Some(crate::types::VariantLiteralTag::String(s)) => Some(format!(
+                    "@as(\"{}\")",
+                    crate::string_literal::ocaml_escaped(&s)
+                )),
                 Some(crate::types::VariantLiteralTag::Int(i)) => Some(format!("@as({i})")),
                 Some(crate::types::VariantLiteralTag::Float(f)) => Some(format!("@as({f})")),
                 Some(crate::types::VariantLiteralTag::Bool(b)) => Some(format!("@as({b})")),
@@ -1485,24 +1486,6 @@ fn tree_of_rec(rs: crate::types::decl::RecStatus) -> OutRecStatus {
         crate::types::decl::RecStatus::TrecFirst => OutRecStatus::Orec_first,
         crate::types::decl::RecStatus::TrecNext => OutRecStatus::Orec_next,
     }
-}
-
-/// OCaml `String.escaped`, as used by `Printf "%S"`.
-fn ocaml_string_escaped(s: &str) -> String {
-    let mut out = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\n' => out.push_str("\\n"),
-            b'\t' => out.push_str("\\t"),
-            b'\r' => out.push_str("\\r"),
-            8 => out.push_str("\\b"),
-            32..=126 => out.push(byte as char),
-            _ => out.push_str(&format!("\\{byte:03}")),
-        }
-    }
-    out
 }
 
 /// `Ctype.flatten_fields` (compiler/ml/ctype.ml): the chain is accumulated
@@ -1958,7 +1941,7 @@ fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> 
         InlineConst::ConstString(s) => print_string_literal_doc(s),
         InlineConst::ConstBool(b) => Doc::text(if *b { "true" } else { "false" }),
         InlineConst::ConstInt(i) => Doc::text(i.to_string()),
-        // res_outcome_printer.ml: `(if positive then "" else "-") ^ digits ^ "n"`.
+        // res_outcome_printer.ml: `Bigint_utils.to_string positive digits ^ "n"`.
         InlineConst::ConstBigint { positive, digits } => {
             Doc::text(format!("{}{}n", if *positive { "" } else { "-" }, digits))
         }

@@ -122,7 +122,7 @@ pub(crate) fn collect_occurs(
                 }
                 count(store, occ, local, body, hash_capacity);
             }
-            NodeSnapshot::Apply(function, args, _, _) => {
+            NodeSnapshot::Apply(function, args, _) => {
                 if let NodeSnapshot::Function(_, params, body, attr, _) = store.snapshot(function)
                     && params.len() == args.len()
                     && !attr.async_

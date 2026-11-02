@@ -161,7 +161,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             let first = simplify(store, state, first);
             append_rebuilt(store, NodeSnapshot::Sequence(first, second))
         }
-        NodeSnapshot::Apply(function, args, info, jsx) => {
+        NodeSnapshot::Apply(function, args, info) => {
             if let NodeSnapshot::Function(_, params, body, attr, _) = store.snapshot(function)
                 && params.len() == args.len()
                 && !attr.async_
@@ -176,7 +176,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 .map(|node| simplify(store, state, node))
                 .collect();
             let function = simplify(store, state, function);
-            append_rebuilt(store, NodeSnapshot::Apply(function, args, info, jsx))
+            append_rebuilt(store, NodeSnapshot::Apply(function, args, info))
         }
         NodeSnapshot::Prim(Primitive::Pstringadd, args, loc) if args.len() == 2 => {
             let left = simplify(store, state, args[0]);
@@ -384,7 +384,6 @@ mod tests {
                 prim_name: "effect".into(),
                 arg_types: vec![],
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                transformed_jsx: false,
             },
             vec![],
             Location::none(),
@@ -442,7 +441,6 @@ mod tests {
                 prim_name: "must_not_run".into(),
                 arg_types: vec![],
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                transformed_jsx: false,
             },
             vec![],
             Location::new_for_error("lets.res", 1, 2),
@@ -501,7 +499,6 @@ mod tests {
                     loc: Location::new_for_error("lets.res", 3, 4),
                     status: crate::lambda::ApplyStatus::Na,
                 },
-                true,
             )
         };
         assert_exact(
@@ -538,7 +535,6 @@ mod tests {
                 loc: Location::none(),
                 status: crate::lambda::ApplyStatus::Na,
             },
-            false,
         );
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.simplify_lets();
@@ -566,7 +562,6 @@ mod tests {
                     prim_name: "unselected".into(),
                     arg_types: vec![],
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                    transformed_jsx: false,
                 },
                 vec![],
                 Location::none(),
@@ -669,7 +664,6 @@ mod tests {
                     loc: Location::new_for_error("pipeline.res", 10, 20),
                     status: crate::lambda::ApplyStatus::Na,
                 },
-                true,
             ),
         );
         let generator = IdGenerator::with_start_stamp(200);
@@ -678,7 +672,7 @@ mod tests {
         context.simplify_exits(&generator);
         context.collect_info();
         let mut inline = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut inline);
+        context.simplify_alias(&generator, &mut inline);
         context.deep_flatten(&generator);
         let mut arity = |_: &Ident, _: &str| None;
         context.alpha_conversion_with_external_arity(&generator, &mut arity);
@@ -706,7 +700,6 @@ mod tests {
                         loc: Location::new_for_error("pipeline.res", 10, 20),
                         status: crate::lambda::ApplyStatus::InferFull,
                     },
-                    false,
                 ),
                 FunctionAttribute::default(),
                 crate::location::Location::none(),
@@ -743,13 +736,13 @@ mod tests {
                 superseded_nodes: 12,
                 hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1420,
-                side_payload_shallow_capacity_bytes: 1920,
+                side_payload_shallow_occupied_bytes: 1400,
+                side_payload_shallow_capacity_bytes: 1888,
                 nested_heap_bytes_included: false,
-                current_live_side_payload_shallow_bytes: 464,
+                current_live_side_payload_shallow_bytes: 460,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 120,
-                superseded_unreachable_side_payload_shallow_bytes: 836,
+                superseded_unreachable_side_payload_shallow_bytes: 820,
             }
         );
     }

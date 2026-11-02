@@ -37,7 +37,8 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
-    ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, ModuleType,
+    ArrowArg, Constant, DictEntry as TypedDictEntry, DictPatternEntry as TypedDictPatternEntry,
+    EnvRef, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeConstraint, ModuleTypeDesc, Pattern, PatternDesc, StructureItem, StructureItemDesc,
     TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
 };
@@ -49,8 +50,6 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
-const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
 
 #[derive(Debug, Clone)]
@@ -324,12 +323,6 @@ fn convert_located_stridx(loc: &Located<StrIdx>, arena: &ParseArena) -> Located<
     }
 }
 
-fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
-}
-
 fn has_warn_on_literal_pattern_attribute(attrs: &[crate::types::decl::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         matches!(
@@ -343,6 +336,46 @@ fn is_dict_type_path(path: &Path) -> bool {
     // Must match the predef dict type exactly.
     // OCaml uses `Path.same tpath Predef.path_dict` which compares stamps.
     path.same(&crate::types::predef::path_dict())
+}
+
+/// `check_no_record_syntax_on_dict` (typecore.ml): record syntax on a dict,
+/// e.g. `let d: dict<int> = {foo: 1}`, points to `dict{...}`. `first_lid` is
+/// the label of the first field.
+fn check_no_record_syntax_on_dict(
+    tctx: &TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    ty: TypeExprRef,
+    first_lid: Option<LidentIdx>,
+) -> TypeCoreResult<()> {
+    match first_lid {
+        Some(lid) if expands_to_dict(tctx.type_ctx, env, ty) => {
+            let key = tctx
+                .arena
+                .get_string(tctx.arena.get_longident(lid).last_idx());
+            Err(TypeCoreError::RecordSyntaxOnDictType {
+                loc,
+                key: key.to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `Parmatch.is_dict_pattern`: a lowered dict pattern, a record pattern of the
+/// `dict` type.
+fn typed_pattern_is_dict(ctx: &TypeContext, pat: &Pattern) -> bool {
+    matches!(pat.pat_desc, PatternDesc::Tpat_record(..))
+        && ctx
+            .get_typed_env(pat.pat_env)
+            .is_some_and(|env| expands_to_dict(ctx, &env, pat.pat_type))
+}
+
+/// `(expand_head env ty).desc` is `Tconstr (path, _, _)` with
+/// `Path.same path Predef.path_dict`.
+fn expands_to_dict(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    matches!(&*ctx.get_desc(expanded), TypeDesc::Tconstr { path, .. } if is_dict_type_path(path))
 }
 
 /// Match OCaml polymorphic compare over `Longident.t`:
@@ -826,6 +859,13 @@ pub enum TypeCoreError {
 
     /// Field access on dict type.
     FieldAccessOnDictType { loc: LocIdx },
+
+    /// Record syntax on a dict, e.g. `let d: dict<int> = {foo: 1}`
+    /// (`Record_syntax_on_dict_type`).
+    RecordSyntaxOnDictType { loc: LocIdx, key: String },
+
+    /// A key matched twice in a dict pattern (`Dict_key_multiply_defined`).
+    DictKeyMultiplyDefined { loc: LocIdx, key: String },
 
     /// Unbound record field access.
     UnboundRecordField {
@@ -3898,6 +3938,43 @@ fn push_synthetic_pat(arena: &ParseArena, pat: ParsedPattern) -> crate::parse_ar
     arena.push_typecheck_pattern(pat)
 }
 
+/// typecore.ml `is_from_parmatch`: a constructor of a counter-example rebuilt
+/// by `Parmatch.Conv`.
+fn is_from_parmatch(arena: &ParseArena, pat: &ParsedPattern) -> bool {
+    match &*pat.ppat_desc {
+        crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
+            match arena.get_longident(lid.txt) {
+                Longident::Lident(name) => arena.get_string(*name).starts_with("#$"),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// typecore.ml `wrap_some`: the pattern of an optional field, `Some(pat)`.
+fn wrap_some(
+    arena: &ParseArena,
+    pat_idx: crate::parse_arena::PatIdx,
+) -> crate::parse_arena::PatIdx {
+    let loc = arena.get_pat(pat_idx).ppat_loc;
+    let lid = Located {
+        txt: arena.predef_some_lid(),
+        loc: arena.none_loc(),
+    };
+    push_synthetic_pat(
+        arena,
+        ParsedPattern {
+            ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_construct(
+                lid,
+                crate::parser::ast::ctor_args(vec![pat_idx], loc),
+            )),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        },
+    )
+}
+
 /// typecore.ml `normalize_constructor_pat_args`: the parser keeps the
 /// syntactic arguments; after disambiguation `C((a, b))` and `C(a, b)` are
 /// equivalent, so a lone tuple spreads over a multi-argument constructor
@@ -4738,6 +4815,61 @@ fn type_pattern_inner(
 
             Ok(Pattern::new(
                 PatternDesc::Tpat_array(typed_pats),
+                loc,
+                expected_ty,
+                pat_env_ref,
+                pat.ppat_attributes.clone(),
+            ))
+        }
+
+        PD::Ppat_dict(entries) => {
+            // typecore.ml Ppat_dict: an entry matches its key's value as an
+            // option, `None` when the key is absent, like an optional record
+            // field.
+            let mut seen = HashSet::new();
+            for entry in entries.iter() {
+                let key = tctx.arena.get_string(entry.pdp_key.txt);
+                if !seen.insert(key) {
+                    return Err(TypeCoreError::DictKeyMultiplyDefined {
+                        loc: entry.pdp_key.loc,
+                        key: key.to_string(),
+                    });
+                }
+            }
+            let ty_value = ctx.new_var(None);
+            let ty_option = ctx.new_constr(crate::types::predef::path_option(), vec![ty_value]);
+            let mut typed_entries = Vec::with_capacity(entries.len());
+            for entry in entries.iter() {
+                let sarg = if entry.pdp_optional
+                    || is_from_parmatch(tctx.arena, tctx.arena.get_pat(entry.pdp_pattern))
+                {
+                    entry.pdp_pattern
+                } else {
+                    wrap_some(tctx.arena, entry.pdp_pattern)
+                };
+                let tdp_pattern = type_pattern_inner(
+                    tctx,
+                    env,
+                    tctx.arena.get_pat(sarg),
+                    ty_option,
+                    mode,
+                    allow_existentials,
+                    state,
+                    explode,
+                )?;
+                typed_entries.push(TypedDictPatternEntry {
+                    tdp_key: Located {
+                        txt: tctx.arena.get_string(entry.pdp_key.txt).to_string(),
+                        loc: entry.pdp_key.loc,
+                    },
+                    tdp_pattern,
+                    tdp_optional: entry.pdp_optional,
+                });
+            }
+            let dict_ty = ctx.new_constr(crate::types::predef::path_dict(), vec![ty_value]);
+            unify_pattern_types(tctx, loc, dict_ty, expected_ty)?;
+            Ok(Pattern::new(
+                PatternDesc::Tpat_dict(typed_entries),
                 loc,
                 expected_ty,
                 pat_env_ref,
@@ -5972,22 +6104,24 @@ fn type_pattern_record(
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
-    let has_dict_pattern_attr = has_dict_pattern_attribute(tctx.arena, &pat.ppat_attributes);
+    check_no_record_syntax_on_dict(
+        tctx,
+        env,
+        loc,
+        expected_ty,
+        fields.first().map(|field| field.lid.txt),
+    )?;
     let record_rest = record_rest.cloned();
     let fields = qualify_unqualified_pattern_record_fields(tctx, fields);
 
-    // OCaml: dict patterns are forced to type dict<'a>, independent of expected_ty shape.
-    // This enables field-label disambiguation through the dict magic field.
     // OCaml Ppat_record (typecore.ml:1502-1511): `opath`/`record_ty` come
     // from `extract_concrete_record env expected_ty`; a non-record expected
     // type gives `(None, newvar ())`, unified with `expected_ty` after the
     // labels (typecore.ml:1560).
-    let record_is_concrete = has_dict_pattern_attr
-        || extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx)
+    let record_is_concrete =
+        extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx)
             .is_some();
-    let record_ty = if has_dict_pattern_attr {
-        ctx.new_constr(crate::types::predef::path_dict(), vec![ctx.new_var(None)])
-    } else if record_is_concrete {
+    let record_ty = if record_is_concrete {
         expected_ty
     } else {
         ctx.new_var(None)
@@ -6062,7 +6196,7 @@ fn type_pattern_record(
         // scope is first reduced by every field name of the pattern
         // (`disambiguate_label_by_ids`, record patterns pass `closed = false`),
         // and `Label.disambiguate` then takes the first remaining label.
-        let by_ids_label = if !record_is_concrete && !has_dict_pattern_attr {
+        let by_ids_label = if !record_is_concrete {
             let module_labels = match &resolved_lid {
                 Longident::Ldot(module_lid, _) => with_resolved_module_components_for_lid(
                     module_lid,
@@ -6112,7 +6246,6 @@ fn type_pattern_record(
                     None,
                 )
             })
-            .map(|label| (label, false))
             .or_else(|| {
                 // OCaml `lookup_from_type` (typecore.ml:852-891) only matches
                 // unqualified labels; a qualified miss stays unbound.
@@ -6133,17 +6266,9 @@ fn type_pattern_record(
                     // deferred field-path forces after pattern typing.
                     false,
                 )
-                // `disambiguate_label` already appended the dict label.
-                .map(|label| (label, true))
             });
 
-        let label = disambiguated.map(|(env_label, materialized)| {
-            if has_dict_pattern_attr && !materialized {
-                materialize_dict_pattern_label(ctx, &env_label, &field_name)
-            } else {
-                env_label
-            }
-        });
+        let label = disambiguated;
         // `Label.disambiguate ~warn` with no `opath` (typecore.ml:910-918),
         // collected by `disambiguate_record_elem_list` (typecore.ml:1010-1016);
         // record patterns pass `closed = false` (typecore.ml:1551).
@@ -6212,9 +6337,7 @@ fn type_pattern_record(
     // OCaml `disambiguate_record_elem_list` (typecore.ml:1000-1021) resolves
     // every label, raising `Wrong_name`/unbound-label errors, before
     // `type_record_elem_list` sorts the fields and types their patterns.
-    if !has_dict_pattern_attr
-        && let Some(field) = pending_fields.iter().find(|field| field.label.is_none())
-    {
+    if let Some(field) = pending_fields.iter().find(|field| field.label.is_none()) {
         return Err(record_pattern_unresolved_label_error(
             tctx,
             env,
@@ -6275,50 +6398,23 @@ fn type_pattern_record(
                 }
                 (env_label, ty_arg, vars, true)
             } else {
-                if !has_dict_pattern_attr {
-                    return Err(record_pattern_unresolved_label_error(
-                        tctx,
-                        env,
-                        record_ty,
-                        expected_ty,
-                        &field.lid,
-                        field.field_name,
-                    ));
-                }
-                let field_ty = ctx.new_var(None);
-                let label_desc = crate::types::LabelDescription {
-                    lbl_name: field.field_name.clone(),
-                    // typecore.ml `Label` name choice: `lbl_runtime_name = name`.
-                    lbl_runtime_name: field.field_name,
-                    lbl_res: record_ty,
-                    lbl_arg: field_ty,
-                    lbl_mut: crate::types::MutableFlag::Immutable,
-                    lbl_optional: field.opt,
-                    lbl_pos: field.source_pos,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                    lbl_private: crate::types::PrivateFlag::Public,
-                    lbl_loc: tctx.arena.to_location(field.lid.loc),
-                    lbl_attributes: vec![],
-                };
-                (label_desc, field_ty, Vec::new(), false)
+                return Err(record_pattern_unresolved_label_error(
+                    tctx,
+                    env,
+                    record_ty,
+                    expected_ty,
+                    &field.lid,
+                    field.field_name,
+                ));
             };
 
         // process_optional_label: if the label is optional and the user did NOT write '?',
         // wrap the pattern in Some(...) before type checking.
         // This matches OCaml's typecore.ml process_optional_label behavior.
         let parsed_pat = tctx.arena.get_pat(field.pat);
-        // `is_from_pamatch` (typecore.ml:1522-1526): Parmatch counter-examples
-        // already carry the optional layer as a `#$` constructor.
-        let is_from_pamatch = match &*parsed_pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
-                match tctx.arena.get_longident(lid.txt) {
-                    Longident::Lident(name) => tctx.arena.get_string(*name).starts_with("#$"),
-                    _ => false,
-                }
-            }
-            _ => false,
-        };
+        // `is_from_parmatch`: Parmatch counter-examples already carry the
+        // optional layer as a `#$` constructor.
+        let is_from_pamatch = is_from_parmatch(tctx.arena, parsed_pat);
         let typed_pat = if label_desc.lbl_optional && !field.opt && !is_from_pamatch {
             // field_ty is option<T> — extract T to type-check the inner pattern
             let inner_ty =
@@ -6391,10 +6487,8 @@ fn type_pattern_record(
         typed_fields.push((field.lid, Arc::new(label_desc), typed_pat, field.opt));
     }
 
-    if !has_dict_pattern_attr {
-        if let Some((_, label_desc, _, _)) = typed_fields.first() {
-            let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res);
-        }
+    if let Some((_, label_desc, _, _)) = typed_fields.first() {
+        let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res);
     }
 
     // Invariant: records are sorted in the typed tree (by label position)
@@ -6423,7 +6517,6 @@ fn type_pattern_record(
     // `check_recordpat_labels` (typecore.ml:1113-1117) does nothing for an
     // empty label list.
     if closed_flag == crate::parser::ast::ClosedFlag::Closed
-        && !has_dict_pattern_attr
         && record_rest.is_none()
         && !typed_fields.is_empty()
     {
@@ -8074,6 +8167,46 @@ fn type_expect_with_recarg_unscoped<'a>(
             ))
         }
 
+        // compiler/ml/typecore.ml Pexp_dict: the values have the type of the
+        // dict's values, the spreads its type; both built at generic level.
+        ED::Pexp_dict(entries) => {
+            let dict_type =
+                |ty| ctx.new_generic_constr(crate::types::predef::path_dict(), vec![ty]);
+            let ty = ctx.new_generic_var(None);
+            unify_expression_types(tctx, loc, dict_type(ty), expected_ty, None)?;
+            let mut typed_entries = Vec::with_capacity(entries.len());
+            for entry in entries.iter() {
+                typed_entries.push(match entry {
+                    crate::parser::ast::DictEntry::Pdict_entry(key, svalue) => {
+                        TypedDictEntry::Tdict_entry(
+                            Located {
+                                txt: tctx.arena.get_string(key.txt).to_string(),
+                                loc: key.loc,
+                            },
+                            type_expect(tctx, env, tctx.arena.get_expr(*svalue), ty, None)?,
+                        )
+                    }
+                    crate::parser::ast::DictEntry::Pdict_spread(sspread) => {
+                        TypedDictEntry::Tdict_spread(type_expect(
+                            tctx,
+                            env,
+                            tctx.arena.get_expr(*sspread),
+                            dict_type(ty),
+                            None,
+                        )?)
+                    }
+                });
+            }
+            let exp_type = crate::types::instance(ctx, expected_ty);
+            Ok(Expression::new(
+                ExpressionDesc::Texp_dict(typed_entries),
+                loc,
+                exp_type,
+                exp_env_ref,
+                expr.pexp_attributes.clone(),
+            ))
+        }
+
         // compiler/ml/typecore.ml Pexp_template: validate every segment, type
         // the values as string-concatenation operands.
         ED::Pexp_template(template) => {
@@ -9249,36 +9382,17 @@ fn translate_unified_ops(
 }
 
 /// Mirrors OCaml `should_unify_expected_result_before_typing_lowered_apply`.
-/// True when the application is a desugared dict literal or async wrapper
-/// whose expected result type should be threaded into the call before its
-/// arguments are typed.
+/// True when the application is an async wrapper whose expected result type
+/// should be threaded into the call before its arguments are typed.
 fn should_unify_expected_result_before_typing_lowered_apply(
-    tctx: &TypeCheckContext<'_>,
     typed_funct: &Expression,
     args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
 ) -> bool {
-    let path = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => path,
-        _ => return false,
-    };
-    let path_name = if path.name_eq("Primitive_dict.make") {
-        "Primitive_dict.make"
-    } else if path.name_eq("Primitive_promise.unsafe_async") {
-        "Primitive_promise.unsafe_async"
-    } else {
-        return false;
-    };
-    match path_name {
-        "Primitive_dict.make" => {
-            args.len() == 1
+    match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => {
+            path.name_eq("Primitive_promise.unsafe_async")
+                && args.len() == 1
                 && matches!(args[0].0, ArgLabel::Nolabel)
-                && matches!(
-                    *tctx.arena.get_expr(args[0].1).pexp_desc,
-                    crate::parser::ast::ExpressionDesc::Pexp_array(_)
-                )
-        }
-        "Primitive_promise.unsafe_async" => {
-            args.len() == 1 && matches!(args[0].0, ArgLabel::Nolabel)
         }
         _ => false,
     }
@@ -9711,7 +9825,7 @@ fn type_application(
     // application during parsing/PPX. Thread the expected result type into
     // the application before typing its arguments so element/value types
     // can be inferred from the surrounding context.
-    if should_unify_expected_result_before_typing_lowered_apply(tctx, &typed_funct, args) {
+    if should_unify_expected_result_before_typing_lowered_apply(&typed_funct, args) {
         if let Some((_arg_ty, ty_res)) =
             filter_arrow_for_lowered_apply(tctx, env, typed_funct.exp_type, args.len())
         {
@@ -10444,7 +10558,11 @@ fn run_unused_check(
         .collect();
     parmatch_check_unused(tctx, env, level, expected_ty, &refs);
     if check_ambiguous {
-        // Parmatch.check_ambiguous_bindings (typecore.ml:4486).
+        // Parmatch.check_ambiguous_bindings (typecore.ml:4486), which lowers
+        // the dict patterns of the cases.
+        let pats: Vec<&Pattern> = cases.iter().map(|case| case.lhs).collect();
+        let lowering = crate::types::dict_pattern::Lowering::new(tctx.type_ctx, &pats);
+        let lowered: Vec<_> = pats.iter().map(|pat| lowering.lower(pat)).collect();
         let oracle = TypecoreParmatchOracle {
             tctx: &mut *tctx,
             env,
@@ -10456,8 +10574,9 @@ fn run_unused_check(
         let mut pm = crate::types::parmatch::Parmatch::new(oracle);
         let cases: Vec<_> = cases
             .into_iter()
-            .map(|case| crate::types::parmatch::AmbiguousCase {
-                lhs: case.lhs,
+            .zip(&lowered)
+            .map(|(case, lhs)| crate::types::parmatch::AmbiguousCase {
+                lhs: lhs.as_ref(),
                 guard_idents: case.guard_idents,
             })
             .collect();
@@ -10512,6 +10631,15 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
             for item in items {
                 collect_expression_ident_heads(item, ids);
+            }
+        }
+        ExpressionDesc::Texp_dict(entries) => {
+            for entry in entries {
+                match entry {
+                    TypedDictEntry::Tdict_entry(_, e) | TypedDictEntry::Tdict_spread(e) => {
+                        collect_expression_ident_heads(e, ids)
+                    }
+                }
             }
         }
         ExpressionDesc::Texp_construct(_, _, args) => {
@@ -10815,6 +10943,9 @@ fn typed_pattern_has_variant(pat: &Pattern) -> bool {
         PatternDesc::Tpat_record(fields, _, _) => fields
             .iter()
             .any(|(_, _, field_pat, _)| typed_pattern_has_variant(field_pat)),
+        PatternDesc::Tpat_dict(entries) => entries
+            .iter()
+            .any(|entry| typed_pattern_has_variant(&entry.tdp_pattern)),
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
             false
         }
@@ -10838,16 +10969,19 @@ fn parmatch_pressure_variants(tctx: &mut TypeCheckContext<'_>, env: &Env, patl: 
     let Some(first) = patl.first() else {
         return;
     };
+    let expected_ty = first.pat_type;
+    let lowering = crate::types::dict_pattern::Lowering::new(tctx.type_ctx, patl);
+    let lowered: Vec<_> = patl.iter().map(|pat| lowering.lower(pat)).collect();
     let oracle = TypecoreParmatchOracle {
         tctx,
         env,
-        expected_ty: first.pat_type,
+        expected_ty,
         level: 0,
         partial_explode: 0,
         none_type: None,
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle);
-    let imported: Vec<_> = patl.iter().map(|pat| pm.import(pat)).collect();
+    let imported: Vec<_> = lowered.iter().map(|pat| pm.import(pat)).collect();
     pm.pressure_variants(EnvRef(0), &imported);
 }
 
@@ -11568,6 +11702,16 @@ fn finalize_variant_in_pattern(
                 finalize_variant_in_pattern(tctx, env, field_pat, convert_closed_reither);
             }
         }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                finalize_variant_in_pattern(
+                    tctx,
+                    env,
+                    &mut entry.tdp_pattern,
+                    convert_closed_reither,
+                );
+            }
+        }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
     }
 }
@@ -11630,6 +11774,13 @@ fn pattern_contains_generalized_constructor(
         }),
         crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(field.pat))
+        }),
+        crate::parser::ast::PatternDesc::Ppat_dict(entries) => entries.iter().any(|entry| {
+            pattern_contains_generalized_constructor(
+                tctx,
+                env,
+                tctx.arena.get_pat(entry.pdp_pattern),
+            )
         }),
         crate::parser::ast::PatternDesc::Ppat_or(left, right) => {
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*left))
@@ -11777,6 +11928,16 @@ fn collect_lident_idents_in_expression(
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => {
             for item in items.iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*item), out);
+            }
+        }
+        ED::Pexp_dict(entries) => {
+            for entry in entries.iter() {
+                match entry {
+                    crate::parser::ast::DictEntry::Pdict_entry(_, e)
+                    | crate::parser::ast::DictEntry::Pdict_spread(e) => {
+                        collect_lident_idents_in_expression(arena, arena.get_expr(*e), out)
+                    }
+                }
             }
         }
         ED::Pexp_construct(_, args) => {
@@ -11983,6 +12144,9 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
         }
         crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
+        }),
+        crate::parser::ast::PatternDesc::Ppat_dict(entries) => entries.iter().any(|entry| {
+            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(entry.pdp_pattern))
         }),
         crate::parser::ast::PatternDesc::Ppat_exception(inner)
         | crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
@@ -14243,6 +14407,10 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
+    // typecore.ml Pexp_record: record syntax on a dict points to `dict{...}`,
+    // checked against the expected type and, with a spread, its type.
+    let first_lid = fields.first().map(|field| field.lid.txt);
+    check_no_record_syntax_on_dict(tctx, env, loc, expected_ty, first_lid)?;
     // Most callers should protect generic expected types from record typing
     // side effects, but constraint bodies must type against the shared generic
     // node so unification side effects match OCaml.
@@ -14264,6 +14432,7 @@ fn type_record(
     let mut typed_base = if let Some(base_expr) = base {
         let base_ty = ctx.new_var(None);
         let typed = type_expect_with_recarg(tctx, env, base_expr, base_ty, None, recarg)?;
+        check_no_record_syntax_on_dict(tctx, env, loc, typed.exp_type, first_lid)?;
         Some(typed)
     } else {
         None
@@ -15494,23 +15663,10 @@ fn type_record(
 
     if typed_base.is_some() {
         // typecore.ml:2902-2906 reads `Array.length lbl.lbl_all` of the first
-        // label. For dict records that array is the shared one grown by
-        // `unsafe_do_not_use__add_with_name` (typecore.ml:960-975), modelled by
-        // the dict label cache.
-        let first_is_dict_label = typed_fields.first().is_some_and(|(_, lbl, _, _)| {
-            matches!(
-                &*ctx.get_desc(ctx.repr(lbl.lbl_res)),
-                TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
-            )
-        });
-        let dict_label_count = if first_is_dict_label {
-            ctx.dict_pattern_label_count()
-        } else {
-            0
-        };
-        let num_fields = (dict_label_count != 0)
-            .then_some(dict_label_count)
-            .or_else(|| all_label_descriptions.as_ref().map(|labels| labels.len()))
+        // label.
+        let num_fields = all_label_descriptions
+            .as_ref()
+            .map(|labels| labels.len())
             .or_else(|| all_labels.as_ref().map(|labels| labels.len()));
         if num_fields.is_some_and(|num_fields| fields.len() == num_fields) {
             tctx.report_warning(loc, Warning::UselessRecordWith);
@@ -15941,20 +16097,17 @@ fn type_field(
         RecArg::Allowed,
     )?;
     let ty_exp = typed_record.exp_type;
-    // OCaml typecore.ml:3648-3669 computes `opath` with
-    // `extract_concrete_typedecl`, but only keeps it for concrete records
-    // (and the dict record special-case). Non-record constructors such as
-    // option/array must not drive label disambiguation; if a label with the
-    // requested name is in scope, OCaml selects it and lets the receiver
-    // unification report the type clash.
-    let record_type_info =
-        extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, tctx.type_ctx);
-    if record_type_info
-        .as_ref()
-        .is_some_and(|(path, _, _)| is_dict_type_path(path))
-    {
+    // typecore.ml `type_label_access`: `someDict.name` points to `Dict.get`.
+    if expands_to_dict(tctx.type_ctx, env, ty_exp) {
         return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
     }
+    // OCaml typecore.ml:3648-3669 computes `opath` with
+    // `extract_concrete_typedecl`, but only keeps it for concrete records.
+    // Non-record constructors such as option/array must not drive label
+    // disambiguation; if a label with the requested name is in scope, OCaml
+    // selects it and lets the receiver unification report the type clash.
+    let record_type_info =
+        extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, tctx.type_ctx);
     let label_expected_record_ty = record_type_info.as_ref().map(|_| ty_exp);
 
     if let Some(err) = label_expected_record_ty.and_then(|expected_record_ty| {
@@ -16144,18 +16297,15 @@ fn type_setfield(
     let typed_record =
         type_expect_with_recarg(tctx, env, record_expr, record_ty, None, RecArg::Allowed)?;
     let ty_exp = typed_record.exp_type;
+    // typecore.ml `type_label_access`: `someDict.name` points to `Dict.get`.
+    if expands_to_dict(ctx, env, ty_exp) {
+        return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
+    }
     // `type_label_access` (typecore.ml:3648-3669): `opath` is only the
     // receiver's concrete record path; other types (option, ...) do not drive
     // label disambiguation, and the receiver unification reports the clash.
     let record_type_info =
         extract_concrete_record_type_info(ty_exp, env, &mut tctx.persistent_env, ctx);
-    // typecore.ml:3835-3843: direct field access on a dict is rejected.
-    if record_type_info
-        .as_ref()
-        .is_some_and(|(path, _, _)| is_dict_type_path(path))
-    {
-        return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
-    }
     let label_expected_record_ty = record_type_info.as_ref().map(|_| ty_exp);
 
     if let Some(err) = label_expected_record_ty.and_then(|expected_record_ty| {
@@ -19313,6 +19463,11 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
                 iter_typed_pattern(field_pat, f);
             }
         }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                iter_typed_pattern(&entry.tdp_pattern, f);
+            }
+        }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {}
     }
 }
@@ -19364,6 +19519,11 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
             }
             for (_, _, field_pat, _) in fields {
                 collect_typed_pattern_idents(field_pat, out);
+            }
+        }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                collect_typed_pattern_idents(&entry.tdp_pattern, out);
             }
         }
         PatternDesc::Tpat_or(left, _, _) => {
@@ -19427,6 +19587,11 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
         | ExpressionDesc::Texp_construct(_, _, items) => items
             .iter()
             .any(|item| typed_expression_uses_ident(item, target)),
+        ExpressionDesc::Texp_dict(entries) => entries.iter().any(|entry| match entry {
+            TypedDictEntry::Tdict_entry(_, e) | TypedDictEntry::Tdict_spread(e) => {
+                typed_expression_uses_ident(e, target)
+            }
+        }),
         ExpressionDesc::Texp_variant(_, payload) => payload
             .as_deref()
             .is_some_and(|expr| typed_expression_uses_ident(expr, target)),
@@ -19709,6 +19874,11 @@ fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
                     collect(field_pat, vars);
                 }
             }
+            PatternDesc::Tpat_dict(entries) => {
+                for entry in entries {
+                    collect(&entry.tdp_pattern, vars);
+                }
+            }
             PatternDesc::Tpat_or(left, right, _) => {
                 collect(left, vars);
                 collect(right, vars);
@@ -19732,6 +19902,7 @@ fn rec_pattern_is_destructuring(pat: &Pattern) -> bool {
         | PatternDesc::Tpat_construct(_, _, _)
         | PatternDesc::Tpat_variant(_, _, _)
         | PatternDesc::Tpat_record(_, _, _)
+        | PatternDesc::Tpat_dict(_)
         | PatternDesc::Tpat_array(_) => true,
         PatternDesc::Tpat_or(left, right, _) => {
             rec_pattern_is_destructuring(left) || rec_pattern_is_destructuring(right)
@@ -19790,7 +19961,9 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
                 RecExpressionClass::Dynamic
             }
         }
-        ExpressionDesc::Texp_match(_, _, _, _)
+        // A dict is built by calls, see `Translcore`.
+        ExpressionDesc::Texp_dict(_)
+        | ExpressionDesc::Texp_match(_, _, _, _)
         | ExpressionDesc::Texp_ifthenelse(_, _, _)
         | ExpressionDesc::Texp_object_get(_, _)
         | ExpressionDesc::Texp_object_set(_, _, _)
@@ -20057,6 +20230,12 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
             rec_use_guard(items.iter().fold(RecUse::default(), |use_, item| {
                 rec_use_join(use_, rec_expression(ctx, env, item))
+            }))
+        }
+        ExpressionDesc::Texp_dict(entries) => {
+            rec_use_inspect(entries.iter().fold(RecUse::default(), |use_, entry| {
+                let (TypedDictEntry::Tdict_entry(_, e) | TypedDictEntry::Tdict_spread(e)) = entry;
+                rec_use_join(use_, rec_expression(ctx, env, e))
             }))
         }
         ExpressionDesc::Texp_construct(_, desc, items) => {
@@ -24880,38 +25059,6 @@ fn force_type_path_for_lookup_from_type(
     }
 }
 
-fn materialize_dict_pattern_label(
-    ctx: &TypeContext,
-    base_label: &crate::types::LabelDescription,
-    field_name: &str,
-) -> crate::types::LabelDescription {
-    let mut cached = ctx.get_dict_pattern_labels();
-    if cached.is_empty() {
-        cached.push((
-            DICT_MAGIC_FIELD_NAME.to_string(),
-            0,
-            base_label.lbl_mut,
-            base_label.lbl_repres.clone(),
-            base_label.lbl_attributes.clone(),
-        ));
-    }
-
-    let mut synthetic = base_label.clone();
-    synthetic.lbl_name = field_name.to_string();
-    synthetic.lbl_pos = cached.len() as i32;
-    synthetic.lbl_repres = crate::types::RecordRepresentation::RecordRegular;
-
-    cached.push((
-        synthetic.lbl_name.clone(),
-        synthetic.lbl_pos,
-        synthetic.lbl_mut,
-        synthetic.lbl_repres.clone(),
-        synthetic.lbl_attributes.clone(),
-    ));
-    ctx.set_dict_pattern_labels(cached);
-    synthetic
-}
-
 /// Disambiguate a label by name, considering the record expression's type.
 /// Follows OCaml's Label.disambiguate pattern:
 /// 1. Get all labels with the given name from the env
@@ -24930,22 +25077,12 @@ fn disambiguate_label(
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
 
-    // OCaml special-case: when disambiguating labels on dict, route any field lookup
-    // through dictValuesType, then preserve the source field name in the final label.
-    let (lookup_name, override_name) = if let Some(ref path) = opath {
-        if is_dict_type_path(path) {
-            (DICT_MAGIC_FIELD_NAME, Some(label_name.to_string()))
-        } else {
-            (label_name, None)
-        }
-    } else {
-        (label_name, None)
-    };
+    let lookup_name = label_name;
 
     // Find all labels with this name
     let all_labels = env.find_all_labels(lookup_name);
     if all_labels.is_empty() {
-        let mut selected = lookup_label_by_expected_type(
+        return lookup_label_by_expected_type(
             lookup_name,
             record_ty,
             env,
@@ -24953,13 +25090,6 @@ fn disambiguate_label(
             ctx,
             qualify_lookup_from_type_label,
         );
-        // `unsafe_do_not_use__add_with_name` (typecore.ml:960-975): the
-        // renamed magic label is appended to the shared `lbl_all`.
-        if let Some(override_name) = override_name {
-            selected =
-                selected.map(|label| materialize_dict_pattern_label(ctx, &label, &override_name));
-        }
-        return selected;
     }
 
     let mut selected = None;
@@ -25066,11 +25196,6 @@ fn disambiguate_label(
         {
             use_label_candidate(ctx, env, lookup_name, desc, mark);
         }
-    }
-
-    if let Some(override_name) = override_name {
-        selected =
-            selected.map(|label| materialize_dict_pattern_label(ctx, &label, &override_name));
     }
 
     if opath.is_some()
@@ -29268,12 +29393,6 @@ fn pm_row_of(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> crate::types::typ
     }
 }
 
-fn pm_has_dict_pattern_attribute(arena: &ParseArena, pat: &Pattern) -> bool {
-    pat.pat_attributes
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
-}
-
 impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
     fn ctx(&self) -> &TypeContext {
         self.tctx.type_ctx
@@ -29388,10 +29507,6 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         *self
             .none_type
             .get_or_insert_with(|| ctx.new_type(TypeDesc::Ttuple(Default::default())))
-    }
-
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool {
-        pm_has_dict_pattern_attribute(self.tctx.arena, pat)
     }
 
     fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool {
@@ -29514,10 +29629,6 @@ impl crate::types::parmatch::Oracle for TranslParmatchOracle<'_> {
             .get_or_insert_with(|| ctx.new_type(TypeDesc::Ttuple(Default::default())))
     }
 
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool {
-        pm_has_dict_pattern_attribute(self.arena, pat)
-    }
-
     fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool {
         pattern_from_variant_spread_attr(self.arena, pat)
     }
@@ -29554,6 +29665,7 @@ pub(crate) fn parmatch_irrefutable(
     persistent_env: &mut PersistentEnvSlot,
     pat: &Pattern,
 ) -> bool {
+    let lowered = crate::types::dict_pattern::Lowering::new(ctx, &[pat]).lower(pat);
     let oracle = TranslParmatchOracle {
         ctx,
         arena,
@@ -29562,7 +29674,7 @@ pub(crate) fn parmatch_irrefutable(
         none_type: None,
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle);
-    pm.irrefutable(pat)
+    pm.irrefutable(&lowered)
 }
 
 /// Patterns that match every value of their type: wildcards, variables,
@@ -29589,6 +29701,9 @@ fn pattern_contains_or(p: &Pattern) -> bool {
         PatternDesc::Tpat_record(fields, _, _) => {
             fields.iter().any(|(_, _, p, _)| pattern_contains_or(p))
         }
+        PatternDesc::Tpat_dict(entries) => entries
+            .iter()
+            .any(|entry| pattern_contains_or(&entry.tdp_pattern)),
     }
 }
 
@@ -29760,6 +29875,40 @@ fn conv_counter_example(
                     loc,
                     P::Ppat_variant(Box::new((label.clone().into(), Located::new(args, none)))),
                 )
+            }
+            // A lowered dict pattern: its labels are the keys, in order of
+            // appearance in the match.
+            PatternDesc::Tpat_record(fields, _, _) if typed_pattern_is_dict(tctx.type_ctx, pat) => {
+                let mut fields: Vec<_> = fields.iter().collect();
+                fields.sort_by_key(|(_, lbl, _, _)| lbl.lbl_pos);
+                let entries = fields
+                    .into_iter()
+                    .map(
+                        |(_, lbl, p, optional)| crate::parser::ast::DictPatternEntry {
+                            pdp_key: Located::new(
+                                tctx.arena.push_typecheck_string(lbl.lbl_name.clone()),
+                                none,
+                            ),
+                            pdp_pattern: lp(tctx, p, counter, none),
+                            pdp_optional: *optional,
+                        },
+                    )
+                    .collect();
+                push_parsed_pattern(arena, loc, P::Ppat_dict(Box::new(entries)))
+            }
+            PatternDesc::Tpat_dict(entries) => {
+                let entries = entries
+                    .iter()
+                    .map(|entry| crate::parser::ast::DictPatternEntry {
+                        pdp_key: Located::new(
+                            tctx.arena.push_typecheck_string(entry.tdp_key.txt.clone()),
+                            entry.tdp_key.loc,
+                        ),
+                        pdp_pattern: lp(tctx, &entry.tdp_pattern, counter, none),
+                        pdp_optional: entry.tdp_optional,
+                    })
+                    .collect();
+                push_parsed_pattern(arena, loc, P::Ppat_dict(Box::new(entries)))
             }
             PatternDesc::Tpat_record(fields, _, _) => {
                 let fields = fields
@@ -29972,6 +30121,32 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 let items = items.iter().map(|item| untype(arena, item)).collect();
                 push_parsed_pattern(arena, none, P::Ppat_array(Box::new(items)))
             }
+            // An entry's pattern matches the key's value as an option.
+            PatternDesc::Tpat_dict(entries) => {
+                let entries = entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let (pattern, optional) = match &entry.tdp_pattern.pat_desc {
+                            PatternDesc::Tpat_any => return None,
+                            PatternDesc::Tpat_construct(_, cstr, args)
+                                if cstr.cstr_name == "Some" && args.len() == 1 =>
+                            {
+                                (&args[0], false)
+                            }
+                            _ => (&entry.tdp_pattern, true),
+                        };
+                        Some(crate::parser::ast::DictPatternEntry {
+                            pdp_key: Located::new(
+                                arena.push_typecheck_string(entry.tdp_key.txt.clone()),
+                                entry.tdp_key.loc,
+                            ),
+                            pdp_pattern: untype(arena, pattern),
+                            pdp_optional: optional,
+                        })
+                    })
+                    .collect();
+                push_parsed_pattern(arena, none, P::Ppat_dict(Box::new(entries)))
+            }
         }
     }
 
@@ -30018,6 +30193,9 @@ fn parmatch_check_partial(
     {
         return crate::types::typedtree::Partial::Total;
     }
+    // `check_partial_gadt` lowers the dict patterns of the cases.
+    let lowered = lower_case_dict_patterns(tctx.type_ctx, cases);
+    let cases = &lowered_case_refs(&lowered, cases);
     let oracle = TypecoreParmatchOracle {
         tctx,
         env,
@@ -30031,6 +30209,31 @@ fn parmatch_check_partial(
         crate::types::parmatch::Partiality::Partial => crate::types::typedtree::Partial::Partial,
         crate::types::parmatch::Partiality::Total => crate::types::typedtree::Partial::Total,
     }
+}
+
+/// `Parmatch.lower_cases`: the patterns of `cases` with their dict patterns
+/// lowered to records, see `Dict_pattern`.
+fn lower_case_dict_patterns<'p>(
+    ctx: &TypeContext,
+    cases: &[crate::types::parmatch::CaseRef<'p>],
+) -> Vec<std::borrow::Cow<'p, Pattern>> {
+    let pats: Vec<&Pattern> = cases.iter().map(|case| case.lhs).collect();
+    let lowering = crate::types::dict_pattern::Lowering::new(ctx, &pats);
+    pats.into_iter().map(|pat| lowering.lower(pat)).collect()
+}
+
+fn lowered_case_refs<'p>(
+    lowered: &'p [std::borrow::Cow<'_, Pattern>],
+    cases: &[crate::types::parmatch::CaseRef<'_>],
+) -> Vec<crate::types::parmatch::CaseRef<'p>> {
+    lowered
+        .iter()
+        .zip(cases)
+        .map(|(lhs, case)| crate::types::parmatch::CaseRef {
+            lhs: lhs.as_ref(),
+            guarded: case.guarded,
+        })
+        .collect()
 }
 
 fn case_refs(cases: &[crate::types::typedtree::Case]) -> Vec<crate::types::parmatch::CaseRef<'_>> {
@@ -30051,6 +30254,9 @@ fn parmatch_check_unused(
     expected_ty: TypeExprRef,
     cases: &[crate::types::parmatch::CaseRef<'_>],
 ) {
+    // `check_unused` lowers the dict patterns of the cases.
+    let lowered = lower_case_dict_patterns(tctx.type_ctx, cases);
+    let cases = &lowered_case_refs(&lowered, cases);
     let oracle = TypecoreParmatchOracle {
         tctx,
         env,

@@ -3191,14 +3191,13 @@ fn decode_cmj_inline_attribute(value: &OcamlValue) -> Option<InlineAttribute> {
 
 fn decode_cmj_apply(value: &OcamlValue) -> Option<Apply> {
     let (_, fields) = value.as_block_opt()?;
-    if fields.len() < 4 {
+    if fields.len() < 3 {
         return None;
     }
     Some(Apply {
         ap_func: Box::new(decode_cmj_lambda(&fields[0])?),
         ap_args: decode_cmj_list(&fields[1], decode_cmj_lambda)?,
         ap_info: decode_cmj_ap_info(&fields[2])?,
-        ap_transformed_jsx: fields[3].as_bool(),
     })
 }
 
@@ -3499,28 +3498,27 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Int(71) => Some(Primitive::Parrayrefu),
         OcamlValue::Int(72) => Some(Primitive::Parraysetu),
         OcamlValue::Int(73) => Some(Primitive::Parrayrefs),
-        OcamlValue::Int(74) => Some(Primitive::Parraysets),
-        OcamlValue::Int(75) => Some(Primitive::Pmakelist),
-        OcamlValue::Int(76) => Some(Primitive::Pmakedict),
-        OcamlValue::Int(77) => Some(Primitive::PdictHas),
-        OcamlValue::Int(78) => Some(Primitive::Pawait),
-        OcamlValue::Int(79) => Some(Primitive::PinitMod),
-        OcamlValue::Int(80) => Some(Primitive::PupdateMod),
-        OcamlValue::Int(81) => Some(Primitive::Phash),
-        OcamlValue::Int(82) => Some(Primitive::PhashMixint),
-        OcamlValue::Int(83) => Some(Primitive::PhashMixstring),
-        OcamlValue::Int(84) => Some(Primitive::PhashFinalmix),
-        OcamlValue::Int(85) => Some(Primitive::Pisint),
-        OcamlValue::Int(86) => Some(Primitive::PisNullUndefined),
-        OcamlValue::Int(87) => Some(Primitive::PnullToOpt),
-        OcamlValue::Int(88) => Some(Primitive::PnullUndefinedToOpt),
-        OcamlValue::Int(89) => Some(Primitive::PisNull),
-        OcamlValue::Int(90) => Some(Primitive::PisUndefined),
-        OcamlValue::Int(91) => Some(Primitive::PisNotNone),
-        OcamlValue::Int(92) => Some(Primitive::PvalFromOption),
-        OcamlValue::Int(93) => Some(Primitive::PvalFromOptionNotNest),
-        OcamlValue::Int(94) => Some(Primitive::PisPolyVarBlock),
-        OcamlValue::Int(95) => Some(Primitive::PjsFnMethod),
+        OcamlValue::Int(74) => Some(Primitive::Pmakelist),
+        OcamlValue::Int(75) => Some(Primitive::Pmakedict),
+        OcamlValue::Int(76) => Some(Primitive::PdictHas),
+        OcamlValue::Int(77) => Some(Primitive::Pawait),
+        OcamlValue::Int(78) => Some(Primitive::PinitMod),
+        OcamlValue::Int(79) => Some(Primitive::PupdateMod),
+        OcamlValue::Int(80) => Some(Primitive::Phash),
+        OcamlValue::Int(81) => Some(Primitive::PhashMixint),
+        OcamlValue::Int(82) => Some(Primitive::PhashMixstring),
+        OcamlValue::Int(83) => Some(Primitive::PhashFinalmix),
+        OcamlValue::Int(84) => Some(Primitive::PisNullUndefined),
+        OcamlValue::Int(85) => Some(Primitive::PnullToOpt),
+        OcamlValue::Int(86) => Some(Primitive::PnullUndefinedToOpt),
+        OcamlValue::Int(87) => Some(Primitive::PisNull),
+        OcamlValue::Int(88) => Some(Primitive::PisUndefined),
+        OcamlValue::Int(89) => Some(Primitive::PisNotNone),
+        OcamlValue::Int(90) => Some(Primitive::PvalFromOption),
+        OcamlValue::Int(91) => Some(Primitive::PvalFromOptionNotNest),
+        OcamlValue::Int(92) => Some(Primitive::PisPolyVarBlock),
+        OcamlValue::Int(93) => Some(Primitive::PjsFnMethod),
+        OcamlValue::Int(94) => Some(Primitive::PdictSpread),
         OcamlValue::Block(0, fields) if fields.len() == 1 => {
             let tag_info = decode_cmj_tag_info(&fields[0])?;
             // `Lambda.mutable_flag_of_tag_info`: a block's mutability follows
@@ -3540,37 +3538,63 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
             fields[0].as_int() as i32,
             decode_cmj_field_dbg_info(&fields[1])?,
         )),
-        OcamlValue::Block(4, fields) if fields.len() == 4 => Some(Primitive::PjsCall {
+        OcamlValue::Block(4, fields) if fields.len() == 3 => Some(Primitive::PjsCall {
             prim_name: fields[0].as_string().to_string(),
             arg_types: crate::cmi::ffi_decode::params(&fields[1])?,
             ffi: Box::new(crate::cmi::ffi_decode::external_decl(&fields[2])?),
-            transformed_jsx: fields[3].as_bool(),
         }),
-        OcamlValue::Block(8, fields) if fields.len() == 1 => {
-            Some(Primitive::Pobjcomp(decode_cmj_comparison(&fields[0])?))
+        // `Pjsx of jsx_element`
+        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+            let (_, jsx) = fields[0].as_block_opt()?;
+            if jsx.len() != 8 {
+                return None;
+            }
+            Some(Primitive::Pjsx(Box::new(
+                crate::lambda::lam_primitive::JsxElement {
+                    jsx_name: jsx[0].as_string().to_string(),
+                    jsx_ffi: crate::cmi::ffi_decode::external_decl(&jsx[1])?,
+                    jsx_multi: jsx[2].as_bool(),
+                    jsx_fragment: jsx[3].as_bool(),
+                    jsx_spread: jsx[4].as_bool(),
+                    jsx_props: decode_cmj_list(&jsx[5], |prop| {
+                        let (_, pair) = prop.as_block_opt()?;
+                        match pair {
+                            [name, optional] => {
+                                Some((name.as_string().to_string(), optional.as_bool()))
+                            }
+                            _ => None,
+                        }
+                    })?,
+                    jsx_children: jsx[6].as_option().map(|n| n.as_int() as usize),
+                    jsx_key: jsx[7].as_bool(),
+                },
+            )))
         }
         OcamlValue::Block(9, fields) if fields.len() == 1 => {
-            Some(Primitive::Pboolcomp(decode_cmj_comparison(&fields[0])?))
+            Some(Primitive::Pobjcomp(decode_cmj_comparison(&fields[0])?))
         }
         OcamlValue::Block(10, fields) if fields.len() == 1 => {
-            Some(Primitive::Pintcomp(decode_cmj_comparison(&fields[0])?))
+            Some(Primitive::Pboolcomp(decode_cmj_comparison(&fields[0])?))
         }
         OcamlValue::Block(11, fields) if fields.len() == 1 => {
-            Some(Primitive::Pfloatcomp(decode_cmj_comparison(&fields[0])?))
+            Some(Primitive::Pintcomp(decode_cmj_comparison(&fields[0])?))
         }
         OcamlValue::Block(12, fields) if fields.len() == 1 => {
-            Some(Primitive::Pbigintcomp(decode_cmj_comparison(&fields[0])?))
+            Some(Primitive::Pfloatcomp(decode_cmj_comparison(&fields[0])?))
         }
         OcamlValue::Block(13, fields) if fields.len() == 1 => {
+            Some(Primitive::Pbigintcomp(decode_cmj_comparison(&fields[0])?))
+        }
+        OcamlValue::Block(14, fields) if fields.len() == 1 => {
             Some(Primitive::Pstringcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(18, fields) if fields.len() == 1 => Some(Primitive::PtaggedTemplate(
+        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::PtaggedTemplate(
             decode_cmj_string_list(&fields[0])?,
         )),
-        OcamlValue::Block(19, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(
+        OcamlValue::Block(20, fields) if fields.len() == 1 => Some(Primitive::Ptemplate(
             decode_cmj_list(&fields[0], decode_cmj_template_segment)?,
         )),
-        OcamlValue::Block(16, fields) if fields.len() == 1 => {
+        OcamlValue::Block(17, fields) if fields.len() == 1 => {
             Some(Primitive::Pjscomp(decode_cmj_comparison(&fields[0])?))
         }
         _ => None,

@@ -377,10 +377,6 @@ impl TailcallInlineState {
                     .collect(),
                 info,
             ),
-            ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-                Box::new(self.transform_expression(*left)),
-                Box::new(self.transform_expression(*right)),
-            ),
             ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
                 Box::new(self.transform_expression(*left)),
                 Box::new(self.transform_expression(*right)),
@@ -459,11 +455,13 @@ impl TailcallInlineState {
                 ExpressionDesc::CamlBlockTag(Box::new(self.transform_expression(*inner)), field)
             }
             ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
-            ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-                dup.map(|expr| Box::new(self.transform_expression(*expr))),
-                props
+            ExpressionDesc::Jsx(jsx) => {
+                ExpressionDesc::Jsx(Box::new(jsx.map(|value| self.transform_expression(value))))
+            }
+            ExpressionDesc::Object(entries) => ExpressionDesc::Object(
+                entries
                     .into_iter()
-                    .map(|(name, value)| (name, self.transform_expression(value)))
+                    .map(|entry| entry.map(|value| self.transform_expression(value)))
                     .collect(),
             ),
             ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
@@ -743,7 +741,6 @@ fn collect_tailcall_use_counts_expression(
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             collect_tailcall_use_counts_expression(left, decls, counts);
             collect_tailcall_use_counts_expression(right, decls, counts);
@@ -792,11 +789,15 @@ fn collect_tailcall_use_counts_expression(
                 collect_tailcall_use_counts_expression(item, decls, counts);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                collect_tailcall_use_counts_expression(dup, decls, counts);
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
+                collect_tailcall_use_counts_expression(value, decls, counts);
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (crate::js_ir::ObjectEntry::Property(_, value)
+                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
                 collect_tailcall_use_counts_expression(value, decls, counts);
             }
         }
@@ -979,7 +980,6 @@ fn collect_once_pure_inline_decls_expression(
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             collect_once_pure_inline_decls_expression(left, statuses, tail_callees, inline_decls);
             collect_once_pure_inline_decls_expression(right, statuses, tail_callees, inline_decls);
@@ -1065,16 +1065,20 @@ fn collect_once_pure_inline_decls_expression(
                 );
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
                 collect_once_pure_inline_decls_expression(
-                    dup,
+                    value,
                     statuses,
                     tail_callees,
                     inline_decls,
                 );
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (crate::js_ir::ObjectEntry::Property(_, value)
+                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
                 collect_once_pure_inline_decls_expression(
                     value,
                     statuses,
@@ -1186,7 +1190,6 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             expression_assigns_ident(left, ident) || expression_assigns_ident(right, ident)
         }
@@ -1222,13 +1225,12 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
         ExpressionDesc::CamlBlock(items, _, _) => items
             .iter()
             .any(|item| expression_assigns_ident(item, ident)),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_ref()
-                .is_some_and(|expr| expression_assigns_ident(expr, ident))
-                || props
-                    .iter()
-                    .any(|(_, value)| expression_assigns_ident(value, ident))
-        }
+        ExpressionDesc::Jsx(jsx) => jsx
+            .expressions()
+            .any(|value| expression_assigns_ident(value, ident)),
+        ExpressionDesc::Object(entries) => entries
+            .iter()
+            .any(|entry| expression_assigns_ident(entry.expression(), ident)),
         ExpressionDesc::Var(_)
         | ExpressionDesc::Undefined { .. }
         | ExpressionDesc::Null
@@ -1471,10 +1473,6 @@ fn substitute_inline_expression(
                 .collect(),
             info,
         ),
-        ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(substitute_inline_expression(*left, substitution)),
-            Box::new(substitute_inline_expression(*right, substitution)),
-        ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
             Box::new(substitute_inline_expression(*left, substitution)),
             Box::new(substitute_inline_expression(*right, substitution)),
@@ -1564,11 +1562,13 @@ fn substitute_inline_expression(
             field,
         ),
         ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
-        ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-            dup.map(|expr| Box::new(substitute_inline_expression(*expr, substitution))),
-            props
+        ExpressionDesc::Jsx(jsx) => ExpressionDesc::Jsx(Box::new(
+            jsx.map(|value| substitute_inline_expression(value, substitution)),
+        )),
+        ExpressionDesc::Object(entries) => ExpressionDesc::Object(
+            entries
                 .into_iter()
-                .map(|(name, value)| (name, substitute_inline_expression(value, substitution)))
+                .map(|entry| entry.map(|value| substitute_inline_expression(value, substitution)))
                 .collect(),
         ),
         ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },
@@ -1691,7 +1691,6 @@ fn apply_tailcall_used_stats_expression(
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             apply_tailcall_used_stats_expression(left, statuses);
             apply_tailcall_used_stats_expression(right, statuses);
@@ -1740,11 +1739,15 @@ fn apply_tailcall_used_stats_expression(
                 apply_tailcall_used_stats_expression(item, statuses);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                apply_tailcall_used_stats_expression(dup, statuses);
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions_mut() {
+                apply_tailcall_used_stats_expression(value, statuses);
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (crate::js_ir::ObjectEntry::Property(_, value)
+                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
                 apply_tailcall_used_stats_expression(value, statuses);
             }
         }

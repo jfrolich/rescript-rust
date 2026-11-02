@@ -243,7 +243,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
 
         // Type testing primitives
-        Primitive::Pisint | Primitive::PisPolyVarBlock => true,
+        Primitive::PisPolyVarBlock => true,
 
         // Offset and misc
         Primitive::Pstringadd
@@ -261,14 +261,17 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
         | Primitive::PjsCall { .. }
+        | Primitive::Pjsx(_)
         | Primitive::PinitMod
         | Primitive::PupdateMod
+        // A spread reads the source's properties, which may run getters or
+        // proxy traps.
+        | Primitive::PdictSpread
         | Primitive::PjsObjectGet(_)
         | Primitive::PjsObjectSet(_)
         | Primitive::Pdebugger
         | Primitive::PjsFnMethod
         | Primitive::Pawait
-        | Primitive::Parraysets
         | Primitive::Parraysetu
         | Primitive::Praise
         | Primitive::Psetfield(_, _)
@@ -302,165 +305,166 @@ pub const SMALL_INLINE_SIZE: i32 = 5;
 /// Exit inline size threshold (for static raise handlers).
 pub const EXIT_INLINE_SIZE: i32 = 7;
 
-/// Estimate the size of a Lambda expression for inlining decisions.
-///
-/// Returns a size estimate where smaller values indicate smaller code.
-/// Returns `TOO_BIG_TO_INLINE` for expressions that shouldn't be inlined.
-pub fn size(lam: &Lambda) -> i32 {
-    size_inner(lam).unwrap_or(TOO_BIG_TO_INLINE)
+/// The size count reached the limit of `size_upto`.
+struct LimitReached;
+
+/// A running size count that stops at `limit`.
+struct SizeCounter {
+    total: i32,
+    limit: i32,
 }
 
-/// Internal size computation that can fail for large expressions.
-fn size_inner(lam: &Lambda) -> Option<i32> {
-    match lam {
-        Lambda::Lvar(_) => Some(1),
-
-        Lambda::Lconst(c) => Some(size_constant(c)),
-
-        Lambda::Llet(_, _, l1, l2) => {
-            let s1 = size_inner(l1)?;
-            let s2 = size_inner(l2)?;
-            Some(1 + s1 + s2)
+impl SizeCounter {
+    fn add(&mut self, n: i32) -> Result<(), LimitReached> {
+        self.total += n;
+        if self.total >= self.limit {
+            Err(LimitReached)
+        } else {
+            Ok(())
         }
+    }
 
-        // Letrec is too big
-        Lambda::Lletrec(_, _) => None,
+    fn lams(&mut self, lams: &[Lambda]) -> Result<(), LimitReached> {
+        lams.iter().try_for_each(|lam| self.lam(lam))
+    }
 
-        // Module field access is small
-        Lambda::Lprim(prim_info) => {
-            match &prim_info.primitive {
-                Primitive::Pfield(_, FieldDbgInfo::Module { .. }) => {
-                    if prim_info.args.len() == 1 {
-                        match &prim_info.args[0] {
-                            Lambda::LglobalModule(_) | Lambda::Lvar(_) => return Some(1),
-                            _ => {}
-                        }
-                    }
-                }
-                Primitive::Praise | Primitive::PisNotNone => {
-                    if prim_info.args.len() == 1 {
-                        return size_inner(&prim_info.args[0]);
-                    }
-                }
-                Primitive::Pmakeblock(
-                    tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
-                    _,
-                ) => {
-                    let missing_fields = tag_info
+    /// Constants count their leaves, and stop at the limit too: a large
+    /// constant list or record should not be walked completely.
+    fn constant(&mut self, c: &Constant) -> Result<(), LimitReached> {
+        match c {
+            Constant::Int { .. }
+            | Constant::Constructor(_)
+            | Constant::NativeInt { .. }
+            | Constant::Char(_)
+            | Constant::Float(_)
+            | Constant::BigInt { .. }
+            | Constant::Pointer(_)
+            | Constant::JsNull
+            | Constant::JsUndefined { .. }
+            | Constant::ModuleAlias
+            | Constant::JsTrue
+            | Constant::JsFalse
+            | Constant::String(_)
+            | Constant::ImmString(_) => self.add(1),
+            Constant::Some(inner) => self.constant(inner),
+            Constant::Block {
+                tag_info, elements, ..
+            } => {
+                // A sparse record block stands for its omitted fields too.
+                let missing_fields = match &**tag_info {
+                    TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
                         .logical_field_count()
-                        .saturating_sub(prim_info.args.len());
-                    return size_lams(1 + missing_fields as i32, &prim_info.args);
-                }
-                Primitive::PjsObjectCreate(obj_params) => {
-                    let logical_arg_count = obj_params
-                        .iter()
-                        .filter(|param| {
-                            !matches!(
-                                param.obj_arg_type,
-                                crate::types::external_ffi_types::Attr::ArgCst(_)
-                            )
-                        })
-                        .count();
-                    let missing_args = logical_arg_count.saturating_sub(prim_info.args.len());
-                    return size_lams(1 + missing_args as i32, &prim_info.args);
-                }
-                Primitive::PrawJsCode(_) => return None,
-                _ => {}
+                        .saturating_sub(elements.len()),
+                    _ => 0,
+                };
+                self.add(missing_fields as i32)?;
+                elements.iter().try_for_each(|c| self.constant(c))
             }
-            size_lams(1, &prim_info.args)
         }
+    }
 
-        Lambda::LglobalModule(_) => Some(1),
-
-        Lambda::Lapply(apply) => {
-            let func_size = size_inner(&apply.ap_func)?;
-            size_lams(func_size, &apply.ap_args)
-        }
-
-        Lambda::Lfunction(func) => size_inner(&func.body),
-
-        // Complex control flow is too big
-        Lambda::Lswitch(_, _) => None,
-        Lambda::LstringSwitch(_, _, _) => None,
-        Lambda::LstaticCatch(_, _, _) => None,
-        Lambda::LtryWith(_, _, _) => None,
-        Lambda::Lwhile(_, _) => None,
-        Lambda::Lfor(_, _, _, _, _) => None,
-        Lambda::Lfor_of(_, _, _) | Lambda::Lfor_await_of(_, _, _) => None,
-
-        // OCaml `Lam_analysis.size`: `Lbreak | Lcontinue -> 1`.
-        Lambda::Lbreak | Lambda::Lcontinue => Some(1),
-
-        Lambda::LstaticRaise(_, args) => {
-            let mut acc = 1;
-            for arg in args {
-                acc += size_inner(arg)?;
+    fn lam(&mut self, lam: &Lambda) -> Result<(), LimitReached> {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_) | Lambda::Lbreak | Lambda::Lcontinue => {
+                self.add(1)
             }
-            Some(acc)
-        }
-
-        Lambda::LifThenElse(l1, l2, l3) => {
-            let s1 = size_inner(l1)?;
-            let s2 = size_inner(l2)?;
-            let s3 = size_inner(l3)?;
-            Some(1 + s1 + s2 + s3)
-        }
-
-        Lambda::Lsequence(l1, l2) => {
-            let s1 = size_inner(l1)?;
-            let s2 = size_inner(l2)?;
-            Some(s1 + s2)
-        }
-
-        Lambda::Lassign(_, v) => {
-            let s = size_inner(v)?;
-            Some(1 + s)
+            Lambda::Lconst(c) => self.constant(c),
+            Lambda::Llet(_, _, l1, l2) => {
+                self.add(1)?;
+                self.lam(l1)?;
+                self.lam(l2)
+            }
+            Lambda::Lprim(prim_info) => {
+                match &prim_info.primitive {
+                    Primitive::Pfield(_, FieldDbgInfo::Module { .. })
+                        if matches!(
+                            prim_info.args.as_slice(),
+                            [Lambda::LglobalModule(_) | Lambda::Lvar(_)]
+                        ) =>
+                    {
+                        return self.add(1);
+                    }
+                    Primitive::Praise | Primitive::PisNotNone if prim_info.args.len() == 1 => {
+                        return self.lam(&prim_info.args[0]);
+                    }
+                    // A sparse record block stands for its omitted fields too.
+                    Primitive::Pmakeblock(
+                        tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
+                        _,
+                    ) => {
+                        let missing_fields = tag_info
+                            .logical_field_count()
+                            .saturating_sub(prim_info.args.len());
+                        self.add(1 + missing_fields as i32)?;
+                        return self.lams(&prim_info.args);
+                    }
+                    Primitive::PjsObjectCreate(obj_params) => {
+                        let logical_arg_count = obj_params
+                            .iter()
+                            .filter(|param| {
+                                !matches!(
+                                    param.obj_arg_type,
+                                    crate::types::external_ffi_types::Attr::ArgCst(_)
+                                )
+                            })
+                            .count();
+                        let missing_args = logical_arg_count.saturating_sub(prim_info.args.len());
+                        self.add(1 + missing_args as i32)?;
+                        return self.lams(&prim_info.args);
+                    }
+                    Primitive::PrawJsCode(_) => return self.add(TOO_BIG_TO_INLINE),
+                    _ => {}
+                }
+                self.add(1)?;
+                self.lams(&prim_info.args)
+            }
+            Lambda::Lapply(apply) => {
+                self.lam(&apply.ap_func)?;
+                self.lams(&apply.ap_args)
+            }
+            Lambda::Lfunction(func) => self.lam(&func.body),
+            Lambda::Lletrec(_, _)
+            | Lambda::Lswitch(_, _)
+            | Lambda::LstringSwitch(_, _, _)
+            | Lambda::LstaticCatch(_, _, _)
+            | Lambda::LtryWith(_, _, _)
+            | Lambda::Lwhile(_, _)
+            | Lambda::Lfor(_, _, _, _, _)
+            | Lambda::Lfor_of(_, _, _)
+            | Lambda::Lfor_await_of(_, _, _) => self.add(TOO_BIG_TO_INLINE),
+            Lambda::LstaticRaise(_, args) => {
+                self.add(1)?;
+                self.lams(args)
+            }
+            Lambda::LifThenElse(l1, l2, l3) => {
+                self.add(1)?;
+                self.lam(l1)?;
+                self.lam(l2)?;
+                self.lam(l3)
+            }
+            Lambda::Lsequence(l1, l2) => {
+                self.lam(l1)?;
+                self.lam(l2)
+            }
+            Lambda::Lassign(_, v) => {
+                self.add(1)?;
+                self.lam(v)
+            }
         }
     }
 }
 
-/// Compute the size of a constant.
-fn size_constant(c: &Constant) -> i32 {
-    match c {
-        Constant::Int { .. }
-        | Constant::Constructor(_)
-        | Constant::NativeInt { .. }
-        | Constant::Char(_)
-        | Constant::Float(_)
-        | Constant::BigInt { .. }
-        | Constant::Pointer(_)
-        | Constant::JsNull
-        | Constant::JsUndefined { .. }
-        | Constant::ModuleAlias
-        | Constant::JsTrue
-        | Constant::JsFalse => 1,
-
-        Constant::String(_) => 1,
-        Constant::ImmString(_) => 1,
-
-        Constant::Some(inner) => size_constant(inner),
-
-        Constant::Block {
-            tag_info, elements, ..
-        } => {
-            let missing_fields = match &**tag_info {
-                TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
-                    .logical_field_count()
-                    .saturating_sub(elements.len()),
-                _ => 0,
-            };
-            missing_fields as i32 + elements.iter().map(size_constant).sum::<i32>()
-        }
+/// `Lam_analysis.size_upto ~limit lam`: the size of a lambda for inlining
+/// decisions if it is below `limit`, `limit` otherwise. Callers only compare
+/// it with small thresholds, so counting stops once `limit` is reached.
+/// `limit` must be at most 1000.
+pub fn size_upto(limit: i32, lam: &Lambda) -> i32 {
+    debug_assert!(limit <= TOO_BIG_TO_INLINE);
+    let mut counter = SizeCounter { total: 0, limit };
+    match counter.lam(lam) {
+        Ok(()) => counter.total,
+        Err(LimitReached) => limit,
     }
-}
-
-/// Compute the size of a list of Lambda expressions.
-fn size_lams(acc: i32, lams: &[Lambda]) -> Option<i32> {
-    let mut total = acc;
-    for lam in lams {
-        total += size_inner(lam)?;
-    }
-    Some(total)
 }
 
 /// Check if all arguments are constants.
@@ -479,7 +483,7 @@ pub fn ok_to_inline_fun_when_app(func: &LFunction, args: &[Lambda]) -> bool {
         crate::lambda::InlineAttribute::Always => true,
         crate::lambda::InlineAttribute::Never => false,
         crate::lambda::InlineAttribute::Default => {
-            let s = size(&func.body);
+            let s = size_upto(10, &func.body);
             s < SMALL_INLINE_SIZE
                 || destruct_pattern(&func.body, &func.params, args)
                 || (args_all_const(args) && s < 10 && no_side_effects(&func.body))
@@ -508,10 +512,10 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
             if let Lambda::Lvar(v) = &**scrutinee {
                 if let Some(Lambda::Lconst(constant)) = find_arg(v, params, args) {
                     // Would need to evaluate the switch to check size
-                    return size(&Lambda::switch(
-                        Lambda::Lconst(constant.clone()),
-                        *switch.clone(),
-                    )) < SMALL_INLINE_SIZE;
+                    return size_upto(
+                        SMALL_INLINE_SIZE,
+                        &Lambda::switch(Lambda::Lconst(constant.clone()), *switch.clone()),
+                    ) < SMALL_INLINE_SIZE;
                 }
             }
             false
@@ -521,11 +525,14 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
                 if let Some(Lambda::Lconst(constant)) = find_arg(v, params, args) {
                     // OCaml lam_analysis.ml:238-242 measures the folded branch,
                     // not the original conditional with its parameter scrutinee.
-                    return size(&Lambda::if_(
-                        Lambda::Lconst(constant.clone()),
-                        (**then_).clone(),
-                        (**else_).clone(),
-                    )) < SMALL_INLINE_SIZE;
+                    return size_upto(
+                        SMALL_INLINE_SIZE,
+                        &Lambda::if_(
+                            Lambda::Lconst(constant.clone()),
+                            (**then_).clone(),
+                            (**else_).clone(),
+                        ),
+                    ) < SMALL_INLINE_SIZE;
                 }
             }
             false
@@ -691,11 +698,11 @@ mod tests {
     fn test_size_simple() {
         // Variable has size 1
         let var = Lambda::var(Ident::create_local("x"));
-        assert_eq!(size(&var), 1);
+        assert_eq!(size_upto(TOO_BIG_TO_INLINE, &var), 1);
 
         // Constant has size 1
         let const_ = Lambda::const_(Constant::int(42));
-        assert_eq!(size(&const_), 1);
+        assert_eq!(size_upto(TOO_BIG_TO_INLINE, &const_), 1);
     }
 
     #[test]
@@ -709,7 +716,7 @@ mod tests {
             Lambda::const_(Constant::int(1)),
             Lambda::var(x),
         );
-        assert_eq!(size(&let_expr), 3);
+        assert_eq!(size_upto(TOO_BIG_TO_INLINE, &let_expr), 3);
     }
 
     #[test]
@@ -717,7 +724,7 @@ mod tests {
         // Letrec is too big
         let x = Ident::create_local("x");
         let letrec = Lambda::letrec(vec![(x, Lambda::const_(Constant::int(1)))], Lambda::var(x));
-        assert_eq!(size(&letrec), TOO_BIG_TO_INLINE);
+        assert_eq!(size_upto(TOO_BIG_TO_INLINE, &letrec), TOO_BIG_TO_INLINE);
 
         // Switch is too big
         let switch = Lambda::Lswitch(
@@ -731,7 +738,7 @@ mod tests {
                 sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             }),
         );
-        assert_eq!(size(&switch), TOO_BIG_TO_INLINE);
+        assert_eq!(size_upto(TOO_BIG_TO_INLINE, &switch), TOO_BIG_TO_INLINE);
     }
 
     #[test]
@@ -807,6 +814,21 @@ mod tests {
         assert!(!safe_to_inline(&Lambda::var(Ident::create_local("x"))));
     }
 
+    fn size_constant(c: &Constant) -> i32 {
+        size_upto(TOO_BIG_TO_INLINE, &Lambda::Lconst(c.clone()))
+    }
+
+    #[test]
+    fn test_size_upto_stops_at_the_limit() {
+        let block = Constant::Block {
+            tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
+            elements: (0..50).map(Constant::int).collect(),
+        };
+        assert_eq!(size_upto(5, &Lambda::Lconst(block.clone())), 5);
+        assert_eq!(size_upto(TOO_BIG_TO_INLINE, &Lambda::Lconst(block)), 50);
+        assert_eq!(size_upto(5, &Lambda::Lconst(Constant::int(1))), 1);
+    }
+
     #[test]
     fn test_size_constant() {
         assert_eq!(size_constant(&Constant::int(42)), 1);
@@ -860,7 +882,7 @@ mod tests {
             attr: FunctionAttribute::default(),
         };
 
-        assert!(size(&func.body) >= SMALL_INLINE_SIZE);
+        assert!(size_upto(TOO_BIG_TO_INLINE, &func.body) >= SMALL_INLINE_SIZE);
         assert!(ok_to_inline_fun_when_app(
             &func,
             &[Lambda::const_(Constant::JsFalse)]

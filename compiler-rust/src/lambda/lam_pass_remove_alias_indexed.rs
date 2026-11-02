@@ -10,7 +10,7 @@ use crate::lambda::lam_beta_reduce_indexed::{
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::BoxedNullable;
 use crate::lambda::lam_indexed_helpers::append_rebuilt;
-use crate::lambda::lam_pass_collect_indexed::indexed_size;
+use crate::lambda::lam_pass_collect_indexed::indexed_size_upto;
 use crate::lambda::lam_pass_collect_indexed::{IndexedElement, IndexedIdKind, IndexedLamStats};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{InlineAttribute, Lambda, TagInfo};
@@ -144,7 +144,7 @@ fn destruct_pattern(
                         dispatch,
                     },
                 );
-                indexed_size(store, reduced) < 5
+                indexed_size_upto(store, reduced, 5) < 5
             }
         }
         NodeSnapshot::IfThenElse(condition, then_, else_) => {
@@ -157,7 +157,7 @@ fn destruct_pattern(
                 false
             } else {
                 let reduced = append_rebuilt(store, NodeSnapshot::IfThenElse(*arg, then_, else_));
-                indexed_size(store, reduced) < 5
+                indexed_size_upto(store, reduced, 5) < 5
             }
         }
         _ => false,
@@ -175,7 +175,7 @@ fn inline_allowed(
         InlineAttribute::Always => true,
         InlineAttribute::Never => false,
         InlineAttribute::Default => {
-            let body_size = indexed_size(store, body);
+            let body_size = indexed_size_upto(store, body, 10);
             body_size < 5
                 || destruct_pattern(store, body, params, args)
                 || (args
@@ -193,7 +193,6 @@ struct Simplifier<'a> {
     id_gen: &'a IdGenerator,
     beta_hash_bucket_count: &'a mut usize,
     beta_diagnostics: &'a mut BetaDiagnostics,
-    jsx_preserve: bool,
     external: &'a mut IndexedExternalInlineResolver<'a>,
 }
 
@@ -205,15 +204,14 @@ impl Simplifier<'_> {
             | NodeSnapshot::Const(_)
             | NodeSnapshot::Break
             | NodeSnapshot::Continue => node,
-            NodeSnapshot::Prim(primitive @ Primitive::PjsCall { .. }, args, loc)
-                if self.jsx_preserve
-                    && matches!(&primitive, Primitive::PjsCall { prim_name, .. } if prim_name == "jsx" || prim_name == "jsxs")
-                    && args.first().is_some_and(|node| {
-                        matches!(
-                            self.store.view(*node),
-                            NodeView::Prim(Primitive::Pfield(_, _), _, _)
-                        )
-                    }) =>
+            // Keep a JSX tag like `M.make` as it is (#7432).
+            NodeSnapshot::Prim(primitive @ Primitive::Pjsx(_), args, loc)
+                if args.first().is_some_and(|node| {
+                    matches!(
+                        self.store.view(*node),
+                        NodeView::Prim(Primitive::Pfield(_, _), _, _)
+                    )
+                }) =>
             {
                 let mut iter = args.into_iter();
                 let first = iter.next().unwrap();
@@ -314,9 +312,7 @@ impl Simplifier<'_> {
                 let b = self.simpl(else_);
                 append_rebuilt(self.store, NodeSnapshot::IfThenElse(c, a, b))
             }
-            NodeSnapshot::Apply(function, args, info, jsx) => {
-                self.simpl_apply(function, args, info, jsx)
-            }
+            NodeSnapshot::Apply(function, args, info) => self.simpl_apply(function, args, info),
             NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
                 let scrutinee = if let NodeView::Var(id) = self.store.view(scrutinee) {
                     match self.meta.ident_tbl.get(id) {
@@ -436,14 +432,11 @@ impl Simplifier<'_> {
         function: NodeId,
         args: Vec<NodeId>,
         info: crate::lambda::ApInfo,
-        jsx: bool,
     ) -> NodeId {
-        let mut fallback_jsx = jsx;
         if let NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { name }), [base], _) =
             self.store.view(function)
             && let NodeView::GlobalModule(module) = self.store.view(*base)
         {
-            fallback_jsx = false;
             let (module, name) = (*module, name.clone());
             if let Some(lambda) = (self.external)(&module, &name) {
                 let imported = self.store.append_compat_lambda(lambda);
@@ -524,7 +517,7 @@ impl Simplifier<'_> {
                 }
             }
             let function = self.simpl(function);
-            return append_rebuilt(self.store, NodeSnapshot::Apply(function, args, info, jsx));
+            return append_rebuilt(self.store, NodeSnapshot::Apply(function, args, info));
         }
         if let NodeSnapshot::Function(_, params, body, attr, _) = self.store.snapshot(function)
             && params.len() == args.len()
@@ -545,10 +538,7 @@ impl Simplifier<'_> {
         }
         let function = self.simpl(function);
         let args = args.into_iter().map(|n| self.simpl(n)).collect();
-        append_rebuilt(
-            self.store,
-            NodeSnapshot::Apply(function, args, info, fallback_jsx),
-        )
+        append_rebuilt(self.store, NodeSnapshot::Apply(function, args, info))
     }
 }
 
@@ -556,7 +546,6 @@ impl IndexedLambdaContext {
     pub fn simplify_alias(
         &mut self,
         id_gen: &IdGenerator,
-        jsx_preserve: bool,
         external: &mut IndexedExternalInlineResolver<'_>,
     ) {
         let root = self.current_root();
@@ -569,7 +558,6 @@ impl IndexedLambdaContext {
                 id_gen,
                 beta_hash_bucket_count,
                 beta_diagnostics: &mut beta_diagnostics,
-                jsx_preserve,
                 external,
             }
             .simpl(root)
@@ -600,12 +588,11 @@ mod tests {
             status: ApplyStatus::Na,
         }
     }
-    fn apply(function: Lambda, args: Vec<Lambda>, jsx: bool) -> Lambda {
+    fn apply(function: Lambda, args: Vec<Lambda>) -> Lambda {
         Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
             ap_args: args,
             ap_info: info(),
-            ap_transformed_jsx: jsx,
         }))
     }
     fn run(input: Lambda, start: i32) -> (Lambda, i32, usize) {
@@ -613,7 +600,7 @@ mod tests {
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         (
             context.materialize(),
             generator.current_stamp(),
@@ -718,7 +705,7 @@ mod tests {
             }
             let generator = IdGenerator::with_start_stamp(20);
             let mut external = |_: &Ident, _: &str| None;
-            context.simplify_alias(&generator, false, &mut external);
+            context.simplify_alias(&generator, &mut external);
             let check = Lambda::prim(predicate, vec![Lambda::var(source)], Location::none());
             let expected = Lambda::if_(
                 Lambda::prim(Primitive::Pnot, vec![check], Location::none()),
@@ -792,7 +779,7 @@ mod tests {
             .insert(value, IndexedIdKind::MutableBlock(vec![]));
         let generator = IdGenerator::with_start_stamp(30);
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         assert_exact(&context.materialize(), &int(7));
     }
 
@@ -814,7 +801,7 @@ mod tests {
             context.metadata_mut().ident_tbl.insert(value, kind);
             let generator = IdGenerator::with_start_stamp(20);
             let mut external = |_: &Ident, _: &str| None;
-            context.simplify_alias(&generator, false, &mut external);
+            context.simplify_alias(&generator, &mut external);
             context.materialize()
         }
         let module = id("Module", 9);
@@ -854,7 +841,7 @@ mod tests {
         );
         let generator = IdGenerator::with_start_stamp(20);
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         assert_exact(&context.materialize(), &int(7));
 
         let fallback = Lambda::prim(
@@ -912,9 +899,23 @@ mod tests {
             .insert(value, IndexedIdKind::Constant(Constant::string("yes")));
         let generator = IdGenerator::with_start_stamp(20);
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         assert_exact(&context.materialize(), &int(1));
 
+        // The tag of a JSX element stays a projection (#7432); the props
+        // are simplified.
+        let jsx = || {
+            Primitive::Pjsx(Box::new(crate::lambda::lam_primitive::JsxElement {
+                jsx_name: "jsx".into(),
+                jsx_ffi: crate::lambda::lam_primitive::ExternalDecl::test_val("jsx", 2),
+                jsx_multi: false,
+                jsx_fragment: false,
+                jsx_spread: false,
+                jsx_props: vec![("x".into(), false)],
+                jsx_children: None,
+                jsx_key: false,
+            }))
+        };
         let base = id("base", 2);
         let first_loc = Location::new_for_error("jsx.res", 1, 2);
         let call_loc = Location::new_for_error("jsx.res", 3, 4);
@@ -924,12 +925,7 @@ mod tests {
             first_loc,
         );
         let input = Lambda::prim(
-            Primitive::PjsCall {
-                prim_name: "jsx".into(),
-                arg_types: vec![],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                transformed_jsx: true,
-            },
+            jsx(),
             vec![
                 first.clone(),
                 Lambda::if_(Lambda::const_(Constant::JsTrue), int(3), int(4)),
@@ -944,17 +940,8 @@ mod tests {
         );
         let generator = IdGenerator::with_start_stamp(20);
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, true, &mut external);
-        let expected = Lambda::prim(
-            Primitive::PjsCall {
-                prim_name: "jsx".into(),
-                arg_types: vec![],
-                ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                transformed_jsx: true,
-            },
-            vec![first, int(3)],
-            call_loc,
-        );
+        context.simplify_alias(&generator, &mut external);
+        let expected = Lambda::prim(jsx(), vec![first, int(3)], call_loc);
         assert_exact(&context.materialize(), &expected);
     }
 
@@ -1015,7 +1002,7 @@ mod tests {
         rec_flag: crate::lambda::lam_compile_context::RecFlag,
         exported: bool,
     ) -> IndexedLambdaContext {
-        let input = apply(Lambda::var(function_id), vec![argument], false);
+        let input = apply(Lambda::var(function_id), vec![argument]);
         let exports = if exported { vec![function_id] } else { vec![] };
         let mut context = IndexedLambdaContext::from_lambda(input, exports);
         let function_node = context.store_mut().append_compat_lambda(function.clone());
@@ -1062,11 +1049,11 @@ mod tests {
             let mut context = context_with_function(f, function.clone(), int(4), flag, false);
             let generator = IdGenerator::with_start_stamp(20);
             let mut external = |_: &Ident, _: &str| None;
-            context.simplify_alias(&generator, false, &mut external);
+            context.simplify_alias(&generator, &mut external);
             let expected = if should_inline {
                 Lambda::prim(Primitive::Pidentity, vec![int(4)], Location::none())
             } else {
-                apply(Lambda::var(f), vec![int(4)], false)
+                apply(Lambda::var(f), vec![int(4)])
             };
             assert_exact(&context.materialize(), &expected);
         }
@@ -1080,10 +1067,10 @@ mod tests {
         );
         let generator = IdGenerator::with_start_stamp(20);
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         assert_exact(
             &context.materialize(),
-            &apply(Lambda::var(f), vec![Lambda::var(f)], false),
+            &apply(Lambda::var(f), vec![Lambda::var(f)]),
         );
 
         let mut closed = context_with_function(
@@ -1095,7 +1082,7 @@ mod tests {
         );
         let generator = IdGenerator::with_start_stamp(20);
         let mut external = |_: &Ident, _: &str| None;
-        closed.simplify_alias(&generator, false, &mut external);
+        closed.simplify_alias(&generator, &mut external);
         assert_exact(
             &closed.materialize(),
             &Lambda::prim(Primitive::Pidentity, vec![int(4)], Location::none()),
@@ -1118,11 +1105,8 @@ mod tests {
         );
         let generator = IdGenerator::with_start_stamp(20);
         let mut external = |_: &Ident, _: &str| None;
-        open.simplify_alias(&generator, false, &mut external);
-        assert_exact(
-            &open.materialize(),
-            &apply(Lambda::var(f), vec![int(4)], false),
-        );
+        open.simplify_alias(&generator, &mut external);
+        assert_exact(&open.materialize(), &apply(Lambda::var(f), vec![int(4)]));
     }
 
     #[test]
@@ -1154,7 +1138,6 @@ mod tests {
                 ap_func: Box::new(function),
                 ap_args: vec![int(1)],
                 ap_info: app_info.clone(),
-                ap_transformed_jsx: true,
             }));
             let (actual, frontier, _) = run(input.clone(), 20);
             assert_exact(&actual, &input);
@@ -1171,7 +1154,6 @@ mod tests {
             ap_func: Box::new(function),
             ap_args: vec![int(1)],
             ap_info: app_info,
-            ap_transformed_jsx: true,
         }));
         let (actual, _, _) = run(input.clone(), 20);
         assert_exact(&actual, &input);
@@ -1186,7 +1168,7 @@ mod tests {
             vec![Lambda::global_module(module)],
             Location::new_for_error("external.res", 1, 2),
         );
-        let input = apply(target.clone(), vec![Lambda::const_(Constant::JsTrue)], true);
+        let input = apply(target.clone(), vec![Lambda::const_(Constant::JsTrue)]);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
         let generator = IdGenerator::with_start_stamp(100);
@@ -1202,13 +1184,13 @@ mod tests {
             calls.push((id.name().to_string(), field.to_string()));
             Some(external_function.clone())
         };
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         assert_exact(&context.materialize(), &int(7));
         assert_eq!(calls, vec![("External".into(), "run".into())]);
         assert_eq!(generator.current_stamp(), 100);
 
         let blocked = id("blocked", 60);
-        let input = apply(target, vec![Lambda::var(blocked)], true);
+        let input = apply(target, vec![Lambda::var(blocked)]);
         let mut context = IndexedLambdaContext::from_lambda(input.clone(), []);
         context
             .metadata_mut()
@@ -1216,14 +1198,11 @@ mod tests {
             .insert(blocked, IndexedIdKind::Parameter);
         let generator = IdGenerator::with_start_stamp(100);
         let mut external = |_: &Ident, _: &str| Some(external_function.clone());
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         let Lambda::Lapply(expected_apply) = input else {
             unreachable!()
         };
-        let expected = Lambda::Lapply(Box::new(Apply {
-            ap_transformed_jsx: false,
-            ..*expected_apply
-        }));
+        let expected = Lambda::Lapply(Box::new(Apply { ..*expected_apply }));
         assert_exact(&context.materialize(), &expected);
         assert_eq!(generator.current_stamp(), 100);
     }
@@ -1246,7 +1225,6 @@ mod tests {
                     prim_name: "effect".into(),
                     arg_types: vec![],
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                    transformed_jsx: false,
                 },
                 vec![],
                 effect_loc,
@@ -1261,7 +1239,6 @@ mod tests {
                     crate::location::Location::none(),
                 ),
                 vec![argument.clone()],
-                false,
             );
             let (actual, frontier, peak) = run(input, 200);
             let fresh = id("x", 201);
@@ -1298,14 +1275,13 @@ mod tests {
                 loc: crate::location::Location::none(),
                 arity: 1,
                 params: vec![x],
-                body: Box::new(apply(Lambda::var(callee), vec![Lambda::var(x)], true)),
+                body: Box::new(apply(Lambda::var(callee), vec![Lambda::var(x)])),
                 attr: FunctionAttribute::default(),
             })),
             vec![int(4)],
-            true,
         );
         let (result, frontier, _) = run(input, 20);
-        assert_exact(&result, &apply(Lambda::var(callee), vec![int(4)], false));
+        assert_exact(&result, &apply(Lambda::var(callee), vec![int(4)]));
         assert_eq!(frontier, 20);
     }
 
@@ -1324,7 +1300,6 @@ mod tests {
                 prim_name: "effect".into(),
                 arg_types: vec![],
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                transformed_jsx: false,
             },
             vec![],
             Location::none(),
@@ -1338,7 +1313,6 @@ mod tests {
                 crate::location::Location::none(),
             ),
             vec![argument.clone()],
-            false,
         );
         let (result, frontier, substitution_peak) = run(input, 100);
         assert_eq!(frontier, 102);
@@ -1442,7 +1416,7 @@ mod tests {
             vec![Lambda::global_module(module)],
             Location::none(),
         );
-        let input = apply(target.clone(), vec![int(1)], true);
+        let input = apply(target.clone(), vec![int(1)]);
         let generator = IdGenerator::with_start_stamp(10);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
@@ -1451,9 +1425,9 @@ mod tests {
             calls.push((id.name().to_string(), field.to_string()));
             None
         };
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         assert_eq!(calls, vec![("External".into(), "run".into())]);
-        assert_exact(&context.materialize(), &apply(target, vec![int(1)], false));
+        assert_exact(&context.materialize(), &apply(target, vec![int(1)]));
         assert_eq!(generator.current_stamp(), 10);
     }
 
@@ -1473,7 +1447,7 @@ mod tests {
             raised,
             7,
             vec![x],
-            apply(Lambda::var(f), vec![Lambda::var(x)], false),
+            apply(Lambda::var(f), vec![Lambda::var(x)]),
         );
         let expected_function = function.clone();
         let expected_f = f;
@@ -1484,7 +1458,7 @@ mod tests {
         context.simplify_exits(&generator);
         context.collect_info();
         let mut external = |_: &Ident, _: &str| None;
-        context.simplify_alias(&generator, false, &mut external);
+        context.simplify_alias(&generator, &mut external);
         context.deep_flatten(&generator);
         let expected = Lambda::let_(
             LetKind::StrictOpt,
@@ -1505,7 +1479,7 @@ mod tests {
                 measurements.metadata_retained_only_side_payload_shallow_bytes,
                 measurements.superseded_unreachable_side_payload_shallow_bytes,
             ),
-            (25, 6, 3, 8, 17, 488, 244, 1044),
+            (25, 6, 3, 8, 17, 488, 244, 1036),
         );
     }
 }

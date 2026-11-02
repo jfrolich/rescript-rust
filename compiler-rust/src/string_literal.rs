@@ -608,3 +608,21 @@ mod tests {
         assert_eq!(code_point_at_utf16_index(&emoji, 2), Ok(Some(0xde00)));
     }
 }
+
+/// OCaml `String.escaped`, as used by `Printf "%S"`.
+pub fn ocaml_escaped(s: &str) -> String {
+    let mut out = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            8 => out.push_str("\\b"),
+            32..=126 => out.push(byte as char),
+            _ => out.push_str(&format!("\\{byte:03}")),
+        }
+    }
+    out
+}

@@ -301,13 +301,34 @@ let primitive ~with_locs (prim : Lambda.primitive) =
   | Psetfield (n, info) ->
     Sexp.list [Sexp.atom "Psetfield"; int n; set_field_dbg_info info]
   | Pduprecord -> Sexp.atom "Pduprecord"
-  | Pjs_call {prim_name; arg_types = _; ffi = _; transformed_jsx} ->
-    Sexp.list [
-      Sexp.atom "Pjs_call";
-      string prim_name;
-      (* Skip arg_types and ffi for brevity *)
-      bool transformed_jsx;
-    ]
+  | Pjs_call {prim_name; arg_types = _; ffi = _} ->
+    (* Skip arg_types and ffi for brevity *)
+    Sexp.list [Sexp.atom "Pjs_call"; string prim_name]
+  | Pjsx
+      {
+        jsx_name;
+        jsx_ffi = _;
+        jsx_multi;
+        jsx_fragment;
+        jsx_spread;
+        jsx_props;
+        jsx_children;
+        jsx_key;
+      } ->
+    Sexp.list
+      [
+        Sexp.atom "Pjsx";
+        string jsx_name;
+        bool jsx_multi;
+        bool jsx_fragment;
+        bool jsx_spread;
+        Sexp.list
+          (List.map
+             (fun (name, optional) -> Sexp.list [string name; bool optional])
+             jsx_props);
+        opt int jsx_children;
+        bool jsx_key;
+      ]
   | Pjs_object_create _ -> Sexp.atom "Pjs_object_create"
   | Praise -> Sexp.atom "Praise"
   | Pobjcomp cmp -> Sexp.list [Sexp.atom "Pobjcomp"; comparison cmp]
@@ -385,6 +406,7 @@ let primitive ~with_locs (prim : Lambda.primitive) =
   | Pmakelist -> Sexp.atom "Pmakelist"
   | Pmakedict -> Sexp.atom "Pmakedict"
   | Pdict_has -> Sexp.atom "Pdict_has"
+  | Pdict_spread -> Sexp.atom "Pdict_spread"
   | Parrayrefu -> Sexp.atom "Parrayrefu"
   | Parraysetu -> Sexp.atom "Parraysetu"
   | Parrayrefs -> Sexp.atom "Parrayrefs"
@@ -430,13 +452,12 @@ let rec lambda ~with_locs (lam : Lambda.t) =
   | Lglobal_module id -> Sexp.list [Sexp.atom "Lglobal_module"; ident id]
   | Lconst c ->
     Sexp.list [Sexp.atom "Lconst"; constant c]
-  | Lapply {ap_func; ap_args; ap_loc; ap_transformed_jsx} ->
+  | Lapply {ap_func; ap_args; ap_loc} ->
     Sexp.list [
       Sexp.atom "Lapply";
       lambda ~with_locs ap_func;
       Sexp.list (List.map (lambda ~with_locs) ap_args);
       ap_info_sexp ~with_locs ap_loc;
-      bool ap_transformed_jsx;
     ]
   | Lfunction {params; body; attr} ->
     Sexp.list [

@@ -41,7 +41,7 @@ pub(crate) fn eliminate_ref(
         | NodeSnapshot::GlobalModule(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => Ok(node),
-        NodeSnapshot::Apply(function, args, info, jsx) => {
+        NodeSnapshot::Apply(function, args, info) => {
             let args = args
                 .into_iter()
                 .map(|node| eliminate_ref(store, target, node))
@@ -49,7 +49,7 @@ pub(crate) fn eliminate_ref(
             let function = eliminate_ref(store, target, function)?;
             Ok(append_rebuilt(
                 store,
-                NodeSnapshot::Apply(function, args, info, jsx),
+                NodeSnapshot::Apply(function, args, info),
             ))
         }
         NodeSnapshot::Let(kind, id, value, body) => {

@@ -47,7 +47,9 @@ impl<'a> crate::js_ir::walk::Visitor<'a> for RecordRestFinder {
 }
 
 fn field_ident_name(index: usize, label: &str) -> String {
-    if crate::js_ir::printer::is_valid_js_ident(label) {
+    // `Js_dump_property.property_key (Lit label) = label`: a `__proto__` key
+    // prints as a computed key.
+    if label != "__proto__" && crate::js_ir::printer::is_valid_js_ident(label) {
         label.to_string()
     } else {
         format!("__rest_field{index}")
@@ -323,10 +325,6 @@ fn rewrite_expression(mut expression: Expression) -> Expression {
             Box::new(rewrite_expression(*left)),
             Box::new(rewrite_expression(*right)),
         ),
-        ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(rewrite_expression(*left)),
-            Box::new(rewrite_expression(*right)),
-        ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
             Box::new(rewrite_expression(*left)),
             Box::new(rewrite_expression(*right)),
@@ -355,11 +353,10 @@ fn rewrite_expression(mut expression: Expression) -> Expression {
         ExpressionDesc::Array(items, mutable) => {
             ExpressionDesc::Array(items.into_iter().map(rewrite_expression).collect(), mutable)
         }
-        ExpressionDesc::Object(proto, fields) => ExpressionDesc::Object(
-            proto.map(|expr| Box::new(rewrite_expression(*expr))),
-            fields
+        ExpressionDesc::Object(entries) => ExpressionDesc::Object(
+            entries
                 .into_iter()
-                .map(|(name, value)| (name, rewrite_expression(value)))
+                .map(|entry| entry.map(rewrite_expression))
                 .collect(),
         ),
         ExpressionDesc::CamlBlock(items, mutable, info) => ExpressionDesc::CamlBlock(
@@ -400,11 +397,10 @@ fn map_statement(statement: Statement, f: &mut impl FnMut(Expression) -> Express
                 items.into_iter().map(|item| map_expr(item, f)).collect(),
                 mutable,
             ),
-            ExpressionDesc::Object(proto, fields) => ExpressionDesc::Object(
-                proto.map(|inner| Box::new(map_expr(*inner, f))),
-                fields
+            ExpressionDesc::Object(entries) => ExpressionDesc::Object(
+                entries
                     .into_iter()
-                    .map(|(name, value)| (name, map_expr(value, f)))
+                    .map(|entry| entry.map(|value| map_expr(value, f)))
                     .collect(),
             ),
             ExpressionDesc::Call(func, args, info) => ExpressionDesc::Call(

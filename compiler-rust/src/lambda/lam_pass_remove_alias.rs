@@ -134,14 +134,9 @@ fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> 
 /// entries for their fresh let-bound parameters (lam_beta_reduce.ml:66-73).
 /// Without this, blocks introduced by beta-reduced functor arguments remain
 /// opaque to subsequent `field_flatten_get` lookups.
-///
-/// `jsx_preserve` ports OCaml's `Js_config.jsx_preserve` global: the
-/// 7432-tagged Pjs_call arm only fires when it is true
-/// (lam_pass_remove_alias.ml:54-62).
-pub fn simplify_alias_with_jsx_and_external_inline_owned(
+pub fn simplify_alias_with_external_inline_owned(
     meta: &mut LamStats,
     lam: Lambda,
-    jsx_preserve: bool,
     external_inline: &mut ExternalInlineResolver<'_>,
 ) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
@@ -150,7 +145,6 @@ pub fn simplify_alias_with_jsx_and_external_inline_owned(
         ident_tbl: &mut meta.ident_tbl,
         export_idents: &export_idents,
         id_gen: &id_gen,
-        jsx_preserve,
         external_inline,
     }
     .simpl_owned(lam);
@@ -165,7 +159,6 @@ struct Simplifier<'a> {
     /// Mirrors OCaml's global `Ident.rename` counter so fresh stamps never
     /// collide across independent beta reductions of the same function.
     id_gen: &'a crate::context::IdGenerator,
-    jsx_preserve: bool,
     external_inline: &'a mut ExternalInlineResolver<'a>,
 }
 
@@ -199,14 +192,11 @@ impl<'a> Simplifier<'a> {
     /// through the folding smart constructors only when OCaml would.
     fn simpl_sharing(&mut self, lam: Lambda) -> Mapped {
         match lam {
-            // 7432: prevent optimization in JSX preserve mode.
+            // Keep a JSX tag like `M.make` as it is: flattening it may give a
+            // variable with a lowercase name, which JSX reads as an intrinsic
+            // element (#7432).
             Lambda::Lprim(prim)
-                if self.jsx_preserve
-                    && matches!(
-                        &prim.primitive,
-                        Primitive::PjsCall { prim_name, .. }
-                            if prim_name == "jsx" || prim_name == "jsxs"
-                    )
+                if matches!(prim.primitive, Primitive::Pjsx(_))
                     && matches!(
                         prim.args.first(),
                         Some(Lambda::Lprim(first)) if matches!(first.primitive, Primitive::Pfield(_, _))
@@ -364,7 +354,6 @@ impl<'a> Simplifier<'a> {
                     ap_func,
                     ap_args,
                     ap_info,
-                    ap_transformed_jsx,
                 } = *apply;
                 let (module_id, field_name) = module_field_apply_target(ap_func.as_ref())
                     .expect("checked module field target");
@@ -383,19 +372,16 @@ impl<'a> Simplifier<'a> {
                         );
                     return (self.simpl_owned(reduced), true);
                 }
-                // `Lambda.apply fn args' ap_info ?ap_transformed_jsx:None`.
-                let _ = ap_transformed_jsx;
                 let (func, c1) = self.simpl_sharing(*ap_func);
                 let (args, c2) = self.simpl_list(ap_args);
                 if c1 || c2 {
-                    (Lambda::apply(func, args, ap_info, false), true)
+                    (Lambda::apply(func, args, ap_info), true)
                 } else {
                     (
                         Lambda::Lapply(Box::new(Apply {
                             ap_func: Box::new(func),
                             ap_args: args,
                             ap_info,
-                            ap_transformed_jsx,
                         })),
                         false,
                     )
@@ -406,7 +392,6 @@ impl<'a> Simplifier<'a> {
                     ap_func,
                     ap_args,
                     ap_info,
-                    ap_transformed_jsx,
                 } = *apply;
                 let Lambda::Lvar(v) = *ap_func else {
                     unreachable!()
@@ -415,17 +400,13 @@ impl<'a> Simplifier<'a> {
                 let normal = |this: &mut Self, ap_args: Vec<Lambda>| {
                     let (func, func_changed) = this.simpl_sharing(Lambda::Lvar(v));
                     if func_changed || args_changed {
-                        (
-                            Lambda::apply(func, ap_args, ap_info.clone(), ap_transformed_jsx),
-                            true,
-                        )
+                        (Lambda::apply(func, ap_args, ap_info.clone()), true)
                     } else {
                         (
                             Lambda::Lapply(Box::new(Apply {
                                 ap_func: Box::new(func),
                                 ap_args,
                                 ap_info: ap_info.clone(),
-                                ap_transformed_jsx,
                             })),
                             false,
                         )

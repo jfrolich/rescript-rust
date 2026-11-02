@@ -102,12 +102,8 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
                 ap_func,
                 ap_args,
                 ap_info,
-                ap_transformed_jsx,
             } = *ap;
-            return (
-                Lambda::apply(*ap_func, ap_args, ap_info, ap_transformed_jsx),
-                true,
-            );
+            return (Lambda::apply(*ap_func, ap_args, ap_info), true);
         }
         Lambda::Lfunction(func) => map_in(&mut func.body, f),
         Lambda::Llet(_, _, e, b) => {

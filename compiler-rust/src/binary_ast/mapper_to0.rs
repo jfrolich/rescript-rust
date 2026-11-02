@@ -733,6 +733,37 @@ impl<'a> Mapper<'a> {
     // ========== Patterns ==========
 
     pub fn map_pattern(&mut self, pat: &current::Pattern) -> pt0::Pattern {
+        if let current::PatternDesc::Ppat_dict(entries) = &*pat.ppat_desc {
+            // ast_mapper_to0.ml P.map Ppat_dict: v0 has no dict patterns,
+            // they're open record patterns with a `res.dictPattern` marker.
+            let fields = entries
+                .iter()
+                .map(|entry| current::PatternRecordField {
+                    lid: current::Loc {
+                        txt: self.arena.push_lident_from_idx(entry.pdp_key.txt),
+                        loc: entry.pdp_key.loc,
+                    },
+                    pat: entry.pdp_pattern,
+                    opt: entry.pdp_optional,
+                })
+                .collect();
+            let marker = self.arena.intern("res.dictPattern");
+            let mut attrs = vec![(
+                crate::parser::core::mknoloc(marker),
+                current::Payload::PStr(Box::default()),
+            )];
+            attrs.extend(pat.ppat_attributes.iter().cloned());
+            let record = current::Pattern {
+                ppat_desc: Box::new(current::PatternDesc::Ppat_record(Box::new((
+                    fields,
+                    current::ClosedFlag::Open,
+                    None,
+                )))),
+                ppat_loc: pat.ppat_loc,
+                ppat_attributes: current::Attributes::from_vec(attrs),
+            };
+            return self.map_pattern(&record);
+        }
         let mut attrs = self.map_attributes(&pat.ppat_attributes);
         // ast_mapper_to0.ml P.map Ppat_variant_spread: v0 has no variant
         // spread pattern, it is `#...t` with a `res.patVariantSpread` marker.
@@ -1104,6 +1135,9 @@ impl<'a> Mapper<'a> {
                     self.map_closed_flag(*flag),
                 )
             }
+            current::PatternDesc::Ppat_dict(_) => {
+                unreachable!("dict patterns are encoded by map_pattern")
+            }
             current::PatternDesc::Ppat_array(pats) => {
                 pt0::PatternDesc::Array(pats.iter().map(|p| self.map_pat_idx(*p)).collect())
             }
@@ -1175,6 +1209,17 @@ impl<'a> Mapper<'a> {
             attrs.append(&mut inner.pexp_attributes);
             inner.pexp_attributes = attrs;
             return inner;
+        }
+        if let current::ExpressionDesc::Pexp_dict(entries) = &*expr.pexp_desc {
+            // ast_mapper_to0.ml Pexp_dict: v0 has no dict literals, they're
+            // the calls they used to be parsed into.
+            let calls = super::ast_dict::to_calls(
+                self.arena,
+                expr.pexp_loc,
+                expr.pexp_attributes.clone(),
+                entries,
+            );
+            return self.map_expression(&calls);
         }
         if let current::ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc {
             return self.map_fun(expr, fun, owner_idx);
@@ -1542,6 +1587,9 @@ impl<'a> Mapper<'a> {
                     self.map_longident_loc(lid),
                     Box::new(self.map_expr_idx(*e2_idx)),
                 )
+            }
+            current::ExpressionDesc::Pexp_dict(_) => {
+                unreachable!("dict literals are encoded by map_expression_with_owner")
             }
             current::ExpressionDesc::Pexp_array(exprs) => {
                 pt0::ExpressionDesc::Array(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())

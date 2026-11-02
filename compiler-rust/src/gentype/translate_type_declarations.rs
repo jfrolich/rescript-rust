@@ -128,7 +128,7 @@ pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &s
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:39-53.
     crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, attributes);
     match crate::gentype::annotation::get_as_string(arena, attributes) {
-        Some(s) => string_escaped_like_ocaml(&s),
+        Some(s) => crate::string_literal::ocaml_escaped(&s),
         None => unwrap_uppercase_exotic(name).to_string(),
     }
 }
@@ -139,29 +139,9 @@ pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &s
 pub fn declared_field_name(ld: &LabelDeclaration) -> String {
     crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(&ld.ld_attributes);
     match &ld.ld_runtime_name {
-        Some(s) => string_escaped_like_ocaml(s),
+        Some(s) => crate::string_literal::ocaml_escaped(s),
         None => unwrap_uppercase_exotic(ld.ld_id.name()).to_string(),
     }
-}
-
-fn string_escaped_like_ocaml(s: &str) -> String {
-    // OCaml TranslateTypeDeclarations.ml:51 uses String.escaped for @as
-    // payloads. Mirror that byte-oriented escaping instead of Rust's
-    // escape_default, which also escapes apostrophes.
-    let mut out = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\n' => out.push_str("\\n"),
-            b'\t' => out.push_str("\\t"),
-            b'\r' => out.push_str("\\r"),
-            8 => out.push_str("\\b"),
-            32..=126 => out.push(byte as char),
-            _ => out.push_str(&format!("\\{byte:03}")),
-        }
-    }
-    out
 }
 
 #[allow(non_snake_case)]

@@ -14,7 +14,6 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
                 loc: Location::none(),
                 status: ApplyStatus::Na,
             },
-            false,
         )),
         Box::new(Lambda::var(message)),
     );
@@ -94,7 +93,6 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                         loc: Location::none(),
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))],
             )),
             exn,
@@ -108,7 +106,6 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                 loc: Location::none(),
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))),
     ));
 
@@ -202,7 +199,6 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                                     loc: Location::none(),
                                     status: ApplyStatus::Na,
                                 },
-                                ap_transformed_jsx: false,
                             }))],
                         )),
                         exn,
@@ -216,7 +212,6 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                             loc: Location::none(),
                             status: ApplyStatus::Na,
                         },
-                        ap_transformed_jsx: false,
                     }))),
                 ),
                 FunctionAttribute::default(),
@@ -315,7 +310,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                         loc: Location::none(),
                                                         status: ApplyStatus::Na,
                                                     },
-                                                    ap_transformed_jsx: false,
                                                 }))],
                                             )),
                                             raw_exn,
@@ -358,7 +352,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                 loc: Location::none(),
                                                                 status: ApplyStatus::Na,
                                                             },
-                                                            ap_transformed_jsx: false,
                                                         })),
                                                         Lambda::LstaticRaise(3, vec![]),
                                                     )),
@@ -379,7 +372,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                 loc: Location::none(),
                                                 status: ApplyStatus::Na,
                                             },
-                                            ap_transformed_jsx: false,
                                         }))),
                                     ),
                                     FunctionAttribute::default(), crate::location::Location::none(),
@@ -392,7 +384,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                 loc: Location::none(),
                                 status: ApplyStatus::Na,
                             },
-                            ap_transformed_jsx: false,
                         })),
                     ),
                     FunctionAttribute::default(), crate::location::Location::none(),
@@ -680,7 +671,6 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                     loc: Location::none(),
                     status: ApplyStatus::Uncurry,
                 },
-                false,
             ),
         )),
     ));
@@ -814,7 +804,6 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
                 loc: Location::none(),
                 status: ApplyStatus::Na,
             },
-            false,
         )),
     ));
 

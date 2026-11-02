@@ -436,8 +436,7 @@ fn flatten_and_mark_dead_expression(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Expression {
-    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution, jsx_preserve)
-    {
+    if let Some(rewritten) = try_substitute_caml_block_projection(&expr, substitution) {
         return rewritten;
     }
 
@@ -574,20 +573,6 @@ fn flatten_and_mark_dead_expression(
                 .collect(),
             info,
         ),
-        ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(flatten_and_mark_dead_expression(
-                *left,
-                id_gen,
-                substitution,
-                jsx_preserve,
-            )),
-            Box::new(flatten_and_mark_dead_expression(
-                *right,
-                id_gen,
-                substitution,
-                jsx_preserve,
-            )),
-        ),
         ExpressionDesc::ArrayIndex(left, right) => {
             let left = flatten_and_mark_dead_expression(*left, id_gen, substitution, jsx_preserve);
             let right =
@@ -710,22 +695,35 @@ fn flatten_and_mark_dead_expression(
             tag,
         ),
         ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
-        ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-            dup.map(|expr| {
-                Box::new(flatten_and_mark_dead_expression(
-                    *expr,
-                    id_gen,
-                    substitution,
-                    jsx_preserve,
-                ))
-            }),
-            props
+        // In JSX preserve mode, keep a JSX tag like `M.make` as it is: the
+        // field's value may be a variable with a lowercase name, which JSX
+        // reads as an intrinsic element, so the printer would have to print
+        // the call instead (#7432).
+        ExpressionDesc::Jsx(jsx)
+            if jsx_preserve
+                && matches!(
+                    jsx.tag.desc,
+                    ExpressionDesc::StaticIndex(..) | ExpressionDesc::ArrayIndex(..)
+                ) =>
+        {
+            let mut jsx = *jsx;
+            let tag = std::mem::replace(&mut jsx.tag, Expression::undefined(false));
+            let mut jsx = jsx.map(|value| {
+                flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+            });
+            jsx.tag = tag;
+            ExpressionDesc::Jsx(Box::new(jsx))
+        }
+        ExpressionDesc::Jsx(jsx) => ExpressionDesc::Jsx(Box::new(jsx.map(|value| {
+            flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+        }))),
+        ExpressionDesc::Object(entries) => ExpressionDesc::Object(
+            entries
                 .into_iter()
-                .map(|(name, value)| {
-                    (
-                        name,
-                        flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve),
-                    )
+                .map(|entry| {
+                    entry.map(|value| {
+                        flatten_and_mark_dead_expression(value, id_gen, substitution, jsx_preserve)
+                    })
                 })
                 .collect(),
         ),
@@ -758,7 +756,6 @@ fn flatten_and_mark_dead_expression(
 fn try_substitute_caml_block_projection(
     expr: &Expression,
     substitution: &HashMap<Ident, Expression>,
-    jsx_preserve: bool,
 ) -> Option<Expression> {
     match &expr.desc {
         ExpressionDesc::ArrayIndex(left, right) => {
@@ -768,13 +765,13 @@ fn try_substitute_caml_block_projection(
             let ExpressionDesc::Number(Number::Int { i, .. }) = right.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, None, i, jsx_preserve)
+            substituted_caml_block_item(substitution, id, None, i)
         }
         ExpressionDesc::StaticIndex(target, field, Some(index)) => {
             let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &target.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, Some(field), *index, jsx_preserve)
+            substituted_caml_block_item(substitution, id, Some(field), *index)
         }
         _ => None,
     }
@@ -785,17 +782,9 @@ fn substituted_caml_block_item(
     id: &Ident,
     field: Option<&str>,
     index: i32,
-    jsx_preserve: bool,
 ) -> Option<Expression> {
     let expression = substitution.get(id)?;
-    // js_pass_flatten_and_mark_dead.ml:266-270 (7432): in JSX preserve mode a
-    // block item that is the variable `make` stays a projection, so the
-    // dumper prints `<Foo.make />`.
-    let substitutable = |item: &Expression| {
-        is_simple_substituted_index_value(item)
-            && !(jsx_preserve
-                && matches!(&item.desc, ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.name() == "make"))
-    };
+    let substitutable = is_simple_substituted_index_value;
     let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag_info) = &expression.desc
     else {
         return None;
@@ -1084,7 +1073,6 @@ fn collect_mark_dead_states_expression(
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             collect_mark_dead_states_expression(left, states);
             collect_mark_dead_states_expression(right, states);
@@ -1137,12 +1125,14 @@ fn collect_mark_dead_states_expression(
                 collect_mark_dead_states_expression(item, states);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                collect_mark_dead_states_expression(dup, states);
-            }
-            for (_, value) in props {
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
                 collect_mark_dead_states_expression(value, states);
+            }
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                collect_mark_dead_states_expression(entry.expression(), states);
             }
         }
     }
@@ -1258,7 +1248,6 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             apply_mark_dead_states_expression(left, states);
             apply_mark_dead_states_expression(right, states);
@@ -1307,12 +1296,14 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
                 apply_mark_dead_states_expression(item, states);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                apply_mark_dead_states_expression(dup, states);
-            }
-            for (_, value) in props {
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions_mut() {
                 apply_mark_dead_states_expression(value, states);
+            }
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                apply_mark_dead_states_expression(entry.expression_mut(), states);
             }
         }
         ExpressionDesc::Var(_)
@@ -1692,10 +1683,6 @@ fn flatten_expression(expr: Expression) -> Expression {
             args.into_iter().map(flatten_expression).collect(),
             info,
         ),
-        ExpressionDesc::StringIndex(left, right) => ExpressionDesc::StringIndex(
-            Box::new(flatten_expression(*left)),
-            Box::new(flatten_expression(*right)),
-        ),
         ExpressionDesc::ArrayIndex(left, right) => ExpressionDesc::ArrayIndex(
             Box::new(flatten_expression(*left)),
             Box::new(flatten_expression(*right)),
@@ -1756,11 +1743,11 @@ fn flatten_expression(expr: Expression) -> Expression {
             ExpressionDesc::CamlBlockTag(Box::new(flatten_expression(*inner)), tag)
         }
         ExpressionDesc::Number(number) => ExpressionDesc::Number(number),
-        ExpressionDesc::Object(dup, props) => ExpressionDesc::Object(
-            dup.map(|dup| Box::new(flatten_expression(*dup))),
-            props
+        ExpressionDesc::Jsx(jsx) => ExpressionDesc::Jsx(Box::new(jsx.map(flatten_expression))),
+        ExpressionDesc::Object(entries) => ExpressionDesc::Object(
+            entries
                 .into_iter()
-                .map(|(name, value)| (name, flatten_expression(value)))
+                .map(|entry| entry.map(flatten_expression))
                 .collect(),
         ),
         ExpressionDesc::Undefined { is_unit } => ExpressionDesc::Undefined { is_unit },

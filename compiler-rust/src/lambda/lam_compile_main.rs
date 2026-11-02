@@ -15,7 +15,7 @@ use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned_with_id_gen;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
 use crate::lambda::lam_pass_lets_dce::simplify_lets_owned;
 use crate::lambda::lam_pass_remove_alias::{
-    ExternalInlineResolver, simplify_alias_with_jsx_and_external_inline_owned,
+    ExternalInlineResolver, simplify_alias_with_external_inline_owned,
 };
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
@@ -242,19 +242,10 @@ pub fn add_hoisted_function_aliases(
 /// Direct port of `compiler/core/lam_compile_main.ml:148-200` pipeline.
 #[cfg(test)]
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
-    simplify_for_js_backend_with_jsx_preserve(lam, false)
-}
-
-/// `jsx_preserve` reaches `simplify_alias` here so that the JSX guard in
-/// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:54-62)
-/// fires on the same callees OCaml does.
-#[cfg(test)]
-pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
     let mut no_external_inline = |_: &Ident, _: &str| None;
     let mut no_external_arity = |_: &Ident, _: &str| None;
     simplify_for_js_backend_with_external_inline_and_meta_owned(
         lam.clone(),
-        jsx_preserve,
         &mut no_external_inline,
         &mut no_external_arity,
     )
@@ -269,7 +260,6 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
 /// previous pass result into owned ports without changing pass order.
 pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     lam: Lambda,
-    jsx_preserve: bool,
     external_inline: &mut ExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> SimplifiedForJsBackend {
@@ -313,12 +303,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:167 — simplify_alias.
-    let lam = simplify_alias_with_jsx_and_external_inline_owned(
-        &mut meta,
-        lam,
-        jsx_preserve,
-        external_inline,
-    );
+    let lam = simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline);
 
     // lam_compile_main.ml:169 — deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
@@ -327,12 +312,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:174 — simplify_alias.
-    let lam = simplify_alias_with_jsx_and_external_inline_owned(
-        &mut meta,
-        lam,
-        jsx_preserve,
-        external_inline,
-    );
+    let lam = simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline);
 
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
@@ -354,12 +334,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:188 — simplify_alias.
-    let lam = simplify_alias_with_jsx_and_external_inline_owned(
-        &mut meta,
-        lam,
-        jsx_preserve,
-        external_inline,
-    );
+    let lam = simplify_alias_with_external_inline_owned(&mut meta, lam, external_inline);
 
     // OCaml runs alpha_conversion a second time here (lam_compile_main.ml:190).
     // Over a 3,355-module application it rewrote none of them, and dropping

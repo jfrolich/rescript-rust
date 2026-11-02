@@ -20,7 +20,7 @@ pub(crate) fn hit_variables(store: &IndexedLambda, targets: &[Ident], node: Node
         match store.view(node) {
             NodeView::Var(id) => ident(id),
             NodeView::Assign(id, value) => ident(id) || hit(store, targets, value),
-            NodeView::Apply(function, args, _, _) => {
+            NodeView::Apply(function, args, _) => {
                 hit(store, targets, function) || args.iter().any(|node| hit(store, targets, *node))
             }
             NodeView::Function(_, _, body, _, _) => hit(store, targets, body),
@@ -102,7 +102,7 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
                 .all(|(_, node)| no_side_effects(store, *node))
                 && no_side_effects(store, body)
         }
-        NodeView::Apply(function, args, _, _) => matches!(
+        NodeView::Apply(function, args, _) => matches!(
             store.view(function),
             NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { name }), _, _)
                 if name == "from_fun" && args.len() == 1 && no_side_effects(store, args[0])
@@ -170,7 +170,7 @@ pub(crate) fn is_closed_with_map(
                 }
                 iter(store, value, position, stats, local);
             }
-            NodeView::Apply(function, args, _, _) => {
+            NodeView::Apply(function, args, _) => {
                 iter(store, function, position, stats, local);
                 let position = after(store, function, position);
                 for node in args {

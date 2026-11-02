@@ -121,6 +121,7 @@ let identify_pexp pexp =
   | Pexp_await _ -> "Pexp_await"
   | Pexp_jsx_element _ -> "Pexp_jsx_element"
   | Pexp_regexp _ -> "Pexp_regexp"
+  | Pexp_dict _ -> "Pexp_dict"
   | Pexp_template _ -> "Pexp_template"
   | Pexp_tagged_template _ -> "Pexp_tagged_template"
 
@@ -140,6 +141,7 @@ let identify_ppat pat =
   | Ppat_constraint _ -> "Ppat_constraint"
   | Ppat_type _ -> "Ppat_type"
   | Ppat_variant_spread _ -> "Ppat_variant_spread"
+  | Ppat_dict _ -> "Ppat_dict"
   | Ppat_unpack _ -> "Ppat_unpack"
   | Ppat_exception _ -> "Ppat_exception"
   | Ppat_extension _ -> "Ppat_extension"

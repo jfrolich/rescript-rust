@@ -67,7 +67,7 @@ pub fn transform_under_supply(
     // `fn :: args, []` case (lines 54-66) is the same with no bindings.
     let mut all_args = args;
     all_args.extend(extra_lambdas);
-    let body = Lambda::apply(fn_, all_args, ap_info.clone(), false);
+    let body = Lambda::apply(fn_, all_args, ap_info.clone());
     let rest = Lambda::function_(
         n,
         extra_args,

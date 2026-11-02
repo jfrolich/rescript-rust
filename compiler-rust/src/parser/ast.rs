@@ -584,6 +584,8 @@ pub enum PatternDesc {
     Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
     Ppat_array(Box<Vec<PatIdx>>),
+    /// Dict: `dict{"k1": P1, "k2": ?P2}`.
+    Ppat_dict(Box<Vec<DictPatternEntry>>),
     /// Or-pattern: `P1 | P2`.
     Ppat_or(PatIdx, PatIdx),
     /// Constraint: `(P: T)`.
@@ -609,6 +611,24 @@ pub struct PatternRecordField {
     pub pat: PatIdx,
     /// Whether this is optional.
     pub opt: bool,
+}
+
+/// An entry of a dict pattern (compiler/ml/parsetree.ml `dict_pattern_entry`):
+/// `"k": P`, or `"k": ?P` when `pdp_optional`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DictPatternEntry {
+    pub pdp_key: StringLoc,
+    pub pdp_pattern: PatIdx,
+    pub pdp_optional: bool,
+}
+
+/// An entry of a dict literal (compiler/ml/parsetree.ml `dict_entry`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DictEntry {
+    /// `"k": E`
+    Pdict_entry(StringLoc, ExprIdx),
+    /// `...E`
+    Pdict_spread(ExprIdx),
 }
 
 /// Record-rest pattern binding (`...Type.t as name`).
@@ -739,6 +759,8 @@ pub enum ExpressionDesc {
     Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
     Pexp_array(Box<Vec<ExprIdx>>),
+    /// Dict: `dict{"k1": E1, ...E2}`.
+    Pexp_dict(Box<Vec<DictEntry>>),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Ternary: `E1 ? E2 : E3`.

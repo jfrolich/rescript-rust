@@ -265,9 +265,10 @@ impl IndexedPreJsBackend {
                         || matches!(c, crate::lambda::Constant::Int { comment: Some(info), .. }
                             if matches!(**info, crate::lambda::lam_constant::PointerInfo::Constructor(_))))
                         && cross_module_inline
-                        && crate::lambda::lam_pass_collect_indexed::indexed_size(
+                        && crate::lambda::lam_pass_collect_indexed::indexed_size_upto(
                             self.context.store(),
                             root,
+                            crate::lambda::lam_analysis::SMALL_INLINE_SIZE,
                         ) < crate::lambda::lam_analysis::SMALL_INLINE_SIZE
                         && pass_free_variables(self.context.store(), root).is_empty() =>
                     {
@@ -451,7 +452,7 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
                 visit(store, value, free);
                 set_insert(free, *id);
             }
-            NodeView::Apply(function, args, _, _) => {
+            NodeView::Apply(function, args, _) => {
                 visit(store, function, free);
                 for child in args {
                     visit(store, *child, free);
@@ -950,7 +951,7 @@ fn collect_required_modules(
             return;
         }
         match store.view(node) {
-            NodeView::Apply(f, args, _, _) => {
+            NodeView::Apply(f, args, _) => {
                 visit(store, f, modules);
                 for n in args {
                     visit(store, *n, modules);
@@ -1038,7 +1039,6 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
     export_idents: Vec<Ident>,
     hoisted: &[HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
-    jsx_preserve: bool,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
@@ -1047,7 +1047,6 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
         export_idents,
         hoisted,
         possible_required_modules,
-        jsx_preserve,
         external_inline,
         external_arity,
         &WarningConfig::new(),
@@ -1061,7 +1060,6 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
     export_idents: Vec<Ident>,
     hoisted: &[HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
-    jsx_preserve: bool,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
     warning_config: &WarningConfig,
@@ -1075,7 +1073,6 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
         export_idents,
         hoisted,
         possible_required_modules,
-        jsx_preserve,
         id_gen,
         external_inline,
         external_arity,
@@ -1093,7 +1090,6 @@ pub(crate) fn optimize_for_pre_js_indexed(
     export_idents: Vec<Ident>,
     hoisted: &[HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
-    jsx_preserve: bool,
     id_gen: Arc<IdGenerator>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
@@ -1103,7 +1099,6 @@ pub(crate) fn optimize_for_pre_js_indexed(
         export_idents,
         hoisted,
         possible_required_modules,
-        jsx_preserve,
         id_gen,
         external_inline,
         external_arity,
@@ -1118,7 +1113,6 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     export_idents: Vec<Ident>,
     hoisted: &[HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
-    jsx_preserve: bool,
     id_gen: Arc<IdGenerator>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
@@ -1150,12 +1144,12 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     context.simplify_exits(&id_gen);
     dump(&mut diagnostics, "simplify_exits", &context);
     context.collect_info_with_external_arity(external_arity);
-    context.simplify_alias(&id_gen, jsx_preserve, external_inline);
+    context.simplify_alias(&id_gen, external_inline);
     dump(&mut diagnostics, "simplify_alias", &context);
     context.deep_flatten(&id_gen);
     dump(&mut diagnostics, "flatten2", &context);
     context.collect_info_with_external_arity(external_arity);
-    context.simplify_alias(&id_gen, jsx_preserve, external_inline);
+    context.simplify_alias(&id_gen, external_inline);
     context.deep_flatten(&id_gen);
     context.collect_info_with_external_arity(external_arity);
     dump(&mut diagnostics, "alpha_before", &context);
@@ -1164,7 +1158,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     context.simplify_exits(&id_gen);
     context.collect_info_with_external_arity(external_arity);
     dump(&mut diagnostics, "simplify_alias_before", &context);
-    context.simplify_alias(&id_gen, jsx_preserve, external_inline);
+    context.simplify_alias(&id_gen, external_inline);
     dump(&mut diagnostics, "alpha_conversion", &context);
     context.alpha_conversion_with_external_arity(&id_gen, external_arity);
     dump(&mut diagnostics, "before-simplify_lets", &context);
@@ -1240,7 +1234,6 @@ mod tests {
             exports,
             hoisted,
             &AHashSet::new(),
-            false,
             generator,
             &mut inline,
             &mut arity,
@@ -1529,7 +1522,6 @@ mod tests {
             vec![export],
             &[],
             &AHashSet::new(),
-            false,
             Arc::new(IdGenerator::with_start_stamp(10)),
             &mut inline,
             &mut arity,
@@ -1654,7 +1646,6 @@ mod tests {
             exports,
             &[],
             &extras,
-            false,
             Arc::new(IdGenerator::with_start_stamp(5)),
             &mut inline,
             &mut arity,
@@ -1965,7 +1956,6 @@ mod tests {
                 vec![id("value", 1)],
                 std::slice::from_ref(&item),
                 &AHashSet::new(),
-                false,
                 Arc::new(IdGenerator::with_start_stamp(10)),
                 &mut inline,
                 &mut arity,
@@ -2273,7 +2263,6 @@ mod tests {
             vec![id("value", 1)],
             &[],
             &AHashSet::new(),
-            false,
             Arc::new(IdGenerator::with_start_stamp(10)),
             &mut inline,
             &mut arity,

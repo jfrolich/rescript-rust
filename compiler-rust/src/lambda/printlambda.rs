@@ -207,6 +207,30 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
             f.print(format_args!("record_rest({})", excluded.join(", ")))
         }
         Primitive::PjsCall { prim_name, .. } => f.print(format_args!("js_call[{prim_name}]")),
+        Primitive::Pjsx(jsx) => {
+            let mut s = format!("jsx[{}", jsx.jsx_name);
+            if jsx.jsx_multi {
+                s.push_str(" multi");
+            }
+            if jsx.jsx_fragment {
+                s.push_str(" fragment");
+            }
+            if jsx.jsx_spread {
+                s.push_str(" spread");
+            }
+            for (name, optional) in &jsx.jsx_props {
+                s.push(' ');
+                s.push_str(name);
+                if *optional {
+                    s.push('?');
+                }
+            }
+            if jsx.jsx_key {
+                s.push_str(" key");
+            }
+            s.push(']');
+            f.print(format_args!("{s}"))
+        }
         Primitive::PjsObjectCreate(_) => s(f, "js_obj_create"),
         Primitive::PjsObjectGet(name) => f.print(format_args!("js_object_get[{name}]")),
         Primitive::PjsObjectSet(name) => f.print(format_args!("js_object_set[{name}]")),
@@ -285,11 +309,10 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::Parrayrefu => s(f, "array.unsafe_get"),
         Primitive::Parraysetu => s(f, "array.unsafe_set"),
         Primitive::Parrayrefs => s(f, "array.get"),
-        Primitive::Parraysets => s(f, "array.set"),
         Primitive::Pmakelist => s(f, "makelist"),
         Primitive::Pmakedict => s(f, "makedict"),
+        Primitive::PdictSpread => s(f, "dict.spread"),
         Primitive::PdictHas => s(f, "dict.has"),
-        Primitive::Pisint => s(f, "isint"),
         Primitive::PisNull => s(f, "is_null"),
         Primitive::PisUndefined => s(f, "is_undefined"),
         Primitive::PisNullUndefined => s(f, "isnullable"),

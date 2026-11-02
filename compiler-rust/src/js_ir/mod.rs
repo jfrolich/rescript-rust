@@ -863,9 +863,6 @@ pub enum CallArity {
 pub struct CallInfo {
     /// Is this a method call?
     pub is_method: bool,
-    /// Whether this call came from a transformed JSX node that should print
-    /// back to preserved JSX syntax.
-    pub call_transformed_jsx: bool,
     /// Call kind (ML / runtime / NA). Mirrors OCaml's `Js_call_info.call_info`.
     pub kind: CallKind,
     /// Arity-known flag. Mirrors OCaml's `Js_call_info.arity`.
@@ -932,9 +929,6 @@ pub enum ExpressionDesc {
     /// Function call
     Call(Box<Expression>, Vec<Expression>, CallInfo),
 
-    /// String index access (str[i])
-    StringIndex(Box<Expression>, Box<Expression>),
-
     /// Array index access (arr[i])
     ArrayIndex(Box<Expression>, Box<Expression>),
 
@@ -997,7 +991,10 @@ pub enum ExpressionDesc {
     Number(Number),
 
     /// Object literal
-    Object(Option<Box<Expression>>, PropertyMap),
+    Object(Vec<ObjectEntry>),
+
+    /// A JSX element in JSX preserve mode, from `Lambda.Pjsx` (`J.Jsx`).
+    Jsx(Box<JsxExpression>),
 
     /// undefined literal
     Undefined { is_unit: bool },
@@ -1024,6 +1021,145 @@ pub struct RecordRestField {
 
 /// Property map for object literals
 pub type PropertyMap = Vec<(PropertyName, Expression)>;
+
+/// `J.Jsx`: a JSX element in JSX preserve mode. The printer prints it as JSX
+/// when every part can be written in JSX, and otherwise as the call
+/// `callee(tag, {...spread, props, children}, key)`. `props` holds runtime
+/// names in declaration order, without optional props that are statically
+/// `undefined`. With `multi`, each child is a separate element of the
+/// `children` array. Subexpressions are evaluated in the order `callee`,
+/// `tag`, `spread`, `props`, `children`, `key`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct JsxExpression {
+    pub callee: Expression,
+    pub tag: Expression,
+    pub spread: Option<Expression>,
+    pub props: Vec<(String, Expression)>,
+    pub children: Option<Vec<Expression>>,
+    pub key: Option<Expression>,
+    pub multi: bool,
+    pub fragment: bool,
+}
+
+impl JsxExpression {
+    /// The subexpressions, in evaluation order.
+    pub fn expressions(&self) -> impl Iterator<Item = &Expression> {
+        std::iter::once(&self.callee)
+            .chain(std::iter::once(&self.tag))
+            .chain(self.spread.iter())
+            .chain(self.props.iter().map(|(_, value)| value))
+            .chain(self.children.iter().flatten())
+            .chain(self.key.iter())
+    }
+
+    /// The subexpressions, in evaluation order.
+    pub fn expressions_mut(&mut self) -> impl Iterator<Item = &mut Expression> {
+        std::iter::once(&mut self.callee)
+            .chain(std::iter::once(&mut self.tag))
+            .chain(self.spread.iter_mut())
+            .chain(self.props.iter_mut().map(|(_, value)| value))
+            .chain(self.children.iter_mut().flatten())
+            .chain(self.key.iter_mut())
+    }
+
+    /// The element with its subexpressions mapped by `f`, in evaluation
+    /// order.
+    pub fn map(self, mut f: impl FnMut(Expression) -> Expression) -> Self {
+        let JsxExpression {
+            callee,
+            tag,
+            spread,
+            props,
+            children,
+            key,
+            multi,
+            fragment,
+        } = self;
+        let callee = f(callee);
+        let tag = f(tag);
+        let spread = spread.map(&mut f);
+        let props = props
+            .into_iter()
+            .map(|(name, value)| (name, f(value)))
+            .collect();
+        let children = children.map(|children| children.into_iter().map(&mut f).collect());
+        let key = key.map(&mut f);
+        JsxExpression {
+            callee,
+            tag,
+            spread,
+            props,
+            children,
+            key,
+            multi,
+            fragment,
+        }
+    }
+
+    pub fn into_expressions(self) -> impl Iterator<Item = Expression> {
+        std::iter::once(self.callee)
+            .chain(std::iter::once(self.tag))
+            .chain(self.spread)
+            .chain(self.props.into_iter().map(|(_, value)| value))
+            .chain(self.children.into_iter().flatten())
+            .chain(self.key)
+    }
+}
+
+/// An entry of an object literal: `k: v` or `...e`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ObjectEntry {
+    Property(PropertyName, Expression),
+    Spread(Expression),
+}
+
+impl ObjectEntry {
+    /// The entry's expression.
+    pub fn expression(&self) -> &Expression {
+        match self {
+            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) => e,
+        }
+    }
+
+    pub fn expression_mut(&mut self) -> &mut Expression {
+        match self {
+            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) => e,
+        }
+    }
+
+    /// The entry with its expression mapped by `f`.
+    pub fn map(self, f: impl FnOnce(Expression) -> Expression) -> Self {
+        match self {
+            ObjectEntry::Property(name, e) => ObjectEntry::Property(name, f(e)),
+            ObjectEntry::Spread(e) => ObjectEntry::Spread(f(e)),
+        }
+    }
+
+    pub fn into_expression(self) -> Expression {
+        match self {
+            ObjectEntry::Property(_, e) | ObjectEntry::Spread(e) => e,
+        }
+    }
+}
+
+impl ExpressionDesc {
+    /// `Object` of `properties` (`E.obj properties`).
+    pub fn object(properties: PropertyMap) -> Self {
+        ExpressionDesc::Object(object_entries(None, properties))
+    }
+}
+
+/// `E.object_entries ?dup properties`: a spread of `dup`, then the properties.
+pub fn object_entries(dup: Option<Expression>, properties: PropertyMap) -> Vec<ObjectEntry> {
+    let mut entries = Vec::with_capacity(properties.len() + usize::from(dup.is_some()));
+    entries.extend(dup.map(ObjectEntry::Spread));
+    entries.extend(
+        properties
+            .into_iter()
+            .map(|(name, value)| ObjectEntry::Property(name, value)),
+    );
+    entries
+}
 
 /// JavaScript expression
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1641,8 +1777,7 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
             values.iter().all(expression_has_no_side_effects)
         }
         ExpressionDesc::StaticIndex(target, _, _) => expression_has_no_side_effects(target),
-        ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right)
+        ExpressionDesc::ArrayIndex(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::Seq(left, right) => {
@@ -1657,12 +1792,13 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::OptionalBlock(inner, _) => expression_has_no_side_effects(inner),
         ExpressionDesc::Array(items, _) => items.iter().all(expression_has_no_side_effects),
         ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(expression_has_no_side_effects),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref().is_none_or(expression_has_no_side_effects)
-                && props
-                    .iter()
-                    .all(|(_, value)| expression_has_no_side_effects(value))
-        }
+        // A spread reads the source's properties, which may run getters or
+        // proxy traps.
+        ExpressionDesc::Jsx(_) => false,
+        ExpressionDesc::Object(entries) => entries.iter().all(|entry| match entry {
+            ObjectEntry::Property(_, value) => expression_has_no_side_effects(value),
+            ObjectEntry::Spread(_) => false,
+        }),
         ExpressionDesc::Cond(test, consequent, alternate) => {
             expression_has_no_side_effects(test)
                 && expression_has_no_side_effects(consequent)
@@ -2236,10 +2372,6 @@ fn same_assignment_target(lhs: &Expression, rhs: &Expression) -> bool {
         (
             ExpressionDesc::ArrayIndex(left_obj, left_index),
             ExpressionDesc::ArrayIndex(right_obj, right_index),
-        )
-        | (
-            ExpressionDesc::StringIndex(left_obj, left_index),
-            ExpressionDesc::StringIndex(right_obj, right_index),
         ) => {
             same_assignment_target(left_obj, right_obj)
                 && same_assignment_target(left_index, right_index)
@@ -2843,10 +2975,6 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
             false
         }
         (
-            ExpressionDesc::StringIndex(left_obj, left_index),
-            ExpressionDesc::StringIndex(right_obj, right_index),
-        )
-        | (
             ExpressionDesc::ArrayIndex(left_obj, left_index),
             ExpressionDesc::ArrayIndex(right_obj, right_index),
         ) => {
@@ -3188,7 +3316,6 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             stack.push(DisposeItem::Expression(*left));
             stack.push(DisposeItem::Expression(*right));
@@ -3222,12 +3349,14 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
         ExpressionDesc::CamlBlock(expressions, _, _) => {
             push_expression_vec(expressions, stack);
         }
-        ExpressionDesc::Object(proto, properties) => {
-            if let Some(proto) = proto {
-                stack.push(DisposeItem::Expression(*proto));
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.into_expressions() {
+                stack.push(DisposeItem::Expression(value));
             }
-            for (_, expression) in properties {
-                stack.push(DisposeItem::Expression(expression));
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                stack.push(DisposeItem::Expression(entry.into_expression()));
             }
         }
         ExpressionDesc::New(func, args) => {

@@ -56,7 +56,7 @@ fn assign(owner: &mut IndexedJsConsumer<'_>, id: &Ident, node: NodeId) -> Block 
     block
 }
 
-fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> Lambda {
+fn external_application(args: Vec<Lambda>, status: ApplyStatus) -> Lambda {
     Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
@@ -68,7 +68,6 @@ fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> La
             loc: Location::new_for_error("caller.res", 10, 20),
             status,
         },
-        ap_transformed_jsx: jsx,
     }))
 }
 
@@ -99,16 +98,12 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
         )]))),
     );
     let mut context = IndexedLambdaContext::from_lambda(
-        external_application(
-            vec![Lambda::const_(Constant::int(7))],
-            ApplyStatus::Na,
-            true,
-        ),
+        external_application(vec![Lambda::const_(Constant::int(7))], ApplyStatus::Na),
         [],
     );
     let root = context.current_root();
     let argument = match context.store().view(root) {
-        NodeView::Apply(_, args, _, _) => args[0],
+        NodeView::Apply(_, args, _) => args[0],
         _ => unreachable!(),
     };
     context.register_backend_roots([root]);
@@ -160,11 +155,7 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
         )]))),
     );
     let mut context = IndexedLambdaContext::from_lambda(
-        external_application(
-            vec![Lambda::const_(Constant::int(42))],
-            ApplyStatus::Na,
-            false,
-        ),
+        external_application(vec![Lambda::const_(Constant::int(42))], ApplyStatus::Na),
         [],
     );
     let root = context.current_root();
@@ -222,14 +213,13 @@ fn rejected_cmj_does_not_import_and_lowers_arguments_after_arity_query_rtl() {
                 Lambda::const_(Constant::int(2)),
             ],
             ApplyStatus::Uncurry,
-            true,
         ),
         [],
     );
     let root = context.current_root();
     let count = context.node_count();
     let args = match context.store().view(root) {
-        NodeView::Apply(_, args, _, _) => args.to_vec(),
+        NodeView::Apply(_, args, _) => args.to_vec(),
         _ => unreachable!(),
     };
     let mut owner = IndexedJsConsumer::new(&mut compiler, &mut context);
@@ -245,7 +235,6 @@ fn rejected_cmj_does_not_import_and_lowers_arguments_after_arity_query_rtl() {
     let ExpressionDesc::Call(_, _, info) = &compiled.expr.desc else {
         panic!("call")
     };
-    assert!(info.call_transformed_jsx);
     assert_eq!(info.arity, CallArity::Full);
     assert_eq!(info.kind, CallKind::Na);
 }
@@ -266,13 +255,12 @@ fn normal_calls_visit_arguments_then_function_rtl_but_emit_source_order() {
                 loc: Location::none(),
                 status: ApplyStatus::Uncurry,
             },
-            ap_transformed_jsx: false,
         })),
         [],
     );
     let root = context.current_root();
     let (function, args) = match context.store().view(root) {
-        NodeView::Apply(f, args, _, _) => (f, args.to_vec()),
+        NodeView::Apply(f, args, _) => (f, args.to_vec()),
         _ => unreachable!(),
     };
     let mut owner = IndexedJsConsumer::new(&mut compiler, &mut context);

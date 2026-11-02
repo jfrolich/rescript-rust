@@ -6,8 +6,8 @@
 use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
     Block, CallArity, CallInfo, CallKind, CaseClause, Expression, ExpressionDesc, ForDirection,
-    JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
-    VariableDeclaration,
+    JsRawInfo, JsxExpression, ModulePathResolver, MutableFlag, ObjectEntry, PropertyMap, Statement,
+    StatementDesc, StringClause, VIdent, VariableDeclaration, object_entries,
 };
 use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
@@ -22,13 +22,6 @@ use std::borrow::Cow;
 struct NameScope {
     ident_names: HashMap<Ident, String>,
     next_suffix: HashMap<String, usize>,
-}
-
-enum JsxChildren<'a> {
-    None,
-    EmptyFragment,
-    Slice(&'a [Expression]),
-    Single(&'a Expression),
 }
 
 struct FunctionPrintContext<'a> {
@@ -1333,7 +1326,7 @@ impl<'r> JsPrinter<'r> {
             ExpressionDesc::Call(func, _, _) => matches!(func.desc, ExpressionDesc::RawJsCode(_)),
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::Fun { .. }
-            | ExpressionDesc::Object(_, _)
+            | ExpressionDesc::Object(_)
             | ExpressionDesc::JsonLiteral(_) => true,
             _ => false,
         }
@@ -1342,7 +1335,7 @@ impl<'r> JsPrinter<'r> {
     fn arrow_expr_needs_paren(&self, expr: &Expression) -> bool {
         match &expr.desc {
             ExpressionDesc::Fun { .. }
-            | ExpressionDesc::Object(_, _)
+            | ExpressionDesc::Object(_)
             | ExpressionDesc::JsonLiteral(_) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
             ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
@@ -1360,345 +1353,121 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn transformed_jsx_call_name<'a>(
-        &self,
-        func: &'a Expression,
-        info: &CallInfo,
-    ) -> Option<&'a str> {
-        if !info.call_transformed_jsx {
-            return None;
-        }
-
-        let name = match &func.desc {
-            ExpressionDesc::Var(VIdent::Id(id)) => Some(id.name()),
-            ExpressionDesc::Var(VIdent::Qualified(_, Some(name))) => Some(name.as_str()),
-            _ => None,
-        }?;
-
-        matches!(name, "jsx" | "jsxs").then_some(name)
-    }
-
-    fn is_jsx_fragment_tag(&self, tag: &Expression) -> bool {
-        matches!(
-            &tag.desc,
-            ExpressionDesc::Var(VIdent::Qualified(module, Some(name)))
-                if name == "Fragment"
-                    && matches!(
-                        &module.kind,
-                        Kind::External { name, .. } if name == "react/jsx-runtime"
-                    )
-        )
-    }
-
-    fn collect_jsx_fields_from_object<'a>(
-        &self,
-        props: &'a [(PropertyName, Expression)],
-    ) -> Option<Vec<(&'a str, &'a Expression)>> {
-        let mut fields = Vec::with_capacity(props.len());
-        for (name, value) in props {
-            let PropertyName::Lit(name) = name else {
-                return None;
-            };
-            fields.push((name.as_str(), value));
-        }
-        Some(fields)
-    }
-
-    fn collect_jsx_fields_from_record_block<'a>(
-        &self,
-        elements: &'a [Expression],
-        fields: &'a [(String, bool)],
-    ) -> Option<Vec<(&'a str, &'a Expression)>> {
-        if elements.len() != fields.len() {
-            return None;
-        }
-
-        let mut collected = Vec::with_capacity(fields.len());
-        for ((name, optional), value) in fields.iter().zip(elements.iter()) {
-            if *optional && is_undefined_literal(value) {
-                continue;
+    /// `print_jsx`: an element that `jsx_printable` accepts.
+    fn print_jsx(&mut self, jsx: &JsxExpression) {
+        let empty_fragment = is_empty_fragment(jsx);
+        let print_tag = |this: &mut Self| match &jsx.tag.desc {
+            _ if empty_fragment => {}
+            ExpressionDesc::Str(txt) => this.write(txt),
+            _ => this.print_expression(&jsx.tag, 15),
+        };
+        // Fragments without children print as <></>, since </> is invalid.
+        let children: Option<&[Expression]> = match &jsx.children {
+            None if empty_fragment => Some(&[]),
+            children => children.as_deref(),
+        };
+        // The key goes before the spread so that tools like esbuild keep
+        // using the automatic runtime's jsx() rather than createElement().
+        let has_attributes = jsx.key.is_some() || jsx.spread.is_some() || !jsx.props.is_empty();
+        self.write("<");
+        print_tag(self);
+        if has_attributes {
+            self.indent();
+            if let Some(key) = &jsx.key {
+                self.newline();
+                self.print_jsx_attribute("key", key);
             }
-            collected.push((name.as_str(), value));
+            if let Some(spread) = &jsx.spread {
+                self.newline();
+                self.write("{...");
+                self.print_expression(spread, 1);
+                self.write("}");
+            }
+            for (name, value) in &jsx.props {
+                self.newline();
+                self.print_jsx_attribute(unwrap_uppercase_exotic(name), value);
+            }
+            self.dedent();
+            self.newline();
+        } else if children.is_none() {
+            self.space();
         }
-        Some(collected)
-    }
-
-    fn collect_jsx_spread_assignments<'a>(
-        &self,
-        props: &'a Expression,
-    ) -> Option<(Vec<(&'a str, &'a Expression)>, &'a Expression)> {
-        fn visit<'a>(
-            expr: &'a Expression,
-            acc: &mut Vec<(&'a str, &'a Expression)>,
-        ) -> Option<&'a Expression> {
-            match &expr.desc {
-                ExpressionDesc::Seq(first, rest) => match &first.desc {
-                    ExpressionDesc::Bin(BinOp::Eq, target, value) => match &target.as_ref().desc {
-                        ExpressionDesc::StaticIndex(_, name, _) => {
-                            acc.push((name.as_str(), value.as_ref()));
-                            visit(rest, acc)
+        match children {
+            None => self.write("/>"),
+            Some(children) => {
+                self.write(">");
+                // `print_indented_list`
+                if !children.is_empty() {
+                    self.indent();
+                    self.newline();
+                    for (i, child) in children.iter().enumerate() {
+                        if i > 0 {
+                            self.newline();
                         }
-                        _ => None,
-                    },
-                    _ => None,
-                },
-                _ => Some(expr),
-            }
-        }
-
-        let mut fields = Vec::new();
-        let spread = visit(props, &mut fields)?;
-        Some((fields, spread))
-    }
-
-    fn collect_transformed_jsx_props<'a>(
-        &self,
-        props: &'a Expression,
-    ) -> Option<(Vec<(&'a str, &'a Expression)>, Option<&'a Expression>)> {
-        match &props.desc {
-            ExpressionDesc::Object(dup, props) => Some((
-                self.collect_jsx_fields_from_object(props)?,
-                dup.as_ref().map(|dup| dup.as_ref()),
-            )),
-            ExpressionDesc::CamlBlock(elements, _, tag)
-                if matches!(**tag, crate::lambda::TagInfo::Record { .. }) =>
-            {
-                let crate::lambda::TagInfo::Record { fields, .. } = &**tag else {
-                    unreachable!()
-                };
-                Some((
-                    self.collect_jsx_fields_from_record_block(elements, fields)?,
-                    None,
-                ))
-            }
-            ExpressionDesc::Seq(_, _) => {
-                let (fields, spread_props) = self.collect_jsx_spread_assignments(props)?;
-                Some((fields, Some(spread_props)))
-            }
-            ExpressionDesc::Var(_) => Some((Vec::new(), Some(props))),
-            _ => None,
-        }
-    }
-
-    fn jsx_children<'a>(
-        &self,
-        fn_name: &str,
-        fields: &[(&'a str, &'a Expression)],
-        is_fragment: bool,
-    ) -> JsxChildren<'a> {
-        for (name, expr) in fields {
-            if *name != "children" {
-                continue;
-            }
-
-            return if fn_name == "jsxs" {
-                match &expr.desc {
-                    ExpressionDesc::Array(children, _) => JsxChildren::Slice(children),
-                    ExpressionDesc::OptionalBlock(inner, _) => match &inner.as_ref().desc {
-                        ExpressionDesc::Array(children, _) => JsxChildren::Slice(children),
-                        _ => JsxChildren::Single(expr),
-                    },
-                    _ => JsxChildren::Single(expr),
+                        let bare = is_printable_jsx(child, self.jsx_preserve);
+                        if !bare {
+                            self.write("{");
+                        }
+                        self.print_expression(child, 1);
+                        if !bare {
+                            self.write("}");
+                        }
+                    }
+                    self.dedent();
                 }
-            } else {
-                JsxChildren::Single(expr)
-            };
-        }
-
-        if is_fragment {
-            JsxChildren::EmptyFragment
-        } else {
-            JsxChildren::None
+                if has_attributes || !children.is_empty() {
+                    self.newline();
+                }
+                self.write("</");
+                print_tag(self);
+                self.write(">");
+            }
         }
     }
 
-    fn print_transformed_jsx_tag(&mut self, tag: &Expression, level: u8, is_fragment: bool) {
-        match &tag.desc {
-            ExpressionDesc::Str(txt) => self.write(txt),
-            _ if is_fragment => {}
-            _ => self.print_expression(tag, level),
-        }
-    }
-
-    fn print_transformed_jsx_key_prop(&mut self, key: &Expression) {
-        self.write("key={");
-        self.print_expression(key, 0);
-        self.write("} ");
-    }
-
-    fn print_transformed_jsx_spread_prop(&mut self, spread: &Expression) {
-        self.write("{...");
-        self.print_expression(spread, 0);
-        self.write("} ");
-    }
-
-    fn print_transformed_jsx_named_prop(&mut self, name: &str, value: &Expression) {
-        self.write(unwrap_uppercase_exotic(name));
+    fn print_jsx_attribute(&mut self, name: &str, value: &Expression) {
+        self.write(name);
         self.write("={");
-        self.print_expression(value, 0);
+        self.print_expression(value, 1);
         self.write("}");
     }
 
-    /// js_dump.ml `print_one_child`: a child prints at the level of the
-    /// enclosing JSX expression (`print_indented_list f level ...`).
-    fn print_transformed_jsx_child(&mut self, child: &Expression, level: u8) {
-        let child_is_jsx = matches!(
-            &child.desc,
-            ExpressionDesc::Call(
-                _,
-                _,
-                CallInfo {
-                    call_transformed_jsx: true,
-                    ..
-                }
-            )
-        );
-        if !child_is_jsx {
-            self.write("{");
-        }
-        self.print_expression(child, level);
-        if !child_is_jsx {
-            self.write("}");
-        }
-    }
-
-    fn print_transformed_jsx(
-        &mut self,
-        level: u8,
-        fn_name: &str,
-        tag: &Expression,
-        fields: &[(&str, &Expression)],
-        spread_props: Option<&Expression>,
-        key: Option<&Expression>,
-    ) {
-        let is_fragment = self.is_jsx_fragment_tag(tag);
-        let children = self.jsx_children(fn_name, fields, is_fragment);
-        let named_prop_count = fields
+    /// An element that JSX can't express prints as the call it stands for.
+    fn print_jsx_call(&mut self, jsx: &JsxExpression, level: u8) {
+        let mut props: PropertyMap = jsx
+            .props
             .iter()
-            .filter(|(name, _)| *name != "children")
-            .count();
-        let has_named_props = named_prop_count != 0;
-        let printable_prop_count =
-            usize::from(key.is_some()) + usize::from(spread_props.is_some()) + named_prop_count;
-
-        if level > 15 {
-            self.write_char('(');
+            .map(|(name, value)| (PropertyName::Lit(name.clone()), value.clone()))
+            .collect();
+        match &jsx.children {
+            None => {}
+            Some(children) => match children.as_slice() {
+                [child] if !jsx.multi => {
+                    props.push((PropertyName::Lit("children".to_string()), child.clone()));
+                }
+                children => props.push((
+                    PropertyName::Lit("children".to_string()),
+                    Expression::array(children.to_vec(), MutableFlag::Mutable),
+                )),
+            },
         }
-
-        self.write("<");
-        self.print_transformed_jsx_tag(tag, level, is_fragment);
-
-        if printable_prop_count == 0 {
-            if matches!(children, JsxChildren::None) {
-                self.write(" ");
-            }
-        } else {
-            self.indent();
-            self.newline();
-
-            let mut remaining = printable_prop_count;
-            if let Some(key) = key {
-                self.print_transformed_jsx_key_prop(key);
-                remaining -= 1;
-                if remaining > 0 {
-                    self.newline();
-                }
-            }
-            if let Some(spread_props) = spread_props {
-                self.print_transformed_jsx_spread_prop(spread_props);
-                remaining -= 1;
-                if remaining > 0 {
-                    self.newline();
-                }
-            }
-            let mut printed_named_props = 0;
-            for (name, value) in fields.iter().filter(|(name, _)| *name != "children") {
-                self.print_transformed_jsx_named_prop(name, value);
-                printed_named_props += 1;
-                if printed_named_props < named_prop_count {
-                    self.newline();
-                }
-            }
-
-            self.dedent();
-        }
-
-        match children {
-            JsxChildren::None => {
-                if has_named_props {
-                    self.newline();
-                }
-                self.write("/>");
-            }
-            JsxChildren::EmptyFragment => {
-                self.write("></>");
-            }
-            JsxChildren::Slice(children) if children.is_empty() && is_fragment => {
-                self.write("></>");
-            }
-            JsxChildren::Slice(children) => {
-                if has_named_props {
-                    self.newline();
-                }
-                self.write(">");
-                self.indent();
-                for child in children {
-                    self.newline();
-                    self.print_transformed_jsx_child(child, level);
-                }
-                self.dedent();
-                self.newline();
-                self.write("</");
-                self.print_transformed_jsx_tag(tag, level, is_fragment);
-                self.write(">");
-            }
-            JsxChildren::Single(child) => {
-                if has_named_props {
-                    self.newline();
-                }
-                self.write(">");
-                self.indent();
-                self.newline();
-                self.print_transformed_jsx_child(child, level);
-                self.dedent();
-                self.newline();
-                self.write("</");
-                self.print_transformed_jsx_tag(tag, level, is_fragment);
-                self.write(">");
-            }
-        }
-
-        if level > 15 {
-            self.write_char(')');
-        }
-    }
-
-    fn try_print_transformed_jsx_call(
-        &mut self,
-        func: &Expression,
-        args: &[Expression],
-        info: &CallInfo,
-        level: u8,
-    ) -> bool {
-        if !self.jsx_preserve {
-            return false;
-        }
-
-        let Some(fn_name) = self.transformed_jsx_call_name(func, info) else {
-            return false;
-        };
-
-        let (tag, props, key) = match args {
-            [tag, props] => (tag, props, None),
-            [tag, props, key] => (tag, props, Some(key)),
-            _ => return false,
-        };
-        let Some((fields, spread_props)) = self.collect_transformed_jsx_props(props) else {
-            return false;
-        };
-
-        self.print_transformed_jsx(level, fn_name, tag, &fields, spread_props, key);
-        true
+        let mut args = Vec::with_capacity(3);
+        args.push(jsx.tag.clone());
+        args.push(Expression::new(ExpressionDesc::Object(object_entries(
+            jsx.spread.clone(),
+            props,
+        ))));
+        // An explicit undefined key is still passed, as by the call.
+        args.extend(jsx.key.clone());
+        let call = ExpressionDesc::Call(
+            Box::new(jsx.callee.clone()),
+            args,
+            CallInfo {
+                arity: CallArity::Full,
+                ..CallInfo::default()
+            },
+        );
+        self.print_expression_desc(&call, level);
     }
 
     /// Print an expression
@@ -1774,15 +1543,13 @@ impl<'r> JsPrinter<'r> {
                 self.print_array_literal(elements);
             }
 
-            ExpressionDesc::Object(dup, props) => self.print_object_literal(
+            ExpressionDesc::Object(entries) => self.print_object_entries(
                 level,
-                dup.as_deref(),
-                props.iter(),
-                |this, (name, value)| {
-                    this.print_property_name(name);
-                    this.write(": ");
-                    this.print_expression(value, 1);
-                },
+                entries
+                    .iter()
+                    .all(|entry| matches!(entry, ObjectEntry::Spread(_))),
+                entries,
+                |this, entry| this.print_object_entry(entry),
             ),
 
             ExpressionDesc::Seq(e1, e2) => {
@@ -1924,11 +1691,15 @@ impl<'r> JsPrinter<'r> {
                 }
             }
 
-            ExpressionDesc::Call(func, args, info) => {
-                if self.try_print_transformed_jsx_call(func, args, info, level) {
-                    return;
+            ExpressionDesc::Jsx(jsx) => {
+                if jsx_printable(jsx, self.jsx_preserve) {
+                    self.print_jsx(jsx);
+                } else {
+                    self.print_jsx_call(jsx, level);
                 }
+            }
 
+            ExpressionDesc::Call(func, args, _) => {
                 let needs_paren = level > 15;
                 if needs_paren {
                     self.write_char('(');
@@ -2042,13 +1813,6 @@ impl<'r> JsPrinter<'r> {
                 if needs_paren {
                     self.write_char(')');
                 }
-            }
-
-            ExpressionDesc::StringIndex(str_expr, idx) => {
-                self.print_expression(str_expr, 15);
-                self.write(".codePointAt(");
-                self.print_expression(idx, 0);
-                self.write_char(')');
             }
 
             ExpressionDesc::StaticIndex(obj, field, _) => {
@@ -2220,7 +1984,6 @@ impl<'r> JsPrinter<'r> {
                         } else {
                             self.print_object_literal(
                                 level,
-                                None,
                                 elements.iter().zip(fields.iter()).filter_map(
                                     |(elem, (field_name, optional))| {
                                         if *optional && is_undefined_literal(elem) {
@@ -2256,7 +2019,6 @@ impl<'r> JsPrinter<'r> {
                         };
                         self.print_object_literal(
                             level,
-                            None,
                             (if tag_field.is_none() {
                                 Vec::new()
                             } else {
@@ -2294,7 +2056,6 @@ impl<'r> JsPrinter<'r> {
                     TagInfo::Module(fields) if fields.len() == elements.len() => {
                         self.print_object_literal(
                             level,
-                            None,
                             elements.iter().zip(fields.iter()),
                             |this, (elem, field_name)| {
                                 let field_name = convert_ident_name(field_name);
@@ -2312,7 +2073,6 @@ impl<'r> JsPrinter<'r> {
                         if name == "::" {
                             self.print_object_literal(
                                 level,
-                                None,
                                 elements.iter().enumerate(),
                                 |this, (i, elem)| {
                                     match i {
@@ -2336,7 +2096,6 @@ impl<'r> JsPrinter<'r> {
                                 let include_debug_name = self.debug && name.as_str() != "::";
                                 self.print_object_literal(
                                     level,
-                                    None,
                                     (if include_tag {
                                         vec![(None, None)]
                                     } else {
@@ -2386,7 +2145,6 @@ impl<'r> JsPrinter<'r> {
                         // `NAME: 1`.
                         self.print_object_literal(
                             level,
-                            None,
                             std::iter::once((false, elements.first())).chain(
                                 elements.get(1).into_iter().map(|value| (true, Some(value))),
                             ),
@@ -2474,7 +2232,7 @@ impl<'r> JsPrinter<'r> {
             props.push(("Error".to_string(), None));
         }
 
-        self.print_object_literal(level, None, props.iter(), |this, prop| {
+        self.print_object_literal(level, props.iter(), |this, prop| {
             let (name, value) = prop;
             this.print_literal_property_name(name);
             this.write(": ");
@@ -2520,12 +2278,23 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
-    fn print_object_literal<T, I, F>(
+    /// An object literal of properties, printed by `print_prop`.
+    fn print_object_literal<T, I, F>(&mut self, level: u8, props: I, mut print_prop: F)
+    where
+        I: IntoIterator<Item = T>,
+        F: FnMut(&mut Self, T),
+    {
+        self.print_object_entries(level, false, props, |this, prop| print_prop(this, prop));
+    }
+
+    /// `Object entries` (js_dump.ml): only spreads, e.g. `{...a, ...b}`, on
+    /// one line, otherwise one entry per line.
+    fn print_object_entries<T, I, F>(
         &mut self,
         level: u8,
-        dup: Option<&Expression>,
-        props: I,
-        mut print_prop: F,
+        only_spreads: bool,
+        entries: I,
+        mut print_entry: F,
     ) where
         I: IntoIterator<Item = T>,
         F: FnMut(&mut Self, T),
@@ -2536,32 +2305,23 @@ impl<'r> JsPrinter<'r> {
         }
 
         self.write_char('{');
-        let mut props = props.into_iter().peekable();
-        // OCaml `js_dump.ml` prints the spread through `J.Spread` at level 1,
-        // whose operand is printed at level 13 (so object literals get parens).
-        if let (Some(spread), None) = (dup, props.peek()) {
-            self.write("...");
-            self.print_expression(spread, 13);
-        } else if dup.is_some() || props.peek().is_some() {
+        let mut entries = entries.into_iter().peekable();
+        if only_spreads || entries.peek().is_none() {
+            while let Some(entry) = entries.next() {
+                print_entry(self, entry);
+                if entries.peek().is_some() {
+                    self.write(", ");
+                }
+            }
+        } else {
             self.indent();
-
-            if let Some(spread) = dup {
+            while let Some(entry) = entries.next() {
                 self.newline();
-                self.write("...");
-                self.print_expression(spread, 13);
-                if props.peek().is_some() {
+                print_entry(self, entry);
+                if entries.peek().is_some() {
                     self.write_char(',');
                 }
             }
-
-            while let Some(prop) = props.next() {
-                self.newline();
-                print_prop(self, prop);
-                if props.peek().is_some() {
-                    self.write_char(',');
-                }
-            }
-
             self.dedent();
             self.newline();
         }
@@ -2569,6 +2329,24 @@ impl<'r> JsPrinter<'r> {
 
         if needs_paren {
             self.write_char(')');
+        }
+    }
+
+    /// An object literal entry: `name: value` or `...e`.
+    fn print_object_entry(&mut self, entry: &ObjectEntry) {
+        match entry {
+            // OCaml `js_dump.ml` prints the spread through `J.Spread` at level
+            // 1, whose operand is printed at level 13 (so object literals get
+            // parens).
+            ObjectEntry::Spread(spread) => {
+                self.write("...");
+                self.print_expression(spread, 13);
+            }
+            ObjectEntry::Property(name, value) => {
+                self.print_property_name(name);
+                self.write(": ");
+                self.print_expression(value, 1);
+            }
         }
     }
 
@@ -2628,7 +2406,14 @@ impl<'r> JsPrinter<'r> {
         self.write_char(']');
     }
 
+    /// `Js_dump_property.property_key (Lit name)`.
     fn print_literal_property_name(&mut self, name: &str) {
+        // A non-computed `__proto__` key sets the prototype of an object
+        // literal, and may occur only once in it.
+        if name == "__proto__" {
+            self.write("[\"__proto__\"]");
+            return;
+        }
         let name = unwrap_uppercase_exotic(name);
         if property_access_uses_dot(name) {
             self.write(name);
@@ -2810,6 +2595,113 @@ impl<'r> JsPrinter<'r> {
 /// (compiler/core/js_dump.ml:299-344). Returns the callee to print when the
 /// function body is `[ Return (Call (Var v, args, _)) ]`, every argument is the
 /// matching parameter, and call info permits the rewrite.
+// JSX preserve mode: a `Jsx` element is printed as JSX only when JSX can
+// express it exactly; otherwise it is printed as the call it stands for.
+
+fn is_jsx_name_char(c: u8, dash: bool) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$') || (dash && c == b'-')
+}
+
+/// `is_jsx_attribute_name`: a JSX identifier, which may contain `-`.
+/// `__proto__` would set the prototype of the props object.
+fn is_jsx_attribute_name(name: &str) -> bool {
+    match name.as_bytes() {
+        [] => false,
+        _ if name == "key" || name == "__proto__" => false,
+        [first, rest @ ..] => {
+            (first.is_ascii_alphabetic() || matches!(first, b'_' | b'$'))
+                && rest.iter().all(|c| is_jsx_name_char(*c, true))
+        }
+    }
+}
+
+/// `is_jsx_value_name`: an element name that JSX reads as a value rather
+/// than an intrinsic element: one not starting with a lowercase letter.
+fn is_jsx_value_name(name: &str) -> bool {
+    match name.as_bytes() {
+        [first, rest @ ..] => {
+            (first.is_ascii_uppercase() || matches!(first, b'_' | b'$'))
+                && rest.iter().all(|c| is_jsx_name_char(*c, false))
+        }
+        [] => false,
+    }
+}
+
+/// `printed_ident_name`: how `vident` prints a variable's name.
+fn printed_ident_name(id: &Ident) -> Cow<'_, str> {
+    if id.is_js() {
+        Cow::Borrowed(id.name())
+    } else {
+        Cow::Owned(convert_ident_name(id.name()))
+    }
+}
+
+fn is_jsx_member_expression(e: &Expression) -> bool {
+    match &e.desc {
+        ExpressionDesc::Var(_) => true,
+        ExpressionDesc::StaticIndex(obj, name, _) => {
+            property_access_uses_dot(name) && is_jsx_member_expression(obj)
+        }
+        _ => false,
+    }
+}
+
+fn is_jsx_tag(tag: &Expression) -> bool {
+    match &tag.desc {
+        // an intrinsic element
+        ExpressionDesc::Str(name) => match name.as_bytes() {
+            [first, rest @ ..] => {
+                first.is_ascii_lowercase() && rest.iter().all(|c| is_jsx_name_char(*c, true))
+            }
+            [] => false,
+        },
+        ExpressionDesc::Var(VIdent::Id(id)) => is_jsx_value_name(&printed_ident_name(id)),
+        ExpressionDesc::Var(VIdent::Qualified(module, None)) => {
+            is_jsx_value_name(&printed_ident_name(&module.id))
+        }
+        ExpressionDesc::Var(VIdent::Qualified(module, Some(_)))
+            if matches!(module.kind, Kind::External { default: true, .. }) =>
+        {
+            is_jsx_value_name(&printed_ident_name(&module.id))
+        }
+        ExpressionDesc::Var(VIdent::Qualified(module, Some(name))) => match module.kind {
+            Kind::Ml | Kind::Runtime => true,
+            Kind::External { .. } => property_access_uses_dot(name),
+        },
+        ExpressionDesc::StaticIndex(..) => is_jsx_member_expression(tag),
+        _ => false,
+    }
+}
+
+fn is_empty_fragment(jsx: &JsxExpression) -> bool {
+    jsx.fragment && jsx.spread.is_none() && jsx.props.is_empty() && jsx.key.is_none()
+}
+
+/// `jsx_printable`. Cross-module inlining can bring an element from a
+/// preserve-mode module into one compiled without preserve mode.
+fn jsx_printable(jsx: &JsxExpression, jsx_preserve: bool) -> bool {
+    jsx_preserve
+        && (is_empty_fragment(jsx) || is_jsx_tag(&jsx.tag))
+        && jsx
+            .props
+            .iter()
+            .all(|(name, _)| is_jsx_attribute_name(unwrap_uppercase_exotic(name)))
+        // JSX makes `children` an array exactly when there are several
+        // children.
+        && jsx
+            .children
+            .as_ref()
+            .is_none_or(|children| (children.len() >= 2) == jsx.multi)
+}
+
+fn is_printable_jsx(e: &Expression, jsx_preserve: bool) -> bool {
+    match &e.desc {
+        ExpressionDesc::Jsx(jsx) => jsx_printable(jsx, jsx_preserve),
+        ExpressionDesc::OptionalBlock(e, true) => is_printable_jsx(e, jsx_preserve),
+        _ => false,
+    }
+}
+
 fn eta_reduce_function_body<'a>(
     is_method: bool,
     params: &[Ident],
@@ -2952,7 +2844,7 @@ fn call_argument_needs_extra_group_indent(
     }
 
     match &expr.desc {
-        ExpressionDesc::Object(_, _) => true,
+        ExpressionDesc::Object(_) => true,
         ExpressionDesc::Array(elements, _) => elements.len() > 1,
         ExpressionDesc::OptionalBlock(inner, true) => {
             call_argument_needs_extra_group_indent(inner, call_level, current_indent)
@@ -3482,7 +3374,6 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             collect_expression_idents(left, stats);
             collect_expression_idents(right, stats);
@@ -3535,11 +3426,14 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(item, stats);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                collect_expression_idents(dup, stats);
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
+                collect_expression_idents(value, stats);
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (ObjectEntry::Property(_, value) | ObjectEntry::Spread(value)) = entry;
                 collect_expression_idents(value, stats);
             }
         }
@@ -3998,10 +3892,10 @@ mod tests {
     #[test]
     fn test_print_singleton_array_preserves_nested_object_indentation_like_ocaml() {
         let expr = Expression::array(
-            vec![Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(PropertyName::lit("foo"), Expression::number(Number::int(1)))],
-            ))],
+            vec![Expression::new(ExpressionDesc::object(vec![(
+                PropertyName::lit("foo"),
+                Expression::number(Number::int(1)),
+            )]))],
             MutableFlag::Immutable,
         );
 
@@ -4199,23 +4093,20 @@ mod tests {
 
     #[test]
     fn test_print_parenthesized_object_statement_uses_ocaml_group_indent() {
-        let stmt = Statement::exp(Expression::new(ExpressionDesc::Object(
-            None,
-            vec![
-                (
-                    PropertyName::lit("high"),
-                    Expression::call(
-                        Expression::var(Ident::create_local("add")),
-                        vec![
-                            Expression::number(Number::int(1)),
-                            Expression::number(Number::int(2)),
-                        ],
-                        CallInfo::default(),
-                    ),
+        let stmt = Statement::exp(Expression::new(ExpressionDesc::object(vec![
+            (
+                PropertyName::lit("high"),
+                Expression::call(
+                    Expression::var(Ident::create_local("add")),
+                    vec![
+                        Expression::number(Number::int(1)),
+                        Expression::number(Number::int(2)),
+                    ],
+                    CallInfo::default(),
                 ),
-                (PropertyName::lit("low"), Expression::number(Number::int(3))),
-            ],
-        )));
+            ),
+            (PropertyName::lit("low"), Expression::number(Number::int(3))),
+        ])));
 
         assert_eq!(
             print_block(&vec![stmt]),
@@ -4323,13 +4214,10 @@ mod tests {
                 )),
                 vec![
                     Expression::var(Ident::create_local("e")),
-                    Expression::new(ExpressionDesc::Object(
-                        None,
-                        vec![(
-                            PropertyName::lit("RE_EXN_ID"),
-                            Expression::var(Ident::create_local("Not_found")),
-                        )],
-                    )),
+                    Expression::new(ExpressionDesc::object(vec![(
+                        PropertyName::lit("RE_EXN_ID"),
+                        Expression::var(Ident::create_local("Not_found")),
+                    )])),
                 ],
                 CallInfo::default(),
             ),
@@ -4347,24 +4235,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_print_transformed_jsx_component_call_uses_jsx_syntax() {
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(Expression::var(Ident::create_persistent("Foo"))),
-                    "make".to_string(),
-                    None,
-                )),
-                Expression::new(ExpressionDesc::Object(None, vec![])),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
-        );
+    fn jsx_element(
+        name: &str,
+        tag: Expression,
+        props: Vec<(&str, Expression)>,
+        children: Option<Vec<Expression>>,
+    ) -> Expression {
+        Expression::new(ExpressionDesc::Jsx(Box::new(JsxExpression {
+            callee: Expression::qualified(jsx_runtime_module(), Some(name.to_string())),
+            tag,
+            spread: None,
+            props: props
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+            children,
+            key: None,
+            multi: name == "jsxs",
+            fragment: false,
+        })))
+    }
 
+    fn foo_make() -> Expression {
+        Expression::new(ExpressionDesc::StaticIndex(
+            Box::new(Expression::var(Ident::create_persistent("Foo"))),
+            "make".to_string(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn test_print_jsx_component_uses_jsx_syntax() {
+        let expr = jsx_element("jsx", foo_make(), vec![], None);
         assert_eq!(
             print_expression_with_jsx_preserve(&expr, true),
             "<Foo.make />"
@@ -4372,60 +4274,20 @@ mod tests {
     }
 
     #[test]
-    fn test_print_transformed_jsx_requires_jsx_preserve_flag_like_ocaml() {
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(Expression::var(Ident::create_persistent("Foo"))),
-                    "make".to_string(),
-                    None,
-                )),
-                Expression::new(ExpressionDesc::Object(None, vec![])),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
-        );
-
+    fn test_print_jsx_without_preserve_prints_the_call_like_ocaml() {
+        let expr = jsx_element("jsx", foo_make(), vec![], None);
         assert_eq!(print_expression(&expr), "JsxRuntime.jsx(Foo.make, {})");
     }
 
     #[test]
-    fn test_print_transformed_jsx_children_keep_nested_jsx_unwrapped() {
-        let strong = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::string("strong"),
-                Expression::new(ExpressionDesc::Object(None, vec![])),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
+    fn test_print_jsx_children_keep_nested_jsx_unwrapped() {
+        let strong = jsx_element("jsx", Expression::string("strong"), vec![], None);
+        let expr = jsx_element(
+            "jsxs",
+            Expression::string("div"),
+            vec![],
+            Some(vec![strong, Expression::string("Hello, world!")]),
         );
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsxs".to_string())),
-            vec![
-                Expression::string("div"),
-                Expression::new(ExpressionDesc::Object(
-                    None,
-                    vec![(
-                        PropertyName::lit("children"),
-                        Expression::array(
-                            vec![strong, Expression::string("Hello, world!")],
-                            MutableFlag::Immutable,
-                        ),
-                    )],
-                )),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
-        );
-
         assert_eq!(
             print_expression_with_jsx_preserve(&expr, true),
             "<div>\n  <strong />\n  {\"Hello, world!\"}\n</div>"
@@ -4433,89 +4295,36 @@ mod tests {
     }
 
     #[test]
-    fn test_print_transformed_jsx_record_block_props_like_ocaml() {
-        let strong = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::string("strong"),
-                Expression::new(ExpressionDesc::CamlBlock(
-                    vec![],
-                    MutableFlag::Immutable,
-                    Box::new(TagInfo::record(
-                        vec![],
-                        crate::parser::ast::MutableFlag::Immutable,
-                    )),
-                )),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
+    fn test_print_jsx_single_child_of_jsxs_prints_the_call_like_ocaml() {
+        // JSX would pass a single child as is, not as an array.
+        let expr = jsx_element(
+            "jsxs",
+            Expression::string("div"),
+            vec![],
+            Some(vec![Expression::string("a")]),
         );
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsxs".to_string())),
-            vec![
-                Expression::string("div"),
-                Expression::new(ExpressionDesc::CamlBlock(
-                    vec![
-                        Expression::undefined(false),
-                        Expression::array(
-                            vec![strong, Expression::string("Hello, world!")],
-                            MutableFlag::Immutable,
-                        ),
-                    ],
-                    MutableFlag::Immutable,
-                    Box::new(TagInfo::record(
-                        vec![
-                            ("className".to_string(), true),
-                            ("children".to_string(), false),
-                        ],
-                        crate::parser::ast::MutableFlag::Immutable,
-                    )),
-                )),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
-        );
-
         assert_eq!(
             print_expression_with_jsx_preserve(&expr, true),
-            "<div>\n  <strong />\n  {\"Hello, world!\"}\n</div>"
+            "JsxRuntime.jsxs(\"div\", {\n  children: [\"a\"]\n})"
         );
     }
 
     #[test]
-    fn test_print_transformed_jsx_spread_and_key_props_like_ocaml() {
-        let spread = Ident::create_persistent("newrecord");
-        let expr = Expression::call(
-            Expression::qualified(jsx_runtime_module(), Some("jsx".to_string())),
-            vec![
-                Expression::string("input"),
-                Expression::new(ExpressionDesc::Seq(
-                    Box::new(Expression::bin(
-                        BinOp::Eq,
-                        Expression::new(ExpressionDesc::StaticIndex(
-                            Box::new(Expression::var(spread)),
-                            "type".to_string(),
-                            None,
-                        )),
-                        Expression::string("text"),
-                    )),
-                    Box::new(Expression::var(spread)),
-                )),
-                Expression::string("barry-key"),
-            ],
-            CallInfo {
-                call_transformed_jsx: true,
-                ..CallInfo::default()
-            },
+    fn test_print_jsx_key_before_spread_and_props_like_ocaml() {
+        let mut expr = jsx_element(
+            "jsx",
+            Expression::string("input"),
+            vec![("type", Expression::string("text"))],
+            None,
         );
-
+        let ExpressionDesc::Jsx(jsx) = &mut expr.desc else {
+            unreachable!()
+        };
+        jsx.spread = Some(Expression::var(Ident::create_persistent("newrecord")));
+        jsx.key = Some(Expression::string("barry-key"));
         assert_eq!(
             print_expression_with_jsx_preserve(&expr, true),
-            "<input\n  key={\"barry-key\"} \n  {...newrecord} \n  type={\"text\"}\n/>"
+            "<input\n  key={\"barry-key\"}\n  {...newrecord}\n  type={\"text\"}\n/>"
         );
     }
 
@@ -5202,8 +5011,7 @@ mod tests {
         let rendered = print_expression(&Expression::new(ExpressionDesc::Fun {
             is_method: false,
             params: vec![],
-            body: vec![Statement::return_(Expression::new(ExpressionDesc::Object(
-                None,
+            body: vec![Statement::return_(Expression::new(ExpressionDesc::object(
                 vec![(
                     PropertyName::lit("default"),
                     Expression::number(Number::int(1)),
@@ -5558,13 +5366,10 @@ mod tests {
 
     #[test]
     fn test_print_object_literal_unwraps_uppercase_exotic_keys() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
-            None,
-            vec![(
-                PropertyName::Lit("\\\"MyWeirdProp\"".to_string()),
-                Expression::number(Number::int(1)),
-            )],
-        )));
+        let rendered = print_expression(&Expression::new(ExpressionDesc::object(vec![(
+            PropertyName::Lit("\\\"MyWeirdProp\"".to_string()),
+            Expression::number(Number::int(1)),
+        )])));
 
         assert_eq!(rendered, "{\n  MyWeirdProp: 1\n}");
     }
@@ -5573,19 +5378,16 @@ mod tests {
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_parenthesized_object_literal_preserves_group_indentation_like_ocaml() {
         let rendered = print_expression(&Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![
-                    (
-                        PropertyName::lit("foo"),
-                        Expression::number(Number::int(43)),
-                    ),
-                    (
-                        PropertyName::lit("bar"),
-                        Expression::number(Number::int(86)),
-                    ),
-                ],
-            ))),
+            Box::new(Expression::new(ExpressionDesc::object(vec![
+                (
+                    PropertyName::lit("foo"),
+                    Expression::number(Number::int(43)),
+                ),
+                (
+                    PropertyName::lit("bar"),
+                    Expression::number(Number::int(86)),
+                ),
+            ]))),
             Box::new(Expression::string("foo")),
         )));
 
@@ -5596,10 +5398,10 @@ mod tests {
     fn test_print_parenthesized_object_literal_before_dot_access_preserves_group_indentation_like_ocaml()
      {
         let expr = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
-            ))),
+            Box::new(Expression::new(ExpressionDesc::object(vec![(
+                PropertyName::lit("_5"),
+                Expression::number(Number::int(3)),
+            )]))),
             "TAG".to_string(),
             None,
         ));
@@ -5616,10 +5418,10 @@ mod tests {
                     "create".to_string(),
                     None,
                 )),
-                vec![Expression::new(ExpressionDesc::Object(
-                    None,
-                    vec![(PropertyName::lit("a"), Expression::number(Number::int(1)))],
-                ))],
+                vec![Expression::new(ExpressionDesc::object(vec![(
+                    PropertyName::lit("a"),
+                    Expression::number(Number::int(1)),
+                )]))],
                 CallInfo::default(),
             )),
             Box::new(Expression::string("a")),
@@ -5634,19 +5436,16 @@ mod tests {
     #[test]
     fn test_print_parenthesized_object_literal_index_as_call_argument_keeps_group_indent() {
         let arg = Expression::new(ExpressionDesc::ArrayIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![
-                    (
-                        PropertyName::lit("foo"),
-                        Expression::number(Number::int(43)),
-                    ),
-                    (
-                        PropertyName::lit("bar"),
-                        Expression::number(Number::int(86)),
-                    ),
-                ],
-            ))),
+            Box::new(Expression::new(ExpressionDesc::object(vec![
+                (
+                    PropertyName::lit("foo"),
+                    Expression::number(Number::int(43)),
+                ),
+                (
+                    PropertyName::lit("bar"),
+                    Expression::number(Number::int(86)),
+                ),
+            ]))),
             Box::new(Expression::string("foo")),
         ));
         let call = Expression::call(
@@ -5664,10 +5463,10 @@ mod tests {
     #[test]
     fn test_print_parenthesized_object_literal_dot_access_as_call_argument_preserves_base_indent() {
         let arg = Expression::new(ExpressionDesc::StaticIndex(
-            Box::new(Expression::new(ExpressionDesc::Object(
-                None,
-                vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
-            ))),
+            Box::new(Expression::new(ExpressionDesc::object(vec![(
+                PropertyName::lit("_5"),
+                Expression::number(Number::int(3)),
+            )]))),
             "TAG".to_string(),
             None,
         ));
@@ -5689,10 +5488,10 @@ mod tests {
                 None,
             )),
             vec![Expression::new(ExpressionDesc::CamlBlockTag(
-                Box::new(Expression::new(ExpressionDesc::Object(
-                    None,
-                    vec![(PropertyName::lit("_5"), Expression::number(Number::int(3)))],
-                ))),
+                Box::new(Expression::new(ExpressionDesc::object(vec![(
+                    PropertyName::lit("_5"),
+                    Expression::number(Number::int(3)),
+                )]))),
                 "TAG".to_string(),
             ))],
             CallInfo::default(),
@@ -5913,29 +5712,25 @@ mod tests {
 
     #[test]
     fn test_print_object_literal_allows_keyword_property_names_without_quotes() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
-            None,
-            vec![
-                (
-                    PropertyName::lit("catch"),
-                    Expression::number(Number::int(1)),
-                ),
-                (
-                    PropertyName::lit("default"),
-                    Expression::number(Number::int(2)),
-                ),
-            ],
-        )));
+        let rendered = print_expression(&Expression::new(ExpressionDesc::object(vec![
+            (
+                PropertyName::lit("catch"),
+                Expression::number(Number::int(1)),
+            ),
+            (
+                PropertyName::lit("default"),
+                Expression::number(Number::int(2)),
+            ),
+        ])));
 
         assert_eq!(rendered, "{\n  catch: 1,\n  default: 2\n}");
     }
 
     #[test]
     fn test_print_spread_only_object_literal_inline_like_ocaml() {
-        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(
-            Some(Box::new(Expression::var(Ident::create_local("source")))),
-            vec![],
-        )));
+        let rendered = print_expression(&Expression::new(ExpressionDesc::Object(vec![
+            ObjectEntry::Spread(Expression::var(Ident::create_local("source"))),
+        ])));
 
         assert_eq!(rendered, "{...source}");
     }

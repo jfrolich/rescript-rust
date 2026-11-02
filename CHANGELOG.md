@@ -16,6 +16,7 @@
 
 - Remove the standalone `bsc` command (`npx bsc`, `cli/bsc.js` and the Rust `bsc` binary). Compile through `rescript build`, which runs the compiler in-process.
 - Remove rewatch's file-backed subprocess build (`RESCRIPT_SUBPROCESS_BUILD`, `RESCRIPT_BSC_EXE`) and the `--dump-typed-sexp` and hidden `--in-process` flags of `rescript build` and `rescript watch`.
+- Record syntax no longer creates or matches dicts, e.g. `let d: dict<int> = {foo: 1}`; it's an error pointing to `dict{...}`. https://github.com/rescript-lang/rescript/pull/8751
 - Remove the call-site `@inlined` attribute, which was parsed but never affected code generation. It is now reported as a misplaced attribute (warning 53). https://github.com/rescript-lang/rescript/pull/8734
 - Remove `@deriving(abstract)` and `@deriving(jsConverter)`. Use record types (with optional fields, mutable fields and `@as` renaming) and polymorphic variants directly instead. https://github.com/rescript-lang/rescript/pull/8729
 
@@ -25,11 +26,21 @@
 
 #### :bug: Bug fix
 
+- Fix editor completion of values from modules included with `include await M`. https://github.com/rescript-lang/rescript/pull/8770
+- Fix editor completion inside dict literals and dict patterns, which suggested untyped values. https://github.com/rescript-lang/rescript/pull/8770
+- Report the required Node.js version 22 when the platform package can't be found. https://github.com/rescript-lang/rescript/pull/8770
+- Fix JSX preserve mode emitting JSX that means something other than the compiled call, and keep more elements as JSX. https://github.com/rescript-lang/rescript/pull/8754
+- Fix exhaustiveness and unused-case checks for dict patterns that match the same key in several cases, print their counter-examples as dict patterns, and reject a key matched twice in one pattern. https://github.com/rescript-lang/rescript/pull/8751
+- Emit `"__proto__"` keys in object literals as computed keys, so they create a property instead of setting the prototype. https://github.com/rescript-lang/rescript/pull/8747
+- Fix the formatter dropping attributes on dict literals and flattening nested dict spreads. https://github.com/rescript-lang/rescript/pull/8746
+- Fix attributes on patterns being duplicated before `as` and dropped on constants when formatting. https://github.com/rescript-lang/rescript/pull/8750
+- Fix compiler crashes when wrapping values in `Some` or passing optional arguments whose types come from a transitive dependency. https://github.com/rescript-lang/rescript/pull/8719
 - Fix unused-pattern warnings for variant spreads reported without a location. https://github.com/rescript-lang/rescript/pull/8744
 - Keep `@warning("-4")` on `if` expressions when formatting; the formatter dropped it. https://github.com/rescript-lang/rescript/pull/8741
 - Fix the formatter dropping a `@res.ternary` attribute written in source, e.g. `let b = @res.ternary x`, and print `@JSX` and `@res.ternary` with the same parens as other attributes, e.g. `(@JSX x) + 1`. https://github.com/rescript-lang/rescript/pull/8740
 - Respect `@warning` attributes on the module in `module type of`, e.g. `module type of @warning("-3") DeprecatedModule`, which still reported the warning. https://github.com/rescript-lang/rescript/pull/8738
 - Fix the formatter dropping or moving attributes and `await` on module expressions, such as `module M = @attr F(X)`, and printing invalid code for module constraints and functors in some positions, such as `module M: T = (X: S)`. https://github.com/rescript-lang/rescript/pull/8735
+- Fix `rescript watch` sometimes not exiting on macOS when `lib/watch.lock` is removed during a full rebuild, and stop re-registering unchanged watch paths on full rebuilds. https://github.com/rescript-lang/rescript/pull/8730
 - Make rewatch compile independent modules after an unrelated failure and recompile blocked dependents when a changed interface survives a failed implementation, including across full watcher rebuilds. https://github.com/rescript-lang/rescript/pull/8667
 - Fix `RescriptTools.binaryPath` failing with `ERR_PACKAGE_IMPORT_NOT_DEFINED` when used from a user project. https://github.com/rescript-lang/rescript/pull/8694
 - GenType: type inline-record cases of untagged variants as objects instead of their single field's type. https://github.com/rescript-lang/rescript/pull/8693
@@ -42,6 +53,12 @@
 
 #### :nail_care: Polish
 
+- Compile dict spreads to object spread syntax instead of `Object.assign`. https://github.com/rescript-lang/rescript/pull/8747
+- Make compilation slightly faster and stop rewatch from copying files twice for modules with an interface. https://github.com/rescript-lang/rescript/pull/8769
+- Speed up inlining decisions for large functions. https://github.com/rescript-lang/rescript/pull/8771
+- Speed up the rewriting of JS globals shadowed by local bindings in nested functions. https://github.com/rescript-lang/rescript/pull/8772
+- Speed up dead code elimination of toplevel bindings in large modules. https://github.com/rescript-lang/rescript/pull/8773
+- Make .cmt and .cmti files smaller by no longer embedding a copy of the .cmi. https://github.com/rescript-lang/rescript/pull/8774
 - Represent explicit expression braces as `Pexp_braces` in parsetree v1 and format `else` branches consistently with `if` branches. https://github.com/rescript-lang/rescript/pull/8678
 - Omit redundant braces around multi-statement switch case bodies when formatting. https://github.com/rescript-lang/rescript/pull/8677
 - Avoid running `rescript-schema-ppx` and `sury-ppx` on source files without an `@schema` annotation. https://github.com/rescript-lang/rescript/pull/8662
@@ -50,6 +67,12 @@
 
 #### :house: Internal
 
+- Make `dict` an abstract type instead of a record with a hidden field. https://github.com/rescript-lang/rescript/pull/8752
+- Remove dead code from the compiler and rewatch. https://github.com/rescript-lang/rescript/pull/8756
+- Represent dict patterns with a dedicated `Tpat_dict` typed tree node. https://github.com/rescript-lang/rescript/pull/8751
+- Represent dict patterns with a dedicated `Ppat_dict` node. https://github.com/rescript-lang/rescript/pull/8749
+- Represent dict literals with dedicated `Pexp_dict` and `Texp_dict` nodes. https://github.com/rescript-lang/rescript/pull/8746
+- Forward-port integer range pattern regression coverage from v12 to v13. https://github.com/rescript-lang/rescript/pull/8718
 - Remove the unused `res.iflet` encoding of `if let`, which the parser always rejects with a syntax error suggesting a `switch`. The error is unchanged. https://github.com/rescript-lang/rescript/pull/8741
 - Represent variant spread patterns (`...t`) with a dedicated `Ppat_variant_spread` parsetree node instead of `Ppat_type` with a `res.patVariantSpread` attribute, which remains only in the PPX wire representation. https://github.com/rescript-lang/rescript/pull/8742
 - Remove the obsolete `res.ternary` and `JSX` attributes from the formatter's internal attribute filters and merge the filters into one. https://github.com/rescript-lang/rescript/pull/8740

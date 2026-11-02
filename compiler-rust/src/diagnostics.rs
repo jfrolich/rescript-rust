@@ -58,8 +58,6 @@ pub enum Warning {
     Preprocessor { message: String },
     /// Warning 23: Useless record with clause.
     UselessRecordWith,
-    /// Warning 24: Bad module name.
-    BadModuleName { name: String },
     /// Warning 26: Unused variable (let-bound or as-pattern).
     UnusedVariable { name: String },
     /// Warning 27: Unused variable (other).
@@ -184,7 +182,6 @@ impl Warning {
             Warning::NonreturningStatement => 21,
             Warning::Preprocessor { .. } => 22,
             Warning::UselessRecordWith => 23,
-            Warning::BadModuleName { .. } => 24,
             Warning::UnusedVariable { .. } => 26,
             Warning::UnusedVariableStrict { .. } => 27,
             Warning::WildcardArgToConstantConstr => 28,
@@ -313,13 +310,6 @@ impl Warning {
                 "All the fields are already explicitly listed in this record. \
                  You can remove the `...` spread."
                     .to_string()
-            }
-            Warning::BadModuleName { name } => {
-                format!(
-                    "This file's name is potentially invalid. \
-                     {} isn't a valid module name.",
-                    name
-                )
             }
             Warning::UnusedVariable { name } | Warning::UnusedVariableStrict { name } => {
                 // Match compiler/ext/warnings.ml:393-400.

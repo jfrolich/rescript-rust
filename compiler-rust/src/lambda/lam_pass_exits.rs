@@ -10,7 +10,7 @@ use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size};
+use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size_upto};
 #[cfg(test)]
 use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::LetKind;
@@ -269,7 +269,7 @@ fn subst_helper_owned(
             let (simplified_l2, c2) = subst_helper_owned(subst, counts, id_gen, *l2);
             // ok_to_inline (lam_pass_exits.ml:173-179)
             let ok_to_inline = if i >= 0 && no_bounded_variables(&simplified_l2) {
-                let lam_size = size(&simplified_l2);
+                let lam_size = size_upto(EXIT_INLINE_SIZE, &simplified_l2);
                 (i_occur <= 2 && lam_size < EXIT_INLINE_SIZE) || lam_size < 5
             } else {
                 false

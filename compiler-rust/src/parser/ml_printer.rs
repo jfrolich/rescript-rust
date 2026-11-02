@@ -102,6 +102,7 @@ fn pattern_is_simple(pat: &Pattern, arena: &ParseArena) -> bool {
         PatternDesc::Ppat_any => true,
         PatternDesc::Ppat_var(_) => true,
         PatternDesc::Ppat_array(_) => true,
+        PatternDesc::Ppat_dict(_) => true,
         PatternDesc::Ppat_unpack(_) => true,
         PatternDesc::Ppat_type(_) => true,
         PatternDesc::Ppat_variant_spread(_) => true,
@@ -236,6 +237,7 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_tuple(_)
             | ExpressionDesc::Pexp_array(_)
+            | ExpressionDesc::Pexp_dict(_)
             | ExpressionDesc::Pexp_record(_)
             | ExpressionDesc::Pexp_constraint(_)
             | ExpressionDesc::Pexp_coerce(_)
@@ -1902,6 +1904,38 @@ fn print_expression_inner<W: Write>(
             f.string(" <- ");
             print_expression_simple_ctx(f, arena, arena.get_expr(*value), ctx);
         }
+        ExpressionDesc::Pexp_dict(entries) => {
+            // OCaml: pp f "@[<hv2>dict{%a}@]" (list dict_entry ~sep:",@;"),
+            // where an entry is "@[<hov2>%S:@;%a@]" and a spread "...%a",
+            // both with `simple_expr ctxt`.
+            f.open_box(BoxKind::HV, 2);
+            f.string("dict{");
+            for (i, entry) in entries.iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                match entry {
+                    DictEntry::Pdict_entry(key, e) => {
+                        f.open_box(BoxKind::HOV, 2);
+                        f.string("\"");
+                        f.string(&crate::string_literal::ocaml_escaped(
+                            arena.get_string(key.txt),
+                        ));
+                        f.string("\":");
+                        f.space();
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                        f.close_box();
+                    }
+                    DictEntry::Pdict_spread(e) => {
+                        f.string("...");
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                    }
+                }
+            }
+            f.string("}");
+            f.close_box();
+        }
         ExpressionDesc::Pexp_array(elems) => {
             // OCaml: @[<0>@[<2>[|%a|]@]@] with (list (simple_expr (under_semi ctxt)) ~sep:";")
             f.open_box(BoxKind::Box, 0);
@@ -2681,6 +2715,43 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                 f.space(); // @; before }
                 f.string("}");
             }
+            f.close_box();
+        }
+        PatternDesc::Ppat_dict(entries) => {
+            // OCaml: pp f "@[<2>dict{%a}@]" (list entry ~sep:",@;"), where
+            // entry is "@[<2>%S:@;%s%a@]" with `pattern1` for the pattern.
+            f.open_box(BoxKind::Box, 2);
+            f.string("dict{");
+            for (i, entry) in entries.iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                f.open_box(BoxKind::Box, 2);
+                f.string("\"");
+                f.string(&crate::string_literal::ocaml_escaped(
+                    arena.get_string(entry.pdp_key.txt),
+                ));
+                f.string("\":");
+                f.space();
+                if entry.pdp_optional {
+                    f.string("?");
+                }
+                let entry_pat = arena.get_pat(entry.pdp_pattern);
+                let needs_parens = matches!(
+                    &*entry_pat.ppat_desc,
+                    PatternDesc::Ppat_alias(..) | PatternDesc::Ppat_or(..)
+                );
+                if needs_parens {
+                    f.string("(");
+                }
+                print_pattern(f, arena, entry_pat);
+                if needs_parens {
+                    f.string(")");
+                }
+                f.close_box();
+            }
+            f.string("}");
             f.close_box();
         }
         PatternDesc::Ppat_array(pats) => {

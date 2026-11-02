@@ -12,7 +12,7 @@ use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_indexed_helpers::{
     VariableSubstitution, append_rebuilt, map_children, substitute,
 };
-use crate::lambda::lam_pass_collect_indexed::indexed_size;
+use crate::lambda::lam_pass_collect_indexed::indexed_size_upto;
 
 pub(crate) type ExitCounts = AHashMap<i32, u32>;
 struct ExitSubstitutions {
@@ -90,7 +90,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
             | NodeView::Const(_)
             | NodeView::Break
             | NodeView::Continue => {}
-            NodeView::Apply(function, args, _, _) => {
+            NodeView::Apply(function, args, _) => {
                 count(store, function, counts);
                 for arg in args {
                     count(store, *arg, counts);
@@ -169,7 +169,7 @@ pub(crate) fn no_bounded_variables(store: &IndexedLambda, node: NodeId) -> bool 
         | NodeView::Break
         | NodeView::Continue => true,
         NodeView::Assign(_, value) => no_bounded_variables(store, value),
-        NodeView::Apply(function, args, _, _) => {
+        NodeView::Apply(function, args, _) => {
             no_bounded_variables(store, function)
                 && args.iter().all(|node| no_bounded_variables(store, *node))
         }
@@ -250,7 +250,7 @@ fn simplify(
             }
             let handler = simplify(store, counts, substitutions, id_gen, handler);
             let inline = exit >= 0 && no_bounded_variables(store, handler) && {
-                let size = indexed_size(store, handler);
+                let size = indexed_size_upto(store, handler, EXIT_INLINE_SIZE);
                 occurrences <= 2 && size < EXIT_INLINE_SIZE || size < 5
             };
             if inline {
@@ -617,7 +617,6 @@ mod tests {
                         loc: loc,
                         status: crate::lambda::ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 })),
                 Lambda::function_(
                     1,
@@ -639,7 +638,6 @@ mod tests {
                         loc: loc,
                         status: crate::lambda::ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 })),
                 Lambda::function_(
                     1,
@@ -685,13 +683,11 @@ mod tests {
                     loc: inner_loc,
                     status: crate::lambda::ApplyStatus::Uncurry,
                 },
-                ap_transformed_jsx: true,
             }))],
             ap_info: crate::lambda::ApInfo {
                 loc: outer_loc,
                 status: crate::lambda::ApplyStatus::InferFull,
             },
-            ap_transformed_jsx: true,
         }));
         let result = simplify_indexed(
             Lambda::LstaticCatch(
@@ -707,15 +703,11 @@ mod tests {
         let Lambda::Lapply(outer) = *body else {
             panic!("expected outer application")
         };
-        // lambda_traverse.ml `shallow_map_sharing` rebuilds a changed
-        // application with its `ap_transformed_jsx`.
-        assert!(outer.ap_transformed_jsx);
         assert_eq!(outer.ap_info.loc, outer_loc);
         assert_eq!(outer.ap_info.status, crate::lambda::ApplyStatus::InferFull);
         let [Lambda::Lapply(inner)] = outer.ap_args.as_slice() else {
             panic!("expected nested application")
         };
-        assert!(inner.ap_transformed_jsx);
         assert_eq!(inner.ap_info.loc, inner_loc);
         assert_eq!(inner.ap_info.status, crate::lambda::ApplyStatus::Uncurry);
 
@@ -732,7 +724,6 @@ mod tests {
                     loc: Location::none(),
                     status: crate::lambda::ApplyStatus::Na,
                 },
-                ap_transformed_jsx: true,
             }))),
         );
         let mut store = IndexedLambda::from_lambda(raw);
@@ -792,7 +783,6 @@ mod tests {
                         loc: apply_loc,
                         status: crate::lambda::ApplyStatus::Uncurry,
                     },
-                    ap_transformed_jsx: true,
                 }));
                 let input = Lambda::LstaticCatch(Box::new(apply), (91, vec![]), Box::new(function));
                 if nested {
@@ -847,7 +837,6 @@ mod tests {
                         loc: Location::none(),
                         status: crate::lambda::ApplyStatus::InferFull,
                     },
-                    ap_transformed_jsx: true,
                 }))),
                 (92, vec![]),
                 Box::new(function),
@@ -857,7 +846,6 @@ mod tests {
         let Lambda::Lapply(apply) = result else {
             panic!("expected eta fallback application")
         };
-        assert!(apply.ap_transformed_jsx);
         assert_eq!(apply.ap_info.status, crate::lambda::ApplyStatus::InferFull);
         let Lambda::Lfunction(function) = *apply.ap_func else {
             panic!("expected function metadata")

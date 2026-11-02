@@ -12,12 +12,12 @@ use crate::types::context::TypeContext;
 use crate::types::path::Path;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
-    Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint, OpenDeclaration, Partial,
-    Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem,
-    StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
-    TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
-    ValueBinding,
+    Case, Constant, DictEntry, Expression, ExpressionDesc, ExtensionConstructor,
+    ExtensionConstructorKind, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
+    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure,
+    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
+    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
+    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -708,6 +708,17 @@ fn sexp_pattern_desc(
             }
             Sexp::list(items)
         }
+        PatternDesc::Tpat_dict(entries) => {
+            let mut items = vec![Sexp::atom("Tpat_dict")];
+            for entry in entries.iter() {
+                items.push(Sexp::list(vec![
+                    string(&entry.tdp_key.txt),
+                    sexp_pattern(arena, ctx, with_locs, &entry.tdp_pattern),
+                    Sexp::atom(if entry.tdp_optional { "true" } else { "false" }),
+                ]));
+            }
+            Sexp::list(items)
+        }
         PatternDesc::Tpat_or(p1, p2, _) => Sexp::list(vec![
             Sexp::atom("Tpat_or"),
             sexp_pattern(arena, ctx, with_locs, p1),
@@ -1135,6 +1146,23 @@ fn sexp_expression_desc(
             let mut items = vec![Sexp::atom("Texp_array")];
             for e in exprs.iter() {
                 items.push(sexp_expression(arena, ctx, with_locs, e));
+            }
+            Sexp::list(items)
+        }
+        ExpressionDesc::Texp_dict(entries) => {
+            let mut items = vec![Sexp::atom("Texp_dict")];
+            for entry in entries.iter() {
+                items.push(match entry {
+                    DictEntry::Tdict_entry(key, e) => Sexp::list(vec![
+                        Sexp::atom("Tdict_entry"),
+                        string(&key.txt),
+                        sexp_expression(arena, ctx, with_locs, e),
+                    ]),
+                    DictEntry::Tdict_spread(e) => Sexp::list(vec![
+                        Sexp::atom("Tdict_spread"),
+                        sexp_expression(arena, ctx, with_locs, e),
+                    ]),
+                });
             }
             Sexp::list(items)
         }

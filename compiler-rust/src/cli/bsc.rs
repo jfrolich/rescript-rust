@@ -373,7 +373,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
                         }
                     }
                 }
-                "-bs-jsx-mode" | "-pp" | "-ppxopt" => {
+                "-bs-jsx-mode" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }

@@ -7459,6 +7459,11 @@ where
                 iter_bound_pattern_idents(p, f);
             }
         }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                iter_bound_pattern_idents(&entry.tdp_pattern, f);
+            }
+        }
         PatternDesc::Tpat_variant(_, Some(inner), _) => iter_bound_pattern_idents(inner, f),
         PatternDesc::Tpat_or(left, _right, _) => iter_bound_pattern_idents(left, f),
         PatternDesc::Tpat_any

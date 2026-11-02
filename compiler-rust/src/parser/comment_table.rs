@@ -1553,6 +1553,24 @@ fn walk_expression(
     }
 
     match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_dict(entries) if parsetree_viewer::dict_has_spread(entries) => {
+            let parts = parsetree_viewer::dict_expr_parts(arena, expr.pexp_loc, entries);
+            let part_exprs: Vec<Expression> = parts
+                .into_iter()
+                .map(|part| match part {
+                    parsetree_viewer::DictExprPart::Rows(rows) => rows,
+                    parsetree_viewer::DictExprPart::Spread(spread) => {
+                        arena.get_expr(spread).clone()
+                    }
+                })
+                .collect();
+            let nodes: Vec<Node<'_>> = part_exprs.iter().map(Node::Expression).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_dict(entries) => {
+            let rows = parsetree_viewer::dict_expr_rows(arena, expr.pexp_loc, entries);
+            walk_list(&[Node::Expression(&rows)], t, comments, arena);
+        }
         ExpressionDesc::Pexp_braces(braces) if is_block_expr_idx(arena, braces.expr) => {
             let inner = arena.get_expr(braces.expr).clone();
             walk_expression(&inner, t, comments, arena);
@@ -2224,51 +2242,6 @@ fn walk_expression(
                                 ];
                                 walk_list(&nodes, t, comments, arena);
                                 return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Dictionary spreads are encoded as a call to
-            // `Primitive_dict.spread`. Walk the reconstructed source parts so
-            // comments attach to the spread expressions and literal rows that
-            // the printer emits, rather than to the synthetic call.
-            if let Some(parts) = parsetree_viewer::collect_spread_dict_expr_parts(arena, expr) {
-                let source_parts: Vec<Expression> = parts
-                    .into_iter()
-                    .map(|part| match part {
-                        parsetree_viewer::DictExprPart::Rows(rows)
-                        | parsetree_viewer::DictExprPart::Spread(rows) => rows.clone(),
-                    })
-                    .collect();
-                let nodes: Vec<Node<'_>> = source_parts.iter().map(Node::Expression).collect();
-                walk_list(&nodes, t, comments, arena);
-                return;
-            }
-
-            // Special case for Primitive_dict.make (dict{} syntax)
-            // Match OCaml: just walk the key_values array expression
-            if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
-                    if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
-                        if arena.get_string(*method_idx) == "make" {
-                            if let Longident::Lident(module_idx) = parent.as_ref() {
-                                if arena.get_string(*module_idx) == "Primitive_dict" {
-                                    let (_, key_values_idx) = &args[0];
-                                    let key_values = arena.get_expr(*key_values_idx);
-                                    // Check if key_values is a tuple array (matching OCaml's is_tuple_array)
-                                    if parsetree_viewer::is_tuple_array(arena, key_values) {
-                                        // Walk the key_values expression directly
-                                        walk_list(
-                                            &[Node::ExpressionIdx(*key_values_idx)],
-                                            t,
-                                            comments,
-                                            arena,
-                                        );
-                                        return;
-                                    }
-                                }
                             }
                         }
                     }
@@ -3089,6 +3062,22 @@ fn walk_pattern(
         }
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
             let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::PatternIdx(*p)).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
+        PatternDesc::Ppat_dict(entries) => {
+            // Comments attach to rows as in record patterns.
+            let keys: Vec<Loc<LidentIdx>> = entries
+                .iter()
+                .map(|entry| Loc {
+                    txt: arena.push_lident_from_idx(entry.pdp_key.txt),
+                    loc: entry.pdp_key.loc,
+                })
+                .collect();
+            let nodes: Vec<Node<'_>> = keys
+                .iter()
+                .zip(entries.iter())
+                .map(|(key, entry)| Node::PatternRecordRow(key, entry.pdp_pattern))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {

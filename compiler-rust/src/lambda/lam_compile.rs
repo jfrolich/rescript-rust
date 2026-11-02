@@ -86,7 +86,6 @@ enum PreparedIndexedExternalApply {
         field_name: String,
         args: Vec<NodeId>,
         info: ApInfo,
-        transformed_jsx: bool,
         known_arity: Option<Arity>,
     },
 }
@@ -265,26 +264,20 @@ pub(crate) fn short_circuit_primitive<'a>(
 ///
 /// The printer's eta-reduction rewrite (js_dump.ml:299-344) gates on
 /// `call_info = Call_ml | Call_builtin_runtime` AND `arity = Full`.
-pub(crate) fn call_info_of_apply_status(
-    call_transformed_jsx: bool,
-    status: ApplyStatus,
-) -> CallInfo {
+pub(crate) fn call_info_of_apply_status(status: ApplyStatus) -> CallInfo {
     use crate::js_ir::{CallArity, CallKind};
     match status {
         ApplyStatus::InferFull => CallInfo {
-            call_transformed_jsx,
             kind: CallKind::MlCall,
             arity: CallArity::Full,
             ..CallInfo::default()
         },
         ApplyStatus::Na => CallInfo {
-            call_transformed_jsx,
             kind: CallKind::MlCall,
             arity: CallArity::Na,
             ..CallInfo::default()
         },
         ApplyStatus::Uncurry => CallInfo {
-            call_transformed_jsx,
             kind: CallKind::Na,
             arity: CallArity::Full,
             ..CallInfo::default()
@@ -631,7 +624,6 @@ impl LambdaCompiler {
             crate::timing::Phase::LambdaOptimization,
             || {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
-                let jsx_preserve = self.jsx_preserve;
                 let module_path_resolver = self.module_path_resolver.as_ref();
                 let cross_module_inline = self.cross_module_inline;
                 let mut cmj_lambda_cache: AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
@@ -664,7 +656,6 @@ impl LambdaCompiler {
                 };
                 crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_and_meta_owned(
                     lam,
-                    jsx_preserve,
                     &mut external_inline,
                     &mut external_arity,
                 )
@@ -1064,12 +1055,7 @@ impl LambdaCompiler {
 
                     let mut args = inner.ap_args.clone();
                     args.extend(apply.ap_args.iter().cloned());
-                    let merged = Lambda::apply(
-                        (*inner.ap_func).clone(),
-                        args,
-                        ap_info,
-                        apply.ap_transformed_jsx,
-                    );
+                    let merged = Lambda::apply((*inner.ap_func).clone(), args, ap_info);
                     return self.compile_expr(&merged);
                 }
             }
@@ -1094,7 +1080,7 @@ impl LambdaCompiler {
             expr: Expression::call(
                 func.expr,
                 args,
-                call_info_of_apply_status(apply.ap_transformed_jsx, apply.ap_info.status),
+                call_info_of_apply_status(apply.ap_info.status),
             ),
         }
     }
@@ -1233,9 +1219,8 @@ impl LambdaCompiler {
         context: &mut IndexedLambdaContext,
         application: NodeId,
     ) -> Option<PreparedIndexedExternalApply> {
-        let (module, field_name, args, info, transformed_jsx) = {
-            let NodeSnapshot::Apply(function, args, info, transformed_jsx) =
-                context.store().snapshot(application)
+        let (module, field_name, args, info) = {
+            let NodeSnapshot::Apply(function, args, info) = context.store().snapshot(application)
             else {
                 return None;
             };
@@ -1262,7 +1247,6 @@ impl LambdaCompiler {
                 name,
                 args,
                 info,
-                transformed_jsx,
             )
         };
 
@@ -1282,7 +1266,6 @@ impl LambdaCompiler {
             field_name,
             args,
             info,
-            transformed_jsx,
             known_arity,
         })
     }
@@ -1328,11 +1311,9 @@ impl LambdaCompiler {
             // compiler/core/lam_compile.ml:303-309 keeps the explicit
             // App_infer_full/App_uncurry call info instead of consulting CMJ
             // arity. In particular App_uncurry stays Call_na.
-            ApplyStatus::InferFull | ApplyStatus::Uncurry => Expression::call(
-                func,
-                args,
-                call_info_of_apply_status(apply.ap_transformed_jsx, apply.ap_info.status),
-            ),
+            ApplyStatus::InferFull | ApplyStatus::Uncurry => {
+                Expression::call(func, args, call_info_of_apply_status(apply.ap_info.status))
+            }
             // compiler/core/lam_compile.ml:310-316 uses
             // `ident_info.arity`; a known `Single` arity is lowered through
             // `apply_with_arity`, while missing/Submodule arity uses dummy
@@ -1507,7 +1488,10 @@ impl LambdaCompiler {
             // lam_compile.ml:1813-1815: `with_source_loc loc (E.obj ~dup:init_val props)`.
             expr: Expression {
                 source_loc: self.source_loc(loc).map(Box::new),
-                ..Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props))
+                ..Expression::new(ExpressionDesc::Object(crate::js_ir::object_entries(
+                    Some(init_expr),
+                    props,
+                )))
             },
         })
     }
@@ -2384,7 +2368,7 @@ impl LambdaCompiler {
             | TagInfo::RecordInlined { .. }
             | TagInfo::PolyVar(_)
             | TagInfo::Extension
-            | TagInfo::RecordExt { .. } => Expression::new(ExpressionDesc::Object(None, vec![])),
+            | TagInfo::RecordExt { .. } => Expression::new(ExpressionDesc::Object(vec![])),
             TagInfo::Tuple | TagInfo::ModuleExport(_) => {
                 Expression::array(vec![], MutableFlag::Mutable)
             }
@@ -7177,8 +7161,10 @@ fn collect_cmj_export_lambdas_from_simplified_lambda(lam: &Lambda) -> AHashMap<S
                 crate::lambda::lam_closure::is_closed(value)
             }
             _ => {
-                crate::lambda::lam_analysis::size(value)
-                    < crate::lambda::lam_analysis::SMALL_INLINE_SIZE
+                crate::lambda::lam_analysis::size_upto(
+                    crate::lambda::lam_analysis::SMALL_INLINE_SIZE,
+                    value,
+                ) < crate::lambda::lam_analysis::SMALL_INLINE_SIZE
                     && crate::lambda::lam_closure::free_variables_with_stats(
                         &Default::default(),
                         Default::default(),
@@ -8342,7 +8328,6 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right)
         | ExpressionDesc::In(left, right) => {
             collect_modules_from_expression(left, modules);
@@ -8396,11 +8381,15 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
                 collect_modules_from_expression(item, modules);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                collect_modules_from_expression(dup, modules);
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
+                collect_modules_from_expression(value, modules);
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (crate::js_ir::ObjectEntry::Property(_, value)
+                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
                 collect_modules_from_expression(value, modules);
             }
         }

@@ -36,6 +36,7 @@ pub mod btype;
 pub mod context;
 pub mod ctype;
 pub mod decl;
+pub mod dict_pattern;
 pub mod env;
 pub(crate) mod env_lazy;
 pub mod external_ffi_types;

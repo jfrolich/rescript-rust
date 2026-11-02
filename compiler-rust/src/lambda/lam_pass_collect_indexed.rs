@@ -249,7 +249,7 @@ where
         }
         NodeView::Prim(Primitive::Praise, _, _) => Arity::raise(),
         NodeView::GlobalModule(_) | NodeView::Prim(_, _, _) => Arity::na(),
-        NodeView::Apply(function, args, _, _) => {
+        NodeView::Apply(function, args, _) => {
             match get_arity_impl(arena, table, function, lookup) {
                 Arity::Na => Arity::na(),
                 Arity::Info {
@@ -340,105 +340,143 @@ pub(crate) fn get_arity_external(
     get_arity_impl(arena, table, node, &mut lookup)
 }
 
-pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
+/// `Lam_analysis.size_upto ~limit` over an indexed lambda: the size of
+/// `node` for inlining decisions if it is below `limit`, `limit` otherwise.
+pub(crate) fn indexed_size_upto(arena: &IndexedLambda, node: NodeId, limit: i32) -> i32 {
     const TOO_BIG: i32 = 1000;
-    fn constant_size(constant: &Constant) -> i32 {
-        match constant {
-            Constant::Some(inner) => constant_size(inner),
-            Constant::Block {
-                tag_info, elements, ..
-            } => {
-                let missing = match &**tag_info {
-                    crate::lambda::TagInfo::Record { .. }
-                    | crate::lambda::TagInfo::RecordInlined { .. } => tag_info
-                        .logical_field_count()
-                        .saturating_sub(elements.len()),
-                    _ => 0,
-                };
-                missing as i32 + elements.iter().map(constant_size).sum::<i32>()
-            }
-            _ => 1,
-        }
+    debug_assert!(limit <= TOO_BIG);
+    struct LimitReached;
+    struct Counter<'a> {
+        arena: &'a IndexedLambda,
+        total: i32,
+        limit: i32,
     }
-    fn nodes_size(arena: &IndexedLambda, initial: i32, nodes: &[NodeId]) -> Option<i32> {
-        let mut total = initial;
-        for node in nodes {
-            total += inner(arena, *node)?;
+    impl Counter<'_> {
+        fn add(&mut self, n: i32) -> Result<(), LimitReached> {
+            self.total += n;
+            if self.total >= self.limit {
+                Err(LimitReached)
+            } else {
+                Ok(())
+            }
         }
-        Some(total)
-    }
-    fn inner(arena: &IndexedLambda, node: NodeId) -> Option<i32> {
-        match arena.view(node) {
-            NodeView::Var(_) | NodeView::GlobalModule(_) | NodeView::Break | NodeView::Continue => {
-                Some(1)
-            }
-            NodeView::Const(constant) => Some(constant_size(constant)),
-            NodeView::Let(_, _, value, body) => {
-                Some(1 + inner(arena, value)? + inner(arena, body)?)
-            }
-            NodeView::LetRec(_, _) => None,
-            NodeView::Prim(primitive, args, _) => {
-                match primitive {
-                    Primitive::Pfield(_, FieldDbgInfo::Module { .. }) if matches!(args, [base] if matches!(arena.view(*base), NodeView::GlobalModule(_) | NodeView::Var(_))) =>
-                    {
-                        return Some(1);
-                    }
-                    Primitive::Praise | Primitive::PisNotNone if args.len() == 1 => {
-                        return inner(arena, args[0]);
-                    }
-                    Primitive::Pmakeblock(
-                        tag @ (crate::lambda::TagInfo::Record { .. }
-                        | crate::lambda::TagInfo::RecordInlined { .. }),
-                        _,
-                    ) => {
-                        return nodes_size(
-                            arena,
-                            1 + tag.logical_field_count().saturating_sub(args.len()) as i32,
-                            args,
-                        );
-                    }
-                    Primitive::PjsObjectCreate(params) => {
-                        let logical = params
-                            .iter()
-                            .filter(|param| {
-                                !matches!(
-                                    param.obj_arg_type,
-                                    crate::types::external_ffi_types::Attr::ArgCst(_)
-                                )
-                            })
-                            .count();
-                        return nodes_size(
-                            arena,
-                            1 + logical.saturating_sub(args.len()) as i32,
-                            args,
-                        );
-                    }
-                    Primitive::PrawJsCode(_) => return None,
-                    _ => {}
+        fn constant(&mut self, constant: &Constant) -> Result<(), LimitReached> {
+            match constant {
+                Constant::Some(inner) => self.constant(inner),
+                Constant::Block {
+                    tag_info, elements, ..
+                } => {
+                    let missing = match &**tag_info {
+                        crate::lambda::TagInfo::Record { .. }
+                        | crate::lambda::TagInfo::RecordInlined { .. } => tag_info
+                            .logical_field_count()
+                            .saturating_sub(elements.len()),
+                        _ => 0,
+                    };
+                    self.add(missing as i32)?;
+                    elements.iter().try_for_each(|c| self.constant(c))
                 }
-                nodes_size(arena, 1, args)
+                _ => self.add(1),
             }
-            NodeView::Apply(function, args, _, _) => {
-                nodes_size(arena, inner(arena, function)?, args)
+        }
+        fn nodes(&mut self, nodes: &[NodeId]) -> Result<(), LimitReached> {
+            nodes.iter().try_for_each(|node| self.node(*node))
+        }
+        fn node(&mut self, node: NodeId) -> Result<(), LimitReached> {
+            let arena = self.arena;
+            match arena.view(node) {
+                NodeView::Var(_)
+                | NodeView::GlobalModule(_)
+                | NodeView::Break
+                | NodeView::Continue => self.add(1),
+                NodeView::Const(constant) => self.constant(constant),
+                NodeView::Let(_, _, value, body) => {
+                    self.add(1)?;
+                    self.node(value)?;
+                    self.node(body)
+                }
+                NodeView::Prim(primitive, args, _) => {
+                    match primitive {
+                        Primitive::Pfield(_, FieldDbgInfo::Module { .. }) if matches!(args, [base] if matches!(arena.view(*base), NodeView::GlobalModule(_) | NodeView::Var(_))) =>
+                        {
+                            return self.add(1);
+                        }
+                        Primitive::Praise | Primitive::PisNotNone if args.len() == 1 => {
+                            return self.node(args[0]);
+                        }
+                        Primitive::Pmakeblock(
+                            tag @ (crate::lambda::TagInfo::Record { .. }
+                            | crate::lambda::TagInfo::RecordInlined { .. }),
+                            _,
+                        ) => {
+                            self.add(
+                                1 + tag.logical_field_count().saturating_sub(args.len()) as i32,
+                            )?;
+                            return self.nodes(args);
+                        }
+                        Primitive::PjsObjectCreate(params) => {
+                            let logical = params
+                                .iter()
+                                .filter(|param| {
+                                    !matches!(
+                                        param.obj_arg_type,
+                                        crate::types::external_ffi_types::Attr::ArgCst(_)
+                                    )
+                                })
+                                .count();
+                            self.add(1 + logical.saturating_sub(args.len()) as i32)?;
+                            return self.nodes(args);
+                        }
+                        Primitive::PrawJsCode(_) => return self.add(TOO_BIG),
+                        _ => {}
+                    }
+                    self.add(1)?;
+                    self.nodes(args)
+                }
+                NodeView::Apply(function, args, _) => {
+                    self.node(function)?;
+                    self.nodes(args)
+                }
+                NodeView::Function(_, _, body, _, _) => self.node(body),
+                NodeView::StaticRaise(_, args) => {
+                    self.add(1)?;
+                    self.nodes(args)
+                }
+                NodeView::IfThenElse(a, b, c) => {
+                    self.add(1)?;
+                    self.node(a)?;
+                    self.node(b)?;
+                    self.node(c)
+                }
+                NodeView::Sequence(a, b) => {
+                    self.node(a)?;
+                    self.node(b)
+                }
+                NodeView::Assign(_, value) => {
+                    self.add(1)?;
+                    self.node(value)
+                }
+                NodeView::LetRec(_, _)
+                | NodeView::Switch { .. }
+                | NodeView::StringSwitch(_, _, _)
+                | NodeView::StaticCatch(_, _, _, _)
+                | NodeView::TryWith(_, _, _)
+                | NodeView::While(_, _)
+                | NodeView::For(_, _, _, _, _)
+                | NodeView::ForOf(_, _, _)
+                | NodeView::ForAwaitOf(_, _, _) => self.add(TOO_BIG),
             }
-            NodeView::Function(_, _, body, _, _) => inner(arena, body),
-            NodeView::StaticRaise(_, args) => nodes_size(arena, 1, args),
-            NodeView::IfThenElse(a, b, c) => {
-                Some(1 + inner(arena, a)? + inner(arena, b)? + inner(arena, c)?)
-            }
-            NodeView::Sequence(a, b) => Some(inner(arena, a)? + inner(arena, b)?),
-            NodeView::Assign(_, value) => Some(1 + inner(arena, value)?),
-            NodeView::Switch { .. }
-            | NodeView::StringSwitch(_, _, _)
-            | NodeView::StaticCatch(_, _, _, _)
-            | NodeView::TryWith(_, _, _)
-            | NodeView::While(_, _)
-            | NodeView::For(_, _, _, _, _)
-            | NodeView::ForOf(_, _, _)
-            | NodeView::ForAwaitOf(_, _, _) => None,
         }
     }
-    inner(arena, node).unwrap_or(TOO_BIG)
+    let mut counter = Counter {
+        arena,
+        total: 0,
+        limit,
+    };
+    match counter.node(node) {
+        Ok(()) => counter.total,
+        Err(LimitReached) => limit,
+    }
 }
 
 fn annotate(
@@ -540,7 +578,7 @@ fn collect(
         | NodeView::GlobalModule(_)
         | NodeView::Break
         | NodeView::Continue => {}
-        NodeView::Apply(function, args, _, _) => {
+        NodeView::Apply(function, args, _) => {
             collect(arena, meta, function, resolver);
             for arg in args {
                 collect(arena, meta, *arg, resolver);
@@ -969,7 +1007,6 @@ mod tests {
                 function(2),
                 vec![Lambda::Lconst(Constant::int(1))],
                 apply_info,
-                false,
             ),
             Lambda::Lswitch(
                 Box::new(Lambda::Lconst(Constant::int(0))),
@@ -1614,7 +1651,7 @@ mod indexed_size_sparse_tests {
             elements: vec![Constant::int(1)],
         });
         let store = IndexedLambda::from_lambda(constant);
-        assert_eq!(indexed_size(&store, store.root()), 6);
+        assert_eq!(indexed_size_upto(&store, store.root(), 1000), 6);
 
         let block = Lambda::prim(
             Primitive::Pmakeblock(sparse_tag(), Mutable::Immutable),
@@ -1622,7 +1659,7 @@ mod indexed_size_sparse_tests {
             Location::none(),
         );
         let store = IndexedLambda::from_lambda(block);
-        assert_eq!(indexed_size(&store, store.root()), 7);
+        assert_eq!(indexed_size_upto(&store, store.root(), 1000), 7);
 
         let params = (0..6)
             .map(|i| ObjParam {
@@ -1638,6 +1675,6 @@ mod indexed_size_sparse_tests {
             Location::none(),
         );
         let store = IndexedLambda::from_lambda(object);
-        assert_eq!(indexed_size(&store, store.root()), 7);
+        assert_eq!(indexed_size_upto(&store, store.root(), 1000), 7);
     }
 }

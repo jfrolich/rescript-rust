@@ -39,24 +39,22 @@ const STAMP_INVALID_ARGUMENT: i32 = 21;
 const STAMP_FAILURE: i32 = 22;
 const STAMP_OK: i32 = 23;
 const STAMP_ERROR: i32 = 24;
-// dict_magic_field_name uses regular ident_create (no predef_exn flag)
-const STAMP_DICT_MAGIC_FIELD: i32 = 25;
-const STAMP_JS_EXN: i32 = 26;
-const STAMP_NOT_FOUND: i32 = 27;
-const STAMP_END_OF_FILE: i32 = 28;
-const STAMP_DIVISION_BY_ZERO: i32 = 29;
-const STAMP_ASSERT_FAILURE: i32 = 30;
-const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 31;
+const STAMP_JS_EXN: i32 = 25;
+const STAMP_NOT_FOUND: i32 = 26;
+const STAMP_END_OF_FILE: i32 = 27;
+const STAMP_DIVISION_BY_ZERO: i32 = 28;
+const STAMP_ASSERT_FAILURE: i32 = 29;
+const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 30;
 
 // Constructor idents (regular Ident.create, in common_initial_env)
-const STAMP_FALSE: i32 = 32;
-const STAMP_TRUE: i32 = 33;
-const STAMP_VOID: i32 = 34; // "()"
-const STAMP_NIL: i32 = 35; // "[]"
-const STAMP_CONS: i32 = 36; // "::"
-const STAMP_NONE: i32 = 37;
-const STAMP_SOME: i32 = 38;
-const STAMP_CTOR_UNKNOWN: i32 = 39;
+const STAMP_FALSE: i32 = 31;
+const STAMP_TRUE: i32 = 32;
+const STAMP_VOID: i32 = 33; // "()"
+const STAMP_NIL: i32 = 34; // "[]"
+const STAMP_CONS: i32 = 35; // "::"
+const STAMP_NONE: i32 = 36;
+const STAMP_SOME: i32 = 37;
+const STAMP_CTOR_UNKNOWN: i32 = 38;
 
 /// The stamp counter value after all predefs are allocated.
 /// OCaml sets `Ident.set_current_time 999` at the end of predef.ml.
@@ -180,9 +178,6 @@ pub fn ident_ok() -> Ident {
 }
 pub fn ident_error() -> Ident {
     make_predef_exn_ident("Error", STAMP_ERROR)
-}
-pub fn ident_dict_magic_field() -> Ident {
-    make_ident("dictValuesType", STAMP_DICT_MAGIC_FIELD)
 }
 pub fn ident_js_exn() -> Ident {
     make_predef_exn_ident("JsExn", STAMP_JS_EXN)

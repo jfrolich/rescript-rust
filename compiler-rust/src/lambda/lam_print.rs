@@ -169,6 +169,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
             write!(f, "record_rest({})", excluded.join(", "))
         }
         Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}[js]"),
+        Primitive::Pjsx(jsx) => write!(f, "{}[jsx]", jsx.jsx_name),
         Primitive::PjsObjectCreate(_) => write!(f, "[js.obj]"),
         Primitive::Praise => write!(f, "raise"),
         Primitive::Pobjcomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
@@ -245,12 +246,11 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pmakearray => write!(f, "makearray"),
         Primitive::Pmakelist => write!(f, "makelist"),
         Primitive::Pmakedict => write!(f, "makedict"),
+        Primitive::PdictSpread => write!(f, "dict.spread"),
         Primitive::PdictHas => write!(f, "dict.has"),
         Primitive::Parrayrefu => write!(f, "array.unsafe_get"),
         Primitive::Parraysetu => write!(f, "array.unsafe_set"),
         Primitive::Parrayrefs => write!(f, "array.get"),
-        Primitive::Parraysets => write!(f, "array.set"),
-        Primitive::Pisint => write!(f, "isint"),
         Primitive::PisPolyVarBlock => write!(f, "#is_poly_var_block"),
         Primitive::Pawait => write!(f, "await"),
         Primitive::Phash => write!(f, "hash"),

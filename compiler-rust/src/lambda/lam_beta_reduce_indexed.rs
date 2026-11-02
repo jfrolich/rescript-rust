@@ -161,7 +161,7 @@ pub(crate) fn simple_beta_reduce(
                 fold_order,
             )
         }
-        NodeSnapshot::Apply(function, body_args, info, _)
+        NodeSnapshot::Apply(function, body_args, info)
             if match store.view(function) {
                 NodeView::Var(_) => true,
                 NodeView::Prim(Primitive::Pfield(_, _), [base], _) => {
@@ -185,7 +185,7 @@ pub(crate) fn simple_beta_reduce(
                 function
             };
             (
-                append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info, false)),
+                append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info)),
                 fold_order,
             )
         }
@@ -450,7 +450,6 @@ mod tests {
                 prim_name: name.into(),
                 arg_types: vec![],
                 ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                transformed_jsx: false,
             },
             vec![],
             Location::none(),

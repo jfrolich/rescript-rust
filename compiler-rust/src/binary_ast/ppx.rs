@@ -25,13 +25,13 @@ use crate::parse_arena::{
 };
 use crate::parser::ast::{
     self as current, ArgLabel, Attribute, Attributes, Case, Constant, ConstructorArguments,
-    ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
-    ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind, FunParam,
-    IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement,
-    LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern,
-    PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, RecFlag, RowField, SignatureItem,
-    SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension,
-    TypeKind, ValueBinding, ValueDescription, WithConstraint,
+    ConstructorDeclaration, CoreType, CoreTypeDesc, DictEntry, DictPatternEntry, Expression,
+    ExpressionDesc, ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind,
+    FunParam, IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp,
+    JsxUnaryElement, LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc,
+    ObjectField, Pattern, PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, RecFlag,
+    RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg,
+    TypeDeclaration, TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -6758,6 +6758,21 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
             PatternDesc::Ppat_array(Box::new(rewritten_pats))
         }
 
+        PatternDesc::Ppat_dict(entries) => {
+            let entries = entries
+                .iter()
+                .map(|entry| {
+                    let pat = arena.get_pat(entry.pdp_pattern).clone();
+                    let rw = rewrite_pattern(&pat, arena);
+                    DictPatternEntry {
+                        pdp_pattern: arena.push_pat(rw),
+                        ..entry.clone()
+                    }
+                })
+                .collect();
+            PatternDesc::Ppat_dict(Box::new(entries))
+        }
+
         // Or pattern: recurse into both alternatives
         PatternDesc::Ppat_or(p1, p2) => {
             let p1_pat = arena.get_pat(*p1).clone();
@@ -7593,11 +7608,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     }
                 }
                 let is_record_pat = match &*arena.get_pat(vb.pvb_pat).ppat_desc {
-                    PatternDesc::Ppat_record(..) => true,
+                    PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_) => true,
                     PatternDesc::Ppat_alias(inner, _) => {
                         matches!(
                             &*arena.get_pat(*inner).ppat_desc,
-                            PatternDesc::Ppat_record(..)
+                            PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_)
                         )
                     }
                     _ => false,
@@ -7935,6 +7950,22 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             )))
         }
 
+        ExpressionDesc::Pexp_dict(entries) => ExpressionDesc::Pexp_dict(Box::new(
+            entries
+                .iter()
+                .map(|entry| {
+                    let mut rewrite = |e: ExprIdx| {
+                        let e = arena.get_expr(e).clone();
+                        let rw = rewrite_expression(&e, arena);
+                        arena.push_expr(rw)
+                    };
+                    match entry {
+                        DictEntry::Pdict_entry(key, e) => DictEntry::Pdict_entry(*key, rewrite(*e)),
+                        DictEntry::Pdict_spread(e) => DictEntry::Pdict_spread(rewrite(*e)),
+                    }
+                })
+                .collect(),
+        )),
         ExpressionDesc::Pexp_array(exprs) => ExpressionDesc::Pexp_array(Box::new(
             exprs
                 .iter()

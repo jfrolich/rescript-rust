@@ -482,7 +482,7 @@ mod tests {
                 program: Program::new(
                     vec![Statement::variable(VariableDeclaration {
                         ident: Ident::create_local("dict"),
-                        value: Some(Expression::new(ExpressionDesc::Object(None, vec![]))),
+                        value: Some(Expression::new(ExpressionDesc::Object(vec![]))),
                         property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     })],

@@ -123,7 +123,6 @@ pub(crate) fn walk_expression<'a>(visitor: &mut impl Visitor<'a>, expression: &'
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             walk_expression(visitor, left);
             walk_expression(visitor, right);
@@ -162,12 +161,14 @@ pub(crate) fn walk_expression<'a>(visitor: &mut impl Visitor<'a>, expression: &'
                 walk_expression(visitor, item);
             }
         }
-        ExpressionDesc::Object(proto, props) => {
-            if let Some(proto) = proto {
-                walk_expression(visitor, proto);
-            }
-            for (_, value) in props {
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
                 walk_expression(visitor, value);
+            }
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                walk_expression(visitor, entry.expression());
             }
         }
     }

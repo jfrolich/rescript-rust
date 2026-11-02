@@ -249,7 +249,6 @@ pub fn parser_args(
     )?;
     let jsx_args = root_config.get_jsx_args();
     let jsx_module_args = root_config.get_jsx_module_args();
-    let jsx_mode_args = root_config.get_jsx_mode_args();
     let jsx_preserve_args = root_config.get_jsx_preserve_args();
     let experimental_features_args = root_config.get_experimental_features_args();
     let bsc_flags = config::flatten_flags(&package_config.compiler_flags);
@@ -263,7 +262,6 @@ pub fn parser_args(
             ppx_flags,
             jsx_args,
             jsx_module_args,
-            jsx_mode_args,
             jsx_preserve_args,
             experimental_features_args,
             warning_args,
@@ -368,7 +366,6 @@ fn generate_ast(
         let flags = [
             root_config.get_jsx_args(),
             root_config.get_jsx_module_args(),
-            root_config.get_jsx_mode_args(),
             root_config.get_jsx_preserve_args(),
             root_config.get_experimental_features_args(),
             package

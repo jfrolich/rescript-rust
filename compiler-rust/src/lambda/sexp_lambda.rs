@@ -484,14 +484,24 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
                 .chain(excluded.iter().map(|label| string(label)))
                 .collect(),
         ),
-        Primitive::PjsCall {
-            prim_name,
-            transformed_jsx,
-            ..
-        } => Sexp::list(vec![
-            Sexp::atom("Pjs_call"),
-            string(prim_name),
-            bool_sexp(*transformed_jsx),
+        // Skip arg_types and ffi for brevity.
+        Primitive::PjsCall { prim_name, .. } => {
+            Sexp::list(vec![Sexp::atom("Pjs_call"), string(prim_name)])
+        }
+        Primitive::Pjsx(jsx) => Sexp::list(vec![
+            Sexp::atom("Pjsx"),
+            string(&jsx.jsx_name),
+            bool_sexp(jsx.jsx_multi),
+            bool_sexp(jsx.jsx_fragment),
+            bool_sexp(jsx.jsx_spread),
+            Sexp::list(
+                jsx.jsx_props
+                    .iter()
+                    .map(|(name, optional)| Sexp::list(vec![string(name), bool_sexp(*optional)]))
+                    .collect(),
+            ),
+            opt(|n: &usize| int(*n as i32), &jsx.jsx_children),
+            bool_sexp(jsx.jsx_key),
         ]),
         Primitive::PjsObjectCreate(_) => Sexp::atom("Pjs_object_create"),
         Primitive::Praise => Sexp::atom("Praise"),
@@ -570,11 +580,10 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pmakelist => Sexp::atom("Pmakelist"),
         Primitive::Pmakedict => Sexp::atom("Pmakedict"),
         Primitive::PdictHas => Sexp::atom("Pdict_has"),
+        Primitive::PdictSpread => Sexp::atom("Pdict_spread"),
         Primitive::Parrayrefu => Sexp::atom("Parrayrefu"),
         Primitive::Parraysetu => Sexp::atom("Parraysetu"),
         Primitive::Parrayrefs => Sexp::atom("Parrayrefs"),
-        Primitive::Parraysets => Sexp::atom("Parraysets"),
-        Primitive::Pisint => Sexp::atom("Pisint"),
         Primitive::PisPolyVarBlock => Sexp::atom("Pis_poly_var_block"),
         Primitive::Pawait => Sexp::atom("Pawait"),
         Primitive::PtaggedTemplate(raw_sources) => {
@@ -626,14 +635,12 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
                 ap_func,
                 ap_args,
                 ap_info,
-                ap_transformed_jsx,
             } = __apply2.as_ref();
             Sexp::list(vec![
                 Sexp::atom("Lapply"),
                 lambda(ap_func, with_locs),
                 Sexp::list(ap_args.iter().map(|a| lambda(a, with_locs)).collect()),
                 ap_info_sexp(ap_info, with_locs),
-                bool_sexp(*ap_transformed_jsx),
             ])
         }
         Lambda::Lfunction(__func1) => {
@@ -814,12 +821,11 @@ fn indexed_lambda(
         NodeView::Var(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
         NodeView::GlobalModule(id) => Sexp::list(vec![Sexp::atom("Lglobal_module"), ident(id)]),
         NodeView::Const(value) => Sexp::list(vec![Sexp::atom("Lconst"), constant(value)]),
-        NodeView::Apply(function, args, info, jsx) => Sexp::list(vec![
+        NodeView::Apply(function, args, info) => Sexp::list(vec![
             Sexp::atom("Lapply"),
             child(function),
             Sexp::list(args.iter().map(|node| child(*node)).collect()),
             ap_info_sexp(info, with_locs),
-            bool_sexp(jsx),
         ]),
         NodeView::Function(_, params, body, attr, _) => Sexp::list(vec![
             Sexp::atom("Lfunction"),

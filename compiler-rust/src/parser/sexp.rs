@@ -682,6 +682,20 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
             Sexp::atom("Ppat_array"),
             Sexp::list(map_empty(pats, |p| pattern(arena, arena.get_pat(*p)))),
         ]),
+        PatternDesc::Ppat_dict(entries) => Sexp::list(vec![
+            Sexp::atom("Ppat_dict"),
+            Sexp::list(map_empty(entries, |entry| {
+                Sexp::list(vec![
+                    Sexp::atom(&quote_string(arena.get_string(entry.pdp_key.txt))),
+                    Sexp::atom(if entry.pdp_optional {
+                        "optional"
+                    } else {
+                        "required"
+                    }),
+                    pattern(arena, arena.get_pat(entry.pdp_pattern)),
+                ])
+            })),
+        ]),
         PatternDesc::Ppat_or(p1, p2) => Sexp::list(vec![
             Sexp::atom("Ppat_or"),
             pattern(arena, arena.get_pat(*p1)),
@@ -876,6 +890,20 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
         ExpressionDesc::Pexp_array(exprs) => Sexp::list(vec![
             Sexp::atom("Pexp_array"),
             Sexp::list(map_empty(exprs, |e| expression(arena, arena.get_expr(*e)))),
+        ]),
+        ExpressionDesc::Pexp_dict(entries) => Sexp::list(vec![
+            Sexp::atom("Pexp_dict"),
+            Sexp::list(map_empty(entries, |entry| match entry {
+                DictEntry::Pdict_entry(key, e) => Sexp::list(vec![
+                    Sexp::atom("Pdict_entry"),
+                    Sexp::atom(&quote_string(arena.get_string(key.txt))),
+                    expression(arena, arena.get_expr(*e)),
+                ]),
+                DictEntry::Pdict_spread(e) => Sexp::list(vec![
+                    Sexp::atom("Pdict_spread"),
+                    expression(arena, arena.get_expr(*e)),
+                ]),
+            })),
         ]),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (ref cond, ref then_e, ref opt_else) = **inner;

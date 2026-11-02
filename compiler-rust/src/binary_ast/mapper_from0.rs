@@ -504,6 +504,107 @@ impl<'a> Mapper<'a> {
         kept.into()
     }
 
+    /// Whether `e` is the identifier `Primitive_dict.<name>`.
+    fn is_primitive_dict(&self, e: &pt0::Expression, name: &str) -> bool {
+        matches!(&e.pexp_desc, pt0::ExpressionDesc::Ident(lid)
+            if matches!(&lid.txt, Longident::Ldot(m, n)
+                if matches!(&**m, Longident::Lident(m) if self.str_eq(*m, "Primitive_dict"))
+                    && self.str_eq(*n, name)))
+    }
+
+    /// ast_mapper_from0.ml `E.dict_rows`: the rows of
+    /// `Primitive_dict.make([("a", 1), ...])`.
+    fn dict_rows<'e>(
+        &mut self,
+        e: &'e pt0::Expression,
+    ) -> Option<Vec<(current::StringLoc, &'e pt0::Expression)>> {
+        let pt0::ExpressionDesc::Apply(func, args) = &e.pexp_desc else {
+            return None;
+        };
+        if !(self.is_primitive_dict(func, "make") && func.pexp_attributes.is_empty()) {
+            return None;
+        }
+        let [(pt0::ArgLabel::Nolabel, arg)] = args.as_slice() else {
+            return None;
+        };
+        let pt0::ExpressionDesc::Array(items) = &arg.pexp_desc else {
+            return None;
+        };
+        if !arg.pexp_attributes.is_empty() {
+            return None;
+        }
+        let mut rows = Vec::with_capacity(items.len());
+        for item in items {
+            let pt0::ExpressionDesc::Tuple(parts) = &item.pexp_desc else {
+                return None;
+            };
+            let [key, value] = parts.as_slice() else {
+                return None;
+            };
+            let key_constant = match &key.pexp_desc {
+                pt0::ExpressionDesc::Constant(c @ pt0::Constant::String(_, delim))
+                    if matches!(delim.as_deref(), None | Some("js" | "*j")) =>
+                {
+                    c
+                }
+                _ => return None,
+            };
+            if !item.pexp_attributes.is_empty() || !key.pexp_attributes.is_empty() {
+                return None;
+            }
+            let key_loc = self.loc(&key.pexp_loc);
+            let current::Constant::String(payload) = self.map_constant(key_constant, key_loc)
+            else {
+                return None;
+            };
+            let key_txt = self.arena.intern(payload.semantic());
+            rows.push((Located::new(key_txt, key_loc), value));
+        }
+        Some(rows)
+    }
+
+    /// ast_mapper_from0.ml `E.dict_entries`: the entries of a dict literal
+    /// encoded as calls, see `Ast_dict`.
+    fn dict_entries<'e>(&mut self, e: &'e pt0::Expression) -> Option<Vec<DictEntry0<'e>>> {
+        fn rows(rows: Vec<(current::StringLoc, &pt0::Expression)>) -> Vec<DictEntry0<'_>> {
+            rows.into_iter()
+                .map(|(key, value)| DictEntry0::Row(key, value))
+                .collect()
+        }
+        if let pt0::ExpressionDesc::Apply(func, args) = &e.pexp_desc
+            && self.is_primitive_dict(func, "spread")
+            && matches!(func.pexp_attributes.as_slice(),
+                [(name, pt0::Payload::PStr(items))]
+                    if items.is_empty() && name.txt == super::ast_dict::SPREAD_MARKER)
+            && let [
+                (pt0::ArgLabel::Nolabel, target),
+                (pt0::ArgLabel::Nolabel, sources_expr),
+            ] = args.as_slice()
+            && let pt0::ExpressionDesc::Array(sources) = &sources_expr.pexp_desc
+            && sources_expr.pexp_attributes.is_empty()
+        {
+            let target_rows = if target.pexp_attributes.is_empty() {
+                self.dict_rows(target)
+            } else {
+                None
+            }?;
+            let mut entries = rows(target_rows);
+            for source in sources {
+                let source_rows = if source.pexp_attributes.is_empty() {
+                    self.dict_rows(source)
+                } else {
+                    None
+                };
+                match source_rows {
+                    Some(source_rows) => entries.extend(rows(source_rows)),
+                    None => entries.push(DictEntry0::Spread(source)),
+                }
+            }
+            return Some(entries);
+        }
+        self.dict_rows(e).map(rows)
+    }
+
     /// ast_mapper_from0.ml `map_constant ~loc`.
     fn map_constant(&mut self, c: &pt0::Constant, loc: LocIdx) -> current::Constant {
         match c {
@@ -1009,6 +1110,42 @@ impl<'a> Mapper<'a> {
                     Located::new(args, args_loc),
                 )))
             }
+            // ast_mapper_from0.ml: a dict pattern, see `Ast_mapper_to0`.
+            pt0::PatternDesc::Record(fields, pt0::ClosedFlag::Open)
+                if pat
+                    .ppat_attributes
+                    .iter()
+                    .any(|(name, _)| name.txt == "res.dictPattern")
+                    && fields
+                        .iter()
+                        .all(|(lid, _)| matches!(lid.txt, Longident::Lident(_))) =>
+            {
+                attrs = attrs
+                    .iter()
+                    .filter(|(name, _)| !self.str_eq(name.txt, "res.dictPattern"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into();
+                let entries = fields
+                    .iter()
+                    .map(|(lid, pat)| {
+                        let mut p1 = self.map_pattern(pat);
+                        let optional = has_optional_attribute(self.arena, &p1.ppat_attributes);
+                        p1.ppat_attributes =
+                            remove_optional_attribute(self.arena, &p1.ppat_attributes);
+                        let Longident::Lident(key) = &lid.txt else {
+                            unreachable!("checked above")
+                        };
+                        let key_loc = self.loc(&lid.loc);
+                        current::DictPatternEntry {
+                            pdp_key: Located::new(*key, key_loc),
+                            pdp_pattern: self.arena.push_pat(p1),
+                            pdp_optional: optional,
+                        }
+                    })
+                    .collect();
+                current::PatternDesc::Ppat_dict(Box::new(entries))
+            }
             pt0::PatternDesc::Record(fields, closed) => {
                 let fields = fields
                     .iter()
@@ -1375,6 +1512,29 @@ impl<'a> Mapper<'a> {
                 pexp_desc: Box::new(current::ExpressionDesc::Pexp_await(await_idx)),
                 pexp_loc: loc,
                 pexp_attributes: self.map_attributes(await_attrs),
+            };
+        }
+
+        // ast_mapper_from0.ml `Pexp_apply _ when dict_entries e`: the calls
+        // encoding a dict literal, see `Ast_dict`.
+        if matches!(expr.pexp_desc, pt0::ExpressionDesc::Apply(..))
+            && let Some(entries) = self.dict_entries(expr)
+        {
+            let entries = entries
+                .into_iter()
+                .map(|entry| match entry {
+                    DictEntry0::Row(key, value) => {
+                        current::DictEntry::Pdict_entry(key, self.push_expr(value))
+                    }
+                    DictEntry0::Spread(spread) => {
+                        current::DictEntry::Pdict_spread(self.push_expr(spread))
+                    }
+                })
+                .collect();
+            return current::Expression {
+                pexp_desc: Box::new(current::ExpressionDesc::Pexp_dict(Box::new(entries))),
+                pexp_loc: loc,
+                pexp_attributes: attrs,
             };
         }
 
@@ -3046,4 +3206,10 @@ fn v0_object_literal_rows(
     rows.iter()
         .all(|(lid, _)| matches!(lid.txt, Longident::Lident(_)))
         .then_some(rows.as_slice())
+}
+
+/// An entry of a v0 dict literal decoded by `dict_entries`.
+enum DictEntry0<'e> {
+    Row(current::StringLoc, &'e pt0::Expression),
+    Spread(&'e pt0::Expression),
 }

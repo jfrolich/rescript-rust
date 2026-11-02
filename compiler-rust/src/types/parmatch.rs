@@ -20,7 +20,7 @@ use crate::parser::ast::ClosedFlag;
 use crate::types::MutableFlag;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    ConstructorDescription, ConstructorKind, LabelDescription, same_constructor,
+    ConstructorDescription, ConstructorKind, LabelArrayRef, LabelDescription, same_constructor,
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
@@ -67,8 +67,14 @@ pub(crate) trait Oracle {
     fn placeholder_lid(&self) -> LidentIdx;
     /// `Ctype.none`.
     fn none_type(&mut self) -> TypeExprRef;
-    /// Whether the pattern carries the `res.dictPattern` attribute.
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool;
+    /// `(Ctype.expand_head env ty).desc` is the predefined `dict` type.
+    fn is_dict_type(&mut self, env: EnvRef, ty: TypeExprRef) -> bool {
+        let ty = self.expand_head(env, ty);
+        matches!(
+            &*self.ctx().get_desc(self.ctx().repr(ty)),
+            TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
+        )
+    }
     /// Whether the pattern carries `res.patFromVariantSpread`.
     fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool;
     /// Whether `lid` is `Ldot (Lident "*predef*", "Some")`.
@@ -327,6 +333,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_array(items) => {
                 Desc::Array(items.iter().map(|item| self.import(item)).collect())
             }
+            // Callers lower dict patterns to records first (`Dict_pattern`).
+            PatternDesc::Tpat_dict(_) => crate::misc::fatal_error("Parmatch.import: dict pattern"),
             PatternDesc::Tpat_or(left, right, _) => Desc::Or(self.import(left), self.import(right)),
         };
         self.push(
@@ -375,11 +383,24 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
     }
 
+    /// `lbl.lbl_all`: the stored array of a label built by `Dict_pattern`,
+    /// otherwise the labels of its record type's declaration.
+    fn lbl_all(
+        &mut self,
+        env: EnvRef,
+        (lbl_all, lbl_res): (LabelArrayRef, TypeExprRef),
+    ) -> Vec<LabelDescription> {
+        match self.oracle.ctx().label_all(lbl_all) {
+            Some(labels) => labels,
+            None => self.oracle.record_labels(env, lbl_res),
+        }
+    }
+
     fn coherent_heads(&mut self, hp1: P, hp2: P) -> bool {
         enum Check {
             Done(bool),
             HeadPaths,
-            RecordLabelCounts(TypeExprRef, TypeExprRef),
+            RecordLabelCounts((LabelArrayRef, TypeExprRef), (LabelArrayRef, TypeExprRef)),
         }
         let check = match (self.desc(hp1), self.desc(hp2)) {
             (Desc::Construct { .. }, Desc::Construct { .. }) => Check::HeadPaths,
@@ -395,7 +416,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Record { fields: f1, .. }, Desc::Record { fields: f2, .. })
                 if !f1.is_empty() && !f2.is_empty() =>
             {
-                Check::RecordLabelCounts(f1[0].lbl.lbl_res, f2[0].lbl.lbl_res)
+                Check::RecordLabelCounts(
+                    (f1[0].lbl.lbl_all, f1[0].lbl.lbl_res),
+                    (f2[0].lbl.lbl_all, f2[0].lbl.lbl_res),
+                )
             }
             (Desc::Any, _)
             | (_, Desc::Any)
@@ -410,11 +434,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 (Some(path1), Some(path2)) => path1.same(&path2),
                 _ => false,
             },
-            Check::RecordLabelCounts(res1, res2) => {
+            Check::RecordLabelCounts(lbl1, lbl2) => {
                 let env1 = self.node(hp1).env;
                 let env2 = self.node(hp2).env;
-                self.oracle.record_labels(env1, res1).len()
-                    == self.oracle.record_labels(env2, res2).len()
+                self.lbl_all(env1, lbl1).len() == self.lbl_all(env2, lbl2).len()
             }
         }
     }
@@ -697,7 +720,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             return Vec::new();
         };
         let opt = first.opt;
-        let lbl_all = self.oracle.record_labels(env, first.lbl.lbl_res);
+        let lbl_all = self.lbl_all(env, (first.lbl.lbl_all, first.lbl.lbl_res));
         let mut table: Vec<Field<'a>> = lbl_all
             .into_iter()
             .map(|lbl| Field {
@@ -2280,6 +2303,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_array(items) => {
                 Desc::Array(items.iter().map(|item| self.import_owned(item)).collect())
             }
+            // Callers lower dict patterns to records first (`Dict_pattern`).
+            PatternDesc::Tpat_dict(_) => crate::misc::fatal_error("Parmatch.import: dict pattern"),
             PatternDesc::Tpat_or(left, right, _) => {
                 Desc::Or(self.import_owned(left), self.import_owned(right))
             }
@@ -2548,6 +2573,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     self.collect_paths_from_pat(r, p);
                 }
             }
+            PatternDesc::Tpat_dict(entries) => {
+                for entry in entries {
+                    self.collect_paths_from_pat(r, &entry.tdp_pattern);
+                }
+            }
             PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_alias(p, _, _) => {
                 self.collect_paths_from_pat(r, p)
             }
@@ -2597,14 +2627,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         total
     }
 
-    fn node_has_dict_pattern(&self, p: P) -> bool {
-        self.node(p)
-            .src
-            .is_some_and(|src| self.oracle.has_dict_pattern_attribute(src))
+    /// `is_dict_pattern` (parmatch.ml): a lowered dict pattern, a record
+    /// pattern of the `dict` type.
+    fn node_has_dict_pattern(&mut self, p: P) -> bool {
+        let node = self.node(p);
+        let (is_record, ty, env) = (matches!(node.desc, Desc::Record { .. }), node.ty, node.env);
+        is_record && ty.is_some_and(|ty| self.oracle.is_dict_type(env, ty))
     }
 
     /// `contains_dict_pattern` (parmatch.ml:1960-1968) on a node.
-    fn contains_dict_pattern(&self, p: P) -> bool {
+    fn contains_dict_pattern(&mut self, p: P) -> bool {
         if self.node_has_dict_pattern(p) {
             return true;
         }
@@ -2781,6 +2813,9 @@ pub(crate) fn contains_extension(pat: &Pattern) -> bool {
         PatternDesc::Tpat_record(fields, _, _) => {
             fields.iter().any(|(_, _, p, _)| contains_extension(p))
         }
+        PatternDesc::Tpat_dict(entries) => entries
+            .iter()
+            .any(|entry| contains_extension(&entry.tdp_pattern)),
         PatternDesc::Tpat_or(p1, p2, _) => contains_extension(p1) || contains_extension(p2),
     }
 }
@@ -3075,6 +3110,11 @@ fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
             }
             for (_, _, p, _) in fields {
                 pat_bound_idents(p, out);
+            }
+        }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                pat_bound_idents(&entry.tdp_pattern, out);
             }
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}

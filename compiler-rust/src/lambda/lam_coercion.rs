@@ -247,7 +247,6 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             max_ident_stamp_in_expression(left).max(max_ident_stamp_in_expression(right))
         }
@@ -292,16 +291,16 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
         ExpressionDesc::CamlBlock(items, _, _) => items.iter().fold(0, |max_stamp, item| {
             max_stamp.max(max_ident_stamp_in_expression(item))
         }),
-        ExpressionDesc::Object(dup, props) => {
-            let mut max_stamp = dup
-                .as_ref()
-                .map(|dup| max_ident_stamp_in_expression(dup))
-                .unwrap_or(0);
-            for (_, value) in props {
-                max_stamp = max_stamp.max(max_ident_stamp_in_expression(value));
-            }
-            max_stamp
-        }
+        ExpressionDesc::Jsx(jsx) => jsx
+            .expressions()
+            .map(max_ident_stamp_in_expression)
+            .max()
+            .unwrap_or(0),
+        ExpressionDesc::Object(entries) => entries
+            .iter()
+            .map(|entry| max_ident_stamp_in_expression(entry.expression()))
+            .max()
+            .unwrap_or(0),
         ExpressionDesc::Bool(_)
         | ExpressionDesc::Str(_)
         | ExpressionDesc::TemplateLiteral(_)

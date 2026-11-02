@@ -5,8 +5,8 @@
 
 use crate::js_ir::op::{Kind, Number};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, Statement, StatementDesc,
-    StringClause, VIdent, expression_has_no_side_effects,
+    BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, ObjectEntry, Statement,
+    StatementDesc, StringClause, VIdent, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_primitive::Primitive;
@@ -24,8 +24,7 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::TemplateLiteral(_)
         | ExpressionDesc::JsonLiteral(_) => true,
         ExpressionDesc::StaticIndex(target, _, _) => js_expr_no_side_effects(target),
-        ExpressionDesc::StringIndex(left, right)
-        | ExpressionDesc::ArrayIndex(left, right)
+        ExpressionDesc::ArrayIndex(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::Seq(left, right) => {
@@ -40,12 +39,13 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::OptionalBlock(inner, _) => js_expr_no_side_effects(inner),
         ExpressionDesc::Array(items, _) => items.iter().all(js_expr_no_side_effects),
         ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(js_expr_no_side_effects),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref().is_none_or(js_expr_no_side_effects)
-                && props
-                    .iter()
-                    .all(|(_, value)| js_expr_no_side_effects(value))
-        }
+        // A spread reads the source's properties, which may run getters or
+        // proxy traps.
+        ExpressionDesc::Jsx(_) => false,
+        ExpressionDesc::Object(entries) => entries.iter().all(|entry| match entry {
+            ObjectEntry::Property(_, value) => js_expr_no_side_effects(value),
+            ObjectEntry::Spread(_) => false,
+        }),
         ExpressionDesc::Cond(test, consequent, alternate) => {
             js_expr_no_side_effects(test)
                 && js_expr_no_side_effects(consequent)
@@ -641,10 +641,6 @@ pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
 
 pub(crate) fn raw_typeof_comparison(expr: Expression, op: BinOp, type_name: &str) -> Expression {
     Expression::bin(op, ocaml_typeof_expr(expr), Expression::string(type_name))
-}
-
-pub(crate) fn is_type_number_expr(expr: Expression) -> Expression {
-    raw_typeof_comparison(expr, BinOp::EqEqEq, "number")
 }
 
 pub(crate) fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<Expression> {

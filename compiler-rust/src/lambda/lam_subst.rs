@@ -58,7 +58,6 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             ap_func: Box::new(subst_aux(s, &apply.ap_func)),
             ap_args: apply.ap_args.iter().map(|arg| subst_aux(s, arg)).collect(),
             ap_info: apply.ap_info.clone(),
-            ap_transformed_jsx: apply.ap_transformed_jsx,
         })),
 
         Lambda::Lfunction(func) => Lambda::Lfunction(Box::new(LFunction {

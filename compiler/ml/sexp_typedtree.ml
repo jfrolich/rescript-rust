@@ -349,6 +349,16 @@ and pattern_desc ~with_locs desc =
   | Tpat_array l ->
     let items = List.map (pattern ~with_locs) l in
     Sexp.list (Sexp.atom "Tpat_array" :: items)
+  | Tpat_dict entries ->
+    let entry {tdp_key; tdp_pattern; tdp_optional} =
+      Sexp.list
+        [
+          string tdp_key.txt;
+          pattern ~with_locs tdp_pattern;
+          Sexp.atom (string_of_bool tdp_optional);
+        ]
+    in
+    Sexp.list (Sexp.atom "Tpat_dict" :: List.map entry entries)
   | Tpat_or (p1, p2, _) ->
     let p1_sexp = pattern ~with_locs p1 in
     let p2_sexp = pattern ~with_locs p2 in
@@ -488,6 +498,15 @@ and expression_desc ~with_locs desc =
   | Texp_array l ->
     let items = List.map (expression ~with_locs) l in
     Sexp.list (Sexp.atom "Texp_array" :: items)
+  | Texp_dict entries ->
+    let entry = function
+      | Tdict_entry (key, e) ->
+        Sexp.list
+          [Sexp.atom "Tdict_entry"; string key.txt; expression ~with_locs e]
+      | Tdict_spread e ->
+        Sexp.list [Sexp.atom "Tdict_spread"; expression ~with_locs e]
+    in
+    Sexp.list (Sexp.atom "Texp_dict" :: List.map entry entries)
   | Texp_ifthenelse (e1, e2, e3) ->
     let e1_sexp = expression ~with_locs e1 in
     let e2_sexp = expression ~with_locs e2 in

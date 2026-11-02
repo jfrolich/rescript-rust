@@ -695,6 +695,20 @@ module Sexp_ast = struct
       | Pexp_array exprs ->
         Sexp.list
           [Sexp.atom "Pexp_array"; Sexp.list (map_empty ~f:expression exprs)]
+      | Pexp_dict entries ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_dict";
+            Sexp.list
+              (map_empty
+                 ~f:(function
+                   | Parsetree.Pdict_entry (key, e) ->
+                     Sexp.list
+                       [Sexp.atom "Pdict_entry"; string key.txt; expression e]
+                   | Pdict_spread e ->
+                     Sexp.list [Sexp.atom "Pdict_spread"; expression e])
+                 entries);
+          ]
       | Pexp_ifthenelse (expr1, expr2, opt_expr) ->
         Sexp.list
           [
@@ -883,6 +897,22 @@ module Sexp_ast = struct
             Sexp.atom "Ppat_variant";
             string lbl;
             Sexp.list (map_empty ~f:pattern patterns);
+          ]
+      | Ppat_dict entries ->
+        Sexp.list
+          [
+            Sexp.atom "Ppat_dict";
+            Sexp.list
+              (map_empty
+                 ~f:(fun {Parsetree.pdp_key; pdp_pattern; pdp_optional} ->
+                   Sexp.list
+                     [
+                       string pdp_key.txt;
+                       Sexp.atom
+                         (if pdp_optional then "optional" else "required");
+                       pattern pdp_pattern;
+                     ])
+                 entries);
           ]
       | Ppat_record (rows, flag, rest) ->
         Sexp.list
@@ -1783,6 +1813,20 @@ module SexpAstWithLocs = struct
       | Pexp_array exprs ->
         Sexp.list
           [Sexp.atom "Pexp_array"; Sexp.list (map_empty ~f:expression exprs)]
+      | Pexp_dict entries ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_dict";
+            Sexp.list
+              (map_empty
+                 ~f:(function
+                   | Parsetree.Pdict_entry (key, e) ->
+                     Sexp.list
+                       [Sexp.atom "Pdict_entry"; string key.txt; location key.loc; expression e]
+                   | Pdict_spread e ->
+                     Sexp.list [Sexp.atom "Pdict_spread"; expression e])
+                 entries);
+          ]
       | Pexp_ifthenelse (expr1, expr2, opt_expr) ->
         Sexp.list
           [
@@ -2005,6 +2049,23 @@ module SexpAstWithLocs = struct
       | Ppat_array patterns ->
         Sexp.list
           [Sexp.atom "Ppat_array"; Sexp.list (map_empty ~f:pattern patterns)]
+      | Ppat_dict entries ->
+        Sexp.list
+          [
+            Sexp.atom "Ppat_dict";
+            Sexp.list
+              (map_empty
+                 ~f:(fun {Parsetree.pdp_key; pdp_pattern; pdp_optional} ->
+                   Sexp.list
+                     [
+                       string pdp_key.txt;
+                       location pdp_key.loc;
+                       Sexp.atom
+                         (if pdp_optional then "optional" else "required");
+                       pattern pdp_pattern;
+                     ])
+                 entries);
+          ]
       | Ppat_or (p1, p2) ->
         Sexp.list [Sexp.atom "Ppat_or"; pattern p1; pattern p2]
       | Ppat_constraint (p, typexpr) ->

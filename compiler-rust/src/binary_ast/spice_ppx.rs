@@ -4810,6 +4810,12 @@ impl<'a> LocCloner<'a> {
                     self.pattern_idx(item);
                 }
             }
+            PatternDesc::Ppat_dict(entries) => {
+                for entry in entries.iter_mut() {
+                    self.located(&mut entry.pdp_key);
+                    self.pattern_idx(&mut entry.pdp_pattern);
+                }
+            }
             PatternDesc::Ppat_construct(lid, args) => {
                 self.located(lid);
                 self.located(&mut **args);
@@ -5055,6 +5061,17 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
                 for item in items.iter_mut() {
                     self.expression_idx(item);
+                }
+            }
+            ExpressionDesc::Pexp_dict(entries) => {
+                for entry in entries.iter_mut() {
+                    match entry {
+                        crate::parser::ast::DictEntry::Pdict_entry(key, e) => {
+                            self.located(key);
+                            self.expression_idx(e);
+                        }
+                        crate::parser::ast::DictEntry::Pdict_spread(e) => self.expression_idx(e),
+                    }
                 }
             }
             ExpressionDesc::Pexp_construct(lid, args) => {

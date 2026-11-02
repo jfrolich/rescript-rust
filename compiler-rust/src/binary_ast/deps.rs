@@ -571,6 +571,14 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*expr);
                 }
             }
+            ExpressionDesc::Pexp_dict(entries) => {
+                for entry in &**entries {
+                    match entry {
+                        crate::parser::ast::DictEntry::Pdict_entry(_, e)
+                        | crate::parser::ast::DictEntry::Pdict_spread(e) => self.add_expr_idx(*e),
+                    }
+                }
+            }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
                 for arg in &args.txt {
@@ -877,6 +885,11 @@ impl<'a> DependencyCollector<'a> {
                 for pat in &**pats {
                     // pat is PatIdx
                     self.add_pat_idx_inner(*pat, unpack_names);
+                }
+            }
+            PatternDesc::Ppat_dict(entries) => {
+                for entry in &**entries {
+                    self.add_pat_idx_inner(entry.pdp_pattern, unpack_names);
                 }
             }
             PatternDesc::Ppat_construct(lid, args) => {

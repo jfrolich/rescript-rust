@@ -22,6 +22,7 @@ let suites =
       Ounit_lambda_traverse_tests.suites;
       Ounit_deep_flatten_tests.suites;
       Ounit_exits_tests.suites;
+      Ounit_lam_size_tests.suites;
       Ounit_sroa_tests.suites;
       Ounit_ast_mapper0_tests.suites;
       Ounit_constructor_arguments_tests.suites;
@@ -35,6 +36,7 @@ let suites =
       Ounit_analysis_config_tests.suites;
       Ounit_analysis_references_tests.suites;
       Ounit_ffi_inclusion_tests.suites;
+      Ounit_typeopt_tests.suites;
       Ounit_gentype_tests.suites;
     ]
 

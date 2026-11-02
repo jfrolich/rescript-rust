@@ -2795,247 +2795,71 @@ fn make_list_expression_with_loc(
     }
 }
 
-/// Parse a dict expression dict{"key": value, ...}.
-/// Note: The Token::Dict already includes the '{', so we don't expect Lbrace.
-///
-/// Desugars to: Primitive_dict.make([("key1", val1), ("key2", val2), ...])
-/// A part of a dict literal: a row `"key": value` or a `...spread_expr`.
-enum DictPart {
-    Row(Expression),
-    Spread(Expression),
-}
-
+/// OCaml `parse_dict_expr` (compiler/syntax/src/res_core.ml): a dict literal
+/// `dict{"key": value, ...spread}` is a `Pexp_dict` node. The `dict{` token is
+/// already consumed.
 fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
-    // Token::Dict already consumed the opening '{'
-    // OCaml: parse_comma_delimited_region ~grammar:DictRows ~closing:Rbrace
-    //        ~f:parse_dict_expr_part.
-
-    let parts: Vec<DictPart> = super::core::parse_comma_delimited_region(
+    let entries: Vec<DictEntry> = super::core::parse_comma_delimited_region(
         p,
         Grammar::DictRows,
         Token::Rbrace,
-        |p| {
-            if p.token == Token::DotDotDot {
-                p.next();
-                let spread_expr = parse_constrained_or_coerced_expr(p);
-                Some(DictPart::Spread(spread_expr))
-            } else {
-                match &p.token {
-                    Token::String(s) => {
-                        let key = extend_cow_lifetime(s.clone());
-                        let key_start_idx = p.start_pos_idx();
-                        p.next();
-                        let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
-                        let value = match p.token {
-                            Token::Colon => {
-                                p.next();
-                                parse_expr(p)
-                            }
-                            Token::Equal => {
-                                p.err_at(
-                                    p.start_pos,
-                                    p.end_pos,
-                                    DiagnosticCategory::message(
-                                        "Dict entries use `:` to separate keys from values. Example: `{\"k\": v}`",
-                                    ),
-                                );
-                                p.next();
-                                parse_expr(p)
-                            }
-                            _ => {
-                                let lid_idx = p.push_lident(key.as_ref());
-                                Expression {
-                                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
-                                        lid_idx, key_loc,
-                                    ))),
-                                    pexp_loc: key_loc,
-                                    pexp_attributes: Attributes::new(),
-                                }
-                            }
-                        };
-                        let value_end_idx = p.loc_end_idx(value.pexp_loc);
-                        let key_expr = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                                Constant::string(&key),
-                            ))),
-                            pexp_loc: key_loc,
-                            pexp_attributes: Attributes::new(),
-                        };
-                        let tuple_loc = p.mk_loc_idx(key_start_idx, value_end_idx);
-                        let key_expr_idx = p.arena_mut().push_expr(key_expr);
-                        let value_idx = p.arena_mut().push_expr(value);
-                        let tuple = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![
-                                key_expr_idx,
-                                value_idx,
-                            ]))),
-                            pexp_loc: tuple_loc,
-                            pexp_attributes: Attributes::new(),
-                        };
-                        Some(DictPart::Row(tuple))
-                    }
-                    _ => None,
-                }
-            }
-        },
+        parse_dict_expr_part,
     );
-
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    // Group consecutive Row parts into chunks, preserving Spread parts as
-    // individual chunks. Mirrors OCaml's `grouped_parts` fold.
-    enum DictChunk {
-        Rows(Vec<Expression>),
-        Spread(Expression),
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_dict(Box::new(entries))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
     }
-    let mut chunks: Vec<DictChunk> = Vec::new();
-    let mut current_rows: Vec<Expression> = Vec::new();
-    for part in parts {
-        match part {
-            DictPart::Row(row) => current_rows.push(row),
-            DictPart::Spread(spread) => {
-                if !current_rows.is_empty() {
-                    chunks.push(DictChunk::Rows(std::mem::take(&mut current_rows)));
-                }
-                chunks.push(DictChunk::Spread(spread));
-            }
+}
+
+/// OCaml `parse_dict_expr_part`: `...spread` or `"key": value`, where a
+/// missing `: value` puns the key as an identifier.
+fn parse_dict_expr_part(p: &mut Parser<'_>) -> Option<DictEntry> {
+    if p.token == Token::DotDotDot {
+        p.next();
+        let spread_expr = parse_constrained_or_coerced_expr(p);
+        let spread_idx = p.arena_mut().push_expr(spread_expr);
+        return Some(DictEntry::Pdict_spread(spread_idx));
+    }
+    let Token::String(s) = &p.token else {
+        return None;
+    };
+    let key = extend_cow_lifetime(s.clone());
+    let key_loc = p.mk_loc_current();
+    p.next();
+    let key_idx = p.arena_mut().intern(key.as_ref());
+    let value = match p.token {
+        Token::Colon => {
+            p.next();
+            parse_expr(p)
         }
-    }
-    if !current_rows.is_empty() {
-        chunks.push(DictChunk::Rows(std::mem::take(&mut current_rows)));
-    }
-
-    // OCaml compiler/syntax/src/res_core.ml:4436-4455 computes chunk
-    // locations from the first row key to the last row value unless callers
-    // explicitly override with the whole dict literal location.
-    let make_dict_chunk =
-        |p: &mut Parser<'_>, rows: Vec<Expression>, loc_override: Option<Location>| {
-            let chunk_loc = loc_override.unwrap_or_else(|| match (rows.first(), rows.last()) {
-                (Some(first), Some(last)) => p.mk_loc_idx(
-                    p.loc_start_idx(first.pexp_loc),
-                    p.loc_end_idx(last.pexp_loc),
+        Token::Equal => {
+            p.err_at(
+                p.start_pos,
+                p.end_pos,
+                DiagnosticCategory::message(
+                    "Dict entries use `:` to separate keys from values. Example: `{\"k\": v}`",
                 ),
-                _ => loc,
-            });
-            let kvp_idx: Vec<ExprIdx> = rows
-                .into_iter()
-                .map(|e| p.arena_mut().push_expr(e))
-                .collect();
-            let array_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(kvp_idx))),
-                pexp_loc: chunk_loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let prim_idx = p.arena_mut().intern_string("Primitive_dict");
-            let make_idx = p.arena_mut().intern_string("make");
-            let lid = Longident::Ldot(Box::new(Longident::Lident(prim_idx)), make_idx);
-            let lid_idx = p.push_longident(lid);
-            let make_ident = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-                    txt: lid_idx,
-                    loc: chunk_loc,
-                })),
-                pexp_loc: chunk_loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let funct_idx = p.arena_mut().push_expr(make_ident);
-            let array_expr_idx = p.arena_mut().push_expr(array_expr);
+            );
+            p.next();
+            parse_expr(p)
+        }
+        _ => {
+            let lid_idx = p.push_lident(key.as_ref());
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                    funct: funct_idx,
-                    args: vec![(ArgLabel::Nolabel, array_expr_idx)],
-                    partial: false,
-                    transformed_jsx: false,
-                }))),
-                pexp_loc: chunk_loc,
+                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, key_loc))),
+                pexp_loc: key_loc,
                 pexp_attributes: Attributes::new(),
             }
-        };
-
-    // Build `Primitive_dict.spread(target, [sources])` with @res.dictSpread.
-    let make_dict_spread = |p: &mut Parser<'_>,
-                            target_expr: Expression,
-                            source_chunks: Vec<DictChunk>,
-                            spread_loc: Location| {
-        let prim_idx = p.arena_mut().intern_string("Primitive_dict");
-        let spread_idx = p.arena_mut().intern_string("spread");
-        let lid = Longident::Ldot(Box::new(Longident::Lident(prim_idx)), spread_idx);
-        let lid_idx = p.push_longident(lid);
-        let dict_spread_attr = super::core::dict_spread_attr(p.arena_mut());
-        let spread_ident = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-                txt: lid_idx,
-                loc: spread_loc,
-            })),
-            pexp_loc: spread_loc,
-            pexp_attributes: vec![dict_spread_attr].into(),
-        };
-
-        // Array element per source chunk: either a dict-make call or the
-        // raw spread expression.
-        let source_expr_idx: Vec<ExprIdx> = source_chunks
-            .into_iter()
-            .map(|chunk| match chunk {
-                DictChunk::Rows(rows) => {
-                    let chunk = make_dict_chunk(p, rows, None);
-                    p.arena_mut().push_expr(chunk)
-                }
-                DictChunk::Spread(expr) => p.arena_mut().push_expr(expr),
-            })
-            .collect();
-        let source_array = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(source_expr_idx))),
-            pexp_loc: spread_loc,
-            pexp_attributes: Attributes::new(),
-        };
-
-        let funct_idx = p.arena_mut().push_expr(spread_ident);
-        let target_idx = p.arena_mut().push_expr(target_expr);
-        let source_array_idx = p.arena_mut().push_expr(source_array);
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: funct_idx,
-                args: vec![
-                    (ArgLabel::Nolabel, target_idx),
-                    (ArgLabel::Nolabel, source_array_idx),
-                ],
-                partial: false,
-                transformed_jsx: false,
-            }))),
-            pexp_loc: spread_loc,
-            pexp_attributes: Attributes::new(),
         }
     };
-
-    match chunks.len() {
-        // OCaml compiler/syntax/src/res_core.ml:4497-4502 only uses the
-        // whole-literal loc override for empty and single-row-only literals.
-        0 => make_dict_chunk(p, Vec::new(), Some(loc)),
-        1 => match chunks.into_iter().next().unwrap() {
-            DictChunk::Rows(rows) => make_dict_chunk(p, rows, Some(loc)),
-            // A single spread chunk: target is an empty dict.
-            DictChunk::Spread(spread) => {
-                let target = make_dict_chunk(p, Vec::new(), None);
-                make_dict_spread(p, target, vec![DictChunk::Spread(spread)], loc)
-            }
-        },
-        _ => {
-            let mut iter = chunks.into_iter();
-            let first = iter.next().unwrap();
-            let (target, sources): (Expression, Vec<DictChunk>) = match first {
-                DictChunk::Rows(rows) => (make_dict_chunk(p, rows, None), iter.collect()),
-                DictChunk::Spread(_) => {
-                    // Spread is first: target is empty dict, all chunks are sources.
-                    let empty_target = make_dict_chunk(p, Vec::new(), None);
-                    let mut sources = vec![first];
-                    sources.extend(iter);
-                    (empty_target, sources)
-                }
-            };
-            make_dict_spread(p, target, sources, loc)
-        }
-    }
+    let value_idx = p.arena_mut().push_expr(value);
+    Some(DictEntry::Pdict_entry(
+        with_loc(key_idx, key_loc),
+        value_idx,
+    ))
 }
 
 // ============================================================================

@@ -474,6 +474,13 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 v.expr(arena, *e);
             }
         }
+        ExpressionDesc::Pexp_dict(entries) => {
+            for entry in entries.iter() {
+                match entry {
+                    DictEntry::Pdict_entry(_, e) | DictEntry::Pdict_spread(e) => v.expr(arena, *e),
+                }
+            }
+        }
         ExpressionDesc::Pexp_construct(_, args) => {
             for arg in &args.txt {
                 v.expr(arena, *arg);
@@ -612,6 +619,11 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
             for p in pats.iter() {
                 v.pat(arena, *p);
+            }
+        }
+        PatternDesc::Ppat_dict(entries) => {
+            for entry in entries.iter() {
+                v.pat(arena, entry.pdp_pattern);
             }
         }
         PatternDesc::Ppat_construct(_, args) => {

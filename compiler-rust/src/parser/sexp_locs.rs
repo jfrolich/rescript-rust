@@ -476,6 +476,21 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
                 },
             ])
         }
+        PatternDesc::Ppat_dict(entries) => Sexp::list(vec![
+            Sexp::atom("Ppat_dict"),
+            Sexp::list(map_empty_with_arena(entries, arena, |entry, arena| {
+                Sexp::list(vec![
+                    Sexp::atom(&quote_string(arena.get_string(entry.pdp_key.txt))),
+                    location(entry.pdp_key.loc, arena),
+                    Sexp::atom(if entry.pdp_optional {
+                        "optional"
+                    } else {
+                        "required"
+                    }),
+                    pattern(arena.get_pat(entry.pdp_pattern), arena),
+                ])
+            })),
+        ]),
         PatternDesc::Ppat_array(pats) => Sexp::list(vec![
             Sexp::atom("Ppat_array"),
             Sexp::list(if pats.is_empty() {
@@ -714,6 +729,25 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
                 expression(arena.get_expr(*e2), arena),
             ])
         }
+        ExpressionDesc::Pexp_dict(entries) => Sexp::list(vec![
+            Sexp::atom("Pexp_dict"),
+            Sexp::list(map_empty_with_arena(
+                entries,
+                arena,
+                |entry, arena| match entry {
+                    DictEntry::Pdict_entry(key, e) => Sexp::list(vec![
+                        Sexp::atom("Pdict_entry"),
+                        Sexp::atom(&quote_string(arena.get_string(key.txt))),
+                        location(key.loc, arena),
+                        expression(arena.get_expr(*e), arena),
+                    ]),
+                    DictEntry::Pdict_spread(e) => Sexp::list(vec![
+                        Sexp::atom("Pdict_spread"),
+                        expression(arena.get_expr(*e), arena),
+                    ]),
+                },
+            )),
+        ]),
         ExpressionDesc::Pexp_array(exprs) => Sexp::list(vec![
             Sexp::atom("Pexp_array"),
             Sexp::list(if exprs.is_empty() {

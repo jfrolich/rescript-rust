@@ -4154,6 +4154,22 @@ fn transform_expression(
                     .collect(),
             ))
         }
+        ExpressionDesc::Pexp_dict(entries) => ExpressionDesc::Pexp_dict(Box::new(
+            entries
+                .into_iter()
+                .map(|entry| {
+                    let mut transform = |e: ExprIdx| {
+                        let e_expr = arena.get_expr(e).clone();
+                        let transformed = transform_expression(e_expr, config, arena);
+                        arena.push_expr(transformed)
+                    };
+                    match entry {
+                        DictEntry::Pdict_entry(key, e) => DictEntry::Pdict_entry(key, transform(e)),
+                        DictEntry::Pdict_spread(e) => DictEntry::Pdict_spread(transform(e)),
+                    }
+                })
+                .collect(),
+        )),
         ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array(Box::new(
             elems
                 .into_iter()
@@ -5031,6 +5047,9 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
             items.iter().any(|item| child(*item, memo))
         }
+        ExpressionDesc::Pexp_dict(entries) => entries.iter().any(|entry| match entry {
+            DictEntry::Pdict_entry(_, e) | DictEntry::Pdict_spread(e) => child(*e, memo),
+        }),
         ExpressionDesc::Pexp_construct(_, args) => args.txt.iter().any(|arg| child(*arg, memo)),
         ExpressionDesc::Pexp_variant(inner) => inner.1.txt.iter().any(|arg| child(*arg, memo)),
         ExpressionDesc::Pexp_record(inner) => {

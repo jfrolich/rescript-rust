@@ -66,7 +66,7 @@ fn transform_under_supply(
     }
     let function = shared.remove(0);
     shared.extend(extra_args);
-    let body = append_rebuilt(store, NodeSnapshot::Apply(function, shared, info, false));
+    let body = append_rebuilt(store, NodeSnapshot::Apply(function, shared, info));
     let mut result = append_rebuilt(
         store,
         // lam_eta_conversion.ml:65 (before its removal): `~loc:Location.none`.
@@ -112,7 +112,7 @@ fn simplify(
         | NodeSnapshot::Const(_)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
-        NodeSnapshot::Apply(function, args, info, jsx) => {
+        NodeSnapshot::Apply(function, args, info) => {
             let arities = get_arity_external(store, metadata, function, external).extract_arity();
             let len = args.len() as i32;
             match arities.first().copied() {
@@ -121,7 +121,7 @@ fn simplify(
                     // right-to-left; `Ext_list.map` itself runs left-to-right.
                     let args = simplify_many(store, metadata, id_gen, external, args);
                     let function = simplify(store, metadata, id_gen, external, function);
-                    append_rebuilt(store, NodeSnapshot::Apply(function, args, info, jsx))
+                    append_rebuilt(store, NodeSnapshot::Apply(function, args, info))
                 }
                 Some(arity) if arity == len => {
                     let args = simplify_many(store, metadata, id_gen, external, args);
@@ -130,7 +130,7 @@ fn simplify(
                         status: ApplyStatus::InferFull,
                         ..info
                     };
-                    append_rebuilt(store, NodeSnapshot::Apply(function, args, info, jsx))
+                    append_rebuilt(store, NodeSnapshot::Apply(function, args, info))
                 }
                 Some(arity) if arity > len => {
                     let function = simplify(store, metadata, id_gen, external, function);
@@ -155,11 +155,9 @@ fn simplify(
                         status: ApplyStatus::InferFull,
                         ..info.clone()
                     };
-                    let inner = append_rebuilt(
-                        store,
-                        NodeSnapshot::Apply(function, first, inner_info, false),
-                    );
-                    append_rebuilt(store, NodeSnapshot::Apply(inner, rest, info, jsx))
+                    let inner =
+                        append_rebuilt(store, NodeSnapshot::Apply(function, first, inner_info));
+                    append_rebuilt(store, NodeSnapshot::Apply(inner, rest, info))
                 }
             }
         }
@@ -322,12 +320,11 @@ mod tests {
             status,
         }
     }
-    fn apply(function: Lambda, args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> Lambda {
+    fn apply(function: Lambda, args: Vec<Lambda>, status: ApplyStatus) -> Lambda {
         Lambda::Lapply(Box::new(Apply {
             ap_func: Box::new(function),
             ap_args: args,
             ap_info: info(status),
-            ap_transformed_jsx: jsx,
         }))
     }
     fn run(input: Lambda, start: i32) -> (Lambda, i32) {
@@ -350,7 +347,7 @@ mod tests {
                 location,
             )
         };
-        let call = |function, argument, jsx| {
+        let call = |function, argument| {
             Lambda::Lapply(Box::new(Apply {
                 ap_func: Box::new(function),
                 ap_args: vec![Lambda::const_(Constant::int(argument))],
@@ -358,13 +355,9 @@ mod tests {
                     loc: location,
                     status: ApplyStatus::Na,
                 },
-                ap_transformed_jsx: jsx,
             }))
         };
-        let input = Lambda::seq(
-            call(access("first"), 1, false),
-            call(access("second"), 2, true),
-        );
+        let input = Lambda::seq(call(access("first"), 1), call(access("second"), 2));
         let generator = IdGenerator::with_start_stamp(10);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
@@ -386,13 +379,12 @@ mod tests {
         let Lambda::Lsequence(first, second) = context.materialize() else {
             panic!("expected sequence")
         };
-        for (node, jsx) in [(*first, false), (*second, true)] {
+        for node in [*first, *second] {
             let Lambda::Lapply(call) = node else {
                 panic!("expected call")
             };
             assert_eq!(call.ap_info.status, ApplyStatus::InferFull);
             assert_eq!(call.ap_info.loc, location);
-            assert_eq!(call.ap_transformed_jsx, jsx);
         }
         assert_eq!(generator.current_stamp(), 10);
     }
@@ -414,7 +406,6 @@ mod tests {
             Lambda::var(*function),
             vec![Lambda::const_(Constant::int(1))],
             ApplyStatus::Na,
-            false,
         )
     }
 
@@ -448,7 +439,6 @@ mod tests {
                     function_expression,
                     vec![under_call(&inner)],
                     ApplyStatus::Na,
-                    false,
                 ),
             ),
         );
@@ -486,7 +476,6 @@ mod tests {
                     Lambda::var(outer),
                     vec![under_call(&inner), under_call(&inner)],
                     ApplyStatus::Na,
-                    false,
                 ),
             ),
         );
@@ -527,7 +516,6 @@ mod tests {
                     function_expression,
                     vec![under_call(&inner)],
                     ApplyStatus::Na,
-                    false,
                 ),
             ),
         );
@@ -596,7 +584,6 @@ mod tests {
                 ),
                 vec![Lambda::const_(Constant::int(0))],
                 ApplyStatus::Na,
-                false,
             )
         };
         let input = Lambda::Lswitch(
@@ -654,17 +641,14 @@ mod tests {
                             Lambda::var(inner),
                             vec![Lambda::const_(Constant::int(1))],
                             ApplyStatus::Na,
-                            false,
                         ),
                         apply(
                             Lambda::var(inner),
                             vec![Lambda::const_(Constant::int(2))],
                             ApplyStatus::Na,
-                            false,
                         ),
                     ],
                     ApplyStatus::Na,
-                    false,
                 ),
             ),
         );
@@ -739,7 +723,7 @@ mod tests {
                 LetKind::Strict,
                 function,
                 definition.clone(),
-                apply(Lambda::var(function), args, ApplyStatus::Na, true),
+                apply(Lambda::var(function), args, ApplyStatus::Na),
             );
             let (actual, frontier) = run(input, 20);
             let Lambda::Llet(_, _, _, body) = actual else {
@@ -749,18 +733,15 @@ mod tests {
                 let Lambda::Lapply(outer) = *body else {
                     panic!("expected outer apply")
                 };
-                assert!(outer.ap_transformed_jsx);
                 assert_eq!(outer.ap_info.status, ApplyStatus::Na);
                 let Lambda::Lapply(inner) = *outer.ap_func else {
                     panic!("expected inner apply")
                 };
-                assert!(!inner.ap_transformed_jsx);
                 assert_eq!(inner.ap_info.status, ApplyStatus::InferFull);
             } else {
                 let Lambda::Lapply(call) = *body else {
                     panic!("expected apply")
                 };
-                assert!(call.ap_transformed_jsx);
                 assert_eq!(call.ap_info.status, ApplyStatus::InferFull);
             }
             assert_eq!(frontier, 20);
@@ -776,7 +757,6 @@ mod tests {
                     prim_name: name.into(),
                     arg_types: vec![],
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                    transformed_jsx: false,
                 },
                 vec![],
                 Location::none(),
@@ -802,7 +782,6 @@ mod tests {
                 function_expression,
                 vec![effect("argument1"), effect("argument2")],
                 ApplyStatus::Na,
-                true,
             ),
         );
         let (actual, frontier) = run(input, 100);
@@ -861,7 +840,6 @@ mod tests {
         let Lambda::Lapply(call) = *function.body else {
             panic!("expected eta call")
         };
-        assert!(!call.ap_transformed_jsx);
         assert_eq!(call.ap_info.status, ApplyStatus::InferFull);
     }
 
@@ -882,7 +860,6 @@ mod tests {
                 Lambda::var(function),
                 vec![Lambda::const_(Constant::int(1))],
                 ApplyStatus::Na,
-                false,
             ),
         );
         let generator = IdGenerator::with_start_stamp(50);
@@ -949,7 +926,6 @@ mod tests {
                 Lambda::var(function),
                 vec![Lambda::const_(Constant::int(1))],
                 ApplyStatus::Na,
-                true,
             ),
         );
         let generator = IdGenerator::with_start_stamp(70);
@@ -984,7 +960,6 @@ mod tests {
                     prim_name: name.into(),
                     arg_types: vec![],
                     ffi: Box::new(crate::lambda::lam_primitive::ExternalDecl::test_val("", 0)),
-                    transformed_jsx: false,
                 },
                 vec![],
                 Location::none(),
@@ -1007,7 +982,6 @@ mod tests {
                 Lambda::var(known),
                 vec![effect("argument")],
                 ApplyStatus::Na,
-                true,
             ),
         );
         let (actual, frontier) = run(input, 100);
@@ -1032,7 +1006,6 @@ mod tests {
         let Lambda::Lapply(call) = *function.body else {
             panic!("expected eta call")
         };
-        assert!(!call.ap_transformed_jsx);
         assert_eq!(call.ap_info.status, ApplyStatus::InferFull);
     }
 }

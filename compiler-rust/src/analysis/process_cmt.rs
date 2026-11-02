@@ -653,6 +653,11 @@ impl Processor<'_> {
                 }
             }
             tt::PatternDesc::Tpat_or(p, _, _) => self.handle_pattern(env, exported, items, None, p),
+            tt::PatternDesc::Tpat_dict(entries) => {
+                for entry in entries {
+                    self.handle_pattern(env, exported, items, None, &entry.tdp_pattern);
+                }
+            }
             tt::PatternDesc::Tpat_record(record_items, _, rest) => {
                 for (_, _, p, _) in record_items {
                     self.handle_pattern(env, exported, items, None, p);

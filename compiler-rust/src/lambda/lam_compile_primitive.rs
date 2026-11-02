@@ -9,9 +9,8 @@ use super::js_exp_make::{
     comparison_to_binop, comparison_to_runtime_member, compile_int_equality,
     compile_nullish_strict_comparison, compile_raw_comparison, int_bnot, int_expr, int_literal,
     int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr, int32_minus, int32_mul,
-    int32_pow, is_nullish_literal, is_optional_block, is_type_number_expr, is_type_object_expr,
-    is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args,
-    to_int32,
+    int32_pow, is_nullish_literal, is_optional_block, is_type_object_expr, is_zero_int,
+    js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args, to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler};
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
@@ -172,7 +171,6 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
-            Parraysets => self.runtime_call_expr("Primitive_array", "set", compiled_args),
             Paddint => int32_add(
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
@@ -484,7 +482,6 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0)),
             PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0)),
             Pmakearray => Expression::array(compiled_args, MutableFlag::Mutable),
             Pmakedict => match <[Expression; 1]>::try_from(compiled_args) {
@@ -516,10 +513,28 @@ impl LambdaCompiler {
                             _ => None,
                         })
                         .collect();
-                    Expression::new(ExpressionDesc::Object(None, props))
+                    Expression::new(ExpressionDesc::Object(crate::js_ir::object_entries(
+                        None, props,
+                    )))
                 }
                 _ => Expression::undefined(false),
             },
+            // `{...target, ...source}`, with the rows of dict literals in place.
+            PdictSpread => Expression::new(ExpressionDesc::Object(
+                compiled_args
+                    .into_iter()
+                    .flat_map(|arg| match arg.desc {
+                        ExpressionDesc::Object(entries)
+                            if entries.iter().all(|entry| {
+                                matches!(entry, crate::js_ir::ObjectEntry::Property(..))
+                            }) =>
+                        {
+                            entries
+                        }
+                        _ => vec![crate::js_ir::ObjectEntry::Spread(arg)],
+                    })
+                    .collect(),
+            )),
             PdictHas => match <[Expression; 2]>::try_from(compiled_args) {
                 Ok([obj, prop]) => {
                     Expression::new(ExpressionDesc::In(Box::new(prop), Box::new(obj)))
@@ -533,9 +548,9 @@ impl LambdaCompiler {
                 }
             },
             Pduprecord => match <[Expression; 1]>::try_from(compiled_args) {
-                Ok([source]) => {
-                    Expression::new(ExpressionDesc::Object(Some(Box::new(source)), vec![]))
-                }
+                Ok([source]) => Expression::new(ExpressionDesc::Object(vec![
+                    crate::js_ir::ObjectEntry::Spread(source),
+                ])),
                 _ => Expression::undefined(false),
             },
             PrecordRest(excluded) => match <[Expression; 1]>::try_from(compiled_args) {
@@ -693,8 +708,8 @@ impl LambdaCompiler {
                 prim_name,
                 arg_types,
                 ffi,
-                transformed_jsx,
-            } => self.compile_js_call(prim_name, arg_types, ffi, *transformed_jsx, compiled_args),
+            } => self.compile_js_call(prim_name, arg_types, ffi, compiled_args),
+            Pjsx(jsx) => self.compile_jsx(jsx, compiled_args),
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
 

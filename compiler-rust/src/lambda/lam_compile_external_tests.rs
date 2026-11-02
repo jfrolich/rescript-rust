@@ -4,8 +4,7 @@ use super::*;
 #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
 fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_pipeline() {
     let lam = import_attributes_lowered_lambda();
-    let simplified =
-        crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(&lam, false);
+    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&simplified);
     let mut block = compiled.prelude;
@@ -54,7 +53,6 @@ fn lowers_js_var_without_args_to_a_value() {
                 variadic: false,
                 effective_arity: 0,
             }),
-            transformed_jsx: false,
         },
         vec![],
         Location::none(),
@@ -87,7 +85,6 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
                 variadic: false,
                 effective_arity: 0,
             }),
-            transformed_jsx: false,
         },
         vec![Lambda::Lconst(Constant::Int {
             i: 10,
@@ -141,7 +138,6 @@ fn lowers_module_external_calls_to_namespace_imports() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![],
         Location::none(),
@@ -224,7 +220,6 @@ fn lowers_pjs_object_get_to_method_calls() {
             loc: Location::none(),
             status: ApplyStatus::Uncurry,
         },
-        ap_transformed_jsx: false,
     }));
 
     let program = compiler.compile_program(&lam);
@@ -266,7 +261,6 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                 variadic: true,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![Lambda::prim(
             Primitive::Pmakearray,
@@ -317,7 +311,6 @@ fn lowers_js_new_to_new_expression() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![Lambda::var(arg)],
         Location::none(),
@@ -379,7 +372,6 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![
             Lambda::var(date),
@@ -424,7 +416,6 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 2,
             }),
-            transformed_jsx: false,
         },
         vec![
             Lambda::const_(Constant::Float("42.".to_string())),
@@ -462,7 +453,6 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![
             Lambda::const_(Constant::String("ab+c".to_string())),
@@ -510,7 +500,6 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![
             Lambda::const_(Constant::Pointer("in_".to_string())),
@@ -544,7 +533,6 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![Lambda::const_(Constant::Block {
             tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
@@ -614,7 +602,6 @@ fn lowers_marshaled_constant_args_in_js_call() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![],
         Location::none(),
@@ -684,11 +671,11 @@ fn lowers_js_object_create_with_marshaled_fields() {
 
     assert!(compiled.prelude.is_empty());
     match &compiled.expr.desc {
-        ExpressionDesc::Object(_, props) => {
+        ExpressionDesc::Object(props) => {
             assert_eq!(props.len(), 3);
             assert!(matches!(
                 &props[0],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::JsonLiteral(txt),
@@ -698,7 +685,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
             ));
             assert!(matches!(
                 &props[1],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
@@ -708,7 +695,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
             ));
             assert!(matches!(
                 &props[2],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::JsonLiteral(txt),
@@ -742,11 +729,11 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
 
     assert!(compiled.prelude.is_empty());
     match &compiled.expr.desc {
-        ExpressionDesc::Object(_, props) => {
+        ExpressionDesc::Object(props) => {
             assert_eq!(props.len(), 1);
             assert!(matches!(
                 &props[0],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::Str(txt),
@@ -785,11 +772,11 @@ fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml(
 
     assert!(compiled.prelude.is_empty());
     match &compiled.expr.desc {
-        ExpressionDesc::Object(_, props) => {
+        ExpressionDesc::Object(props) => {
             assert_eq!(props.len(), 1);
             assert!(matches!(
                 &props[0],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::Str(txt),
@@ -858,11 +845,11 @@ fn lowers_js_object_create_with_statically_present_optional_field_inline_like_oc
 
     assert!(compiled.prelude.is_empty());
     match &compiled.expr.desc {
-        ExpressionDesc::Object(_, props) => {
+        ExpressionDesc::Object(props) => {
             assert_eq!(props.len(), 1);
             assert!(matches!(
                 &props[0],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::Str(txt),
@@ -904,7 +891,7 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Object(_, props),
+                    desc: ExpressionDesc::Object(props),
                     ..
                 }),
             ..
@@ -1009,7 +996,7 @@ fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_l
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Object(_, props),
+                    desc: ExpressionDesc::Object(props),
                     ..
                 }),
             property,
@@ -1124,7 +1111,6 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                 variadic: false,
                 effective_arity: 1,
             }),
-            transformed_jsx: false,
         },
         vec![
             Lambda::Lsequence(
@@ -1255,11 +1241,11 @@ fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
         )
     ));
     match &object.as_ref().desc {
-        ExpressionDesc::Object(_, props) => {
+        ExpressionDesc::Object(props) => {
             assert_eq!(props.len(), 1);
             assert!(matches!(
                 &props[0],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
@@ -1313,7 +1299,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::Object(_, props),
+                    desc: ExpressionDesc::Object(props),
                     ..
                 }),
             ..
@@ -1322,7 +1308,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
             assert_eq!(props.len(), 1);
             assert!(matches!(
                 &props[0],
-                (
+                crate::js_ir::ObjectEntry::Property(
                     PropertyName::Lit(name),
                     Expression {
                         desc: ExpressionDesc::Str(txt),
@@ -1360,7 +1346,7 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
                     vec![
                         Statement::variable(VariableDeclaration {
                             ident: dict,
-                            value: Some(Expression::new(ExpressionDesc::Object(None, vec![]))),
+                            value: Some(Expression::new(ExpressionDesc::Object(vec![]))),
                             property: LetKind::Strict,
                             ident_info: IdentInfo::default(),
                         }),

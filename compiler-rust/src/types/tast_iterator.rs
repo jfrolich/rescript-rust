@@ -249,6 +249,11 @@ pub fn walk_pat<I: TastIterator + ?Sized>(sub: &mut I, p: &Pattern) {
                 sub.pat(p);
             }
         }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                sub.pat(&entry.tdp_pattern);
+            }
+        }
         PatternDesc::Tpat_or(p1, p2, _) => {
             sub.pat(p1);
             sub.pat(p2);
@@ -317,6 +322,13 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
         | ExpressionDesc::Texp_array(es) => {
             for e in es {
                 sub.expr(e);
+            }
+        }
+        ExpressionDesc::Texp_dict(entries) => {
+            for entry in entries {
+                match entry {
+                    DictEntry::Tdict_entry(_, e) | DictEntry::Tdict_spread(e) => sub.expr(e),
+                }
             }
         }
         ExpressionDesc::Texp_variant(_, eo) => {

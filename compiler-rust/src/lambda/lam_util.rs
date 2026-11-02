@@ -107,7 +107,6 @@ fn refine_let_parts(
                 ap_func: apply.ap_func.clone(),
                 ap_args: vec![arg],
                 ap_info: apply.ap_info.clone(),
-                ap_transformed_jsx: apply.ap_transformed_jsx,
             }))
         }
 
@@ -308,7 +307,6 @@ mod tests {
                 loc: Location::none(),
                 status: crate::lambda::ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }));
         let result = refine_let(LetKind::Strict, x, e, apply);
         match result {

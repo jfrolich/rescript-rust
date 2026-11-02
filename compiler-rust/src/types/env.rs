@@ -15,17 +15,17 @@
 //! - `Env` - The main environment type
 //! - Lookup functions for values, types, and modules
 
-use super::asttypes::{MutableFlag, PrivateFlag};
+use super::asttypes::PrivateFlag;
 use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
-    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
+    LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem,
+    TypeDeclaration, TypeKind, ValueDescription,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
-use crate::ident::{Ident, IdentFlags};
+use crate::ident::Ident;
 use crate::location::Location;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -2578,26 +2578,12 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     }
     {
         let tvar = ctx.new_generic_var(None);
-        let option_t = ctx.new_generic_constr(predef::path_option(), vec![tvar]);
-        let dict_label = crate::types::decl::LabelDeclaration {
-            ld_id: predef::ident_dict_magic_field(),
-            ld_runtime_name: None,
-            ld_mutable: MutableFlag::Immutable,
-            ld_optional: true,
-            ld_type: option_t,
-            ld_loc: Location::none(),
-            ld_attributes: vec![],
-        };
         add_type_with_constrs(
             &mut env,
             predef::ident_dict(),
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
-                type_kind: TypeKind::TypeRecord(
-                    crate::types::decl::SharedVec::from(vec![dict_label]),
-                    crate::types::decl::RecordRepresentation::RecordRegular,
-                ),
                 type_variance: vec![crate::types::variance::Variance::full()],
                 ..decl_abstr(1, false)
             },

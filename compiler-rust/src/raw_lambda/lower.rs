@@ -111,7 +111,6 @@ impl LoweringContext {
             ap_func,
             ap_args,
             ap_info,
-            ap_transformed_jsx,
         } = apply;
 
         let func = *ap_func;
@@ -127,7 +126,6 @@ impl LoweringContext {
                 loc: ap_info.loc,
                 status: ApplyStatus::Uncurry,
             },
-            ap_transformed_jsx,
         )
     }
 
@@ -306,7 +304,6 @@ pub(crate) fn wrap_exn_raw(loc: Location, arg: RawLambda) -> RawLambda {
             loc,
             status: ApplyStatus::Uncurry,
         },
-        ap_transformed_jsx: false,
     }))
 }
 
@@ -332,7 +329,6 @@ pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
             loc,
             status: ApplyStatus::Uncurry,
         },
-        false,
     )
 }
 
@@ -538,39 +534,21 @@ fn is_valid_hash_number(value: &str) -> bool {
     }
 }
 
-fn make_apply(
-    func: Lambda,
-    args: Vec<Lambda>,
-    ap_info: ApInfo,
-    ap_transformed_jsx: bool,
-) -> Lambda {
+fn make_apply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo) -> Lambda {
     match func {
         Lambda::Lfunction(function) => {
             if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
                 return reduced;
             }
-            make_lapply(
-                Lambda::Lfunction(function),
-                args,
-                ap_info,
-                ap_transformed_jsx,
-            )
+            make_lapply(Lambda::Lfunction(function), args, ap_info)
         }
         Lambda::Llet(kind, id, value, body) => match *body {
-            body @ Lambda::Lfunction(_) => Lambda::let_(
-                kind,
-                id,
-                *value,
-                make_apply(body, args, ap_info, ap_transformed_jsx),
-            ),
-            body => make_lapply(
-                Lambda::Llet(kind, id, value, Box::new(body)),
-                args,
-                ap_info,
-                ap_transformed_jsx,
-            ),
+            body @ Lambda::Lfunction(_) => {
+                Lambda::let_(kind, id, *value, make_apply(body, args, ap_info))
+            }
+            body => make_lapply(Lambda::Llet(kind, id, value, Box::new(body)), args, ap_info),
         },
-        func => make_lapply(func, args, ap_info, ap_transformed_jsx),
+        func => make_lapply(func, args, ap_info),
     }
 }
 
@@ -647,17 +625,11 @@ fn eta_conversion_args(
         .collect()
 }
 
-fn make_lapply(
-    func: Lambda,
-    args: Vec<Lambda>,
-    ap_info: ApInfo,
-    ap_transformed_jsx: bool,
-) -> Lambda {
+fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo) -> Lambda {
     Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(func),
         ap_args: args,
         ap_info,
-        ap_transformed_jsx,
     }))
 }
 
@@ -1145,7 +1117,6 @@ mod tests {
                 loc: Location::none(),
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }));
 
         let lowered = lower_to_lambda(raw);
@@ -1178,7 +1149,6 @@ mod tests {
                 loc: Location::none(),
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }));
 
         let lowered = lower_to_lambda(raw);

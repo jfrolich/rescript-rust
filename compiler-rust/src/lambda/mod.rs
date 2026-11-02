@@ -429,8 +429,6 @@ pub struct Apply {
     pub ap_args: Vec<Lambda>,
     /// Application info
     pub ap_info: ApInfo,
-    /// Was this transformed from JSX?
-    pub ap_transformed_jsx: bool,
 }
 
 /// Transform the lambda in `boxed` and store the result in the same
@@ -882,39 +880,21 @@ impl Lambda {
     }
 
     /// Create a function application using OCaml's `Lam.apply` smart constructor.
-    pub fn apply(
-        func: Lambda,
-        args: Vec<Lambda>,
-        ap_info: ApInfo,
-        ap_transformed_jsx: bool,
-    ) -> Self {
+    pub fn apply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo) -> Self {
         match func {
             Lambda::Lfunction(function) => {
                 if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
                     return reduced;
                 }
-                make_lapply(
-                    Lambda::Lfunction(function),
-                    args,
-                    ap_info,
-                    ap_transformed_jsx,
-                )
+                make_lapply(Lambda::Lfunction(function), args, ap_info)
             }
             Lambda::Llet(kind, id, value, body) => match *body {
-                body @ Lambda::Lfunction(_) => Lambda::let_(
-                    kind,
-                    id,
-                    *value,
-                    Lambda::apply(body, args, ap_info, ap_transformed_jsx),
-                ),
-                body => make_lapply(
-                    Lambda::Llet(kind, id, value, Box::new(body)),
-                    args,
-                    ap_info,
-                    ap_transformed_jsx,
-                ),
+                body @ Lambda::Lfunction(_) => {
+                    Lambda::let_(kind, id, *value, Lambda::apply(body, args, ap_info))
+                }
+                body => make_lapply(Lambda::Llet(kind, id, value, Box::new(body)), args, ap_info),
             },
-            func => make_lapply(func, args, ap_info, ap_transformed_jsx),
+            func => make_lapply(func, args, ap_info),
         }
     }
 
@@ -1020,173 +1000,7 @@ impl Lambda {
                 // is code motion, not normalization; it is the final
                 // `lam_pass_guard_raises` pass (compiler/ml/lambda.ml if_).
 
-                match cond {
-                    Lambda::Lprim(prim_info) => match *prim_info {
-                        PrimInfo {
-                            primitive: Primitive::Pisint,
-                            args,
-                            loc,
-                        } => {
-                            let [Lambda::Lvar(i)] = args.as_slice() else {
-                                return make_if(
-                                    Lambda::Lprim(Box::new(PrimInfo {
-                                        primitive: Primitive::Pisint,
-                                        args,
-                                        loc,
-                                    })),
-                                    then_,
-                                    else_,
-                                );
-                            };
-
-                            if let Lambda::LifThenElse(pred, _, branch_false) = &then_ {
-                                if let Lambda::Lprim(__prim205) = pred.as_ref()
-                                    && let PrimInfo {
-                                        primitive: Primitive::Pintcomp(Comparison::Eq),
-                                        args: pred_args,
-                                        ..
-                                    } = __prim205.as_ref()
-                                {
-                                    if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
-                                        pred_args.as_slice()
-                                    {
-                                        if i.same(j) && lambda_eq_approx(branch_false, &else_) {
-                                            return then_;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if let Lambda::Lprim(__prim204) = &then_
-                                && let PrimInfo {
-                                    primitive: Primitive::Pintcomp(Comparison::Eq),
-                                    args: pred_args,
-                                    ..
-                                } = __prim204.as_ref()
-                            {
-                                if let [Lambda::Lvar(j), Lambda::Lconst(_)] = pred_args.as_slice() {
-                                    if i.same(j) && lambda_eq_approx(&Lambda::false_(), &else_) {
-                                        return then_;
-                                    }
-                                }
-                            }
-
-                            if let Lambda::LifThenElse(pred, branch_true, branch_false) = &then_ {
-                                if let Lambda::Lprim(__prim203) = pred.as_ref()
-                                    && let PrimInfo {
-                                        primitive: Primitive::Pintcomp(Comparison::Neq),
-                                        args: pred_args,
-                                        loc,
-                                    } = __prim203.as_ref()
-                                {
-                                    if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
-                                        pred_args.as_slice()
-                                    {
-                                        if i.same(j) && lambda_eq_approx(branch_true, &else_) {
-                                            return Lambda::LifThenElse(
-                                                Box::new(Lambda::Lprim(Box::new(PrimInfo {
-                                                    primitive: Primitive::Pintcomp(Comparison::Eq),
-                                                    args: pred_args.clone(),
-                                                    loc: *loc,
-                                                }))),
-                                                branch_false.clone(),
-                                                branch_true.clone(),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            match &then_ {
-                                Lambda::Lprim(__prim6)
-                                    if matches!(
-                                        __prim6.as_ref(),
-                                        PrimInfo {
-                                            primitive: Primitive::Pintcomp(Comparison::Neq),
-                                            args: _pred_args,
-                                            loc: _,
-                                        }
-                                    ) =>
-                                {
-                                    let PrimInfo {
-                                        primitive: Primitive::Pintcomp(Comparison::Neq),
-                                        args: pred_args,
-                                        loc,
-                                    } = __prim6.as_ref()
-                                    else {
-                                        unreachable!()
-                                    };
-
-                                    if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
-                                        pred_args.as_slice()
-                                    {
-                                        if i.same(j) && lambda_eq_approx(&Lambda::true_(), &else_) {
-                                            return Lambda::Lprim(Box::new(PrimInfo {
-                                                primitive: Primitive::Pintcomp(Comparison::Neq),
-                                                args: pred_args.clone(),
-                                                loc: *loc,
-                                            }));
-                                        }
-                                    }
-                                }
-                                Lambda::Lprim(__prim5)
-                                    if matches!(
-                                        __prim5.as_ref(),
-                                        PrimInfo {
-                                            primitive: Primitive::Pnot,
-                                            args: _outer_args,
-                                            ..
-                                        }
-                                    ) =>
-                                {
-                                    let PrimInfo {
-                                        primitive: Primitive::Pnot,
-                                        args: outer_args,
-                                        ..
-                                    } = __prim5.as_ref()
-                                    else {
-                                        unreachable!()
-                                    };
-
-                                    if let [Lambda::Lprim(__prim202)] = outer_args.as_slice()
-                                        && let PrimInfo {
-                                            primitive: Primitive::Pintcomp(Comparison::Eq),
-                                            args: pred_args,
-                                            loc,
-                                        } = __prim202.as_ref()
-                                    {
-                                        if let [Lambda::Lvar(j), Lambda::Lconst(_)] =
-                                            pred_args.as_slice()
-                                        {
-                                            if i.same(j)
-                                                && lambda_eq_approx(&Lambda::true_(), &else_)
-                                            {
-                                                return Lambda::Lprim(Box::new(PrimInfo {
-                                                    primitive: Primitive::Pintcomp(Comparison::Neq),
-                                                    args: pred_args.clone(),
-                                                    loc: *loc,
-                                                }));
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-
-                            make_if(
-                                Lambda::Lprim(Box::new(PrimInfo {
-                                    primitive: Primitive::Pisint,
-                                    args,
-                                    loc,
-                                })),
-                                then_,
-                                else_,
-                            )
-                        }
-                        prim_info => make_if(Lambda::Lprim(Box::new(prim_info)), then_, else_),
-                    },
-                    cond => make_if(cond, then_, else_),
-                }
+                make_if(cond, then_, else_)
             }
         }
     }
@@ -1368,17 +1182,11 @@ fn eta_conversion_args(
         .collect()
 }
 
-fn make_lapply(
-    func: Lambda,
-    args: Vec<Lambda>,
-    ap_info: ApInfo,
-    ap_transformed_jsx: bool,
-) -> Lambda {
+fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo) -> Lambda {
     Lambda::Lapply(Box::new(Apply {
         ap_func: Box::new(func),
         ap_args: args,
         ap_info,
-        ap_transformed_jsx,
     }))
 }
 
@@ -1827,32 +1635,6 @@ mod tests {
             }
             _ => panic!("Expected raise-then if to lower to sequence"),
         }
-    }
-
-    #[test]
-    fn test_if_then_else_pisint_reuses_eq_branch() {
-        let value = Ident::create_local("value");
-        let inner_if = Lambda::LifThenElse(
-            Box::new(Lambda::prim(
-                Primitive::Pintcomp(Comparison::Eq),
-                vec![Lambda::var(value), Lambda::const_(Constant::int(0))],
-                Location::none(),
-            )),
-            Box::new(Lambda::const_(Constant::int(1))),
-            Box::new(Lambda::false_()),
-        );
-
-        let if_expr = Lambda::if_(
-            Lambda::prim(
-                Primitive::Pisint,
-                vec![Lambda::var(value)],
-                Location::none(),
-            ),
-            inner_if.clone(),
-            Lambda::false_(),
-        );
-
-        assert!(lambda_eq_approx(&if_expr, &inner_if));
     }
 
     #[test]

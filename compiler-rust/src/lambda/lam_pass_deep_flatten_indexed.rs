@@ -39,7 +39,7 @@ fn rhs_is_beta_residue(store: &IndexedLambda, node: NodeId) -> bool {
         {
             rhs_is_beta_residue(store, rest)
         }
-        NodeView::Apply(_, _, _, _) => true,
+        NodeView::Apply(_, _, _) => true,
         _ => false,
     }
 }

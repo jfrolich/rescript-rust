@@ -57,8 +57,8 @@ impl<'a> IndexedJsConsumer<'a> {
         continuation: &Continuation,
         lower: &mut impl FnMut(&mut Self, NodeId, &Continuation) -> Output,
     ) -> Output {
-        let (function, count, info, jsx) = match self.context.store().view(application) {
-            NodeView::Apply(function, args, info, jsx) => (function, args.len(), info.clone(), jsx),
+        let (function, count, info) = match self.context.store().view(application) {
+            NodeView::Apply(function, args, info) => (function, args.len(), info.clone()),
             _ => panic!("application lowering requires an application node"),
         };
         // compiler/core/lam_compile.ml:1609-1623. Only the real flattening
@@ -66,13 +66,12 @@ impl<'a> IndexedJsConsumer<'a> {
         // can change the root, so immediately dispatch that returned ID.
         if info.status == ApplyStatus::Na {
             let flattened = match self.context.store().view(function) {
-                NodeView::Apply(inner, inner_args, inner_info, _)
+                NodeView::Apply(inner, inner_args, inner_info)
                     if inner_info.status == ApplyStatus::Na =>
                 {
                     let merged_info = info.clone();
                     let mut args = inner_args.to_vec();
-                    let NodeView::Apply(_, outer_args, _, _) =
-                        self.context.store().view(application)
+                    let NodeView::Apply(_, outer_args, _) = self.context.store().view(application)
                     else {
                         unreachable!()
                     };
@@ -84,7 +83,7 @@ impl<'a> IndexedJsConsumer<'a> {
             if let Some((function, args, info)) = flattened {
                 let merged = append_rebuilt(
                     self.context.store_mut(),
-                    NodeSnapshot::Apply(function, args, info, jsx),
+                    NodeSnapshot::Apply(function, args, info),
                 );
                 return lower(self, merged, continuation);
             }
@@ -103,7 +102,6 @@ impl<'a> IndexedJsConsumer<'a> {
                     field_name,
                     args,
                     info,
-                    transformed_jsx,
                     known_arity,
                 } => {
                     let (prelude, args) =
@@ -117,11 +115,9 @@ impl<'a> IndexedJsConsumer<'a> {
                         });
                     let function = Expression::qualified(module, Some(field_name));
                     let mut expr = match info.status {
-                        ApplyStatus::InferFull | ApplyStatus::Uncurry => Expression::call(
-                            function,
-                            args,
-                            call_info_of_apply_status(transformed_jsx, info.status),
-                        ),
+                        ApplyStatus::InferFull | ApplyStatus::Uncurry => {
+                            Expression::call(function, args, call_info_of_apply_status(info.status))
+                        }
                         ApplyStatus::Na => match known_arity {
                             Some(arity) if !arity.is_na() => {
                                 self.compiler.apply_with_arity(function, arity, args)
@@ -143,7 +139,7 @@ impl<'a> IndexedJsConsumer<'a> {
         let (args_prelude, args) = self.call_arguments(
             count,
             |owner, i| {
-                let NodeView::Apply(_, args, _, _) = owner.context.store().view(application) else {
+                let NodeView::Apply(_, args, _) = owner.context.store().view(application) else {
                     unreachable!()
                 };
                 args[i]
@@ -225,7 +221,7 @@ impl<'a> IndexedJsConsumer<'a> {
         let mut expr = Expression::call(
             compiled_function.value.expect("call function"),
             args,
-            call_info_of_apply_status(jsx, info.status),
+            call_info_of_apply_status(info.status),
         );
         expr.source_loc = (self.compiler.source_loc(&info.loc)).map(Box::new);
         Output::of_block_and_expression(continuation, prelude, expr)

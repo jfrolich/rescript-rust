@@ -14,12 +14,12 @@ use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, ImportAttributes as JsImportAttributes, Kind, PropertyName};
 use crate::js_ir::printer::js_export_name;
 use crate::js_ir::{
-    BinOp, Block, CallInfo, Expression, ExpressionDesc, ModuleId, Statement, VariableDeclaration,
-    expression_has_no_side_effects,
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, JsxExpression, ModuleId, Statement,
+    VariableDeclaration, expression_has_no_side_effects,
 };
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_primitive::{
-    Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
+    Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsxElement, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 use crate::lambda::{Lambda, TagInfo};
@@ -549,7 +549,7 @@ impl LambdaCompiler {
         let identity = matches!(
             value.desc,
             ExpressionDesc::Null
-                | ExpressionDesc::Object(_, _)
+                | ExpressionDesc::Object(_)
                 | ExpressionDesc::Number(_)
                 | ExpressionDesc::CamlBlock(_, _, _)
                 | ExpressionDesc::Array(_, _)
@@ -907,7 +907,9 @@ impl LambdaCompiler {
 
         let object = self.add_external_effect(
             self.fuse_external_effects(effects),
-            Expression::new(ExpressionDesc::Object(None, props)),
+            Expression::new(ExpressionDesc::Object(crate::js_ir::object_entries(
+                None, props,
+            ))),
         );
 
         if optional_assignments.is_empty() {
@@ -970,20 +972,69 @@ impl LambdaCompiler {
         )
     }
 
+    /// `Lam_compile_external_call.jsx_callee`: the function a JSX external
+    /// refers to. Translcore only builds `Pjsx` for `Decl_val` externals that
+    /// aren't the module itself.
+    pub(crate) fn jsx_callee(&mut self, decl: &ExternalDecl) -> Expression {
+        match (&decl.kind, &decl.module_) {
+            (DeclKind::DeclVal { name }, None) => {
+                self.translate_scoped_module_value(None, name, &decl.scopes)
+            }
+            (DeclKind::DeclVal { name }, Some(ModuleSource::ModuleNamed(emn))) => {
+                self.translate_scoped_module_value(Some(emn), name, &decl.scopes)
+            }
+            _ => unreachable!("Pjsx of an external that isn't a Decl_val"),
+        }
+    }
+
+    /// `Pjsx` (lam_compile_primitive.ml): the arguments are the tag, the
+    /// spread, the props, the children and the key. Optional props that are
+    /// statically `undefined` are left out.
+    pub(crate) fn compile_jsx(&mut self, jsx: &JsxElement, args: Vec<Expression>) -> Expression {
+        let mut args = args.into_iter();
+        let tag = args.next().expect("Pjsx without a tag");
+        let spread = jsx
+            .jsx_spread
+            .then(|| args.next().expect("Pjsx without its spread"));
+        let props = jsx
+            .jsx_props
+            .iter()
+            .zip(args.by_ref())
+            .filter(|((_, optional), value)| {
+                !(*optional && matches!(value.desc, ExpressionDesc::Undefined { .. }))
+            })
+            .map(|((name, _), value)| (name.clone(), value))
+            .collect();
+        let children = jsx
+            .jsx_children
+            .map(|n| args.by_ref().take(n).collect::<Vec<_>>());
+        let key = match (jsx.jsx_key, args.next(), args.next()) {
+            (true, Some(key), None) => Some(self.external_optional_to_undefined_expr(key)),
+            (false, None, None) => None,
+            _ => unreachable!("Pjsx with a wrong number of arguments"),
+        };
+        let callee = self.jsx_callee(&jsx.jsx_ffi);
+        Expression::new(ExpressionDesc::Jsx(Box::new(JsxExpression {
+            callee,
+            tag,
+            spread,
+            props,
+            children,
+            key,
+            multi: jsx.jsx_multi,
+            fragment: jsx.jsx_fragment,
+        })))
+    }
+
     /// `Lam_compile_external_call.translate_ffi`.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile_js_call(
         &mut self,
         prim_name: &str,
         arg_types: &[Param],
         decl: &ExternalDecl,
-        transformed_jsx: bool,
         args: Vec<Expression>,
     ) -> Expression {
-        let call_info = CallInfo {
-            call_transformed_jsx: transformed_jsx,
-            ..CallInfo::default()
-        };
+        let call_info = CallInfo::default();
         let splice = decl.variadic;
         let scopes = &decl.scopes;
         // a bare `@module` binds the module itself under the primitive name

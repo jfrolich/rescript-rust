@@ -32,12 +32,12 @@ pub(crate) fn append_refine_let(
     {
         return append_rebuilt(store, NodeSnapshot::Prim(primitive, vec![arg], loc));
     }
-    if let NodeSnapshot::Apply(function, args, info, jsx) = store.snapshot(body)
+    if let NodeSnapshot::Apply(function, args, info) = store.snapshot(body)
         && let [only] = args.as_slice()
         && matches!(store.view(*only), NodeView::Var(id) if id.same(&param))
         && !hit_variable(store, &param, function)
     {
-        return append_rebuilt(store, NodeSnapshot::Apply(function, vec![arg], info, jsx));
+        return append_rebuilt(store, NodeSnapshot::Apply(function, vec![arg], info));
     }
     fn safe_to_alias(store: &IndexedLambda, node: NodeId) -> bool {
         match store.view(node) {
@@ -85,7 +85,7 @@ fn eq_approx(store: &IndexedLambda, left: NodeId, right: NodeId) -> bool {
         (NodeView::GlobalModule(a), NodeView::GlobalModule(b)) => a.same(b),
         (NodeView::Var(a), NodeView::Var(b)) => a.same(b),
         (NodeView::Const(a), NodeView::Const(b)) => a.eq_approx(b),
-        (NodeView::Apply(af, aa, _, _), NodeView::Apply(bf, ba, _, _)) => {
+        (NodeView::Apply(af, aa, _), NodeView::Apply(bf, ba, _)) => {
             eq_approx(store, af, bf) && list_eq_approx(store, aa, ba)
         }
         (NodeView::IfThenElse(a1, a2, a3), NodeView::IfThenElse(b1, b2, b3)) => {
@@ -281,109 +281,12 @@ fn append_if(
             append_rebuilt(store, NodeSnapshot::Sequence(first, else_node))
         };
     }
-    match store.snapshot(condition) {
-        NodeSnapshot::Prim(Primitive::Pisint, args, loc) => {
-            append_pisint_if(store, args, loc, then_node, else_node)
-        }
-        _ => store.append(NodeSnapshot::IfThenElse(condition, then_node, else_node)),
-    }
-}
-
-fn append_pisint_if(
-    store: &mut IndexedLambda,
-    args: Vec<NodeId>,
-    loc: crate::location::Location,
-    then_node: NodeId,
-    else_node: NodeId,
-) -> NodeId {
-    let [variable_node] = args.as_slice() else {
-        let condition = store.append(NodeSnapshot::Prim(Primitive::Pisint, args, loc));
-        return store.append(NodeSnapshot::IfThenElse(condition, then_node, else_node));
-    };
-    let NodeView::Var(variable) = store.view(*variable_node) else {
-        let condition = store.append(NodeSnapshot::Prim(Primitive::Pisint, args, loc));
-        return store.append(NodeSnapshot::IfThenElse(condition, then_node, else_node));
-    };
-    if let NodeView::IfThenElse(predicate, _, branch_false) = store.view(then_node)
-        && let NodeView::Prim(Primitive::Pintcomp(crate::lambda::Comparison::Eq), [lhs, rhs], _) =
-            store.view(predicate)
-        && matches!(store.view(*lhs), NodeView::Var(id) if variable.same(id))
-        && matches!(store.view(*rhs), NodeView::Const(_))
-        && eq_approx(store, branch_false, else_node)
-    {
-        return then_node;
-    }
-    if let NodeView::Prim(Primitive::Pintcomp(crate::lambda::Comparison::Eq), [lhs, rhs], _) =
-        store.view(then_node)
-        && matches!(store.view(*lhs), NodeView::Var(id) if variable.same(id))
-        && matches!(store.view(*rhs), NodeView::Const(_))
-        && is_false(store, else_node)
-    {
-        return then_node;
-    }
-    if let NodeView::IfThenElse(predicate, branch_true, branch_false) = store.view(then_node)
-        && let NodeSnapshot::Prim(
-            Primitive::Pintcomp(crate::lambda::Comparison::Neq),
-            predicate_args,
-            predicate_loc,
-        ) = store.snapshot(predicate)
-        && let [lhs, rhs] = predicate_args.as_slice()
-        && matches!(store.view(*lhs), NodeView::Var(id) if variable.same(id))
-        && matches!(store.view(*rhs), NodeView::Const(_))
-        && eq_approx(store, branch_true, else_node)
-    {
-        let predicate = store.append(NodeSnapshot::Prim(
-            Primitive::Pintcomp(crate::lambda::Comparison::Eq),
-            predicate_args,
-            predicate_loc,
-        ));
-        return store.append(NodeSnapshot::IfThenElse(
-            predicate,
-            branch_false,
-            branch_true,
-        ));
-    }
-    if let NodeSnapshot::Prim(
-        Primitive::Pintcomp(crate::lambda::Comparison::Neq),
-        predicate_args,
-        predicate_loc,
-    ) = store.snapshot(then_node)
-        && let [lhs, rhs] = predicate_args.as_slice()
-        && matches!(store.view(*lhs), NodeView::Var(id) if variable.same(id))
-        && matches!(store.view(*rhs), NodeView::Const(_))
-        && is_true(store, else_node)
-    {
-        return store.append(NodeSnapshot::Prim(
-            Primitive::Pintcomp(crate::lambda::Comparison::Neq),
-            predicate_args,
-            predicate_loc,
-        ));
-    }
-    if let NodeSnapshot::Prim(Primitive::Pnot, outer_args, _) = store.snapshot(then_node)
-        && let [inner] = outer_args.as_slice()
-        && let NodeSnapshot::Prim(
-            Primitive::Pintcomp(crate::lambda::Comparison::Eq),
-            predicate_args,
-            predicate_loc,
-        ) = store.snapshot(*inner)
-        && let [lhs, rhs] = predicate_args.as_slice()
-        && matches!(store.view(*lhs), NodeView::Var(id) if variable.same(id))
-        && matches!(store.view(*rhs), NodeView::Const(_))
-        && is_true(store, else_node)
-    {
-        return store.append(NodeSnapshot::Prim(
-            Primitive::Pintcomp(crate::lambda::Comparison::Neq),
-            predicate_args,
-            predicate_loc,
-        ));
-    }
-    let condition = store.append(NodeSnapshot::Prim(Primitive::Pisint, args, loc));
     store.append(NodeSnapshot::IfThenElse(condition, then_node, else_node))
 }
 
 pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> NodeId {
     match node {
-        NodeSnapshot::Apply(function, args, info, jsx) => {
+        NodeSnapshot::Apply(function, args, info) => {
             fn eta_args(
                 store: &IndexedLambda,
                 params: &[Ident],
@@ -462,10 +365,10 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
             if let NodeSnapshot::Let(kind, id, value, body) = store.snapshot(function)
                 && matches!(store.view(body), NodeView::Function(_, _, _, _, _))
             {
-                let apply = append_rebuilt(store, NodeSnapshot::Apply(body, args, info, jsx));
+                let apply = append_rebuilt(store, NodeSnapshot::Apply(body, args, info));
                 return store.append(NodeSnapshot::Let(kind, id, value, apply));
             }
-            store.append(NodeSnapshot::Apply(function, args, info, jsx))
+            store.append(NodeSnapshot::Apply(function, args, info))
         }
         NodeSnapshot::Prim(
             Primitive::Pmakeblock(crate::lambda::TagInfo::Module(fields), mutable),
@@ -693,11 +596,10 @@ pub(crate) fn map_children(
     mut map: impl FnMut(&mut IndexedLambda, NodeId) -> NodeId,
 ) -> NodeSnapshot {
     match node {
-        NodeSnapshot::Apply(f, args, info, jsx) => NodeSnapshot::Apply(
+        NodeSnapshot::Apply(f, args, info) => NodeSnapshot::Apply(
             map(store, f),
             args.into_iter().map(|x| map(store, x)).collect(),
             info,
-            jsx,
         ),
         NodeSnapshot::Function(a, p, body, attr, loc) => {
             NodeSnapshot::Function(a, p, map(store, body), attr, loc)

@@ -47,7 +47,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
     /// (lam_pass_alpha_conversion.ml:26-49).
     fn populate_apply_info(
         &mut self,
-        ap_transformed_jsx: bool,
         args_arity: &[i32],
         len: i32,
         fn_: &Lambda,
@@ -61,7 +60,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 self.simpl(fn_),
                 args.iter().map(|a| self.simpl(a)).collect(),
                 ap_info.clone(),
-                ap_transformed_jsx,
             ),
             Some(x) => {
                 if x == len {
@@ -75,7 +73,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
                         self.simpl(fn_),
                         args.iter().map(|a| self.simpl(a)).collect(),
                         new_info,
-                        ap_transformed_jsx,
                     )
                 } else if x > len {
                     // lam_pass_alpha_conversion.ml:37-42 — under-application:
@@ -98,8 +95,8 @@ impl<'a, 'r> Alpha<'a, 'r> {
                         status: ApplyStatus::InferFull,
                         ..ap_info.clone()
                     };
-                    let inner = Lambda::apply(self.simpl(fn_), first, infer_full, false);
-                    Lambda::apply(inner, rest, ap_info.clone(), ap_transformed_jsx)
+                    let inner = Lambda::apply(self.simpl(fn_), first, infer_full);
+                    Lambda::apply(inner, rest, ap_info.clone())
                 }
             }
         }
@@ -109,7 +106,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
     /// (`compiler/core/lam_pass_alpha_conversion.ml:26-49`).
     fn populate_apply_info_owned(
         &mut self,
-        ap_transformed_jsx: bool,
         args_arity: &[i32],
         len: i32,
         fn_: Lambda,
@@ -121,7 +117,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 self.simpl_owned(fn_),
                 args.into_iter().map(|a| self.simpl_owned(a)).collect(),
                 ap_info,
-                ap_transformed_jsx,
             ),
             Some(x) if x == len => {
                 let new_info = ApInfo {
@@ -132,7 +127,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     self.simpl_owned(fn_),
                     args.into_iter().map(|a| self.simpl_owned(a)).collect(),
                     new_info,
-                    ap_transformed_jsx,
                 )
             }
             Some(x) if x > len => {
@@ -157,8 +151,8 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     status: ApplyStatus::InferFull,
                     ..ap_info.clone()
                 };
-                let inner = Lambda::apply(self.simpl_owned(fn_), first, infer_full, false);
-                Lambda::apply(inner, rest, ap_info, ap_transformed_jsx)
+                let inner = Lambda::apply(self.simpl_owned(fn_), first, infer_full);
+                Lambda::apply(inner, rest, ap_info)
             }
         }
     }
@@ -175,19 +169,11 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     ap_func,
                     ap_args,
                     ap_info,
-                    ap_transformed_jsx,
                 } = __apply3.as_ref();
 
                 let args_arity = self.get_arity(ap_func).extract_arity();
                 let len = ap_args.len() as i32;
-                self.populate_apply_info(
-                    *ap_transformed_jsx,
-                    &args_arity,
-                    len,
-                    ap_func,
-                    ap_args,
-                    ap_info,
-                )
+                self.populate_apply_info(&args_arity, len, ap_func, ap_args, ap_info)
             }
 
             // lam_pass_alpha_conversion.ml:62
@@ -317,19 +303,11 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     ap_func,
                     ap_args,
                     ap_info,
-                    ap_transformed_jsx,
                 } = *__apply1;
 
                 let args_arity = self.get_arity(&ap_func).extract_arity();
                 let len = ap_args.len() as i32;
-                self.populate_apply_info_owned(
-                    ap_transformed_jsx,
-                    &args_arity,
-                    len,
-                    *ap_func,
-                    ap_args,
-                    ap_info,
-                )
+                self.populate_apply_info_owned(&args_arity, len, *ap_func, ap_args, ap_info)
             }
             Lambda::Llet(str, v, l1, l2) => Lambda::Llet(
                 str,

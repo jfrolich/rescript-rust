@@ -4,7 +4,7 @@
 //! of the program block. Also includes free variable analysis and side-effect
 //! checking for JS IR statements and expressions.
 
-use ahash::AHashSet as HashSet;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, UsedStats};
@@ -789,7 +789,6 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 left,
@@ -890,21 +889,20 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 TailMoveUseContext::Other,
             )
         }),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_ref().is_none_or(|expr| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    expr,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            }) && props.iter().all(|(_, value)| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    value,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
+        ExpressionDesc::Jsx(jsx) => jsx.expressions().all(|value| {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                value,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }),
+        ExpressionDesc::Object(entries) => entries.iter().all(|entry| {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                entry.expression(),
+                target,
+                TailMoveUseContext::Other,
+            )
+        }),
     }
 }
 
@@ -1024,7 +1022,6 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             expression_mentions_ident_outside_nested_functions(left, target)
                 || expression_mentions_ident_outside_nested_functions(right, target)
@@ -1062,13 +1059,12 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         ExpressionDesc::CamlBlock(items, _, _) => items
             .iter()
             .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref()
-                .is_some_and(|dup| expression_mentions_ident_outside_nested_functions(dup, target))
-                || props.iter().any(|(_, value)| {
-                    expression_mentions_ident_outside_nested_functions(value, target)
-                })
-        }
+        ExpressionDesc::Jsx(jsx) => jsx
+            .expressions()
+            .any(|value| expression_mentions_ident_outside_nested_functions(value, target)),
+        ExpressionDesc::Object(entries) => entries.iter().any(|entry| {
+            expression_mentions_ident_outside_nested_functions(entry.expression(), target)
+        }),
     }
 }
 
@@ -1211,7 +1207,6 @@ fn substitute_export_alias_use_in_expression(
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             substitute_export_alias_use_in_expression(left, target, replacement);
             substitute_export_alias_use_in_expression(right, target, replacement);
@@ -1261,11 +1256,15 @@ fn substitute_export_alias_use_in_expression(
                 substitute_export_alias_use_in_expression(item, target, replacement);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                substitute_export_alias_use_in_expression(dup, target, replacement);
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions_mut() {
+                substitute_export_alias_use_in_expression(value, target, replacement);
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (crate::js_ir::ObjectEntry::Property(_, value)
+                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
                 substitute_export_alias_use_in_expression(value, target, replacement);
             }
         }
@@ -1393,7 +1392,6 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             expression_mentions_ident_anywhere(left, target)
                 || expression_mentions_ident_anywhere(right, target)
@@ -1436,13 +1434,12 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         ExpressionDesc::CamlBlock(items, _, _) => items
             .iter()
             .any(|item| expression_mentions_ident_anywhere(item, target)),
-        ExpressionDesc::Object(dup, props) => {
-            dup.as_deref()
-                .is_some_and(|dup| expression_mentions_ident_anywhere(dup, target))
-                || props
-                    .iter()
-                    .any(|(_, value)| expression_mentions_ident_anywhere(value, target))
-        }
+        ExpressionDesc::Jsx(jsx) => jsx
+            .expressions()
+            .any(|value| expression_mentions_ident_anywhere(value, target)),
+        ExpressionDesc::Object(entries) => entries
+            .iter()
+            .any(|entry| expression_mentions_ident_anywhere(entry.expression(), target)),
     }
 }
 
@@ -1458,7 +1455,7 @@ fn shake_program(mut program: Program) -> Program {
 
 fn shake_block_owned(block: Block, export_set: &HashSet<Ident>) -> Block {
     let block = flatten_toplevel_block_owned(block);
-    let required = fixed_point_required_idents(&block, export_set);
+    let required = live_idents(&block, export_set);
 
     block
         .into_iter()
@@ -1553,79 +1550,55 @@ fn flatten_toplevel_block_refs_into<'a>(block: &'a Block, flattened: &mut Vec<&'
     }
 }
 
-/// Per-statement facts used by the required-ident fixed point. They do not
-/// depend on the required set, so they are computed once instead of on every
-/// iteration.
-enum RequiredIdentsEntry {
-    Variable {
-        ident: Ident,
-        /// `(has_side_effects, free_variables)` of the initializer.
-        value: Option<(bool, HashSet<Ident>)>,
-    },
-    /// Free variables of a non-declaration statement with side effects.
-    Effect(Option<HashSet<Ident>>),
-}
-
-fn fixed_point_required_idents(block: &Block, export_set: &HashSet<Ident>) -> HashSet<Ident> {
-    let entries: Vec<RequiredIdentsEntry> = block
-        .iter()
-        .map(|stmt| match &stmt.desc {
-            StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
-                RequiredIdentsEntry::Variable {
-                    ident: *ident,
-                    value: value.as_ref().map(|value| {
-                        (
-                            !js_expr_no_side_effects(value),
-                            free_variables_of_expression(value),
-                        )
-                    }),
+/// `live_idents export_set block` (js_shake.ml): the identifiers the
+/// toplevel `block` needs: the exports, everything a statement with side
+/// effects refers to, and transitively the free variables of the initializers
+/// of needed declarations. Each initializer's free variables are computed
+/// once, and a worklist follows the dependencies.
+fn live_idents(block: &Block, export_set: &HashSet<Ident>) -> HashSet<Ident> {
+    // Free variables of the initializer of each toplevel declaration.
+    let mut deps: HashMap<Ident, HashSet<Ident>> = HashMap::default();
+    let mut live: HashSet<Ident> = HashSet::default();
+    let mut worklist: Vec<Ident> = Vec::new();
+    let mark = |id: Ident, live: &mut HashSet<Ident>, worklist: &mut Vec<Ident>| {
+        if live.insert(id) {
+            worklist.push(id);
+        }
+    };
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(value),
+                ..
+            }) => {
+                let free = free_variables_of_expression(value);
+                deps.entry(*ident).or_default().extend(free);
+                if !js_expr_no_side_effects(value) {
+                    mark(*ident, &mut live, &mut worklist);
                 }
             }
-            _ => RequiredIdentsEntry::Effect(
-                (!js_statement_no_side_effects(stmt)).then(|| free_variables_of_statement(stmt)),
-            ),
-        })
-        .collect();
-    let mut required = required_idents(&entries, export_set, true);
-    loop {
-        // `required_idents` only adds to its input, so equal sizes mean the
-        // set is unchanged.
-        let next = required_idents(&entries, &required, false);
-        if next.len() == required.len() {
-            return required;
-        }
-        required = next;
-    }
-}
-
-fn required_idents(
-    entries: &[RequiredIdentsEntry],
-    initial: &HashSet<Ident>,
-    count_effect_statements: bool,
-) -> HashSet<Ident> {
-    let mut required = initial.clone();
-
-    for entry in entries {
-        match entry {
-            RequiredIdentsEntry::Variable { ident, value } => {
-                if required.contains(ident) {
-                    if let Some((_, free)) = value {
-                        required.extend(free.iter().copied());
+            StatementDesc::Variable(VariableDeclaration { value: None, .. }) => {}
+            _ => {
+                if !js_statement_no_side_effects(stmt) {
+                    for id in free_variables_of_statement(stmt) {
+                        mark(id, &mut live, &mut worklist);
                     }
-                } else if let Some((true, free)) = value {
-                    required.insert(*ident);
-                    required.extend(free.iter().copied());
-                }
-            }
-            RequiredIdentsEntry::Effect(free) => {
-                if count_effect_statements && let Some(free) = free {
-                    required.extend(free.iter().copied());
                 }
             }
         }
     }
-
-    required
+    for id in export_set {
+        mark(*id, &mut live, &mut worklist);
+    }
+    while let Some(id) = worklist.pop() {
+        if let Some(free) = deps.get(&id) {
+            for id in free {
+                mark(*id, &mut live, &mut worklist);
+            }
+        }
+    }
+    live
 }
 
 #[derive(Default)]
@@ -1793,7 +1766,6 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::Seq(left, right)
         | ExpressionDesc::Bin(_, left, right)
         | ExpressionDesc::FlatCall(left, right)
-        | ExpressionDesc::StringIndex(left, right)
         | ExpressionDesc::ArrayIndex(left, right) => {
             collect_expression_idents(left, stats);
             collect_expression_idents(right, stats);
@@ -1845,11 +1817,15 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(item, stats);
             }
         }
-        ExpressionDesc::Object(dup, props) => {
-            if let Some(dup) = dup {
-                collect_expression_idents(dup, stats);
+        ExpressionDesc::Jsx(jsx) => {
+            for value in jsx.expressions() {
+                collect_expression_idents(value, stats);
             }
-            for (_, value) in props {
+        }
+        ExpressionDesc::Object(entries) => {
+            for entry in entries {
+                let (crate::js_ir::ObjectEntry::Property(_, value)
+                | crate::js_ir::ObjectEntry::Spread(value)) = entry;
                 collect_expression_idents(value, stats);
             }
         }

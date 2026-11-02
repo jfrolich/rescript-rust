@@ -71,6 +71,7 @@ pub enum Grammar {
     PatternOcamlList,
     /// Record pattern
     PatternRecord,
+    PatternDict,
     /// Type definition
     TypeDef,
     /// Type constructor name
@@ -172,6 +173,7 @@ impl std::fmt::Display for Grammar {
             Grammar::PatternList => "multiple patterns",
             Grammar::PatternOcamlList => "a list pattern",
             Grammar::PatternRecord => "a record pattern",
+            Grammar::PatternDict => "a dict pattern",
             Grammar::ParameterList => "parameters",
             Grammar::StringFieldDeclarations => "string field declarations",
             Grammar::FieldDeclarations => "field declarations",
@@ -588,6 +590,7 @@ pub fn is_list_element(grammar: &Grammar, token: &Token<'_>) -> bool {
         Grammar::PatternMatching => is_pattern_match_start(token),
         Grammar::PatternOcamlList => is_pattern_ocaml_list_start(token),
         Grammar::PatternRecord => is_pattern_record_item_start(token),
+        Grammar::PatternDict => is_dict_row_start(token),
         Grammar::Attribute => is_attribute_start(token),
         Grammar::TypeConstraint => *token == Token::Constraint,
         Grammar::PackageConstraint => *token == Token::And,
@@ -612,7 +615,10 @@ pub fn is_list_terminator(grammar: &Grammar, token: &Token<'_>) -> bool {
         ) => true,
         (Grammar::ModExprList, Token::Rparen) => true,
         (
-            Grammar::PatternList | Grammar::PatternOcamlList | Grammar::PatternRecord,
+            Grammar::PatternList
+                | Grammar::PatternOcamlList
+                | Grammar::PatternRecord
+                | Grammar::PatternDict,
             Token::Forwardslash
             | Token::Rbracket
             | Token::Rparen

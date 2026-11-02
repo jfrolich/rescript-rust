@@ -624,6 +624,12 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
+            PatternDesc::Ppat_dict(entries) => {
+                for entry in entries.iter() {
+                    self.pat(entry.pdp_pattern)?;
+                }
+                Ok(())
+            }
             PatternDesc::Ppat_construct(_, args) => {
                 for arg in args.txt.iter() {
                     self.pat(*arg)?;
@@ -943,6 +949,15 @@ impl<'a> Checker<'a> {
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
                 for item in items.iter() {
                     self.expr(*item)?;
+                }
+                Ok(())
+            }
+            ExpressionDesc::Pexp_dict(entries) => {
+                for entry in entries.iter() {
+                    match entry {
+                        crate::parser::ast::DictEntry::Pdict_entry(_, e)
+                        | crate::parser::ast::DictEntry::Pdict_spread(e) => self.expr(*e)?,
+                    }
                 }
                 Ok(())
             }
