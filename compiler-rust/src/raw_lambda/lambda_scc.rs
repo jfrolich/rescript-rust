@@ -54,39 +54,38 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
     }
 }
 
-/// OCaml `Lambda_scc.preprocess_deps`. Bindings are ranked in list order
-/// (`Ordered_hash_map_local_ident`); each row lists the group members its
-/// right hand side mentions, in `Hash_set_ident_mask.iter_and_unmask`
-/// bucket order.
+/// OCaml `Lambda_scc.preprocess_deps` (compiler/ml/lambda_scc.ml, upstream
+/// #9153): for each binding, the indices of the group members its right hand
+/// side refers to, in binding order. One `seen` array is shared by all bodies
+/// (`seen[j] == i` once body `i` has referred to binding `j`), so finding the
+/// edges costs the size of the bodies rather than the group size per body.
 fn preprocess_deps(groups: &Bindings) -> Vec<Vec<usize>> {
-    let mask_order = ocaml_ident_mask_iteration_order(groups);
-    // First position of each member, as a linear `position` scan would find.
-    let mut member_index = AHashMap::with_capacity(groups.len());
-    for (index, (member, _)) in groups.iter().enumerate() {
-        member_index.entry(*member).or_insert(index);
+    let len = groups.len();
+    // `Hash_ident.replace index id i`: a repeated member keeps its last index.
+    let mut index = AHashMap::with_capacity(len);
+    for (i, (member, _)) in groups.iter().enumerate() {
+        index.insert(*member, i);
     }
+    let mut seen = vec![usize::MAX; len];
     groups
         .iter()
-        .map(|(_, lam)| {
-            let mut hit = vec![false; groups.len()];
-            let mut remaining = groups.len();
+        .enumerate()
+        .map(|(i, (_, lam))| {
+            let mut found = Vec::new();
+            // stop walking `lam` once it has referred to every binding
             exists_var(
-                &mut |id: &Ident| {
-                    if let Some(&index) = member_index.get(id)
-                        && !hit[index]
-                    {
-                        hit[index] = true;
-                        remaining -= 1;
+                &mut |id: &Ident| match index.get(id) {
+                    Some(&j) if seen[j] != i => {
+                        seen[j] = i;
+                        found.push(j);
+                        found.len() == len
                     }
-                    remaining == 0
+                    _ => false,
                 },
                 lam,
             );
-            mask_order
-                .iter()
-                .copied()
-                .filter(|index| hit[*index])
-                .collect()
+            found.sort_unstable();
+            found
         })
         .collect()
 }
@@ -170,7 +169,7 @@ pub(crate) fn bind_rec(groups: Bindings, body: RawLambda) -> RawLambda {
             .map(|&i| slots[i].take().expect("each binding is in one cluster"))
             .collect();
         if let [base_key] = cluster.as_slice()
-            && !node_vec[*base_key].contains(base_key)
+            && node_vec[*base_key].binary_search(base_key).is_err()
         {
             let (id, lam) = bindings.pop().expect("one binding");
             RawLambda::let_(LetKind::Strict, id, lam, acc)
@@ -178,78 +177,6 @@ pub(crate) fn bind_rec(groups: Bindings, body: RawLambda) -> RawLambda {
             RawLambda::letrec(bindings, acc)
         }
     })
-}
-
-fn ocaml_ident_mask_iteration_order(bindings: &[(Ident, RawLambda)]) -> Vec<usize> {
-    let bucket_len = ocaml_hashtbl_power_2_above(8, bindings.len());
-    let mut buckets = vec![Vec::<usize>::new(); bucket_len];
-    for (index, (id, _)) in bindings.iter().enumerate() {
-        let bucket = (ocaml_hash_string_int(id.name(), id.stamp()) as usize) & (bucket_len - 1);
-        buckets[bucket].insert(0, index);
-    }
-    buckets.into_iter().flatten().collect()
-}
-
-fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
-    while x < n {
-        x <<= 1;
-    }
-    x
-}
-
-fn ocaml_hash_string_int(s: &str, i: i32) -> u32 {
-    let h = ocaml_hash_mix_string(0, s);
-    ocaml_hash_final_mix(ocaml_hash_mix_uint32(h, ocaml_tagged_int_bits(i))) & 0x3fff_ffff
-}
-
-fn ocaml_tagged_int_bits(i: i32) -> u32 {
-    ((i as u32) << 1) | 1
-}
-
-fn ocaml_hash_mix_string(mut h: u32, s: &str) -> u32 {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-
-    while i + 4 <= len {
-        let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
-        h = ocaml_hash_mix_uint32(h, word);
-        i += 4;
-    }
-
-    let rem = len & 3;
-    if rem != 0 {
-        let mut word = 0u32;
-        if rem >= 3 {
-            word |= (bytes[i + 2] as u32) << 16;
-        }
-        if rem >= 2 {
-            word |= (bytes[i + 1] as u32) << 8;
-        }
-        word |= bytes[i] as u32;
-        h = ocaml_hash_mix_uint32(h, word);
-    }
-
-    h ^ (len as u32)
-}
-
-fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
-    d = d.wrapping_mul(0xcc9e2d51);
-    d = d.rotate_left(15);
-    d = d.wrapping_mul(0x1b873593);
-    h ^= d;
-    h = h.rotate_left(13);
-    h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
-    h
-}
-
-fn ocaml_hash_final_mix(mut h: u32) -> u32 {
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85ebca6b);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xc2b2ae35);
-    h ^= h >> 16;
-    h
 }
 
 #[cfg(test)]
@@ -293,6 +220,94 @@ mod tests {
         };
         assert!(matches!(inner_bindings.as_slice(), [(id, _)] if id.same(&find_end)));
         assert!(matches!(*body, RawLambda::Lvar(ref id) if id.same(&find_end)));
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Shape {
+        Let(String),
+        Rec(Vec<String>),
+    }
+
+    /// Mirrors upstream `tests/ounit_tests/ounit_lambda_scc_tests.ml`: split
+    /// `bodies` (each binding with the members its body refers to, in order)
+    /// and read the bindings back outermost first.
+    fn bind(bodies: &[(&str, &[&str])]) -> Vec<Shape> {
+        let group: Vec<(&str, Ident)> = bodies
+            .iter()
+            .map(|(name, _)| (*name, Ident::create_local(*name)))
+            .collect();
+        let id_of = |name: &str| group.iter().find(|(n, _)| *n == name).unwrap().1;
+        let bindings = bodies
+            .iter()
+            .map(|(name, refs)| {
+                let body = refs.iter().fold(RawLambda::unit(), |acc, r| {
+                    RawLambda::seq(acc, RawLambda::var(id_of(r)))
+                });
+                (id_of(name), body)
+            })
+            .collect();
+        let mut lam = bind_rec(bindings, RawLambda::unit());
+        let mut shape = Vec::new();
+        loop {
+            match lam {
+                RawLambda::Llet(_, id, _, rest) => {
+                    shape.push(Shape::Let(id.name().to_string()));
+                    lam = *rest;
+                }
+                RawLambda::Lletrec(bindings, rest) => {
+                    let mut names: Vec<String> =
+                        bindings.iter().map(|(id, _)| id.name().to_string()).collect();
+                    names.sort();
+                    shape.push(Shape::Rec(names));
+                    lam = *rest;
+                }
+                _ => return shape,
+            }
+        }
+    }
+
+    fn rec(names: &[&str]) -> Shape {
+        Shape::Rec(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    fn let_(name: &str) -> Shape {
+        Shape::Let(name.to_string())
+    }
+
+    #[test]
+    fn a_reference_stays_an_edge_when_an_earlier_body_had_it_too() {
+        // `x` refers to `c` first; `b`'s edge to `c` must survive the shared
+        // `seen` array, or the cycle b <-> c falls apart into two plain lets.
+        assert_eq!(
+            bind(&[("x", &["c"]), ("b", &["c"]), ("c", &["b"])]),
+            vec![rec(&["b", "c"]), let_("x")]
+        );
+    }
+
+    #[test]
+    fn a_mixed_group_keeps_cycles_self_recursion_and_plain_lets_apart() {
+        let result = bind(&[
+            ("a", &["b"]),
+            // a body referring to the same binding twice
+            ("b", &["a", "a"]),
+            ("c", &["a"]),
+            ("d", &["d"]),
+            ("e", &[]),
+        ]);
+        assert_eq!(result.len(), 4);
+        let position = |item: &Shape| result.iter().position(|x| x == item).unwrap();
+        for item in [rec(&["a", "b"]), let_("c"), rec(&["d"]), let_("e")] {
+            position(&item);
+        }
+        assert!(position(&rec(&["a", "b"])) < position(&let_("c")));
+    }
+
+    #[test]
+    fn a_body_that_refers_to_every_binding() {
+        assert_eq!(
+            bind(&[("a", &["a", "b", "c"]), ("b", &[]), ("c", &["b"])]),
+            vec![let_("b"), let_("c"), rec(&["a"])]
+        );
     }
 
     #[test]
