@@ -793,12 +793,16 @@ pub fn compile(
             round_universe.retain(|module_name| !loaded.contains(module_name));
             build_state.loaded_modules.extend(loaded);
         }
+        // Each module's AST is dropped once the module is compiled (below), so
+        // a module compiled by an earlier build (watch mode) or round has to
+        // be parsed again before it compiles.
+        super::incremental::parse_for_round(build_state, &round_universe)?;
         let registry_only = Arc::new(std::mem::take(&mut round_registry_only));
         let compile_universe_count = round_universe.len();
         total_universe_count += compile_universe_count;
         set_length(total_universe_count as u64);
 
-        let stored_asts_snapshot = build_state.snapshot_stored_asts();
+        let mut stored_asts_snapshot = build_state.take_stored_asts(&round_universe);
         let compile_universe = Arc::new(std::mem::take(&mut round_universe));
         let module_costs = compute_module_costs(&compile_universe, &stored_asts_snapshot);
         let priorities =
@@ -955,7 +959,13 @@ pub fn compile(
                         );
                     }
                     let registry_snapshot = worker_registry_template.clone();
-                    let stored_asts = &stored_asts_snapshot;
+                    // Hand the worker this module's ASTs: they are freed as soon
+                    // as it is compiled, not when the build ends.
+                    let module_asts: AHashMap<String, StoredAst> =
+                        [format!("{module_name}:impl"), format!("{module_name}:intf")]
+                            .into_iter()
+                            .filter_map(|key| stored_asts_snapshot.remove(&key).map(|ast| (key, ast)))
+                            .collect();
                     let parent_span = compile_parent_span.clone();
                     let in_process_hooks = InProcessSchedulerHooks {
                         tx: tx.clone(),
@@ -967,7 +977,7 @@ pub fn compile(
                             build_state_ref,
                             build_command_state_ref,
                             &registry_snapshot,
-                            stored_asts,
+                            &module_asts,
                             &module_name,
                             is_dirty,
                             parent_span,
@@ -1194,6 +1204,9 @@ pub fn compile(
         // Close our sender handle so any lingering clones in already-spawned
         // workers don't keep the channel open past the scope.
         drop(tx);
+        // Modules this round did not get to (an error stopped it) keep their
+        // ASTs for the next build.
+        build_state.restore_stored_asts(stored_asts_snapshot);
         completed_count += completed.len();
         for msg in &results_buffer[round_results_start..] {
             let ok = msg.result.is_ok() && !matches!(msg.interface_result, Some(Err(_)));

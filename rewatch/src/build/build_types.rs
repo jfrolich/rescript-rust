@@ -639,12 +639,28 @@ impl BuildCommandState {
         self.in_memory_deps.lock().unwrap().get(key).cloned()
     }
 
-    /// Clone the parse-phase AST table once for an in-process compile wave.
-    /// Stored AST payloads are already behind `Arc`, so this keeps worker
-    /// lookups immutable and avoids a contended mutex plus per-lookup Arc
-    /// cloning while modules compile in parallel.
-    pub fn snapshot_stored_asts(&self) -> AHashMap<String, StoredAst> {
-        self.stored_asts.lock().unwrap().clone()
+    /// Move the parsed ASTs of `modules` out of the table for one compile
+    /// round. The scheduler hands each module its own entries, so an AST is
+    /// freed when its module is compiled instead of living until the build
+    /// ends.
+    pub fn take_stored_asts(&self, modules: &AHashSet<String>) -> AHashMap<String, StoredAst> {
+        let mut stored_asts = self.stored_asts.lock().unwrap();
+        let mut taken = AHashMap::with_capacity(modules.len() * 2);
+        for module_name in modules {
+            for key in [format!("{module_name}:impl"), format!("{module_name}:intf")] {
+                if let Some(ast) = stored_asts.remove(&key) {
+                    taken.insert(key, ast);
+                }
+            }
+        }
+        taken
+    }
+
+    /// Put back the ASTs a compile round did not use.
+    pub fn restore_stored_asts(&self, asts: AHashMap<String, StoredAst>) {
+        if !asts.is_empty() {
+            self.stored_asts.lock().unwrap().extend(asts);
+        }
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {
