@@ -249,10 +249,24 @@ pub fn current_record(
     digests: &UnitDigests,
 ) -> PackageState {
     let mut record = PackageState::default();
-    record.meta.insert(
-        state_db::META_OUTPUTS.to_string(),
-        expected_outputs(build_state, package_name).join("\n"),
-    );
+    let previous = build_state
+        .previous_in_process
+        .as_ref()
+        .and_then(|previous| previous.packages.get(package_name));
+    let changed = previous.and_then(|previous| changed_modules(build_state, package_name, previous));
+    record.partial = changed.is_some();
+    let outputs = match previous
+        .filter(|previous| record.partial && outputs_as_recorded(build_state, package_name, previous))
+    {
+        Some(previous) => previous
+            .state
+            .meta
+            .get(state_db::META_OUTPUTS)
+            .cloned()
+            .unwrap_or_default(),
+        None => expected_outputs(build_state, package_name).join("\n"),
+    };
+    record.meta.insert(state_db::META_OUTPUTS.to_string(), outputs);
     if build_state
         .get_package(package_name)
         .is_some_and(|package| package.is_root)
@@ -321,12 +335,6 @@ pub fn current_record(
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    let previous = build_state
-        .previous_in_process
-        .as_ref()
-        .and_then(|previous| previous.packages.get(package_name));
-    let changed = previous.and_then(|previous| changed_modules(build_state, package_name, previous));
-    record.partial = changed.is_some();
     let mut written: AHashMap<&String, WrittenRecord> = build_state
         .modules
         .par_iter()
@@ -424,7 +432,26 @@ pub fn current_record(
         record.modules.insert(module_name.clone(), row);
     }
     let in_memory_deps = build_state.in_memory_deps.lock().unwrap();
-    for (module_name, module) in build_state.modules.iter() {
+    // A partial record sets the rows of the sources this build parsed; the
+    // others are as recorded.
+    let parsed: Option<AHashSet<String>> = record.partial.then(|| {
+        build_state
+            .stored_asts
+            .lock()
+            .unwrap()
+            .keys()
+            .filter_map(|key| Some(key.rsplit_once(':')?.0.to_string()))
+            .collect()
+    });
+    let modules: Box<dyn Iterator<Item = (&String, &Module)>> = match &parsed {
+        Some(parsed) => Box::new(
+            parsed
+                .iter()
+                .filter_map(|module_name| build_state.modules.get_key_value(module_name)),
+        ),
+        None => Box::new(build_state.modules.iter()),
+    };
+    for (module_name, module) in modules {
         if module.package_name != package_name {
             continue;
         }
@@ -469,6 +496,27 @@ pub fn current_record(
         .map(|(key, (_, text))| (key.clone(), text.clone()))
         .collect::<BTreeMap<_, _>>();
     record
+}
+
+/// Whether `package_name`'s outputs are those `previous` recorded, for a
+/// partial record (the same sources): the outputs follow from the sources
+/// and the package's and root configuration, so they are the same when
+/// neither configuration changed since the recorded build started.
+fn outputs_as_recorded(
+    build_state: &BuildCommandState,
+    package_name: &str,
+    previous: &PackageRecord,
+) -> bool {
+    let Some(started) = previous.clean_build_started_at else {
+        return false;
+    };
+    let Some(package) = build_state.get_package(package_name) else {
+        return false;
+    };
+    [&build_state.get_root_config().path, &package.config.path]
+        .into_iter()
+        .all(|config| mtime(config).is_some_and(|modified| modified < started))
+        && previous.state.meta.contains_key(state_db::META_OUTPUTS)
 }
 
 /// For a one-shot build that kept `package_name`'s sources as `previous`
