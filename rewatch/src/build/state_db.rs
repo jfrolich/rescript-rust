@@ -367,81 +367,130 @@ fn read_meta_from(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String
 /// Everything recorded for the package, `None` when there is no readable
 /// database.
 pub fn read(package: &Package) -> Option<PackageState> {
-    let conn = open_existing(&path(package))?;
-    let read = || -> rusqlite::Result<PackageState> {
-        let meta = read_meta_from(&conn)?;
-        let mut sources = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT path, module FROM sources")?;
-        for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
-            let (path, module) = row?;
-            sources.insert(PathBuf::from(path), module);
-        }
-        let mut modules = BTreeMap::new();
-        let mut stmt = conn.prepare(
-            "SELECT module, js_confirmed_at, implementation_warnings, interface_warnings,
-                    interface_digest, imports FROM modules",
-        )?;
-        for row in stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                ModuleRow {
-                    js_confirmed_at: row.get::<_, Option<i64>>(1)?.and_then(time_from_nanos),
-                    implementation_warnings: row.get(2)?,
-                    interface_warnings: row.get(3)?,
-                    interface_digest: row.get::<_, Option<i64>>(4)?.map(|digest| digest as u64),
-                    imports: decode_imports(row.get(5)?),
+    let db = path(package);
+    let conn = open_existing(&db)?;
+    let db = db.as_path();
+    // The large tables are read on their own connections in parallel: a big
+    // package's record is thousands of rows in each.
+    let ((meta_sources_warnings, modules), (deps, stored_interfaces)) = rayon::join(
+        || {
+            rayon::join(
+                move || -> rusqlite::Result<_> {
+                    Ok((
+                        read_meta_from(&conn)?,
+                        read_sources(&conn)?,
+                        read_parse_warnings(&conn)?,
+                    ))
                 },
-            ))
-        })? {
-            let (module, row) = row?;
-            modules.insert(module, row);
-        }
-        let mut parse_warnings = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT source, text FROM parse_warnings")?;
-        for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
-            let (source, text) = row?;
-            parse_warnings.insert(source, text);
-        }
-        let mut deps = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT source, mtime, deps FROM deps")?;
-        for row in stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })? {
-            let (source, mtime, text) = row?;
-            let deps_list = text
-                .split('\n')
-                .filter(|dep| !dep.is_empty())
-                .map(str::to_string)
-                .collect();
-            deps.insert(
-                source,
-                SourceDeps {
-                    mtime,
-                    deps: deps_list,
-                },
-            );
-        }
-        let mut stored_interfaces = BTreeMap::new();
-        let mut stmt = conn.prepare("SELECT module, hash FROM interfaces")?;
-        for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
-            let (module, digest) = row?;
-            stored_interfaces.insert(module, digest as u64);
-        }
-        Ok(PackageState {
-            meta,
-            sources,
-            modules,
-            parse_warnings,
-            deps,
-            stored_interfaces,
-            ..PackageState::default()
-        })
-    };
-    read().ok()
+                || on_own_connection(db, read_modules),
+            )
+        },
+        || {
+            rayon::join(
+                || on_own_connection(db, read_deps),
+                || on_own_connection(db, read_stored_interface_hashes),
+            )
+        },
+    );
+    let (meta, sources, parse_warnings) = meta_sources_warnings.ok()?;
+    Some(PackageState {
+        meta,
+        sources,
+        modules: modules.ok()?,
+        parse_warnings,
+        deps: deps.ok()?,
+        stored_interfaces: stored_interfaces.ok()?,
+        ..PackageState::default()
+    })
+}
+
+fn on_own_connection<T>(
+    db: &Path,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    let conn = open_existing(db).ok_or(rusqlite::Error::InvalidQuery)?;
+    read(&conn)
+}
+
+fn read_sources(conn: &Connection) -> rusqlite::Result<BTreeMap<PathBuf, String>> {
+    let mut sources = BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT path, module FROM sources")?;
+    for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+        let (path, module) = row?;
+        sources.insert(PathBuf::from(path), module);
+    }
+    Ok(sources)
+}
+
+fn read_modules(conn: &Connection) -> rusqlite::Result<BTreeMap<String, ModuleRow>> {
+    let mut modules = BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT module, js_confirmed_at, implementation_warnings, interface_warnings,
+                interface_digest, imports FROM modules",
+    )?;
+    for row in stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            ModuleRow {
+                js_confirmed_at: row.get::<_, Option<i64>>(1)?.and_then(time_from_nanos),
+                implementation_warnings: row.get(2)?,
+                interface_warnings: row.get(3)?,
+                interface_digest: row.get::<_, Option<i64>>(4)?.map(|digest| digest as u64),
+                imports: decode_imports(row.get(5)?),
+            },
+        ))
+    })? {
+        let (module, row) = row?;
+        modules.insert(module, row);
+    }
+    Ok(modules)
+}
+
+fn read_parse_warnings(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String>> {
+    let mut parse_warnings = BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT source, text FROM parse_warnings")?;
+    for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+        let (source, text) = row?;
+        parse_warnings.insert(source, text);
+    }
+    Ok(parse_warnings)
+}
+
+fn read_deps(conn: &Connection) -> rusqlite::Result<BTreeMap<String, SourceDeps>> {
+    let mut deps = BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT source, mtime, deps FROM deps")?;
+    for row in stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (source, mtime, text) = row?;
+        let deps_list = text
+            .split('\n')
+            .filter(|dep| !dep.is_empty())
+            .map(str::to_string)
+            .collect();
+        deps.insert(
+            source,
+            SourceDeps {
+                mtime,
+                deps: deps_list,
+            },
+        );
+    }
+    Ok(deps)
+}
+
+fn read_stored_interface_hashes(conn: &Connection) -> rusqlite::Result<BTreeMap<String, u64>> {
+    let mut stored_interfaces = BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT module, hash FROM interfaces")?;
+    for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
+        let (module, digest) = row?;
+        stored_interfaces.insert(module, digest as u64);
+    }
+    Ok(stored_interfaces)
 }
 
 /// The metadata key of the runtime interfaces' key (see
