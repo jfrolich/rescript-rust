@@ -32,21 +32,18 @@ pub fn global_threads() -> usize {
     threads_from_env().unwrap_or_else(|| GLOBAL_THREADS.min(compile_threads()))
 }
 
-/// The size of the pool compiling many modules.
+/// The size of the pool compiling many modules: a worker per logical CPU.
+///
+/// Workers that compiled a module's signature can block before its JS while
+/// a dependency's JS metadata is still being produced, which a larger pool
+/// would hide; but every worker also keeps its own type store, and on a large
+/// project the extra workers cost far more memory (about 50 MB each on Tella)
+/// than the overlap saves time (about 2%).
 pub fn compile_threads() -> usize {
     if let Some(threads) = threads_from_env() {
         return threads;
     }
-    let logical = num_cpus::get().max(1);
-    let target = logical.saturating_mul(8).div_ceil(5);
-    let scaling_cap = logical.saturating_add(8);
-    // In-process compilation publishes signatures before JS is emitted so
-    // dependents can type-check early. Those workers can later block before JS
-    // while waiting for dependency cmj metadata, so a CPU-sized pool leaves
-    // runnable modules stranded behind parked workers. A small oversubscription
-    // keeps that overlap, while a scaling cap avoids limiting larger builders
-    // to the core count of this development machine.
-    target.min(scaling_cap)
+    num_cpus::get().max(1)
 }
 
 fn compile_pool() -> &'static rayon::ThreadPool {
