@@ -497,9 +497,11 @@ pub fn incremental_build_without_lock(
         compile::prepare_registry_for_runtime_precompile(build_state);
         let registry = std::mem::take(&mut build_state.module_registry);
         let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
+        let runtime_store = compile::RuntimeStore::of_build(build_state);
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
             let handle = compile::spawn_runtime_precompile(scope, || {
-                let result = compile::pre_compile_runtime_modules(&registry, &runtime_root);
+                let result =
+                    compile::pre_compile_runtime_modules(&registry, &runtime_root, runtime_store.as_ref());
                 phase_mark("runtime-precompile-done");
                 result
             });
