@@ -180,13 +180,59 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     Ok(result)
 }
 
+/// The content hash of the executable at `path`. Hashing the whole binary
+/// (tens of megabytes) on every build is a noticeable part of a small
+/// rebuild, so the hash is kept in a file in the temporary directory with the
+/// executable's size, modification and change times and inode, and reused
+/// while those are the same (replacing or rewriting the binary changes them).
+fn executable_hash(path: &Path) -> Option<blake3::Hash> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mut stamp = format!(
+        "{}\n{}\n{}",
+        path.display(),
+        metadata.len(),
+        metadata
+            .modified()
+            .ok()
+            .map(state_db::nanos_from_time)
+            .unwrap_or(0)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        stamp.push_str(&format!(
+            "\n{}\n{}.{}",
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        ));
+    }
+    let cache = std::env::temp_dir().join(format!(
+        "rescript-exe-{}.hash",
+        &blake3::hash(path.as_os_str().as_encoded_bytes()).to_hex()[..16]
+    ));
+    if let Ok(cached) = std::fs::read_to_string(&cache)
+        && let Some((cached_stamp, hash)) = cached.rsplit_once('\n')
+        && cached_stamp == stamp
+        && let Ok(hash) = blake3::Hash::from_hex(hash)
+    {
+        return Some(hash);
+    }
+    let hash = helpers::compute_file_hash(path)?;
+    let tmp = cache.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, format!("{stamp}\n{}", hash.to_hex())).is_ok() {
+        let _ = std::fs::rename(&tmp, &cache);
+    }
+    Some(hash)
+}
+
 pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
     // Builds compile with the compiler linked into this executable, so its
     // identity invalidates previous builds.
     let bsc_path = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .context("Could not resolve the rescript executable")?;
-    let bsc_hash = helpers::compute_file_hash(&bsc_path).ok_or(anyhow!(
+    let bsc_hash = executable_hash(&bsc_path).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
     ))?;
