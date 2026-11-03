@@ -8887,6 +8887,8 @@ fn compile_matching_unresolved<'p>(
 /// Build a match failure exception raise.
 /// Equivalent to OCaml's `partial_function`.
 pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
+    // OCaml matching.ml:2688-2691 embeds the source position in the payload.
+    arena.require_locations();
     let line = loc.loc_start.line;
     let char_pos = loc.loc_start.column();
     // `Filename.basename fname` (matching.ml:2690-2691).

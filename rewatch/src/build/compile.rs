@@ -972,12 +972,6 @@ pub fn compile(
                         registry_only: registry_only.clone(),
                     };
                     scope.spawn(move |_| {
-                        // Parse deferred sources here, on the worker, so only
-                        // the ASTs of the modules being compiled are alive.
-                        let module_asts: AHashMap<String, StoredAst> = module_asts
-                            .into_iter()
-                            .map(|(key, ast)| (key, super::parse::materialize(ast)))
-                            .collect();
                         let msg = compile_one(
                             build_state_ref,
                             build_command_state_ref,
@@ -3690,6 +3684,37 @@ pub(crate) fn runtime_compiler_options(
 /// after the worker returns, before dependents are scheduled. Actual compiler
 /// failures are returned as errors so the DAG scheduler stops dependents, like
 /// the bsc subprocess path does.
+fn compile_with_location_retry<T>(
+    ast: &StoredAst,
+    build: &BuildCommandState,
+    mut compile: impl FnMut(&StoredAst) -> Result<T>,
+    has_warnings: impl FnOnce(&T) -> bool,
+) -> Result<T> {
+    use rescript_compiler::driver::LocationRetry;
+    let mut result = compile(ast);
+    if !ast.arena().stores_locations()
+        && result
+            .as_ref()
+            .err()
+            .and_then(|err| err.downcast_ref::<LocationRetry>())
+            == Some(&LocationRetry::Output)
+    {
+        // Generated location constants only need this module's source. The
+        // first attempt has not published its signature or JavaScript.
+        result = super::parse::reparse_with_locations(ast).and_then(|located| compile(&located));
+    }
+    if !build.diagnostic_locations && build.dump.is_none() && result.as_ref().map_or(true, has_warnings) {
+        // Diagnostics can refer to declarations in dependency interfaces.
+        // Rebuild with locations rather than report against location-free
+        // imported signatures. Only the second pass emits diagnostics.
+        build
+            .diagnostic_retry
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        return Err(LocationRetry::Diagnostic.into());
+    }
+    result
+}
+
 fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
     module: &Module,
@@ -3778,25 +3803,33 @@ fn compile_module_in_process_to_js_boundary(
         let intf_source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(&interface.path));
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
-            Some(StoredAst::Signature(stored)) => {
-                rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
-                    &stored.arena,
-                    &stored.signature,
-                    &intf_source_abs.to_string_lossy(),
-                    module_name,
-                    &options,
-                    &local_registry,
-                )
-            }
+            Some(ast @ StoredAst::Signature(_)) => compile_with_location_retry(
+                ast,
+                build_command_state,
+                |ast| {
+                    let StoredAst::Signature(stored) = ast else {
+                        unreachable!("interface retry changed AST kind")
+                    };
+                    rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+                        &stored.arena,
+                        &stored.signature,
+                        &intf_source_abs.to_string_lossy(),
+                        module_name,
+                        &options,
+                        &local_registry,
+                    )
+                },
+                |result| !result.warnings.is_empty(),
+            ),
             Some(_) => {
                 return Err(anyhow!(
-                    "in-process invariant violated: expected signature AST for {}, found another AST",
+                    "expected signature AST for {}",
                     intf_source_abs.display()
                 ));
             }
             None => {
                 return Err(anyhow!(
-                    "in-process invariant violated: missing stored signature AST for {}",
+                    "missing stored signature AST for {}",
                     intf_source_abs.display()
                 ));
             }
@@ -3936,26 +3969,34 @@ fn compile_module_in_process_to_js_boundary(
         .entered();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match stored_asts.get(&impl_key) {
-                Some(StoredAst::Structure(stored)) => {
-                    let signature_hook: Option<
-                        &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
-                    > = if publish_implementation_signature {
-                        Some(&mut signature_hook)
-                    } else {
-                        None
-                    };
-                    rescript_compiler::driver::compile_preprocessed_structure_in_process_until_js(
-                        &stored.arena,
-                        &stored.structure,
-                        &source_abs.to_string_lossy(),
-                        module_name,
-                        &options,
-                        &local_registry,
-                        has_interface,
-                        gentype_ignore_interface,
-                        signature_hook,
-                    )
-                }
+                Some(ast @ StoredAst::Structure(_)) => compile_with_location_retry(
+                    ast,
+                    build_command_state,
+                    |ast| {
+                        let StoredAst::Structure(stored) = ast else {
+                            unreachable!("implementation retry changed AST kind")
+                        };
+                        let signature_hook: Option<
+                            &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
+                        > = if publish_implementation_signature {
+                            Some(&mut signature_hook)
+                        } else {
+                            None
+                        };
+                        rescript_compiler::driver::compile_preprocessed_structure_in_process_until_js(
+                            &stored.arena,
+                            &stored.structure,
+                            &source_abs.to_string_lossy(),
+                            module_name,
+                            &options,
+                            &local_registry,
+                            has_interface,
+                            gentype_ignore_interface,
+                            signature_hook,
+                        )
+                    },
+                    |result| !result.warnings.is_empty(),
+                ),
                 Some(_) => panic!(
                     "in-process invariant violated: expected structure AST for {}, found another AST",
                     source_abs.display()
@@ -4097,6 +4138,14 @@ fn finish_in_process_js(
         metadata_tx,
         write_tx,
     );
+    if !build_command_state.diagnostic_locations
+        && build_command_state.dump.is_none()
+        && result.as_ref().map_or(true, |outcome| outcome.warning.is_some())
+    {
+        build_command_state
+            .diagnostic_retry
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let (result, registry_updates) = match result {
         Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
         Err(err) => (Err(err), Vec::new()),

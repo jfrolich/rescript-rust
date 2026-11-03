@@ -1834,6 +1834,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn raw_loc_constant(&self, kind: RawLocKind, loc: Location) -> RawLambda {
+        self.arena.require_locations();
         let file = self.basename_for_loc(loc);
         let (line, start_col, end_col) = Self::loc_coords(loc);
         match kind {
@@ -1887,6 +1888,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn failure_payload(&self, loc: Location) -> Constant {
+        self.arena.require_locations();
         Constant::Block {
             tag_info: Box::new(TagInfo::Tuple),
             elements: vec![
@@ -4965,6 +4967,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create the location constant for `#init_mod`.
     /// Produces `Const_block(Blk_tuple, [filename, line, char])`.
     fn undefined_location(&self, loc_idx: LocIdx) -> RawLambda {
+        self.arena.require_locations();
         let loc = self.loc(loc_idx);
         let fname = self.basename_for_loc(loc);
         RawLambda::Lconst(Constant::Block {
@@ -6108,7 +6111,9 @@ impl<'a> RawLambdaConverter<'a> {
 
         let loc_for_handler = loc;
         let fname = self.basename_for_loc(loc_for_handler);
+        let arena = self.arena;
         let handler_fun = || {
+            arena.require_locations();
             let line = loc_for_handler.loc_start.line;
             let char_pos = loc_for_handler.loc_start.column();
             let match_failure_ident =
@@ -6178,7 +6183,9 @@ impl<'a> RawLambdaConverter<'a> {
             let pat_act_list = self.cases_to_pat_act_list(cases);
             let loc_for_handler = loc;
             let fname = self.basename_for_loc(loc_for_handler);
+            let arena = self.arena;
             let handler_fun = || {
+                arena.require_locations();
                 let line = loc_for_handler.loc_start.line;
                 let char_pos = loc_for_handler.loc_start.column();
                 let match_failure_ident =
@@ -6812,7 +6819,9 @@ impl<'a> RawLambdaConverter<'a> {
                             let loc = self.loc(binding.vb_pat.pat_loc);
                             let fname = self.basename_for_loc(loc);
                             let loc_for_handler = loc;
+                            let arena = self.arena;
                             let handler_fun = move || {
+                                arena.require_locations();
                                 let line = loc_for_handler.loc_start.line;
                                 let char_pos = loc_for_handler.loc_start.column();
                                 let match_failure_ident = predef_exception_ident(

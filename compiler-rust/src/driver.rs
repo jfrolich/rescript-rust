@@ -62,6 +62,16 @@ static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 use crate::binary_ast::writer::{AST_IMPL_MAGIC_NUMBER, AST_INTF_MAGIC_NUMBER};
 
+/// Internal control flow: discard a location-free attempt before publishing
+/// it, then compile the same source with location side tables enabled.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum LocationRetry {
+    #[error("diagnostic compilation requires source locations")]
+    Diagnostic,
+    #[error("generated output requires source locations")]
+    Output,
+}
+
 #[derive(Debug)]
 pub struct UserDiagnostic {
     output: String,
@@ -13684,8 +13694,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     registry: &ModuleRegistry,
     has_interface: bool,
     gentype_ignore_interface: bool,
-    signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
 ) -> Result<InProcessPreJsCompileResult> {
+    if !arena.stores_locations()
+        && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
+            || options.capture_intermediates
+            || !options.dumps.is_empty())
+    {
+        return Err(LocationRetry::Output.into());
+    }
     let _span = info_span!(
         "compiler.in_process_compile",
         module = %module_name,
@@ -13873,6 +13890,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // typemod.ml:1769-1776 forces the delayed usage checks before Lambda
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
+    if !arena.stores_locations() && !tctx.warnings.is_empty() {
+        return Err(LocationRetry::Diagnostic.into());
+    }
     let post_type_warning_start = tctx.warnings.len();
     // js_implementation.ml:148-156 prints `-dtyped-sexp` here, before the
     // signature is saved: `register_in_memory_signature` below finalizes the
@@ -13999,7 +14019,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         }
         (pers_struct, new_alias_rewrites, internal_env)
     };
-    if !has_interface && let Some(hook) = signature_ready {
+    // A location-free attempt must not publish a signature before Lambda
+    // translation has ruled out a diagnostic or a location-valued constant.
+    if !has_interface
+        && arena.stores_locations()
+        && let Some(hook) = signature_ready.take()
+    {
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
@@ -14127,6 +14152,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             .into());
         }
     };
+    if !arena.stores_locations() {
+        if !tctx.warnings.is_empty() || !raw_warnings.is_empty() || raw_diagnostic.is_some() {
+            return Err(LocationRetry::Diagnostic.into());
+        }
+        if arena.locations_required() {
+            return Err(LocationRetry::Output.into());
+        }
+    }
+
     // The file compile reports the typing warnings, then Translmod's
     // (js_implementation.ml:161-167); a Translmod error escapes before
     // `Warnings.check_fatal`.
@@ -14235,6 +14269,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         String::new()
     };
 
+    if !has_interface && let Some(hook) = signature_ready {
+        let _ = hook(InProcessSignatureReady {
+            pers_struct: pers_struct.take(),
+            new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
+        })?;
+    }
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
@@ -14521,6 +14561,9 @@ pub fn typecheck_preprocessed_signature_in_process(
             // As in the file compile: the warnings reported so far precede
             // the error report.
             tctx.drain_open_slot_uses();
+            if !arena.stores_locations() {
+                return Err(LocationRetry::Diagnostic.into());
+            }
             let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
@@ -14565,6 +14608,9 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
+    if !arena.stores_locations() && !tctx.warnings.is_empty() {
+        return Err(LocationRetry::Diagnostic.into());
+    }
     let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());

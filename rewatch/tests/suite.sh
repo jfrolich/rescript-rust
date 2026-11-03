@@ -134,6 +134,7 @@ fi
 ./compile/21-namespaced-interface-is-checked.sh &&
 ./compile/22-worker-store-respects-package-visibility.sh &&
 ./compile/23-interface-mismatch-names-the-resi.sh &&
+./compile/24-location-free-retry.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&

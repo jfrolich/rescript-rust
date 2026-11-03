@@ -151,6 +151,7 @@ pub struct StoredStructureAst {
     pub arena: ParseArena,
     pub structure: Structure,
     pub source_len: usize,
+    pub retry_source: Option<Arc<ParseSource>>,
 }
 
 #[derive(Debug)]
@@ -158,13 +159,11 @@ pub struct StoredSignatureAst {
     pub arena: ParseArena,
     pub signature: Signature,
     pub source_len: usize,
+    pub retry_source: Option<Arc<ParseSource>>,
 }
 
-/// A source file kept as its bytes until its module compiles. Parsing again
-/// from these bytes is cheap and yields the same AST, while the parsed form is
-/// about 50 times larger than the source; keeping every module's AST from the
-/// parse phase until it compiles dominated the peak memory of large builds.
-pub struct DeferredParse {
+/// Immutable input for a location-enabled diagnostic or semantic retry.
+pub struct ParseSource {
     pub file_path: PathBuf,
     pub source: Vec<u8>,
     pub source_path_for_ast: String,
@@ -172,22 +171,40 @@ pub struct DeferredParse {
     pub options: rescript_compiler::driver::CompilerOptions,
 }
 
+impl std::fmt::Debug for ParseSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParseSource")
+            .field("file_path", &self.file_path)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone)]
 pub enum StoredAst {
     Structure(Arc<StoredStructureAst>),
     Signature(Arc<StoredSignatureAst>),
-    /// Parsed once for its dependencies and warnings; parsed again from
-    /// the kept source when the module compiles.
-    Deferred(Arc<DeferredParse>),
 }
 
 impl StoredAst {
+    pub fn arena(&self) -> &ParseArena {
+        match self {
+            Self::Structure(ast) => &ast.arena,
+            Self::Signature(ast) => &ast.arena,
+        }
+    }
+
+    pub fn retry_source(&self) -> Option<&Arc<ParseSource>> {
+        match self {
+            Self::Structure(ast) => ast.retry_source.as_ref(),
+            Self::Signature(ast) => ast.retry_source.as_ref(),
+        }
+    }
+
     /// Length of the source the AST was parsed from.
     pub fn source_len(&self) -> usize {
         match self {
             StoredAst::Structure(ast) => ast.source_len,
             StoredAst::Signature(ast) => ast.source_len,
-            StoredAst::Deferred(deferred) => deferred.source.len(),
         }
     }
 }
@@ -197,7 +214,6 @@ impl std::fmt::Debug for StoredAst {
         match self {
             StoredAst::Structure(_) => write!(f, "StoredAst::Structure(..)"),
             StoredAst::Signature(_) => write!(f, "StoredAst::Signature(..)"),
-            StoredAst::Deferred(_) => write!(f, "StoredAst::Deferred(..)"),
         }
     }
 }
@@ -271,6 +287,10 @@ pub struct BuildCommandState {
     pub dump: Option<DumpRequest>,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
+    /// A diagnostic build rechecks dependencies with locations too, because
+    /// cross-module errors can quote the dependency's declaration site.
+    pub diagnostic_locations: bool,
+    pub diagnostic_retry: std::sync::atomic::AtomicBool,
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
     // Maps module_name -> InMemoryModuleState.
     pub in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>,
@@ -434,6 +454,8 @@ impl BuildCommandState {
             warn_error_override,
             dump: None,
             stored_asts: Mutex::new(AHashMap::new()),
+            diagnostic_locations: false,
+            diagnostic_retry: std::sync::atomic::AtomicBool::new(false),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),

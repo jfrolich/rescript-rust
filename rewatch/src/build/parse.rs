@@ -92,7 +92,7 @@ pub fn generate_asts(
                                 state,
                                 state.get_warn_error_override(),
                                 &parse_span,
-                                true,
+                                !state.diagnostic_locations && state.dump.is_none(),
                             )
                             .map_err(|e| e.to_string());
 
@@ -104,7 +104,7 @@ pub fn generate_asts(
                                         state,
                                         state.get_warn_error_override(),
                                         &parse_span,
-                                        true,
+                                        !state.diagnostic_locations && state.dump.is_none(),
                                     ) {
                                         Ok(v) => Ok(Some(v)),
                                         Err(e) => Err(e.to_string()),
@@ -332,7 +332,7 @@ fn generate_ast(
     build_state: &BuildState,
     warn_error_override: Option<String>,
     parent_span: &tracing::Span,
-    defer: bool,
+    omit_locations: bool,
 ) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
 
@@ -407,30 +407,35 @@ fn generate_ast(
         tracing::Span::none().entered()
     };
 
-    // Sources rewritten by an external PPX keep their AST: parsing them
-    // again would run the PPX process again.
-    let kept_source = (defer && frontend_options.external_ppxs.is_empty()).then(|| source_bytes.clone());
-    let (stderr, stored_ast, deps) = parse_source(
-        &file_path,
-        source_bytes,
-        &source_path_str,
-        &open_deps,
-        &frontend_options,
-    )
-    .map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))?;
-    let stored_ast = match kept_source {
-        Some(source) => {
-            drop(stored_ast);
-            StoredAst::Deferred(Arc::new(DeferredParse {
-                file_path,
-                source,
-                source_path_for_ast: source_path_str,
-                open_deps,
-                options: frontend_options,
-            }))
+    // External PPXs consume the location-bearing frozen AST protocol. A
+    // source map explicitly asks for source coordinates as generated output.
+    let locations = !omit_locations
+        || !frontend_options.external_ppxs.is_empty()
+        || build_state
+            .get_root_config()
+            .effective_source_map_mode(build_state.source_map_command)
+            .is_some();
+    let source = Arc::new(ParseSource {
+        file_path,
+        source: source_bytes,
+        source_path_for_ast: source_path_str,
+        open_deps,
+        options: frontend_options,
+    });
+    let mut result = parse_saved_source(&source, locations);
+    // The first pass reports nothing with invented positions. Parse failures
+    // and frontend warnings are regenerated against the exact same bytes.
+    if !locations && (result.as_ref().map_or(true, |(stderr, _, _)| stderr.is_some())) {
+        result = parse_saved_source(&source, true);
+    }
+    let (stderr, mut stored_ast, deps) =
+        result.map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))?;
+    if !stored_ast.arena().stores_locations() {
+        match &mut stored_ast {
+            StoredAst::Structure(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
+            StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
         }
-        None => stored_ast,
-    };
+    }
     Ok(GeneratedAst {
         stderr,
         stored_ast: Some(stored_ast),
@@ -438,33 +443,27 @@ fn generate_ast(
     })
 }
 
-/// The parsed AST of `ast`, parsing a deferred source again. Its warnings and
-/// dependencies were recorded by the first parse.
-pub(crate) fn materialize(ast: StoredAst) -> StoredAst {
-    let StoredAst::Deferred(deferred) = ast else {
-        return ast;
-    };
-    let deferred = Arc::try_unwrap(deferred).unwrap_or_else(|shared| DeferredParse {
-        file_path: shared.file_path.clone(),
-        source: shared.source.clone(),
-        source_path_for_ast: shared.source_path_for_ast.clone(),
-        open_deps: shared.open_deps.clone(),
-        options: shared.options.clone(),
-    });
-    let (_, stored_ast, _) = parse_source(
-        &deferred.file_path,
-        deferred.source,
-        &deferred.source_path_for_ast,
-        &deferred.open_deps,
-        &deferred.options,
+fn parse_saved_source(
+    source: &ParseSource,
+    locations: bool,
+) -> anyhow::Result<(Option<helpers::StdErr>, StoredAst, Dependencies)> {
+    parse_source(
+        &source.file_path,
+        source.source.clone(),
+        &source.source_path_for_ast,
+        &source.open_deps,
+        &source.options,
+        locations,
     )
-    .unwrap_or_else(|err| {
-        panic!(
-            "parsing {} again failed after it parsed: {err}",
-            deferred.file_path.display()
-        )
-    });
-    stored_ast
+}
+
+/// Recreate the AST with location side tables only when compilation needs them.
+pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAst> {
+    let source = ast
+        .retry_source()
+        .ok_or_else(|| anyhow!("missing source for location retry"))?;
+    let (_, ast, _) = parse_saved_source(source, true)?;
+    Ok(ast)
 }
 
 const SOURCE_TRIGGERED_PPXES: &[(&[&str], &str)] = &[
@@ -524,6 +523,7 @@ fn parse_source(
     source_path_for_ast: &str,
     extra_deps: &[String],
     options: &rescript_compiler::driver::CompilerOptions,
+    locations: bool,
 ) -> anyhow::Result<(
     Option<helpers::StdErr>,
     super::build_types::StoredAst,
@@ -531,7 +531,7 @@ fn parse_source(
 )> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let source = source_bytes_to_latin1(bytes);
-        let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
+        let mut parser = Parser::with_locations(source_path_for_ast.to_string(), &source, locations);
         // Frontend warning reports, in the order `bsc -bs-ast` prints them.
         let mut warnings = String::new();
 
@@ -570,6 +570,7 @@ fn parse_source(
                     arena,
                     signature,
                     source_len: source.len(),
+                    retry_source: None,
                 }));
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         } else {
@@ -602,6 +603,7 @@ fn parse_source(
                     arena,
                     structure,
                     source_len: source.len(),
+                    retry_source: None,
                 }));
             Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
         }
@@ -711,6 +713,42 @@ mod tests {
         filter_ppx_flags, open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled, should_run_ppx,
     };
     use crate::config::{Config, OneOrMore};
+
+    #[test]
+    fn location_free_frontend_keeps_ast_and_dependencies_for_compilation() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let source = std::sync::Arc::new(super::ParseSource {
+                    file_path: std::path::PathBuf::from("Example.res"),
+                    source: b"@genType type t = {value: int}\nlet f = x => Other.apply(x)".to_vec(),
+                    source_path_for_ast: "Example.res".to_string(),
+                    open_deps: vec!["Implicit".to_string()],
+                    options: rescript_compiler::driver::CompilerOptions::default(),
+                });
+                let (warnings, mut ast, deps) = super::parse_saved_source(&source, false).unwrap();
+                assert!(warnings.is_none());
+                assert!(!ast.arena().stores_locations());
+                assert_eq!(ast.arena().location_count(), 0);
+                assert_eq!(ast.arena().position_count(), 0);
+                let super::StoredAst::Structure(stored) = &mut ast else {
+                    panic!("expected structure")
+                };
+                std::sync::Arc::get_mut(stored).unwrap().retry_source = Some(source.clone());
+                let located = super::reparse_with_locations(&ast).unwrap();
+                assert!(located.arena().stores_locations());
+                assert!(located.arena().location_count() > 0);
+                assert!(located.retry_source().is_none());
+                let (_, _, full_deps) = super::parse_saved_source(&source, true).unwrap();
+                assert_eq!(deps, full_deps);
+                assert!(deps.iter().any(|name| name == "Other"));
+                tx.send(()).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("frontend timed out or failed");
+    }
 
     #[test]
     fn open_dependencies_extracts_and_dedups() {
