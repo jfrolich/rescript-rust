@@ -1358,6 +1358,9 @@ impl ParseArena {
 
     /// Clone a location, creating fresh position objects with the same values.
     pub fn clone_loc(&mut self, loc: LocIdx) -> LocIdx {
+        if !self.store_locations {
+            return loc;
+        }
         let info = self.get_location(loc).clone();
         let start = *self.get_position(info.loc_start);
         let end = *self.get_position(info.loc_end);
@@ -1526,7 +1529,11 @@ impl ParseArena {
         foreign_file_name: &dyn Fn(StrIdx) -> Option<String>,
     ) -> LocIdx {
         if !self.store_locations {
-            return self.fresh_location_identity(loc.loc_ghost);
+            return if loc.origin != 0 {
+                LocIdx(loc.origin | if loc.loc_ghost { 0x4000_0000 } else { 0 })
+            } else {
+                self.fresh_location_identity(loc.loc_ghost)
+            };
         }
         let push_pos = |pos: &Position| {
             // `Location::none()` is Rust's spelling of OCaml `Location.none`
@@ -1556,7 +1563,7 @@ impl ParseArena {
     /// over `locations()` do not see them.
     pub fn push_typecheck_ghost_loc(&self, idx: LocIdx) -> LocIdx {
         if !self.store_locations {
-            return self.fresh_location_identity(true);
+            return LocIdx(idx.0 | 0x4000_0000);
         }
         let loc = self.get_location(idx);
         let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
@@ -1607,6 +1614,9 @@ impl ParseArena {
     /// Create a ghost version of an existing location.
     /// Returns a new LocIdx with the same positions but loc_ghost=true.
     pub fn mk_ghost_loc(&mut self, idx: LocIdx) -> LocIdx {
+        if !self.store_locations {
+            return LocIdx(idx.0 | 0x4000_0000);
+        }
         let loc = self.get_location(idx);
         let start = loc.loc_start;
         let end = loc.loc_end;
@@ -1621,6 +1631,11 @@ impl ParseArena {
             loc_start: *self.get_position(loc.loc_start),
             loc_end: *self.get_position(loc.loc_end),
             loc_ghost: loc.loc_ghost,
+            origin: if self.store_locations {
+                0
+            } else {
+                idx.0 & 0x3fff_ffff
+            },
         }
     }
 
@@ -1628,6 +1643,9 @@ impl ParseArena {
     /// Useful for migrating code that creates Location values.
     /// Creates fresh positions to match OCaml behavior.
     pub fn from_location(&mut self, loc: &Location) -> LocIdx {
+        if !self.store_locations && loc.origin != 0 {
+            return LocIdx(loc.origin | if loc.loc_ghost { 0x4000_0000 } else { 0 });
+        }
         let start_idx = self.push_position(loc.loc_start);
         let end_idx = self.push_position(loc.loc_end);
         self.push_loc(start_idx, end_idx, loc.loc_ghost)
@@ -3098,6 +3116,21 @@ mod tests {
         assert!(arena.is_used_attribute(a));
         assert!(!arena.is_used_attribute(b));
         assert!(arena.loc_ghost(arena.none_loc()));
+
+        // Env usage tracking uses full Location values, not LocIdx. Omitted
+        // coordinates must not merge two shadowed declarations of one name.
+        let mut usage = crate::types::usage::UsageTables::default();
+        let a_loc = arena.to_location(a);
+        let b_loc = arena.to_location(b);
+        let copied_a = arena.clone_loc(a);
+        assert_eq!(arena.to_location(copied_a), a_loc);
+        let restored_a = arena.from_location(&a_loc);
+        assert_eq!(arena.to_location(restored_a), a_loc);
+        let a_used = usage.check_value_usage("x", a_loc).unwrap();
+        let b_used = usage.check_value_usage("x", b_loc).unwrap();
+        usage.mark_value_used("x", b_loc);
+        assert!(!usage.is_used(a_used));
+        assert!(usage.is_used(b_used));
     }
 
     #[test]
@@ -3110,6 +3143,7 @@ mod tests {
             loc_start: Position::new(second, 2, 10, 12),
             loc_end: Position::new(second, 2, 10, 20),
             loc_ghost: false,
+            origin: 0,
         });
 
         let names = arena.source_file_names();

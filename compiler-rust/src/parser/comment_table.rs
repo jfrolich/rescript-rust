@@ -1169,6 +1169,7 @@ fn rewrite_value_binding_locs(
                         loc_start: *arena.loc_start(pat_loc),
                         loc_end: *arena.loc_end(inner_typ_loc),
                         loc_ghost: false,
+                        origin: 0,
                     });
                     let inner_expr_loc = arena.get_expr(*expr_idx).pexp_loc;
                     (new_pat_loc, *expr_idx, inner_expr_loc)
@@ -1194,6 +1195,7 @@ fn rewrite_value_binding_locs(
                         loc_start: *arena.loc_start(pvb_pat.ppat_loc),
                         loc_end: *arena.loc_end(inner_typ_loc),
                         loc_ghost: false,
+                        origin: 0,
                     });
                     (new_pat_loc, vb.pvb_expr, pvb_expr_loc)
                 } else {
@@ -1233,6 +1235,7 @@ fn rewrite_value_binding_locs(
                             loc_start: *arena.loc_start(pvb_pat.ppat_loc),
                             loc_end: *arena.loc_end(inner_typ_loc),
                             loc_ghost: false,
+                            origin: 0,
                         });
                         let expr_loc = arena.get_expr(expr_idx).pexp_loc;
                         (new_pat_loc, expr_idx, expr_loc)

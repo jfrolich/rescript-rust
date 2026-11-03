@@ -1309,6 +1309,7 @@ mod tests {
                 loc_start: Position::new(StrIdx(17), 3, 21, 24),
                 loc_end: Position::new(StrIdx(29), 5, 44, 49),
                 loc_ghost: ghost,
+                origin: 0,
             };
             for optional in [false, true] {
                 let name = "long_owned_label_with_unicode_λ";

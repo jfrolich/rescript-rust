@@ -1030,6 +1030,7 @@ fn read_location(ctx: &TypeContext, value: &OcamlValue) -> Location {
         loc_start: read_position(ctx, &fields[0]),
         loc_end: read_position(ctx, &fields[1]),
         loc_ghost: fields[2].as_bool(),
+        origin: 0,
     }
 }
 

@@ -796,6 +796,7 @@ impl<'a> Mapper<'a> {
                     loc_start: *self.arena.get_position(fragment.opening),
                     loc_end: *self.arena.get_position(fragment.closing),
                     loc_ghost: loc.loc_ghost,
+                    origin: loc.origin,
                 };
                 let mut list = self.jsx_children_list(&fragment.children, &fragment_loc);
                 list.pexp_attributes = attrs;
@@ -808,6 +809,7 @@ impl<'a> Mapper<'a> {
                     loc_start: offset_position(&loc.loc_end, 2),
                     loc_end: offset_position(&loc.loc_end, 1),
                     loc_ghost: true,
+                    origin: loc.origin,
                 };
                 let nil = self.construct_noarg("[]", &nil_loc, &nil_loc);
                 let children_idx = self.intern("children");
@@ -897,6 +899,7 @@ impl<'a> Mapper<'a> {
             loc_start: head_start,
             loc_end: tail.pexp_loc.loc_end,
             loc_ghost: false,
+            origin: loc.origin,
         };
         let cons = self.intern("::");
         pt0::Expression {

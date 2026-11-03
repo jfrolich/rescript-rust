@@ -8,7 +8,9 @@
 //!
 //! Identity-based sharing for positions and locations is handled by the
 //! `ParseArena` module using `PosIdx` and `LocIdx` indices. The Position
-//! and Location structs here are pure value types without identity.
+//! structs here are value types. A location-free compilation carries an
+//! opaque origin on Location so declaration-usage tracking does not collapse
+//! distinct bindings when their source coordinates are absent.
 //!
 //! File names are stored as `StrIdx` to enable pointer-based sharing in
 //! marshal output. The same StrIdx passed to all positions in a file will
@@ -92,6 +94,10 @@ pub struct Location {
     pub loc_end: Position,
     /// Whether this is a "ghost" location (compiler-generated).
     pub loc_ghost: bool,
+    /// Opaque declaration identity when source coordinates are omitted. Zero
+    /// for ordinary locations; never interpreted as a line or source offset.
+    /// This keeps Env's usage keys distinct without retaining source spans.
+    pub origin: u32,
 }
 
 impl Default for Location {
@@ -100,6 +106,7 @@ impl Default for Location {
             loc_start: Position::default(),
             loc_end: Position::default(),
             loc_ghost: true,
+            origin: 0,
         }
     }
 }
@@ -111,6 +118,7 @@ impl Location {
             loc_start: start,
             loc_end: end,
             loc_ghost: false,
+            origin: 0,
         }
     }
 
@@ -132,6 +140,7 @@ impl Location {
                 cnum: end_offset as i32,
             },
             loc_ghost: false,
+            origin: 0,
         }
     }
 
@@ -154,6 +163,7 @@ impl Location {
             loc_start: pos,
             loc_end: pos,
             loc_ghost: true,
+            origin: 0,
         }
     }
 
@@ -205,6 +215,7 @@ impl Location {
             loc_start: self.loc_start,
             loc_end: self.loc_end,
             loc_ghost: true,
+            origin: self.origin,
         }
     }
 
@@ -214,6 +225,7 @@ impl Location {
             loc_start: self.loc_start,
             loc_end: other.loc_end,
             loc_ghost: self.loc_ghost && other.loc_ghost,
+            origin: self.origin,
         }
     }
 

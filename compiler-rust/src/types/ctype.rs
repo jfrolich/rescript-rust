@@ -14139,6 +14139,7 @@ mod tests {
             loc_start: Position::new(StrIdx(31), 2, 10, 12),
             loc_end: Position::new(StrIdx(32), 4, 25, 29),
             loc_ghost: true,
+            origin: 0,
         };
         let labels = [
             ArgLabel::Nolabel,
