@@ -1731,7 +1731,7 @@ mod type_arg_tests {
             loc_start: Position::new(StrIdx(13), 3, 18, 21),
             loc_end: Position::new(StrIdx(19), 5, 31, 36),
             loc_ghost: true,
-            origin: 0,
+            origin: Default::default(),
         };
         let labels = [
             ArgLabel::Nolabel,

@@ -28774,7 +28774,7 @@ mod tests {
         let val_loc = Location::none();
         let val_loc = Location {
             loc_ghost: false,
-            origin: 0,
+            origin: Default::default(),
             ..val_loc
         };
         // `check_usage` registers a (name, loc) key once.

@@ -83,6 +83,41 @@ impl Position {
     }
 }
 
+/// Opaque per-source declaration identity. Three bytes fit in Location's
+/// existing padding next to `loc_ghost`, avoiding per-node memory growth.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct LocationOrigin([u8; 3]);
+
+impl LocationOrigin {
+    pub fn new(value: u32) -> Self {
+        assert!(value < 1 << 24, "source declaration identity overflow");
+        let bytes = value.to_le_bytes();
+        Self([bytes[0], bytes[1], bytes[2]])
+    }
+
+    pub fn raw(self) -> u32 {
+        u32::from_le_bytes([self.0[0], self.0[1], self.0[2], 0])
+    }
+}
+
+impl Serialize for LocationOrigin {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.raw())
+    }
+}
+
+impl<'de> Deserialize<'de> for LocationOrigin {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        if value >= 1 << 24 {
+            return Err(serde::de::Error::custom(
+                "source declaration identity overflow",
+            ));
+        }
+        Ok(Self::new(value))
+    }
+}
+
 /// A location span in source code.
 ///
 /// This corresponds to `Location.t` in OCaml.
@@ -97,7 +132,7 @@ pub struct Location {
     /// Opaque declaration identity when source coordinates are omitted. Zero
     /// for ordinary locations; never interpreted as a line or source offset.
     /// This keeps Env's usage keys distinct without retaining source spans.
-    pub origin: u32,
+    pub origin: LocationOrigin,
 }
 
 impl Default for Location {
@@ -106,7 +141,7 @@ impl Default for Location {
             loc_start: Position::default(),
             loc_end: Position::default(),
             loc_ghost: true,
-            origin: 0,
+            origin: Default::default(),
         }
     }
 }
@@ -118,7 +153,7 @@ impl Location {
             loc_start: start,
             loc_end: end,
             loc_ghost: false,
-            origin: 0,
+            origin: Default::default(),
         }
     }
 
@@ -140,7 +175,7 @@ impl Location {
                 cnum: end_offset as i32,
             },
             loc_ghost: false,
-            origin: 0,
+            origin: Default::default(),
         }
     }
 
@@ -163,7 +198,7 @@ impl Location {
             loc_start: pos,
             loc_end: pos,
             loc_ghost: true,
-            origin: 0,
+            origin: Default::default(),
         }
     }
 
@@ -293,6 +328,19 @@ impl<T> Located<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_uses_existing_location_padding() {
+        assert_eq!(std::mem::size_of::<LocationOrigin>(), 3);
+        assert_eq!(std::mem::size_of::<Location>(), 36);
+        let origin = LocationOrigin::new(0xabcdef);
+        assert_eq!(origin.raw(), 0xabcdef);
+        let bytes = crate::binser::to_vec(&origin).unwrap();
+        assert_eq!(
+            crate::binser::from_slice::<LocationOrigin>(&bytes).unwrap(),
+            origin
+        );
+    }
 
     #[test]
     fn test_position() {

@@ -1148,7 +1148,7 @@ impl ParseArena {
         let id = self
             .next_location_identity
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        assert!(id < 0x4000_0000, "location identity overflow");
+        assert!(id < 1 << 24, "location identity overflow");
         LocIdx(id | if ghost { 0x4000_0000 } else { 0 })
     }
 
@@ -1529,8 +1529,8 @@ impl ParseArena {
         foreign_file_name: &dyn Fn(StrIdx) -> Option<String>,
     ) -> LocIdx {
         if !self.store_locations {
-            return if loc.origin != 0 {
-                LocIdx(loc.origin | if loc.loc_ghost { 0x4000_0000 } else { 0 })
+            return if loc.origin.raw() != 0 {
+                LocIdx(loc.origin.raw() | if loc.loc_ghost { 0x4000_0000 } else { 0 })
             } else {
                 self.fresh_location_identity(loc.loc_ghost)
             };
@@ -1631,11 +1631,11 @@ impl ParseArena {
             loc_start: *self.get_position(loc.loc_start),
             loc_end: *self.get_position(loc.loc_end),
             loc_ghost: loc.loc_ghost,
-            origin: if self.store_locations {
+            origin: crate::location::LocationOrigin::new(if self.store_locations {
                 0
             } else {
                 idx.0 & 0x3fff_ffff
-            },
+            }),
         }
     }
 
@@ -1643,8 +1643,8 @@ impl ParseArena {
     /// Useful for migrating code that creates Location values.
     /// Creates fresh positions to match OCaml behavior.
     pub fn from_location(&mut self, loc: &Location) -> LocIdx {
-        if !self.store_locations && loc.origin != 0 {
-            return LocIdx(loc.origin | if loc.loc_ghost { 0x4000_0000 } else { 0 });
+        if !self.store_locations && loc.origin.raw() != 0 {
+            return LocIdx(loc.origin.raw() | if loc.loc_ghost { 0x4000_0000 } else { 0 });
         }
         let start_idx = self.push_position(loc.loc_start);
         let end_idx = self.push_position(loc.loc_end);
@@ -3143,7 +3143,7 @@ mod tests {
             loc_start: Position::new(second, 2, 10, 12),
             loc_end: Position::new(second, 2, 10, 20),
             loc_ghost: false,
-            origin: 0,
+            origin: Default::default(),
         });
 
         let names = arena.source_file_names();

@@ -2776,7 +2776,7 @@ fn print_block_row_with_comments(
             cnum: pos_range.end,
         },
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
 
     // Use the existing comment printing helpers
@@ -5613,7 +5613,7 @@ fn print_record_pattern(
                         loc_start: *arena.loc_start(field.lid.loc),
                         loc_end: *arena.loc_end(field_pat.ppat_loc),
                         loc_ghost: false,
-                        origin: 0,
+                        origin: Default::default(),
                     };
                     let doc = print_leading_comments_with(doc, leading, &full_loc);
                     print_trailing_comments_with(doc, trailing, &full_loc)
@@ -5752,7 +5752,7 @@ fn print_dict_pattern_row(
         loc_start: *arena.loc_start(field.lid.loc),
         loc_end: *arena.loc_end(field_pat.ppat_loc),
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
     let doc = print_leading_comments_with(doc, leading, &full_loc);
     print_trailing_comments_with(doc, trailing, &full_loc)
@@ -7492,7 +7492,7 @@ fn print_cases(
             loc_start: *arena.loc_start(arena.get_pat(case.pc_lhs).ppat_loc),
             loc_end: end_pos,
             loc_ghost: false,
-            origin: 0,
+            origin: Default::default(),
         };
         let doc_with_leading = print_leading_comments_with(doc, leading, &full_loc);
         let doc_with_comments = print_trailing_comments_with(doc_with_leading, trailing, &full_loc);
@@ -9709,7 +9709,7 @@ fn get_jsx_prop_full_loc(prop: &JsxProp, arena: &ParseArena) -> FullLocation {
                 loc_start: start.loc_start,
                 loc_end: end.loc_end,
                 loc_ghost: false,
-                origin: 0,
+                origin: Default::default(),
             }
         }
         JsxProp::Spreading { loc, .. } => arena.to_location(*loc),
@@ -9882,7 +9882,7 @@ fn unary_element_closing_token_pos_range(
         loc_start: start_pos,
         loc_end: *end,
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
     (pos_range, full_loc)
 }
@@ -9902,7 +9902,7 @@ fn container_element_closing_tag_pos_range(
         loc_start: *start_pos,
         loc_end: *end_pos,
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
     (pos_range, full_loc)
 }
@@ -10094,7 +10094,7 @@ fn print_jsx_container_tag(
         loc_start: *opening_greater_than,
         loc_end: *opening_greater_than,
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
 
     let opening_greater_than_doc = print_comments_by_pos(
@@ -10200,7 +10200,7 @@ fn print_jsx_fragment(
         loc_start: *fragment_start,
         loc_end: *opening_greater_than,
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
     let opening = print_comments_by_pos(
         Doc::text("<>"),
@@ -10217,7 +10217,7 @@ fn print_jsx_fragment(
         loc_start: *closing_lesser_than,
         loc_end: *fragment_end,
         loc_ghost: false,
-        origin: 0,
+        origin: Default::default(),
     };
     let closing = print_comments_by_pos(
         Doc::text("</>"),
