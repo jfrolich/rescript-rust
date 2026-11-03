@@ -494,27 +494,12 @@ fn fresh_store_per_compilation() -> bool {
     *FRESH.get_or_init(|| std::env::var_os("RESCRIPT_FRESH_STORE").is_some())
 }
 
-/// The number of store types after which a worker's store is dropped before
-/// its next compilation. Every worker builds its own store from the same
-/// dependencies, so without a bound each one ends a large build holding most
-/// of them (on Tella about 45 MB per worker). The store is a cache: a
-/// compilation after the reset builds what it reads again, while dependency
-/// graphs stay in the shared pool. Around this size the rebuilds cost about
-/// 2% of a build's CPU time.
-const STORE_TYPE_BUDGET: usize = 60_000;
-
 pub(crate) fn current() -> StoreLease {
     let generation = BUILD_GENERATION.load(Ordering::SeqCst);
     let fresh = fresh_store_per_compilation();
     StoreLease(Some(THREAD_TYPE_STORE.with(
         |slot| match slot.borrow_mut().take() {
-            Some(store)
-                if store.generation == generation
-                    && !fresh
-                    && store.type_count() <= STORE_TYPE_BUDGET =>
-            {
-                store
-            }
+            Some(store) if store.generation == generation && !fresh => store,
             _ => Box::new(ThreadTypeStore::new()),
         },
     )))
