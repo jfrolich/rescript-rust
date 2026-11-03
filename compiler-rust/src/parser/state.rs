@@ -136,11 +136,22 @@ pub struct Parser<'src> {
 impl<'src> Parser<'src> {
     /// Create a new parser for the given source code.
     pub fn new(filename: impl Into<String>, src: &'src str) -> Self {
+        Self::with_locations(filename, src, true)
+    }
+
+    /// Parse with optional source-location side tables. The scanner still
+    /// tracks its current cursor because line breaks participate in grammar.
+    pub fn with_locations(
+        filename: impl Into<String>,
+        src: &'src str,
+        store_locations: bool,
+    ) -> Self {
         // Create arena first so we can intern the filename
-        let mut arena = ParseArena::new();
+        let mut arena = ParseArena::with_locations(store_locations);
         arena.reserve_for_source(src.len());
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
+        arena.set_source_file(filename_idx);
         let scanner = Scanner::new(filename_idx, src);
         // Push initial default positions to arena
         let default_pos = Position::default();
@@ -919,6 +930,61 @@ impl<'src> Parser<'src> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_free_parser_preserves_ast_shape() {
+        let sources = [
+            "let x = 1\nlet y = x + 2",
+            "let f = (~x=1, y) => x + y\nlet z = f(~x=2, 3)",
+            "type t = {a: int, b?: string}\nlet x = {a: 1}",
+            "let f = x => switch x { | Some(y) => y | None => 0 }",
+            "let f = x => {\n x\n -1\n}",
+            "let x = <div className=\"test\">{React.string(\"hello\")}</div>",
+            "type t = (. int => int) => int",
+            "let x = `hello ${name}`",
+        ];
+        for source in sources {
+            let source = source.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let parse = |locations| {
+                    let mut parser = Parser::with_locations("test.res", &source, locations);
+                    let structure = crate::parser::module::parse_structure(&mut parser);
+                    assert!(
+                        parser.diagnostics.is_empty(),
+                        "{source}: {:?}",
+                        parser.diagnostics
+                    );
+                    // The regular AST sexp also exposes braces offsets. They
+                    // are intentionally absent; compare syntax, not locations.
+                    fn syntax_only(sexp: &mut crate::parser::sexp::Sexp) {
+                        use crate::parser::sexp::Sexp;
+                        if let Sexp::List(items) = sexp {
+                            if matches!(items.first(), Some(Sexp::Atom(tag)) if tag == "braces_loc")
+                            {
+                                items.truncate(1);
+                            } else {
+                                for item in items {
+                                    syntax_only(item);
+                                }
+                            }
+                        }
+                    }
+                    let mut output = crate::parser::sexp::structure(parser.arena(), &structure);
+                    syntax_only(&mut output);
+                    if !locations {
+                        assert_eq!(parser.arena().position_count(), 0);
+                        assert_eq!(parser.arena().location_count(), 0);
+                    }
+                    output.to_string()
+                };
+                assert_eq!(parse(true), parse(false), "{source}");
+                tx.send(()).unwrap();
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("location-free parse failed or hung");
+        }
+    }
 
     #[test]
     fn test_parser_new() {

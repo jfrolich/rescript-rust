@@ -463,6 +463,14 @@ struct ExprOverrides {
 /// indices.
 #[derive(Debug)]
 pub struct ParseArena {
+    /// Location-free builds retain node identity and generated/source provenance,
+    /// but allocate no position or location records. Full locations are populated
+    /// only by a fresh diagnostic compilation.
+    store_locations: bool,
+    next_location_identity: std::sync::atomic::AtomicU32,
+    locations_required: std::sync::atomic::AtomicBool,
+    /// File identity is unit metadata, not a source span. JSX uses it for names.
+    absent_position: Position,
     /// Arena of positions (returns PosIdx).
     positions: Arena<Position, PosIdx>,
     /// File names of all positions pushed so far (resolved lazily by
@@ -935,6 +943,10 @@ impl Default for ParseArena {
         };
 
         Self {
+            store_locations: true,
+            next_location_identity: std::sync::atomic::AtomicU32::new(2),
+            locations_required: std::sync::atomic::AtomicBool::new(false),
+            absent_position: Position::default(),
             positions: Arena::default(),
             position_file_names: HashSet::new(),
             last_position_file_name: None,
@@ -1026,8 +1038,10 @@ impl ParseArena {
     /// per file. The ratios are the 90th percentile of nodes per source byte
     /// over a large project, so most files never reallocate.
     pub fn reserve_for_source(&mut self, source_len: usize) {
-        self.positions.reserve(source_len * 45 / 100);
-        self.locations.reserve(source_len * 16 / 100);
+        if self.store_locations {
+            self.positions.reserve(source_len * 45 / 100);
+            self.locations.reserve(source_len * 16 / 100);
+        }
         self.expressions.reserve(source_len * 9 / 100);
         self.longidents.reserve(source_len * 65 / 1000);
         self.patterns.reserve(source_len * 2 / 100);
@@ -1058,22 +1072,37 @@ impl ParseArena {
     /// This ensures that `LocIdx::default()` (which is `LocIdx(0)`) always refers to
     /// a valid "none" location, even without calling `none_loc()` first.
     pub fn new() -> Self {
-        let mut arena = Self::default();
+        Self::with_locations(true)
+    }
+
+    /// Disable source-location storage for speculative, diagnostic-free builds.
+    /// Scanner cursor positions remain transient parser state for the grammar.
+    pub fn with_locations(store_locations: bool) -> Self {
+        let mut arena = Self {
+            store_locations,
+            ..Self::default()
+        };
         // Pre-allocate none file name and position at index 0
         // This way LocIdx::default() == LocIdx(0) is always valid
         let none_file_idx = arena.strings.intern("_none_");
         arena.position_file_names.insert(none_file_idx);
         let none_pos = Position::new(none_file_idx, 1, 0, -1);
-        let pos_idx = arena.positions.push(none_pos);
-        let none_loc = InternedLocation::new(pos_idx, pos_idx, true);
-        arena.locations.push(none_loc);
+        if store_locations {
+            let pos_idx = arena.positions.push(none_pos);
+            let none_loc = InternedLocation::new(pos_idx, pos_idx, true);
+            arena.locations.push(none_loc);
+        }
         // Pre-allocate dummy location with line 0 for internal PPX nodes
         let dummy_file_idx = arena.strings.push_interned("_none_");
         arena.position_file_names.insert(dummy_file_idx);
         let dummy_pos = Position::new(dummy_file_idx, 0, 0, -1);
-        let dummy_pos_idx = arena.positions.push(dummy_pos);
-        let dummy_loc = InternedLocation::new(dummy_pos_idx, dummy_pos_idx, true);
-        arena.dummy_loc = arena.locations.push(dummy_loc);
+        arena.dummy_loc = if store_locations {
+            let dummy_pos_idx = arena.positions.push(dummy_pos);
+            let dummy_loc = InternedLocation::new(dummy_pos_idx, dummy_pos_idx, true);
+            arena.locations.push(dummy_loc)
+        } else {
+            LocIdx(1)
+        };
         // Pre-allocate placeholder longident (for placeholder AST nodes)
         let placeholder_idx = arena.strings.intern("placeholder");
         arena.static_placeholder_lid = arena.longidents.push(Longident::Lident(placeholder_idx));
@@ -1087,6 +1116,40 @@ impl ParseArena {
         let option_str = arena.strings.intern("option");
         arena.static_option_lid = arena.longidents.push(Longident::Lident(option_str));
         arena
+    }
+
+    pub fn set_source_file(&mut self, file_name: StrIdx) {
+        self.absent_position.file_name = file_name;
+        self.record_position_file_name(file_name);
+    }
+
+    pub fn stores_locations(&self) -> bool {
+        self.store_locations
+    }
+
+    /// A semantic consumer (e.g. an assertion payload) needs a full-location
+    /// retry even when the compilation emits no warning or error.
+    pub fn require_locations(&self) {
+        if !self.store_locations {
+            self.locations_required
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn locations_required(&self) -> bool {
+        self.locations_required
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn fresh_location_identity(&self, ghost: bool) -> LocIdx {
+        // Ghostness affects warning eligibility, and identity tracks consumed
+        // attributes. Neither encodes a source position. Do not collapse all
+        // attributes onto Location.none, which would hide unused attributes.
+        let id = self
+            .next_location_identity
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(id < 0x4000_0000, "location identity overflow");
+        LocIdx(id | if ghost { 0x4000_0000 } else { 0 })
     }
 
     /// Get the placeholder longident index.
@@ -1188,7 +1251,11 @@ impl ParseArena {
     /// PosIdx through code paths (reference sharing), not by value deduplication.
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
         self.record_position_file_name(pos.file_name);
-        self.positions.push(pos)
+        if self.store_locations {
+            self.positions.push(pos)
+        } else {
+            self.none_pos()
+        }
     }
 
     /// Push a position from components.
@@ -1196,9 +1263,7 @@ impl ParseArena {
     /// This matches OCaml's behavior where each position is a separate object.
     /// file_name should be an interned StrIdx (from arena.intern_string).
     pub fn push_pos(&mut self, file_name: StrIdx, line: i32, bol: i32, cnum: i32) -> PosIdx {
-        self.record_position_file_name(file_name);
-        self.positions
-            .push(Position::new(file_name, line, bol, cnum))
+        self.push_position(Position::new(file_name, line, bol, cnum))
     }
 
     /// Get the "none" position index (for _none_ file).
@@ -1209,6 +1274,9 @@ impl ParseArena {
 
     /// Look up a position by index.
     pub fn get_position(&self, idx: PosIdx) -> &Position {
+        if !self.store_locations {
+            return &self.absent_position;
+        }
         let raw = idx.to_u32();
         if raw < SYNTHETIC_POSITION_BASE {
             self.positions.get(idx)
@@ -1233,7 +1301,11 @@ impl ParseArena {
 
     /// Push a location into the arena and return its index.
     pub fn push_location(&mut self, loc: InternedLocation) -> LocIdx {
-        self.locations.push(loc)
+        if self.store_locations {
+            self.locations.push(loc)
+        } else {
+            self.fresh_location_identity(loc.loc_ghost)
+        }
     }
 
     /// Push a location from position indices.
@@ -1416,6 +1488,23 @@ impl ParseArena {
 
     /// Look up a location by index.
     pub fn get_location(&self, idx: LocIdx) -> &InternedLocation {
+        if !self.store_locations {
+            const SOURCE: InternedLocation = InternedLocation {
+                loc_start: PosIdx(0),
+                loc_end: PosIdx(0),
+                loc_ghost: false,
+            };
+            const GENERATED: InternedLocation = InternedLocation {
+                loc_start: PosIdx(0),
+                loc_end: PosIdx(0),
+                loc_ghost: true,
+            };
+            return if idx.0 < 2 || idx.0 & 0x4000_0000 != 0 {
+                &GENERATED
+            } else {
+                &SOURCE
+            };
+        }
         let raw = idx.to_u32();
         if raw < SYNTHETIC_LOCATION_BASE {
             self.locations.get(idx)
@@ -1436,6 +1525,9 @@ impl ParseArena {
         loc: &crate::location::Location,
         foreign_file_name: &dyn Fn(StrIdx) -> Option<String>,
     ) -> LocIdx {
+        if !self.store_locations {
+            return self.fresh_location_identity(loc.loc_ghost);
+        }
         let push_pos = |pos: &Position| {
             // `Location::none()` is Rust's spelling of OCaml `Location.none`
             // (`in_file "_none_"`: line 1, bol 0, cnum -1).
@@ -1463,6 +1555,9 @@ impl ParseArena {
     /// arena became shared. These indices live in a separate range, so scans
     /// over `locations()` do not see them.
     pub fn push_typecheck_ghost_loc(&self, idx: LocIdx) -> LocIdx {
+        if !self.store_locations {
+            return self.fresh_location_identity(true);
+        }
         let loc = self.get_location(idx);
         let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
         let slot = self.synthetic_locations.len();
@@ -1533,10 +1628,8 @@ impl ParseArena {
     /// Useful for migrating code that creates Location values.
     /// Creates fresh positions to match OCaml behavior.
     pub fn from_location(&mut self, loc: &Location) -> LocIdx {
-        self.record_position_file_name(loc.loc_start.file_name);
-        self.record_position_file_name(loc.loc_end.file_name);
-        let start_idx = self.positions.push(loc.loc_start);
-        let end_idx = self.positions.push(loc.loc_end);
+        let start_idx = self.push_position(loc.loc_start);
+        let end_idx = self.push_position(loc.loc_end);
         self.push_loc(start_idx, end_idx, loc.loc_ghost)
     }
 
@@ -2963,6 +3056,48 @@ mod tests {
             &*arena.get_pat(patterns[2047]).ppat_desc,
             PatternDesc::Ppat_any
         ));
+    }
+
+    #[test]
+    fn location_free_arena_allocates_no_location_side_tables() {
+        let mut arena = ParseArena::with_locations(false);
+        arena.reserve_for_source(100_000);
+        let file = arena.intern("test.res");
+        arena.set_source_file(file);
+        let mut last = LocIdx::none();
+        for offset in 0..10_000 {
+            let start = arena.push_pos(file, 1, 0, offset);
+            let loc = arena.mk_loc(start, start);
+            assert_ne!(loc, last);
+            assert!(!arena.loc_ghost(loc));
+            assert!(arena.loc_ghost(arena.push_typecheck_ghost_loc(loc)));
+            assert_eq!(arena.loc_start(loc).cnum, 0);
+            last = loc;
+        }
+        arena.push_typecheck_location(&Location::default(), &|_| None);
+        assert_eq!(arena.position_count(), 0);
+        assert_eq!(arena.location_count(), 0);
+        assert_eq!(arena.synthetic_positions.len(), 0);
+        assert_eq!(arena.synthetic_locations.len(), 0);
+        assert!(!arena.locations_required());
+        arena.require_locations();
+        assert!(arena.locations_required());
+    }
+
+    #[test]
+    fn location_free_attributes_keep_distinct_usage_identity() {
+        let mut arena = ParseArena::with_locations(false);
+        let name = arena.intern("test");
+        let a = arena.mk_loc(PosIdx(0), PosIdx(0));
+        let b = arena.mk_loc(PosIdx(0), PosIdx(0));
+        let attr = (
+            Located::new(name, a),
+            crate::parser::ast::Payload::PStr(Box::new(vec![])),
+        );
+        arena.mark_used_attribute(&attr);
+        assert!(arena.is_used_attribute(a));
+        assert!(!arena.is_used_attribute(b));
+        assert!(arena.loc_ghost(arena.none_loc()));
     }
 
     #[test]
