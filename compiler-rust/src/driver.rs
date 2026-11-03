@@ -66,6 +66,8 @@ use crate::binary_ast::writer::{AST_IMPL_MAGIC_NUMBER, AST_INTF_MAGIC_NUMBER};
 /// it, then compile the same source with location side tables enabled.
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum LocationRetry {
+    #[error("warning reporting requires source locations")]
+    Warning,
     #[error("diagnostic compilation requires source locations")]
     Diagnostic,
     #[error("generated output requires source locations")]
@@ -13891,7 +13893,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     if !arena.stores_locations() && !tctx.warnings.is_empty() {
-        return Err(LocationRetry::Diagnostic.into());
+        return Err(LocationRetry::Warning.into());
     }
     let post_type_warning_start = tctx.warnings.len();
     // js_implementation.ml:148-156 prints `-dtyped-sexp` here, before the
@@ -14153,8 +14155,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         }
     };
     if !arena.stores_locations() {
-        if !tctx.warnings.is_empty() || !raw_warnings.is_empty() || raw_diagnostic.is_some() {
+        if raw_diagnostic.is_some() {
             return Err(LocationRetry::Diagnostic.into());
+        }
+        if !tctx.warnings.is_empty() || !raw_warnings.is_empty() {
+            return Err(LocationRetry::Warning.into());
         }
         if arena.locations_required() {
             return Err(LocationRetry::Output.into());
@@ -14609,7 +14614,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
     if !arena.stores_locations() && !tctx.warnings.is_empty() {
-        return Err(LocationRetry::Diagnostic.into());
+        return Err(LocationRetry::Warning.into());
     }
     let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
     if type_warnings_have_errors(&tctx.warnings) {

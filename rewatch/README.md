@@ -40,10 +40,10 @@ node is generated; neither carries a source span. The source bytes are retained 
 location-enabled retry, then dropped with the AST after compilation.
 
 - A frontend warning or parse error reparses the file with locations before reporting it.
-- A compiler warning or error restarts the build with locations, including dependency
-  signatures: cross-module diagnostics can cite a declaration in another source file.
-  Speculative diagnostic text is never shown. Subsequent watch builds can use the fast
-  path again.
+- Compiler warnings retry only the affected module with locations. Type/backend errors
+  restart the build with located dependency signatures too: cross-module errors can cite
+  a declaration in another source file. Speculative diagnostic text is never shown.
+  Subsequent watch builds can use the fast path again.
 - Location-valued generated code (`__LINE__`, assertions, match failures, recursive
   module initialization) retries only that module, before publishing its signature or JS.
 - External PPXs, source maps, editor tooling and requested IR dumps use locations.

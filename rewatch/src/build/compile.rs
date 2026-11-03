@@ -3691,22 +3691,23 @@ fn compile_with_location_retry<T>(
     has_warnings: impl FnOnce(&T) -> bool,
 ) -> Result<T> {
     use rescript_compiler::driver::LocationRetry;
-    let mut result = compile(ast);
-    if !ast.arena().stores_locations()
-        && result
-            .as_ref()
-            .err()
-            .and_then(|err| err.downcast_ref::<LocationRetry>())
-            == Some(&LocationRetry::Output)
-    {
-        // Generated location constants only need this module's source. The
-        // first attempt has not published its signature or JavaScript.
-        result = super::parse::reparse_with_locations(ast).and_then(|located| compile(&located));
+    let result = compile(ast);
+    let local_retry = !ast.arena().stores_locations()
+        && match &result {
+            Err(error) => matches!(
+                error.downcast_ref::<LocationRetry>(),
+                Some(LocationRetry::Output | LocationRetry::Warning)
+            ),
+            Ok(result) => has_warnings(result),
+        };
+    if local_retry {
+        // Warning sites and location-valued constants belong to this module.
+        // No first-attempt signature or JavaScript has been published.
+        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located));
     }
-    if !build.diagnostic_locations && build.dump.is_none() && result.as_ref().map_or(true, has_warnings) {
-        // Diagnostics can refer to declarations in dependency interfaces.
-        // Rebuild with locations rather than report against location-free
-        // imported signatures. Only the second pass emits diagnostics.
+    if !build.diagnostic_locations && build.dump.is_none() && result.is_err() {
+        // Type errors can quote declarations from dependency interfaces.
+        // Rebuild those with locations as well before reporting the error.
         build
             .diagnostic_retry
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4138,10 +4139,7 @@ fn finish_in_process_js(
         metadata_tx,
         write_tx,
     );
-    if !build_command_state.diagnostic_locations
-        && build_command_state.dump.is_none()
-        && result.as_ref().map_or(true, |outcome| outcome.warning.is_some())
-    {
+    if !build_command_state.diagnostic_locations && build_command_state.dump.is_none() && result.is_err() {
         build_command_state
             .diagnostic_retry
             .store(true, std::sync::atomic::Ordering::Relaxed);
