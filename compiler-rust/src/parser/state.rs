@@ -567,11 +567,16 @@ impl<'src> Parser<'src> {
 
             match result.token {
                 Token::Comment(mut comment) => {
-                    // Collect comment and continue scanning.
-                    comment.set_prev_tok_end_pos(self.end_pos);
-                    comment.set_prev_tok_is_question(preceding_is_question);
+                    // Ordinary comments are formatter metadata. A location-free
+                    // compilation must not retain their spans in this separate
+                    // collection after omitting the arena's location tables.
+                    // Doc/module comments are distinct tokens, handled below.
+                    if self.arena.stores_locations() {
+                        comment.set_prev_tok_end_pos(self.end_pos);
+                        comment.set_prev_tok_is_question(preceding_is_question);
+                        self.comments.push(comment);
+                    }
                     preceding_is_question = false;
-                    self.comments.push(comment);
                     self.prev_end_pos = self.end_pos;
                     self.prev_end_pos_idx = self.end_pos_idx;
                     self.end_pos = result.end_pos;
@@ -984,6 +989,22 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_secs(5))
                 .expect("location-free parse failed or hung");
         }
+    }
+
+    #[test]
+    fn location_free_parser_does_not_retain_formatter_comment_spans() {
+        let source = "// heading\n/** doc */\nlet x = /* value */ 1\n";
+        let parse = |locations| {
+            let mut parser = Parser::with_locations("comments.res", source, locations);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            assert!(parser.diagnostics.is_empty());
+            assert_eq!(parser.comments().len(), if locations { 2 } else { 0 });
+            let syntax = crate::parser::sexp::structure(parser.arena(), &structure).to_string();
+            // Documentation is semantic attribute content, not a formatter comment.
+            assert!(syntax.contains("doc"));
+            syntax
+        };
+        assert_eq!(parse(false), parse(true));
     }
 
     #[test]
