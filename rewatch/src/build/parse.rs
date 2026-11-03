@@ -722,10 +722,14 @@ mod tests {
             .spawn(move || {
                 let source = std::sync::Arc::new(super::ParseSource {
                     file_path: std::path::PathBuf::from("Example.res"),
-                    source: b"@genType type t = {value: int}\nlet f = x => Other.apply(x)".to_vec(),
+                    source: b"@genType type t = {value: int}\nlet f = x => Other.apply(x)\nlet view = () => <div />".to_vec(),
                     source_path_for_ast: "Example.res".to_string(),
                     open_deps: vec!["Implicit".to_string()],
-                    options: rescript_compiler::driver::CompilerOptions::default(),
+                    options: rescript_compiler::driver::CompilerOptions {
+                        spice_ppx: true,
+                        jsx_version: Some(4),
+                        ..Default::default()
+                    },
                 });
                 let (warnings, mut ast, deps) = super::parse_saved_source(&source, false).unwrap();
                 assert!(warnings.is_none());

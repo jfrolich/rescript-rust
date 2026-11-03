@@ -805,11 +805,20 @@ impl<'a> Mapper<'a> {
             current::JsxElement::Unary(unary) => {
                 let tag = self.jsx_tag_ident(&unary.tag_name);
                 let mut args = self.map_jsx_props(&unary.props, expr.pexp_loc);
-                let nil_loc = FullLocation {
-                    loc_start: offset_position(&loc.loc_end, 2),
-                    loc_end: offset_position(&loc.loc_end, 1),
-                    loc_ghost: true,
-                    origin: loc.origin,
+                // ast_mapper_to0.ml:804-809 locates the synthetic [] at />.
+                // With omitted source coordinates there is no position to
+                // offset; retain provenance only. The offset routine assumes
+                // a real position past those characters and cannot consume an
+                // offset starting at zero (it keeps stepping to prior lines).
+                let nil_loc = if self.arena.stores_locations() {
+                    FullLocation {
+                        loc_start: offset_position(&loc.loc_end, 2),
+                        loc_end: offset_position(&loc.loc_end, 1),
+                        loc_ghost: true,
+                        origin: loc.origin,
+                    }
+                } else {
+                    loc.ghostify()
                 };
                 let nil = self.construct_noarg("[]", &nil_loc, &nil_loc);
                 let children_idx = self.intern("children");
