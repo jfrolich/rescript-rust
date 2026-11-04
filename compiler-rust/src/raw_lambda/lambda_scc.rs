@@ -3,6 +3,7 @@
 //! are not recursive.
 
 use crate::fast_hash::AHashMap;
+use crate::lambda::LamLoc;
 use crate::ident::Ident;
 use crate::lambda::LetKind;
 use crate::raw_lambda::RawLambda;
@@ -190,7 +191,7 @@ mod tests {
             vec![Ident::create_local(param)],
             body,
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         )
     }
 

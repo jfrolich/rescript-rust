@@ -5,6 +5,7 @@
 //! Lambda-bearing metadata as [`NodeId`] values owned by the same compilation context.
 
 use ahash::{AHashMap, AHashSet};
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 #[cfg(test)]
@@ -642,7 +643,7 @@ mod tests {
     use crate::lambda::lam_compile_context::{Element, IdKind, LamStats};
     use crate::lambda::lam_pass_collect as tree;
     use crate::lambda::{FunctionAttribute, LambdaSwitch, SwitchDispatch, SwitchKey};
-    use crate::location::Location;
+    use LamLoc;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -868,17 +869,17 @@ mod tests {
             vec![x],
             Lambda::Lvar(x),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let makeblock = Lambda::prim(
             Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable),
             vec![Lambda::Lconst(Constant::int(1)), Lambda::Lvar(f)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let some = Lambda::prim(
             Primitive::Psome,
             vec![Lambda::Lvar(block)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let tail = Lambda::Lswitch(
             Box::new(Lambda::Lvar(optional)),
@@ -946,7 +947,7 @@ mod tests {
                 (0..arity).map(|n| id("p", 100 + n)).collect(),
                 Lambda::Lconst(Constant::int(0)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             )
         }
         fn assert_same(lambda: Lambda) {
@@ -959,7 +960,7 @@ mod tests {
             assert_eq!(expected, get_arity(&indexed, &indexed_meta, indexed.root()));
         }
         let apply_info = crate::lambda::ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             inlined: crate::lambda::InlineAttribute::Default,
             status: crate::lambda::ApplyStatus::Na,
         };
@@ -1024,7 +1025,7 @@ mod tests {
                     inline,
                     ..FunctionAttribute::default()
                 },
-                crate::location::Location::none(),
+                LamLoc::NONE,
             )
         }
         let always = id("always", 20);
@@ -1086,7 +1087,7 @@ mod tests {
                                 Lambda::prim(
                                     Primitive::PnullToOpt,
                                     vec![Lambda::Lvar(source)],
-                                    Location::none(),
+                                    LamLoc::NONE,
                                 ),
                                 Lambda::let_(
                                     crate::lambda::LetKind::Strict,
@@ -1094,7 +1095,7 @@ mod tests {
                                     Lambda::prim(
                                         Primitive::PnullUndefinedToOpt,
                                         vec![Lambda::Lvar(source)],
-                                        Location::none(),
+                                        LamLoc::NONE,
                                     ),
                                     Lambda::Lvar(null_undefined_opt),
                                 ),
@@ -1140,7 +1141,7 @@ mod tests {
     fn bound_functions_always_retain_node_ids_like_ocaml_collect() {
         fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
             Lambda::Lfunction(Box::new(crate::lambda::LFunction {
-                loc: crate::location::Location::none(),
+                loc: LamLoc::NONE,
                 arity: params.len() as i32,
                 params,
                 body: Box::new(body),
@@ -1394,7 +1395,7 @@ mod tests {
         let value = Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
             vec![Lambda::LglobalModule(module)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let lambda = Lambda::let_(
             crate::lambda::LetKind::Strict,
@@ -1434,7 +1435,7 @@ mod tests {
                     },
                 ),
                 args: vec![Lambda::LglobalModule(module)],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             }))
         }
         let static_one = id("staticOne", 50);
@@ -1490,9 +1491,9 @@ mod tests {
                 vec![Lambda::prim(
                     Primitive::Pfield(0, FieldDbgInfo::Module { name: field.into() }),
                     vec![Lambda::LglobalModule(module)],
-                    Location::none(),
+                    LamLoc::NONE,
                 )],
-                Location::none(),
+                LamLoc::NONE,
             )
         }
         fn resolved() -> ExternalArityInfo {
@@ -1597,7 +1598,7 @@ mod indexed_size_sparse_tests {
     use super::*;
     use crate::lambda::lam_primitive::{Attr, Label, ObjParam};
     use crate::lambda::{Constant, Lambda, TagInfo};
-    use crate::location::Location;
+    use LamLoc;
     use crate::parser::ast::MutableFlag;
 
     fn sparse_tag() -> TagInfo {
@@ -1620,7 +1621,7 @@ mod indexed_size_sparse_tests {
         let block = Lambda::prim(
             Primitive::Pmakeblock(sparse_tag(), Mutable::Immutable),
             vec![Lambda::const_(Constant::int(1))],
-            Location::none(),
+            LamLoc::NONE,
         );
         let store = IndexedLambda::from_lambda(block);
         assert_eq!(indexed_size(&store, store.root()), 7);
@@ -1636,7 +1637,7 @@ mod indexed_size_sparse_tests {
         let object = Lambda::prim(
             Primitive::PjsObjectCreate(params),
             vec![Lambda::const_(Constant::int(1))],
-            Location::none(),
+            LamLoc::NONE,
         );
         let store = IndexedLambda::from_lambda(object);
         assert_eq!(indexed_size(&store, store.root()), 7);

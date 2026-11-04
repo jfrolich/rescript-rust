@@ -9,6 +9,7 @@ use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
 };
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
@@ -560,7 +561,7 @@ mod tests {
     use super::*;
     use crate::ident::Ident;
     use crate::lambda::{FunctionAttribute, LambdaSwitch, LetKind, Primitive};
-    use crate::location::Location;
+    use LamLoc;
 
     #[test]
     fn test_no_side_effects_simple() {
@@ -578,7 +579,7 @@ mod tests {
             vec![Ident::create_local("x")],
             Lambda::const_(Constant::int(1)),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         assert!(no_side_effects(&func));
     }
@@ -619,7 +620,7 @@ mod tests {
                 Lambda::const_(Constant::int(1)),
                 Lambda::const_(Constant::int(2)),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(no_side_effects(&add));
 
@@ -630,7 +631,7 @@ mod tests {
                 Lambda::const_(Constant::int(10)),
                 Lambda::const_(Constant::int(2)),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(no_side_effects(&div));
 
@@ -641,7 +642,7 @@ mod tests {
                 Lambda::const_(Constant::int(10)),
                 Lambda::const_(Constant::int(0)),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(!no_side_effects(&div_zero));
 
@@ -649,7 +650,7 @@ mod tests {
         let raise = Lambda::prim(
             Primitive::Praise,
             vec![Lambda::const_(Constant::int(1))],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(!no_side_effects(&raise));
     }
@@ -662,7 +663,7 @@ mod tests {
                 is_stmt: false,
             }),
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(no_side_effects(&raw_literal));
 
@@ -672,7 +673,7 @@ mod tests {
                 is_stmt: false,
             }),
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(!no_side_effects(&raw_unknown));
 
@@ -682,7 +683,7 @@ mod tests {
                 is_stmt: true,
             }),
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         );
         assert!(no_side_effects(&raw_comment_stmt));
     }
@@ -751,7 +752,7 @@ mod tests {
     fn test_lfunction_can_be_inlined() {
         // Normal function can be inlined
         let func = LFunction {
-            loc: crate::location::Location::none(),
+            loc: LamLoc::NONE,
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -761,7 +762,7 @@ mod tests {
 
         // Async function cannot be inlined
         let async_func = LFunction {
-            loc: crate::location::Location::none(),
+            loc: LamLoc::NONE,
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -774,7 +775,7 @@ mod tests {
 
         // Function with directive cannot be inlined
         let directive_func = LFunction {
-            loc: crate::location::Location::none(),
+            loc: LamLoc::NONE,
             arity: 1,
             params: vec![Ident::create_local("x")],
             body: Box::new(Lambda::const_(Constant::int(1))),
@@ -794,7 +795,7 @@ mod tests {
             vec![Ident::create_local("x")],
             Lambda::const_(Constant::int(1)),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         assert!(safe_to_inline(&func));
 
@@ -849,11 +850,11 @@ mod tests {
             Lambda::prim(
                 Primitive::Pdebugger,
                 vec![Lambda::var(value)],
-                crate::location::Location::none(),
+                LamLoc::NONE,
             )
         };
         let func = LFunction {
-            loc: crate::location::Location::none(),
+            loc: LamLoc::NONE,
             arity: 1,
             params: vec![checked],
             body: Box::new(Lambda::if_(Lambda::var(checked), branch(), branch())),
@@ -879,7 +880,7 @@ mod tests {
     fn test_ok_to_inline_fun_when_app_folds_switch_on_constant_scrutinee_like_ocaml() {
         let x = Ident::create_local("x");
         let func = LFunction {
-            loc: crate::location::Location::none(),
+            loc: LamLoc::NONE,
             arity: 1,
             params: vec![x],
             body: Box::new(Lambda::Lswitch(
@@ -915,10 +916,10 @@ mod tests {
 #[cfg(test)]
 mod indexed_helper_extraction_tests {
     use super::*;
-    use crate::location::Location;
+    use LamLoc;
 
     fn effect() -> Lambda {
-        Lambda::prim(Primitive::Pdebugger, vec![], Location::none())
+        Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE)
     }
 
     #[test]
@@ -927,7 +928,7 @@ mod indexed_helper_extraction_tests {
             assert!(!no_side_effects(&Lambda::prim(
                 primitive,
                 vec![effect()],
-                Location::none()
+                LamLoc::NONE
             )));
         }
         assert!(!no_side_effects(&Lambda::prim(
@@ -936,7 +937,7 @@ mod indexed_helper_extraction_tests {
                 Lambda::const_(Constant::int(1)),
                 Lambda::var(Ident::create_local("d"))
             ],
-            Location::none(),
+            LamLoc::NONE,
         )));
         assert!(!no_side_effects(&Lambda::prim(
             Primitive::Pdivint,
@@ -944,7 +945,7 @@ mod indexed_helper_extraction_tests {
                 Lambda::const_(Constant::int(1)),
                 Lambda::const_(Constant::int(0))
             ],
-            Location::none(),
+            LamLoc::NONE,
         )));
         assert!(no_side_effects(&Lambda::prim(
             Primitive::Pdivint,
@@ -952,7 +953,7 @@ mod indexed_helper_extraction_tests {
                 Lambda::const_(Constant::int(1)),
                 Lambda::const_(Constant::int(2))
             ],
-            Location::none(),
+            LamLoc::NONE,
         )));
     }
 }

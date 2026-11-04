@@ -4,6 +4,7 @@
 //! useful for debugging the compilation pipeline.
 
 use std::fmt;
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
@@ -633,7 +634,7 @@ mod tests {
     use super::*;
     use crate::ident::Ident;
     use crate::lambda::{Constant, FunctionAttribute};
-    use crate::location::Location;
+    use LamLoc;
 
     #[test]
     fn test_print_var() {
@@ -666,7 +667,7 @@ mod tests {
             vec![x],
             Lambda::var(x),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let s = lambda_to_string(&func);
         assert!(s.contains("function"));
@@ -695,7 +696,7 @@ mod tests {
                 Lambda::const_(Constant::int(1)),
                 Lambda::const_(Constant::int(2)),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         let s = lambda_to_string(&add);
         assert!(s.contains("+"));

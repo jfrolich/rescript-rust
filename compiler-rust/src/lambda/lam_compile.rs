@@ -6,6 +6,7 @@
 //! that can be extended with more advanced codegen passes.
 
 use ahash::{AHashMap, AHashSet};
+use crate::lambda::{LamLoc, LamLocTable};
 use std::sync::Arc;
 
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
@@ -50,7 +51,6 @@ use crate::lambda::{
     ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo, SwitchCaseTag,
     SwitchKey, TagInfo,
 };
-use crate::location::Location;
 use tracing::info_span;
 
 use super::js_exp_make::{
@@ -100,7 +100,9 @@ pub(crate) struct StaticHandler {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LambdaDiagnostic {
-    pub(crate) loc: Location,
+    /// `None` when the compilation is location-free: the caller must retry
+    /// with locations rather than report a range it does not have.
+    pub(crate) loc: Option<crate::location::Location>,
     pub(crate) message: String,
 }
 
@@ -359,13 +361,16 @@ pub struct LambdaCompiler {
     /// inline probes do not re-read the same `.cmj` metadata
     /// (`query_external_id_info` in compiler/core/lam_compile.ml:234-244,
     /// 274-279).
-    pub(crate) cmj_lambda_cache: AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
+    pub(crate) cmj_lambda_cache: AHashMap<String, Option<Arc<crate::lambda::CmjExportLambdas>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     /// Non-constant `persistent_closed_lambda` exports recorded for
     /// cross-module inlining (compiler/core/lam_stats_export.ml:53-89).
-    pub(crate) cmj_export_lambdas: AHashMap<String, Lambda>,
+    pub(crate) cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
+    /// Resolves the location handles of the Lambda being compiled and of the
+    /// JS IR built from it; imported lambdas are rebased into it.
+    lam_locs: LamLocTable,
     pub(crate) external_module_ids: AHashMap<ExternalModuleCacheKey, Ident>,
     /// Modules registered by dynamic imports (`Lam_compile_primitive`'s
     /// `Pimport` registers them in `Lam_compile_env.cached_tbl`), which feed
@@ -480,9 +485,10 @@ impl LambdaCompiler {
             cmj_arity_cache: AHashMap::new(),
             cmj_lambda_cache: AHashMap::new(),
             cmj_export_constants: AHashMap::new(),
-            cmj_export_lambdas: AHashMap::new(),
+            cmj_export_lambdas: Default::default(),
             cmj_export_arities: AHashMap::new(),
             hoisted_functions: Vec::new(),
+            lam_locs: LamLocTable::opaque(),
             if_return_finished: AHashMap::new(),
             external_module_ids: AHashMap::new(),
             dynamic_import_modules: Vec::new(),
@@ -634,8 +640,11 @@ impl LambdaCompiler {
                 let jsx_preserve = self.jsx_preserve;
                 let module_path_resolver = self.module_path_resolver.as_ref();
                 let cross_module_inline = self.cross_module_inline;
-                let mut cmj_lambda_cache: AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
-                    AHashMap::new();
+                let mut cmj_lambda_cache: AHashMap<
+                    String,
+                    Option<Arc<crate::lambda::CmjExportLambdas>>,
+                > = AHashMap::new();
+                let lam_locs = &mut self.lam_locs;
                 let mut cmj_arity_cache: AHashMap<
                     String,
                     Option<Arc<AHashMap<String, CmjExportArity>>>,
@@ -649,8 +658,7 @@ impl LambdaCompiler {
                             resolver.module_cmj_export_lambdas(module_id.name())
                         })
                     })?
-                    .get(field_name)
-                    .cloned()
+                    .import(field_name, lam_locs)
                 };
                 let mut external_arity = |module_id: &Ident, field_name: &str| {
                     cached_cmj_table(&mut cmj_arity_cache, module_id.name(), || {
@@ -677,9 +685,12 @@ impl LambdaCompiler {
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
         self.cmj_export_lambdas = if self.cross_module_inline {
-            collect_cmj_export_lambdas_from_simplified_lambda(&simplified_result.lambda)
+            crate::lambda::CmjExportLambdas::export(
+                collect_cmj_export_lambdas_from_simplified_lambda(&simplified_result.lambda),
+                &self.lam_locs,
+            )
         } else {
-            AHashMap::new()
+            Default::default()
         };
         self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
             &simplified_result.lambda,
@@ -805,15 +816,36 @@ impl LambdaCompiler {
         self.source_map_enabled = enabled;
     }
 
-    pub(crate) fn source_loc(&self, loc: &Location) -> Option<Location> {
-        (self.source_map_enabled && !loc.loc_ghost && loc.loc_start.cnum >= 0).then_some(*loc)
+    /// The Lambda/JS location table that resolves this compiler's handles.
+    pub fn set_lam_locs(&mut self, lam_locs: LamLocTable) {
+        self.lam_locs = lam_locs;
     }
 
-    pub(crate) fn source_loc_of_lam(&self, lam: &Lambda) -> Option<Location> {
+    pub fn lam_locs(&self) -> &LamLocTable {
+        &self.lam_locs
+    }
+
+    pub(crate) fn take_lam_locs(&mut self) -> LamLocTable {
+        std::mem::take(&mut self.lam_locs)
+    }
+
+    /// Whether `loc` maps to a real source position (`Location.none` and
+    /// ghost locations do not).
+    fn mappable_loc(&self, loc: LamLoc) -> bool {
+        self.lam_locs
+            .get(loc)
+            .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
+    }
+
+    pub(crate) fn source_loc(&self, loc: &LamLoc) -> Option<LamLoc> {
+        (self.source_map_enabled && self.mappable_loc(*loc)).then_some(*loc)
+    }
+
+    pub(crate) fn source_loc_of_lam(&self, lam: &Lambda) -> Option<LamLoc> {
         if !self.source_map_enabled {
             return None;
         }
-        fn find(lam: &Lambda) -> Option<Location> {
+        fn find(lam: &Lambda) -> Option<LamLoc> {
             match lam {
                 Lambda::Lapply(apply) => Some(apply.ap_info.loc),
                 Lambda::Lprim(info) => Some(info.loc),
@@ -845,14 +877,14 @@ impl LambdaCompiler {
                 | Lambda::Lcontinue => None,
             }
         }
-        find(lam).filter(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
+        find(lam).filter(|loc| self.mappable_loc(*loc))
     }
 
     pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
         std::mem::take(&mut self.cmj_export_constants)
     }
 
-    pub(crate) fn take_cmj_export_lambdas(&mut self) -> AHashMap<String, Lambda> {
+    pub(crate) fn take_cmj_export_lambdas(&mut self) -> crate::lambda::CmjExportLambdas {
         std::mem::take(&mut self.cmj_export_lambdas)
     }
 
@@ -868,10 +900,10 @@ impl LambdaCompiler {
         self.diagnostic.take()
     }
 
-    pub(crate) fn report_diagnostic(&mut self, loc: &Location, message: &str) {
+    pub(crate) fn report_diagnostic(&mut self, loc: &LamLoc, message: &str) {
         if self.diagnostic.is_none() {
             self.diagnostic = Some(LambdaDiagnostic {
-                loc: *loc,
+                loc: self.lam_locs.get(*loc),
                 message: message.to_string(),
             });
         }
@@ -1051,7 +1083,7 @@ impl LambdaCompiler {
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
         let mut compiled = self.compile_apply_call_inner(apply);
         if compiled.expr.source_loc.is_none() {
-            compiled.expr.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
+            compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
         }
         compiled
     }
@@ -1117,8 +1149,7 @@ impl LambdaCompiler {
                 .as_ref()
                 .and_then(|resolver| resolver.module_cmj_export_lambdas(module.id.name()))
         })?
-        .get(field_name)
-        .cloned()
+        .import(field_name, &mut self.lam_locs)
     }
 
     fn resolve_cmj_module_field_lambda(
@@ -1509,7 +1540,7 @@ impl LambdaCompiler {
             prelude,
             // lam_compile.ml:1813-1815: `with_source_loc loc (E.obj ~dup:init_val props)`.
             expr: Expression {
-                source_loc: self.source_loc(loc).map(Box::new),
+                source_loc: self.source_loc(loc),
                 ..Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props))
             },
         })
@@ -1539,7 +1570,7 @@ impl LambdaCompiler {
             Lambda::Lapply(apply) => {
                 let mut compiled = self.compile_apply_call(apply);
                 if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = (self.source_loc(&apply.ap_info.loc)).map(Box::new);
+                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
                 }
                 compiled
             }
@@ -1577,7 +1608,7 @@ impl LambdaCompiler {
                     directive: (func.attr.directive.clone()).map(Box::new),
                 });
                 // lam_compile.ml:1827-1829: `with_source_loc loc (E.ocaml_fun ...)`.
-                expr.source_loc = self.source_loc(&func.loc).map(Box::new);
+                expr.source_loc = self.source_loc(&func.loc);
                 Compiled {
                     prelude: vec![],
                     expr,
@@ -1666,7 +1697,7 @@ impl LambdaCompiler {
                 if compiled.expr.source_loc.is_none()
                     && primitive_uses_default_compilation(&info.primitive, &info.args)
                 {
-                    compiled.expr.source_loc = self.source_loc(&info.loc).map(Box::new);
+                    compiled.expr.source_loc = self.source_loc(&info.loc);
                 }
                 compiled
             }
@@ -2563,7 +2594,7 @@ impl LambdaCompiler {
         if let Some(first) = block.first_mut()
             && first.source_loc.is_none()
         {
-            first.source_loc = self.source_loc_of_lam(lam).map(Box::new);
+            first.source_loc = self.source_loc_of_lam(lam);
         }
         block
     }
@@ -2899,7 +2930,7 @@ impl LambdaCompiler {
                 let mut compiled = self.compile_apply_call(apply);
                 // lam_compile.ml:1606-1609: `with_source_loc ap_loc (E.call ...)`.
                 if compiled.expr.source_loc.is_none() {
-                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc).map(Box::new);
+                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
                 }
                 let mut block = compiled.prelude;
                 block.push(Statement::return_(compiled.expr));
@@ -3673,7 +3704,7 @@ impl LambdaCompiler {
             directive: (func.attr.directive.clone()).map(Box::new),
         });
         // lam_compile.ml:436: `with_source_loc loc result`.
-        expr.source_loc = self.source_loc(&func.loc).map(Box::new);
+        expr.source_loc = self.source_loc(&func.loc);
         expr
     }
 

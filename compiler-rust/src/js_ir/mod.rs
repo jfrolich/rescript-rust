@@ -20,6 +20,7 @@ pub mod source_map;
 pub(crate) mod walk;
 
 use ahash::AHashMap;
+use crate::lambda::LamLoc;
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
@@ -99,7 +100,8 @@ pub struct ModulePathResolver {
         RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportConstant>>>>>,
     cmj_export_arities_cache:
         RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>>,
-    cmj_export_lambdas_cache: RefCell<AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>>>,
+    cmj_export_lambdas_cache:
+        RefCell<AHashMap<String, Option<Arc<crate::lambda::CmjExportLambdas>>>>,
     cmj_hoisted_exports_cache: RefCell<AHashMap<(String, Vec<String>), Option<String>>>,
 }
 
@@ -370,7 +372,7 @@ impl ModulePathResolver {
     pub fn module_cmj_export_lambdas(
         &self,
         module_name: &str,
-    ) -> Option<Arc<AHashMap<String, Lambda>>> {
+    ) -> Option<Arc<crate::lambda::CmjExportLambdas>> {
         if let Some(cached) = self
             .cmj_export_lambdas_cache
             .borrow()
@@ -1033,7 +1035,7 @@ pub struct Expression {
     /// Optional comment
     pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<Box<crate::location::Location>>,
+    pub source_loc: Option<LamLoc>,
 }
 
 impl Expression {
@@ -1774,7 +1776,7 @@ pub struct CaseClause {
     /// Optional comment
     pub comment: Option<String>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<crate::location::Location>,
+    pub source_loc: Option<LamLoc>,
 }
 
 /// Integer switch clause
@@ -1874,7 +1876,7 @@ pub struct Statement {
     /// Optional comment
     pub comment: Option<Box<String>>,
     /// Original ReScript source location used by source map generation.
-    pub source_loc: Option<Box<crate::location::Location>>,
+    pub source_loc: Option<LamLoc>,
 }
 
 impl Statement {

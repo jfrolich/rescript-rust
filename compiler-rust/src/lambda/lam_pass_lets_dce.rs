@@ -8,6 +8,7 @@
 //! justifies it. Do not introduce Rust-only logic.
 
 use ahash::AHashMap as HashMap;
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, no_side_effects};
@@ -317,7 +318,7 @@ mod tests {
         let concat = Lambda::prim(
             Primitive::Pstringadd,
             vec![Lambda::Lvar(x), Lambda::Lvar(y)],
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let inner = Lambda::let_(
             LetKind::Alias,

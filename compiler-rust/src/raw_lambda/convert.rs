@@ -22,6 +22,7 @@ use crate::lambda::{
     ApInfo, ApplyStatus, FieldDbgInfo, FunctionAttribute, InlineAttribute, Lambda, Primitive,
     SetFieldDbgInfo,
 };
+use crate::lambda::LamLoc;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::MutableFlag as ParserMutableFlag;
@@ -521,6 +522,28 @@ struct ComparisonSpecialization {
     simplify_constant_constructor: bool,
 }
 
+/// A source position the converter reads: an arena location index, or a
+/// declaration `Location` carried by the type system
+/// (`PrimitiveCoercion.pc_loc`). Node handles and coordinate reads both go
+/// through the converter so the two stay separate.
+#[derive(Debug, Clone, Copy)]
+enum SrcLoc {
+    Arena(LocIdx),
+    Decl(Location),
+}
+
+impl From<LocIdx> for SrcLoc {
+    fn from(idx: LocIdx) -> Self {
+        SrcLoc::Arena(idx)
+    }
+}
+
+impl From<Location> for SrcLoc {
+    fn from(loc: Location) -> Self {
+        SrcLoc::Decl(loc)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RawLambdaDiagnostic {
     pub loc: Location,
@@ -574,6 +597,8 @@ pub struct RawLambdaConverter<'a> {
     preserve_expanded_sparse_records: bool,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     hoisted_exports: Vec<crate::lambda::HoistedExport>,
+    /// Location handles attached to the nodes this conversion builds.
+    lam_locs: crate::raw_lambda::loc::LamLocBuilder,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -602,6 +627,7 @@ impl<'a> RawLambdaConverter<'a> {
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
+            lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
 
@@ -631,6 +657,7 @@ impl<'a> RawLambdaConverter<'a> {
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
+            lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
 
@@ -661,6 +688,7 @@ impl<'a> RawLambdaConverter<'a> {
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
+            lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
 
@@ -692,6 +720,7 @@ impl<'a> RawLambdaConverter<'a> {
             preserve_expanded_sparse_records: false,
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
+            lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
         }
     }
 
@@ -754,9 +783,9 @@ impl<'a> RawLambdaConverter<'a> {
         std::mem::take(&mut self.hoisted_exports)
     }
 
-    fn report_unknown_builtin_primitive(&mut self, loc: Location, prim_name: &str) {
+    fn report_unknown_builtin_primitive(&mut self, loc: SrcLoc, prim_name: &str) {
         if prim_name.starts_with('%') {
-            self.report_diagnostic(loc, format!("Unknown builtin primitive \"{prim_name}\""));
+            self.report_diagnostic(self.loc(loc), format!("Unknown builtin primitive \"{prim_name}\""));
         }
     }
 
@@ -797,7 +826,7 @@ impl<'a> RawLambdaConverter<'a> {
             crate::lambda::lam_compat::LetKind::StrictOpt,
             id,
             crate::raw_lambda::lower::wrap_exn_raw(
-                Location::none(),
+                LamLoc::NONE,
                 RawLambda::var(raw_id.clone()),
             ),
             handler,
@@ -954,7 +983,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn for_let_with_synced_stamps(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         param: RawLambda,
         pat: &Pattern,
         body: RawLambda,
@@ -980,7 +1009,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn for_function_with_synced_stamps(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         param: RawLambda,
         pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
@@ -1018,7 +1047,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn for_multiple_match_with_synced_stamps(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         paraml: Vec<RawLambda>,
         pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
@@ -1037,9 +1066,51 @@ impl<'a> RawLambdaConverter<'a> {
         lambda
     }
 
+    /// Semantic read of source coordinates (location-valued constants,
+    /// diagnostics). Node metadata uses [`Self::lam_loc`] instead.
     #[inline]
-    fn loc(&self, idx: LocIdx) -> Location {
-        self.arena.to_location(idx)
+    fn loc(&self, loc: impl Into<SrcLoc>) -> Location {
+        match loc.into() {
+            SrcLoc::Arena(idx) => self.arena.to_location(idx),
+            SrcLoc::Decl(loc) => loc,
+        }
+    }
+
+    /// The node handle of a source location.
+    #[inline]
+    fn lam_loc(&self, loc: impl Into<SrcLoc>) -> LamLoc {
+        match loc.into() {
+            SrcLoc::Arena(idx) => self.lam_locs.from_idx(self.arena, idx),
+            SrcLoc::Decl(loc) => self.lam_locs.intern(loc),
+        }
+    }
+
+    /// Whether a location is compiler-generated.
+    fn is_ghost_loc(&self, loc: SrcLoc) -> bool {
+        match loc {
+            SrcLoc::Arena(idx) => self.arena.get_location(idx).loc_ghost,
+            SrcLoc::Decl(loc) => loc.loc_ghost,
+        }
+    }
+
+    /// The node handle of a hoisted-function location, resolved back to its
+    /// arena index for warnings (`LocIdx::none` without coordinates).
+    fn loc_idx_for_lam_loc(&self, loc: LamLoc) -> LocIdx {
+        match self.lam_locs.get(loc) {
+            Some(loc) => self.loc_idx_for_location(&loc),
+            None => self.arena.none_loc(),
+        }
+    }
+
+    fn loc_arena(&self) -> crate::raw_lambda::loc::LocArena<'_> {
+        crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs)
+    }
+
+    /// The table resolving every location handle in the converted Lambda
+    /// (and the hoisted functions). Location-free arenas give an opaque
+    /// table without coordinate rows.
+    pub fn take_lam_locs(&self) -> crate::lambda::LamLocTable {
+        self.lam_locs.take_table(self.arena)
     }
 
     fn next_raise_count(&mut self) -> i32 {
@@ -1405,8 +1476,8 @@ impl<'a> RawLambdaConverter<'a> {
             crate::lambda::HoistedFunction {
                 binding,
                 path: segments,
-                loc: self.loc(attr_name.loc),
-                target_loc: self.loc(target_loc),
+                loc: self.lam_loc(attr_name.loc),
+                target_loc: self.lam_loc(target_loc),
             },
         );
     }
@@ -1661,13 +1732,13 @@ impl<'a> RawLambdaConverter<'a> {
             .as_ref()
             .map(crate::types::Path::name)
             .unwrap_or_else(|| ext.ext_id.name().to_string());
-        let loc = self.loc(ext.ext_loc);
+        let loc = ext.ext_loc;
         match &ext.ext_kind {
             crate::types::typedtree::ExtensionConstructorKind::Text_decl(_, _) => {
-                RawLambda::prim(Primitive::PcreateExtension(name), vec![], loc)
+                RawLambda::prim(Primitive::PcreateExtension(name), vec![], self.lam_loc(loc))
             }
             crate::types::typedtree::ExtensionConstructorKind::Text_rebind(path, _) => {
-                self.translate_extension_path_raw(path, loc)
+                self.translate_extension_path_raw(path, SrcLoc::from(loc))
             }
         }
     }
@@ -1833,8 +1904,22 @@ impl<'a> RawLambdaConverter<'a> {
         (line, start_col, end_col)
     }
 
-    fn raw_loc_constant(&self, kind: RawLocKind, loc: Location) -> RawLambda {
-        self.arena.require_locations();
+    fn raw_loc_constant(&self, kind: RawLocKind, loc: SrcLoc) -> RawLambda {
+        // `__FILE__` and `__MODULE__` read only the unit and the source file
+        // name, which a location-free arena keeps for source locations; the
+        // other kinds (and generated or declaration locations) read real
+        // coordinates and need the located retry.
+        let needs_coordinates = match kind {
+            RawLocKind::Line | RawLocKind::Loc | RawLocKind::Pos => true,
+            RawLocKind::Module if !self.unit_name.is_empty() => false,
+            RawLocKind::File | RawLocKind::Module => {
+                matches!(loc, SrcLoc::Decl(_)) || self.is_ghost_loc(loc)
+            }
+        };
+        if needs_coordinates {
+            self.arena.require_locations();
+        }
+        let loc = self.loc(loc);
         let file = self.basename_for_loc(loc);
         let (line, start_col, end_col) = Self::loc_coords(loc);
         match kind {
@@ -1865,7 +1950,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn value_path_loc_constant(
         &self,
         path: &crate::types::Path,
-        loc: Location,
+        loc: SrcLoc,
     ) -> Option<RawLambda> {
         let crate::types::Path::Pdot(prefix, name, _) = path else {
             return None;
@@ -1887,8 +1972,9 @@ impl<'a> RawLambdaConverter<'a> {
         Some(self.raw_loc_constant(kind, loc))
     }
 
-    fn failure_payload(&self, loc: Location) -> Constant {
+    fn failure_payload(&self, loc: LocIdx) -> Constant {
         self.arena.require_locations();
+        let loc = self.loc(loc);
         Constant::Block {
             tag_info: Box::new(TagInfo::Tuple),
             elements: vec![
@@ -1899,18 +1985,18 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn raise_predef_exception(&self, name: &str, stamp: i32, loc: Location) -> Lambda {
+    fn raise_predef_exception(&self, name: &str, stamp: i32, loc: LocIdx) -> Lambda {
         let exn = Lambda::global_module(predef_exception_ident(name, stamp));
         let payload = Lambda::const_(self.failure_payload(loc));
         let block = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
             vec![exn, payload],
-            loc,
+            self.lam_loc(loc),
         );
-        Lambda::prim(Primitive::Praise, vec![block], loc)
+        Lambda::prim(Primitive::Praise, vec![block], self.lam_loc(loc))
     }
 
-    fn raw_assert_failed(&self, loc: Location) -> RawLambda {
+    fn raw_assert_failed(&self, loc: LocIdx) -> RawLambda {
         RawLambda::from_lowered(self.raise_predef_exception(
             "Assert_failure",
             PREDEF_ASSERT_FAILURE_STAMP,
@@ -1918,7 +2004,7 @@ impl<'a> RawLambdaConverter<'a> {
         ))
     }
 
-    fn raw_assert_false(&self, loc: Location) -> RawLambda {
+    fn raw_assert_false(&self, loc: LocIdx) -> RawLambda {
         // OCaml translcore.ml:926-931 only lowers `assert false` to
         // Lambda.lambda_assert_false when -bs-noassertfalse is active.
         if !self.no_assert_false {
@@ -2355,7 +2441,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
-        loc: Location,
+        loc: SrcLoc,
     ) -> RawLambda {
         let env = self.env;
         self.translate_primitive_raw_in_env(loc, prim, ty, env, ty, None)
@@ -2399,7 +2485,7 @@ impl<'a> RawLambdaConverter<'a> {
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
         args: &[&Expression],
-        loc: Location,
+        loc: SrcLoc,
     ) -> Option<Primitive> {
         let prim_name = Self::raw_primitive_name(&prim.prim_name).to_string();
 
@@ -2483,7 +2569,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// `Translcore.external_result_wrap`.
     fn external_result_wrap(
-        loc: Location,
+        loc: LamLoc,
         result_type: crate::types::external_ffi_types::ReturnWrapper,
         returns_unit: bool,
         result: RawLambda,
@@ -2504,7 +2590,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// `Translcore.transl_external_application`.
     fn transl_external_application(
         &mut self,
-        loc: Location,
+        loc: SrcLoc,
         env: &crate::types::env::Env,
         prim: &crate::types::PrimitiveDescription,
         val_type: TypeExprRef,
@@ -2517,7 +2603,7 @@ impl<'a> RawLambdaConverter<'a> {
             PrimKind::KindInlineConst(c) => RawLambda::const_(Self::lambda_of_inline_const(c)),
             PrimKind::KindExternal(spec) => match spec.as_ref() {
                 ExternalFfi::FfiObjCreate(labels) => {
-                    RawLambda::prim(Primitive::PjsObjectCreate(labels.clone()), argl, loc)
+                    RawLambda::prim(Primitive::PjsObjectCreate(labels.clone()), argl, self.lam_loc(loc))
                 }
                 ExternalFfi::FfiBs(arg_types, result_type, decl) => {
                     let returns_unit = self.external_returns_unit(env, prim, val_type);
@@ -2529,14 +2615,14 @@ impl<'a> RawLambdaConverter<'a> {
                             transformed_jsx,
                         },
                         argl,
-                        loc,
+                        self.lam_loc(loc),
                     );
-                    Self::external_result_wrap(loc, *result_type, returns_unit, call)
+                    Self::external_result_wrap(self.lam_loc(loc), *result_type, returns_unit, call)
                 }
             },
             PrimKind::KindIntrinsic => {
                 self.report_diagnostic(
-                    loc,
+                    self.loc(loc),
                     format!(
                         "\x1b[1;31mError:\x1b[0m internal error, using unrecognized primitive {}",
                         prim.prim_name
@@ -2652,9 +2738,9 @@ impl<'a> RawLambdaConverter<'a> {
         match segments(&path, Vec::new()) {
             Some((module_, path)) => Some(ImportSource::ImportModule { module_, path }),
             None => {
-                let loc = self.loc(loc);
+                let loc = loc;
                 self.report_diagnostic(
-                    loc,
+                    self.loc(loc),
                     "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.".to_string(),
                 );
                 None
@@ -2688,7 +2774,7 @@ impl<'a> RawLambdaConverter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn transl_adapted_external_import(
         &mut self,
-        loc: Location,
+        loc: SrcLoc,
         env: &crate::types::env::Env,
         emn: &ExternalModuleName,
         name: &str,
@@ -2720,13 +2806,13 @@ impl<'a> RawLambdaConverter<'a> {
                     transformed_jsx: false,
                 },
                 send_args,
-                loc,
+                self.lam_loc(loc),
             )
         };
         let m = self.fresh_ident("m");
         let adapted_value = if prim.prim_arity == 0 {
             Self::external_result_wrap(
-                loc,
+                self.lam_loc(loc),
                 return_wrapper,
                 returns_unit,
                 send_call(
@@ -2742,7 +2828,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .map(|i| self.fresh_ident(&format!("prim{i}")))
                 .collect();
             let body = Self::external_result_wrap(
-                loc,
+                self.lam_loc(loc),
                 return_wrapper,
                 returns_unit,
                 send_call(
@@ -2758,11 +2844,11 @@ impl<'a> RawLambdaConverter<'a> {
                 params,
                 body,
                 FunctionAttribute::default(),
-                loc,
+                self.lam_loc(loc),
             )
         };
         let callback =
-            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default(), loc);
+            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default(), self.lam_loc(loc));
         RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "then".to_string(),
@@ -2785,16 +2871,16 @@ impl<'a> RawLambdaConverter<'a> {
                         path: vec![],
                     })),
                     vec![],
-                    loc,
+                    self.lam_loc(loc),
                 ),
                 callback,
             ],
-            loc,
+            self.lam_loc(loc),
         )
     }
 
     /// `Translcore.transl_dynamic_import`.
-    fn transl_dynamic_import(&mut self, loc: Location, arg: &Expression) -> RawLambda {
+    fn transl_dynamic_import(&mut self, loc: SrcLoc, arg: &Expression) -> RawLambda {
         use crate::types::decl::PrimKind;
         use crate::types::external_ffi_types::{DeclKind, ExternalFfi, ModuleSource};
         if let ExpressionDesc::Texp_ident(_, _, desc) = &arg.exp_desc
@@ -2821,7 +2907,7 @@ impl<'a> RawLambdaConverter<'a> {
             );
         }
         match self.import_source_of_arg(arg) {
-            Some(source) => RawLambda::prim(Primitive::Pimport(Box::new(source)), vec![], loc),
+            Some(source) => RawLambda::prim(Primitive::Pimport(Box::new(source)), vec![], self.lam_loc(loc)),
             None => RawLambda::unit(),
         }
     }
@@ -2868,7 +2954,7 @@ impl<'a> RawLambdaConverter<'a> {
         _tag: i32,
         tag_info: TagInfo,
         elems: Vec<RawLambda>,
-        loc: Location,
+        loc: LocIdx,
     ) -> RawLambda {
         if let Some(constants) = elems
             .iter()
@@ -2883,7 +2969,7 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::prim(
                 Primitive::Pmakeblock(tag_info, Mutable::Immutable),
                 elems,
-                loc,
+                self.lam_loc(loc),
             )
         }
     }
@@ -2948,7 +3034,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn convert_construct_raw(
         &mut self,
-        loc: Location,
+        loc: SrcLoc,
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
     ) -> RawLambda {
@@ -2960,7 +3046,7 @@ impl<'a> RawLambdaConverter<'a> {
                         extended_expression,
                         ..
                     } => self.convert_record_raw(
-                        self.loc(arg.exp_loc),
+                        SrcLoc::from(arg.exp_loc),
                         fields,
                         extended_expression.as_deref(),
                         inlined_record_representation(cstr),
@@ -2978,7 +3064,7 @@ impl<'a> RawLambdaConverter<'a> {
                         let (record_fields, logical_field_count) =
                             self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
                         self.convert_record_raw(
-                            self.loc(arg.exp_loc),
+                            SrcLoc::from(arg.exp_loc),
                             &record_fields,
                             None,
                             inlined_record_representation(cstr),
@@ -3051,7 +3137,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                     args_lam,
-                    loc,
+                    self.lam_loc(loc),
                 )
             }
         }
@@ -3059,7 +3145,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn convert_record_raw(
         &mut self,
-        loc: Location,
+        loc: SrcLoc,
         fields: &[(
             Located<LidentIdx>,
             LabelDescription,
@@ -3123,7 +3209,7 @@ impl<'a> RawLambdaConverter<'a> {
                             RawLambda::prim(
                                 Primitive::Pfield(pos, info),
                                 vec![base_var.clone()],
-                                self.loc(lid.loc),
+                                self.lam_loc(lid.loc),
                             )
                         } else {
                             RawLambda::unit()
@@ -3149,7 +3235,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 Mutable::Mutable,
                             ),
                             elems,
-                            loc,
+                            self.lam_loc(loc),
                         )
                     } else {
                         self.raw_block_or_prim(
@@ -3192,7 +3278,7 @@ impl<'a> RawLambdaConverter<'a> {
                         RawLambda::prim(
                             Primitive::Pmakeblock(tag_info, Mutable::Mutable),
                             elems,
-                            loc,
+                            self.lam_loc(loc),
                         )
                     } else {
                         self.raw_block_or_prim(tag, tag_info, elems, loc)
@@ -3225,7 +3311,7 @@ impl<'a> RawLambdaConverter<'a> {
                             },
                         ),
                         args,
-                        loc,
+                        self.lam_loc(loc),
                     )
                 }
             };
@@ -3259,7 +3345,7 @@ impl<'a> RawLambdaConverter<'a> {
             let update = RawLambda::prim(
                 Primitive::Psetfield(pos, info),
                 vec![RawLambda::var(copy_id), self.convert_expr_raw(expr)],
-                loc,
+                self.lam_loc(loc),
             );
             body = RawLambda::seq(update, body);
         }
@@ -3267,7 +3353,7 @@ impl<'a> RawLambdaConverter<'a> {
         RawLambda::let_(
             LetKind::Strict,
             copy_id,
-            RawLambda::prim(Primitive::Pduprecord, vec![init_expr], loc),
+            RawLambda::prim(Primitive::Pduprecord, vec![init_expr], self.lam_loc(loc)),
             body,
         )
     }
@@ -3418,7 +3504,7 @@ impl<'a> RawLambdaConverter<'a> {
         mid: &Ident,
         ids: &[(Ident, usize)],
         body: RawLambda,
-        loc: Location,
+        loc: LocIdx,
     ) -> RawLambda {
         ids.iter().rev().fold(body, |acc, (id, pos)| {
             RawLambda::let_(
@@ -3432,7 +3518,7 @@ impl<'a> RawLambdaConverter<'a> {
                         },
                     ),
                     vec![RawLambda::var(*mid)],
-                    loc,
+                    self.lam_loc(loc),
                 ),
                 acc,
             )
@@ -3610,7 +3696,7 @@ impl<'a> RawLambdaConverter<'a> {
             });
             let Some((_top_id, _positions, Some(target_id))) = resolved else {
                 self.report_warning(
-                    self.loc_idx_for_location(&hoisted.loc),
+                    self.loc_idx_for_lam_loc(hoisted.loc),
                     Warning::MisplacedAttribute {
                         name: "res.hoistedFunction".to_string(),
                     },
@@ -3619,7 +3705,7 @@ impl<'a> RawLambdaConverter<'a> {
             };
             if !hoisted.binding.same(&target_id) {
                 self.report_warning(
-                    self.loc_idx_for_location(&hoisted.loc),
+                    self.loc_idx_for_lam_loc(hoisted.loc),
                     Warning::MisplacedAttribute {
                         name: "res.hoistedFunction".to_string(),
                     },
@@ -3635,7 +3721,7 @@ impl<'a> RawLambdaConverter<'a> {
             let js_name = crate::js_ir::printer::convert_ident_name(&export_name);
             if occupied.contains(&js_name) {
                 self.report_diagnostic(
-                    hoisted.target_loc,
+                    self.lam_locs.get(hoisted.target_loc).unwrap_or_else(Location::none),
                     format!(
                         "Cannot hoist this function as `{export_name}` because that name is already used by a top-level binding."
                     ),
@@ -3677,7 +3763,7 @@ impl<'a> RawLambdaConverter<'a> {
             true,
             &self.global_path(),
             cc,
-            Location::none(),
+            LamLoc::NONE,
         );
         self.type_ctx.set_typeopt_cache(false);
         self.materialize_hoisted_exports(result)
@@ -3715,7 +3801,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         env: &crate::types::env::Env,
         path: &crate::types::Path,
-        loc: Location,
+        loc: SrcLoc,
     ) -> RawLambda {
         match path {
             crate::types::Path::Pident(id) => {
@@ -3745,7 +3831,7 @@ impl<'a> RawLambdaConverter<'a> {
                         },
                     ),
                     vec![prefix_lam],
-                    loc,
+                    self.lam_loc(loc),
                 )
             }
             crate::types::Path::Papply(_, _) => RawLambda::unit(),
@@ -4236,7 +4322,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn translate_module_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
+    fn translate_module_path_raw(&mut self, path: &crate::types::Path, loc: SrcLoc) -> RawLambda {
         let normalized = self.normalize_module_path_in_env(self.env, path);
         self.translate_normal_path_raw_in_env(self.env, &normalized, loc)
     }
@@ -4245,13 +4331,13 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         env: &crate::types::env::Env,
         path: &crate::types::Path,
-        loc: Location,
+        loc: SrcLoc,
     ) -> RawLambda {
         let normalized = self.normalize_module_path_in_env(env, path);
         self.translate_normal_path_raw_in_env(env, &normalized, loc)
     }
 
-    fn translate_value_path_raw(&mut self, path: &crate::types::Path, loc: Location) -> RawLambda {
+    fn translate_value_path_raw(&mut self, path: &crate::types::Path, loc: SrcLoc) -> RawLambda {
         if let Some(lam) = self.value_path_loc_constant(path, loc) {
             return lam;
         }
@@ -4266,7 +4352,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         env: &crate::types::env::Env,
         path: &crate::types::Path,
-        loc: Location,
+        loc: SrcLoc,
     ) -> RawLambda {
         if let Some(lam) = self.value_path_loc_constant(path, loc) {
             return lam;
@@ -4281,7 +4367,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn translate_extension_path_raw(
         &mut self,
         path: &crate::types::Path,
-        loc: Location,
+        loc: SrcLoc,
     ) -> RawLambda {
         self.translate_value_path_raw(path, loc)
     }
@@ -4446,7 +4532,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn wrap_id_pos_list_raw<F>(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         id_pos_list: &[(Ident, usize, ModuleCoercion)],
         mut get_field: F,
         lam: RawLambda,
@@ -4488,7 +4574,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn apply_coercion_result_raw(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         strict: LetKind,
         funct: RawLambda,
         param: Ident,
@@ -4504,7 +4590,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ap_func: Box::new(RawLambda::var(id)),
                     ap_args: vec![arg],
                     ap_info: ApInfo {
-                        loc,
+                        loc: self.lam_loc(loc),
                         inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
@@ -4519,14 +4605,14 @@ impl<'a> RawLambdaConverter<'a> {
                     is_a_functor: true,
                     ..FunctionAttribute::default()
                 },
-                loc,
+                self.lam_loc(loc),
             )
         })
     }
 
     fn apply_coercion_raw(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         strict: LetKind,
         coercion: &ModuleCoercion,
         arg: RawLambda,
@@ -4553,12 +4639,12 @@ impl<'a> RawLambdaConverter<'a> {
                                         FieldDbgInfo::Module { name: name.clone() },
                                     ),
                                     vec![named.clone()],
-                                    loc,
+                                    self.lam_loc(loc),
                                 );
                                 this.apply_coercion_raw(loc, LetKind::Alias, cc, field)
                             })
                             .collect(),
-                        loc,
+                        self.lam_loc(loc),
                     );
                     this.wrap_id_pos_list_raw(
                         loc,
@@ -4572,7 +4658,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     },
                                 ),
                                 vec![named.clone()],
-                                loc,
+                                self.lam_loc(loc),
                             )
                         },
                         lam,
@@ -4592,15 +4678,15 @@ impl<'a> RawLambdaConverter<'a> {
                 self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
             }
             ModuleCoercion::Tcoerce_primitive(pc) => {
-                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc)
+                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, SrcLoc::from(pc.pc_loc))
             }
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
                     let translated = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
-                        this.translate_normal_path_raw_in_env(env.as_ref(), path, loc)
+                        this.translate_normal_path_raw_in_env(env.as_ref(), path, SrcLoc::from(loc))
                     } else {
                         let env = this.env;
-                        this.translate_normal_path_raw_in_env(env, path, loc)
+                        this.translate_normal_path_raw_in_env(env, path, SrcLoc::from(loc))
                     };
                     this.apply_coercion_raw(loc, LetKind::Alias, inner, translated)
                 })
@@ -4613,7 +4699,7 @@ impl<'a> RawLambdaConverter<'a> {
         fields: &[Ident],
         is_top_level: bool,
         cc: &ModuleCoercion,
-        loc: Location,
+        loc: LocIdx,
     ) -> RawLambda {
         match cc {
             ModuleCoercion::Tcoerce_none => {
@@ -4635,7 +4721,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
-                    loc,
+                    self.lam_loc(loc),
                 )
             }
             ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
@@ -4655,7 +4741,7 @@ impl<'a> RawLambdaConverter<'a> {
                             block_fields.push(self.transl_primitive_raw(
                                 &pc.pc_desc,
                                 pc.pc_type,
-                                pc.pc_loc,
+                                SrcLoc::from(pc.pc_loc),
                             ));
                         }
                         _ => {
@@ -4705,7 +4791,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let lam = RawLambda::prim(
                     Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
-                    loc,
+                    self.lam_loc(loc),
                 );
                 let filtered_id_pos = id_pos_list
                     .iter()
@@ -4741,7 +4827,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
-                    loc,
+                    self.lam_loc(loc),
                 )
             }
         }
@@ -4764,7 +4850,7 @@ impl<'a> RawLambdaConverter<'a> {
             // path reifies the module reference, so static aliases must not
             // contribute a required JS import on their own.
             return self.apply_coercion_raw(
-                self.loc(module_expr.mod_loc),
+                module_expr.mod_loc,
                 LetKind::Alias,
                 cc,
                 RawLambda::const_(Constant::ModuleAlias),
@@ -4780,7 +4866,7 @@ impl<'a> RawLambdaConverter<'a> {
                     false,
                     rootpath,
                     cc,
-                    self.loc(module_expr.mod_loc),
+                    module_expr.mod_loc,
                 )
             }
             ModuleExprDesc::Tmod_constraint(inner, _, _, inner_cc) => {
@@ -4788,21 +4874,21 @@ impl<'a> RawLambdaConverter<'a> {
                 self.convert_module_expr_raw_with_coercion(inner, rootpath, &composed)
             }
             ModuleExprDesc::Tmod_ident(path, _) => {
-                let loc = self.loc(module_expr.mod_loc);
+                let loc = module_expr.mod_loc;
                 let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
-                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc)
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, SrcLoc::from(loc))
                 } else {
-                    self.translate_module_path_raw(path, loc)
+                    self.translate_module_path_raw(path, SrcLoc::from(loc))
                 };
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
             ModuleExprDesc::Tmod_unpack(expr, _) => {
-                let loc = self.loc(module_expr.mod_loc);
+                let loc = module_expr.mod_loc;
                 let arg = self.convert_expr_raw(expr);
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
             ModuleExprDesc::Tmod_functor(param, _, _, body) => {
-                let loc = self.loc(module_expr.mod_loc);
+                let loc = module_expr.mod_loc;
                 let inline_attribute = self.get_inline_attribute_from(&module_expr.mod_attributes);
                 let (arg_coercion, res_coercion) = match cc {
                     ModuleCoercion::Tcoerce_none => {
@@ -4838,11 +4924,11 @@ impl<'a> RawLambdaConverter<'a> {
                         inline: inline_attribute,
                         ..FunctionAttribute::default()
                     },
-                    loc,
+                    self.lam_loc(loc),
                 )
             }
             ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
-                let loc = self.loc(module_expr.mod_loc);
+                let loc = module_expr.mod_loc;
                 let inlined = self.get_inlined_attribute_from(&funct.mod_attributes);
                 let funct_lam = self.with_inlined_attribute_check_suppressed(|this| {
                     this.convert_module_expr_raw_with_coercion(
@@ -4855,7 +4941,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ap_func: Box::new(funct_lam),
                     ap_args: vec![self.convert_module_expr_raw_with_coercion(arg, &None, ccarg)],
                     ap_info: ApInfo {
-                        loc,
+                        loc: self.lam_loc(loc),
                         inlined,
                         status: ApplyStatus::Na,
                     },
@@ -4925,7 +5011,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.check_module_attribute(inner);
                     self.note_possible_required_modules_from_module_expr(inner);
                     return self.apply_coercion_raw(
-                        self.loc(inner.mod_loc),
+                        inner.mod_loc,
                         LetKind::Alias,
                         &composed,
                         RawLambda::const_(Constant::ModuleAlias),
@@ -4943,17 +5029,17 @@ impl<'a> RawLambdaConverter<'a> {
                 {
                     self.note_possible_required_modules_from_module_expr(module_expr);
                     return self.apply_coercion_raw(
-                        self.loc(module_expr.mod_loc),
+                        module_expr.mod_loc,
                         LetKind::Alias,
                         cc,
                         RawLambda::const_(Constant::ModuleAlias),
                     );
                 }
-                let loc = self.loc(module_expr.mod_loc);
+                let loc = module_expr.mod_loc;
                 let arg = if let Some(env) = self.env_for_module_expr(module_expr) {
-                    self.translate_module_path_raw_in_env(env.as_ref(), path, loc)
+                    self.translate_module_path_raw_in_env(env.as_ref(), path, SrcLoc::from(loc))
                 } else {
-                    self.translate_module_path_raw(path, loc)
+                    self.translate_module_path_raw(path, SrcLoc::from(loc))
                 };
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, arg)
             }
@@ -5384,7 +5470,7 @@ impl<'a> RawLambdaConverter<'a> {
                             RawLambda::Lvar(binding.id),
                             binding.rhs.clone(),
                         ],
-                        Location::none(),
+                        LamLoc::NONE,
                     )
                 };
                 result = RawLambda::seq(patch, result);
@@ -5407,7 +5493,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::prim(
                         Primitive::PinitMod,
                         vec![loc.clone(), shape.clone()],
-                        Location::none(),
+                        LamLoc::NONE,
                     )
                 };
                 result = RawLambda::let_(LetKind::Strict, binding.id, init, result);
@@ -5444,13 +5530,13 @@ impl<'a> RawLambdaConverter<'a> {
             .iter()
             .map(|mb| {
                 let id = mb.mb_id;
-                let loc = self.loc(mb.mb_expr.mod_loc);
+                let loc = mb.mb_expr.mod_loc;
                 let shape = self.init_shape(&mb.mb_expr);
                 let rhs = self
                     .convert_module_expr_raw(&mb.mb_expr, &Self::field_path(rootpath, &mb.mb_id));
                 RecModuleBinding {
                     id,
-                    loc,
+                    loc: self.loc(loc),
                     init: shape,
                     rhs,
                 }
@@ -5468,7 +5554,7 @@ impl<'a> RawLambdaConverter<'a> {
         is_top_level: bool,
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
-        loc: Location,
+        loc: LocIdx,
     ) -> RawLambda {
         let Some((item, rem)) = items.split_first() else {
             return self.make_module_block_raw(fields, is_top_level, cc, loc);
@@ -5578,7 +5664,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 let body =
-                    self.rebind_included_idents_raw(&mid, &ids, body, self.loc(incl.incl_loc));
+                    self.rebind_included_idents_raw(&mid, &ids, body, incl.incl_loc);
 
                 RawLambda::let_(
                     Self::pure_module(&incl.incl_mod),
@@ -5705,7 +5791,7 @@ impl<'a> RawLambdaConverter<'a> {
                     let warn_loc = Some(expr.exp_loc);
                     if let Some(env) = self.env_for_expr(expr) {
                         self.translate_primitive_raw_in_env(
-                            self.loc(expr.exp_loc),
+                            SrcLoc::from(expr.exp_loc),
                             prim,
                             expr.exp_type,
                             env.as_ref(),
@@ -5715,7 +5801,7 @@ impl<'a> RawLambdaConverter<'a> {
                     } else {
                         let env = self.env;
                         self.translate_primitive_raw_in_env(
-                            self.loc(expr.exp_loc),
+                            SrcLoc::from(expr.exp_loc),
                             prim,
                             expr.exp_type,
                             env,
@@ -5729,10 +5815,10 @@ impl<'a> RawLambdaConverter<'a> {
                         self.translate_value_path_raw_in_env(
                             env.as_ref(),
                             path,
-                            self.loc(expr.exp_loc),
+                            SrcLoc::from(expr.exp_loc),
                         )
                     } else {
-                        self.translate_value_path_raw(path, self.loc(expr.exp_loc))
+                        self.translate_value_path_raw(path, SrcLoc::from(expr.exp_loc))
                     }
                 }
             },
@@ -5756,7 +5842,7 @@ impl<'a> RawLambdaConverter<'a> {
                     *async_,
                     directive,
                     inline,
-                    self.loc(expr.exp_loc),
+                    expr.exp_loc,
                 )
             }
             // translcore.ml `Texp_tagged_template`: `transl_exp tag ::
@@ -5776,7 +5862,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::PtaggedTemplate(raw_sources.clone()),
                     args,
-                    self.loc(expr.exp_loc),
+                    self.lam_loc(expr.exp_loc),
                 )
             }
             ExpressionDesc::Texp_template { segments, values } => {
@@ -5787,7 +5873,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::Ptemplate(segments.clone()),
                     args,
-                    self.loc(expr.exp_loc),
+                    self.lam_loc(expr.exp_loc),
                 )
             }
             ExpressionDesc::Texp_apply {
@@ -5797,7 +5883,7 @@ impl<'a> RawLambdaConverter<'a> {
                 transformed_jsx,
             } => self.convert_apply_raw(
                 expr.exp_loc,
-                self.loc(expr.exp_loc),
+                expr.exp_loc,
                 funct,
                 args,
                 *partial,
@@ -5813,7 +5899,7 @@ impl<'a> RawLambdaConverter<'a> {
                 if !exn_cases.is_empty() {
                     // Match with exception cases: wrap in try-with + static catch.
                     // Matches OCaml's transl_match logic from translcore.ml.
-                    let loc = self.loc(expr.exp_loc);
+                    let loc = expr.exp_loc;
                     let partial = *partial;
                     self.compile_match_with_exceptions_raw(
                         loc, scrut, cases, exn_cases, partial, expr, exn_id,
@@ -5839,13 +5925,13 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     }
                     let partial = *partial;
-                    let loc = self.loc(expr.exp_loc);
+                    let loc = expr.exp_loc;
                     // Use full matching compiler (ported from OCaml's matching.ml)
                     self.compile_full_matching(loc, scrut, cases, partial)
                 }
             }
             ExpressionDesc::Texp_try(body, cases) => {
-                let _loc = self.loc(expr.exp_loc);
+                let _loc = expr.exp_loc;
                 let exn_id = self.name_pattern_ident("exn", cases);
                 let handler = self.compile_trywith_handler_raw(&exn_id, cases);
                 let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
@@ -5857,10 +5943,10 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|item| self.convert_expr_raw(item))
                     .collect::<Vec<_>>();
-                self.raw_block_or_prim(0, TagInfo::Tuple, elems, self.loc(expr.exp_loc))
+                self.raw_block_or_prim(0, TagInfo::Tuple, elems, expr.exp_loc)
             }
             ExpressionDesc::Texp_construct(_, cstr, args) => {
-                self.convert_construct_raw(self.loc(expr.exp_loc), cstr, args)
+                self.convert_construct_raw(SrcLoc::from(expr.exp_loc), cstr, args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => raw_polyvariant_const(tag),
@@ -5875,7 +5961,7 @@ impl<'a> RawLambdaConverter<'a> {
                             ))),
                             arg_lam,
                         ],
-                        self.loc(expr.exp_loc),
+                        expr.exp_loc,
                     )
                 }
             },
@@ -5894,7 +5980,7 @@ impl<'a> RawLambdaConverter<'a> {
                 extended_expression,
                 ..
             } => self.convert_record_raw(
-                self.loc(expr.exp_loc),
+                SrcLoc::from(expr.exp_loc),
                 fields,
                 extended_expression.as_deref(),
                 None,
@@ -5909,7 +5995,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (record_fields, logical_field_count) =
                     self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
                 self.convert_record_raw(
-                    self.loc(expr.exp_loc),
+                    SrcLoc::from(expr.exp_loc),
                     &record_fields,
                     None,
                     None,
@@ -5923,7 +6009,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::prim(
                         Primitive::Pfield(pos, info),
                         vec![self.convert_expr_raw(record)],
-                        self.loc(expr.exp_loc),
+                        self.lam_loc(expr.exp_loc),
                     )
                 } else {
                     RawLambda::unit()
@@ -5934,7 +6020,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::prim(
                         Primitive::Psetfield(pos, info),
                         vec![self.convert_expr_raw(record), self.convert_expr_raw(value)],
-                        self.loc(expr.exp_loc),
+                        self.lam_loc(expr.exp_loc),
                     )
                 } else {
                     RawLambda::unit()
@@ -5945,7 +6031,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|item| self.convert_expr_raw(item))
                     .collect::<Vec<_>>();
-                RawLambda::prim(Primitive::Pmakearray, elems, self.loc(expr.exp_loc))
+                RawLambda::prim(Primitive::Pmakearray, elems, self.lam_loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_sequence(a, b) => {
                 // OCaml builds `Lsequence (transl_exp a, transl_exp b)`, and the
@@ -6009,13 +6095,13 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::PjsObjectCreate(labels),
                     args,
-                    self.loc(expr.exp_loc),
+                    self.lam_loc(expr.exp_loc),
                 )
             }
             ExpressionDesc::Texp_object_get(obj_expr, name) => RawLambda::prim(
                 Primitive::PjsObjectGet(name.txt.clone()),
                 vec![self.convert_expr_raw(obj_expr)],
-                self.loc(expr.exp_loc),
+                self.lam_loc(expr.exp_loc),
             ),
             ExpressionDesc::Texp_object_set(obj_expr, name, value) => {
                 // OCaml evaluates the list literal `[transl_exp expr;
@@ -6025,7 +6111,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(
                     Primitive::PjsObjectSet(name.txt.clone()),
                     vec![obj, value],
-                    self.loc(expr.exp_loc),
+                    self.lam_loc(expr.exp_loc),
                 )
             }
             ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
@@ -6041,7 +6127,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.convert_expr_raw(body),
             ),
             ExpressionDesc::Texp_extension_constructor(_, path) => {
-                self.translate_extension_path_raw(path, self.loc(expr.exp_loc))
+                self.translate_extension_path_raw(path, SrcLoc::from(expr.exp_loc))
             }
             ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_for_pack_raw(modl),
             ExpressionDesc::Texp_assert(inner_expr) => {
@@ -6050,14 +6136,14 @@ impl<'a> RawLambdaConverter<'a> {
                     ExpressionDesc::Texp_construct(_, ref cstr, ref args)
                         if cstr.cstr_name == "false" && args.is_empty()
                 ) {
-                    self.raw_assert_false(self.loc(expr.exp_loc))
+                    self.raw_assert_false(expr.exp_loc)
                 } else if self.noassert {
                     // OCaml translcore.ml:926-931 handles `assert false`
                     // first, then lowers ordinary assertions to unit under
                     // Clflags.noassert.
                     RawLambda::unit()
                 } else {
-                    let failure = self.raw_assert_failed(self.loc(expr.exp_loc));
+                    let failure = self.raw_assert_failed(expr.exp_loc);
                     RawLambda::LifThenElse(
                         Box::new(self.convert_expr_raw(inner_expr)),
                         Box::new(RawLambda::unit()),
@@ -6091,7 +6177,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// the simple matchers can't handle.
     fn compile_full_matching(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         scrut: &Expression,
         cases: &[Case],
         partial: Partial,
@@ -6109,7 +6195,8 @@ impl<'a> RawLambdaConverter<'a> {
 
         let scrut_lam = self.convert_expr_raw(scrut);
 
-        let loc_for_handler = loc;
+        let loc_for_handler = self.loc(loc);
+        let node_loc = self.lam_loc(loc);
         let fname = self.basename_for_loc(loc_for_handler);
         let arena = self.arena;
         let handler_fun = || {
@@ -6132,9 +6219,9 @@ impl<'a> RawLambdaConverter<'a> {
                 args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                     args: vec![exn, payload],
-                    loc: loc_for_handler,
+                    loc: node_loc,
                 }))],
-                loc: loc_for_handler,
+                loc: node_loc,
             }))
         };
         self.compile_matching_with_synced_stamps(handler_fun, scrut_lam, pat_act_list, partial)
@@ -6155,7 +6242,7 @@ impl<'a> RawLambdaConverter<'a> {
     ///   )
     fn compile_match_with_exceptions_raw(
         &mut self,
-        loc: Location,
+        loc: LocIdx,
         scrut: &Expression,
         cases: &[Case],
         exn_cases: &[Case],
@@ -6181,7 +6268,8 @@ impl<'a> RawLambdaConverter<'a> {
             // Note: do NOT allocate a raise_count here for Partial matches.
             // compile_matching allocates its own raise_num internally.
             let pat_act_list = self.cases_to_pat_act_list(cases);
-            let loc_for_handler = loc;
+            let loc_for_handler = self.loc(loc);
+            let node_loc = self.lam_loc(loc);
             let fname = self.basename_for_loc(loc_for_handler);
             let arena = self.arena;
             let handler_fun = || {
@@ -6204,9 +6292,9 @@ impl<'a> RawLambdaConverter<'a> {
                     args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
                         primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                         args: vec![exn, payload],
-                        loc: loc_for_handler,
+                        loc: node_loc,
                     }))],
-                    loc: loc_for_handler,
+                    loc: node_loc,
                 }))
             };
             self.compile_matching_with_synced_stamps(
@@ -6297,7 +6385,7 @@ impl<'a> RawLambdaConverter<'a> {
             };
         }
 
-        let pat_loc = self.loc(pat.pat_loc);
+        let pat_loc = pat.pat_loc;
         let mut result = body;
 
         if constructor_has_optional_shape(cstr) {
@@ -6324,7 +6412,7 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     });
                 let payload =
-                    RawLambda::prim(from_option, vec![RawLambda::var(*scrut_id)], pat_loc);
+                    RawLambda::prim(from_option, vec![RawLambda::var(*scrut_id)], self.lam_loc(pat_loc));
                 // For Tpat_any, OCaml's matching.ml still creates a binding
                 if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
                     let match_id = self.fresh_ident("match");
@@ -6363,7 +6451,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 },
                             ),
                             vec![RawLambda::var(*scrut_id)],
-                            pat_loc,
+                            self.lam_loc(pat_loc),
                         ),
                         crate::types::VariantConstructorCase::Constant(_) => {
                             unreachable!("constant constructor payload")
@@ -6373,7 +6461,7 @@ impl<'a> RawLambdaConverter<'a> {
                 crate::types::ConstructorKind::Extension(_) => RawLambda::prim(
                     Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
                     vec![RawLambda::var(*scrut_id)],
-                    pat_loc,
+                    self.lam_loc(pat_loc),
                 ),
             };
             // For Tpat_any, OCaml's matching.ml still creates a binding
@@ -6462,13 +6550,13 @@ impl<'a> RawLambdaConverter<'a> {
                         (tmp, Some((tmp, scrut)))
                     }
                 };
-                let pat_loc = self.loc(pat.pat_loc);
+                let pat_loc = pat.pat_loc;
                 let mut result = body;
                 for (idx, item) in items.iter().enumerate() {
                     let field = RawLambda::prim(
                         Primitive::Pfield(idx as i32, FieldDbgInfo::Tuple),
                         vec![RawLambda::var(tmp)],
-                        pat_loc,
+                        self.lam_loc(pat_loc),
                     );
                     // OCaml's make_tuple_matching always generates field access
                     // for ALL positions, even wildcards. The wildcard gets a
@@ -6510,7 +6598,7 @@ impl<'a> RawLambdaConverter<'a> {
                         RawLambda::prim(
                             Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
                             vec![RawLambda::var(tmp)],
-                            self.loc(pat.pat_loc),
+                            self.lam_loc(pat.pat_loc),
                         ),
                         body,
                     ),
@@ -6624,15 +6712,15 @@ impl<'a> RawLambdaConverter<'a> {
                             };
 
                             let loc = if let Some((lid, _, _)) = mentioned.get(pos) {
-                                self.loc(lid.loc)
+                                lid.loc
                             } else {
-                                self.loc(pat_loc_idx)
+                                pat_loc_idx
                             };
 
                             let field = RawLambda::prim(
                                 Primitive::Pfield(field_pos, info),
                                 vec![RawLambda::var(tmp)],
-                                loc,
+                                self.lam_loc(loc),
                             );
 
                             if let Some((_, _, inner_pat)) = mentioned.get(pos) {
@@ -6662,7 +6750,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 RawLambda::prim(
                                     Primitive::Pfield(pos, info),
                                     vec![RawLambda::var(tmp)],
-                                    self.loc(lid.loc),
+                                    self.lam_loc(lid.loc),
                                 )
                             }
                         };
@@ -6692,7 +6780,7 @@ impl<'a> RawLambdaConverter<'a> {
                         (tmp, Some((tmp, scrut)))
                     }
                 };
-                let pat_loc = self.loc(pat.pat_loc);
+                let pat_loc = pat.pat_loc;
                 let mut result = body;
                 for (idx, item) in items.iter().enumerate() {
                     let field = RawLambda::prim(
@@ -6701,7 +6789,7 @@ impl<'a> RawLambdaConverter<'a> {
                             RawLambda::var(tmp),
                             RawLambda::const_(Constant::int(idx as i32)),
                         ],
-                        pat_loc,
+                        self.lam_loc(pat_loc),
                     );
                     result = self.bind_irrefutable_pattern_raw(item, field, result);
                 }
@@ -6745,7 +6833,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let payload = RawLambda::prim(
                     Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
                     vec![scrut],
-                    self.loc(pat.pat_loc),
+                    self.lam_loc(pat.pat_loc),
                 );
                 self.bind_irrefutable_pattern_raw(inner, payload, body)
             }
@@ -6816,9 +6904,9 @@ impl<'a> RawLambdaConverter<'a> {
                         } else {
                             // Use matching compiler's for_let (OCaml: Matching.for_let)
                             let pat_act_list = vec![(&binding.vb_pat, acc.into())];
-                            let loc = self.loc(binding.vb_pat.pat_loc);
-                            let fname = self.basename_for_loc(loc);
-                            let loc_for_handler = loc;
+                            let loc = binding.vb_pat.pat_loc;
+                            let loc_for_handler = self.loc(loc);
+                            let fname = self.basename_for_loc(loc_for_handler);
                             let arena = self.arena;
                             let handler_fun = move || {
                                 arena.require_locations();
@@ -6845,9 +6933,9 @@ impl<'a> RawLambdaConverter<'a> {
                                             Mutable::Immutable,
                                         ),
                                         args: vec![exn, payload],
-                                        loc: Location::none(),
+                                        loc: LamLoc::NONE,
                                     }))],
-                                    loc: Location::none(),
+                                    loc: LamLoc::NONE,
                                 }))
                             };
                             acc = self.compile_matching_with_synced_stamps(
@@ -6898,7 +6986,7 @@ impl<'a> RawLambdaConverter<'a> {
                         acc = RawLambda::let_(kind, id, value, acc);
                     } else if self.is_irrefutable_pattern(&binding.vb_pat) {
                         acc = self.for_let_with_synced_stamps(
-                            self.loc(binding.vb_pat.pat_loc),
+                            binding.vb_pat.pat_loc,
                             value,
                             &binding.vb_pat,
                             acc,
@@ -6953,7 +7041,7 @@ impl<'a> RawLambdaConverter<'a> {
                             binding.vb_expr.exp_loc,
                         );
                         self.for_let_with_synced_stamps(
-                            self.loc(binding.vb_pat.pat_loc),
+                            binding.vb_pat.pat_loc,
                             value,
                             &binding.vb_pat,
                             acc,
@@ -6975,7 +7063,7 @@ impl<'a> RawLambdaConverter<'a> {
         async_: bool,
         directive: Option<String>,
         inline: InlineAttribute,
-        loc: Location,
+        loc: LocIdx,
     ) -> RawLambda {
         fn pattern_binds_value(pattern: &Pattern) -> bool {
             match &pattern.pat_desc {
@@ -7016,7 +7104,7 @@ impl<'a> RawLambdaConverter<'a> {
                 PatternDesc::Tpat_any => lambda_body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
                 _ => self.for_function_with_synced_stamps(
-                    self.loc(pat.pat_loc),
+                    pat.pat_loc,
                     RawLambda::var(*id),
                     vec![(pat, lambda_body.into())],
                     param.fp_partial,
@@ -7043,7 +7131,7 @@ impl<'a> RawLambdaConverter<'a> {
                 one_unit_arg,
                 is_a_functor: false,
             },
-            loc,
+            self.lam_loc(loc),
         )
     }
 
@@ -7080,7 +7168,7 @@ impl<'a> RawLambdaConverter<'a> {
     fn convert_apply_raw(
         &mut self,
         loc_idx: LocIdx,
-        loc: Location,
+        loc: LocIdx,
         funct: &Expression,
         args: &[ApplyArg],
         partial: bool,
@@ -7103,16 +7191,16 @@ impl<'a> RawLambdaConverter<'a> {
                         .collect::<Vec<_>>();
                     if let Some(kind) = Self::raw_loc_kind(raw_name) {
                         let base = match applied {
-                            [] => self.raw_loc_constant(kind, loc),
+                            [] => self.raw_loc_constant(kind, SrcLoc::from(loc)),
                             [arg] => {
                                 let expr = arg.expression.as_ref().expect("checked above");
                                 RawLambda::prim(
                                     Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                                     vec![
-                                        self.raw_loc_constant(kind, self.loc(expr.exp_loc)),
+                                        self.raw_loc_constant(kind, SrcLoc::from(expr.exp_loc)),
                                         self.convert_expr_raw(expr),
                                     ],
-                                    loc,
+                                    self.lam_loc(loc),
                                 )
                             }
                             _ => RawLambda::unit(),
@@ -7128,7 +7216,7 @@ impl<'a> RawLambdaConverter<'a> {
                         && let [arg] = applied_exprs.as_slice()
                     {
                         // translcore.ml:1030-1032
-                        self.transl_dynamic_import(loc, arg)
+                        self.transl_dynamic_import(SrcLoc::from(loc), arg)
                     } else {
                         let arg_lams = applied_exprs
                             .iter()
@@ -7138,7 +7226,7 @@ impl<'a> RawLambdaConverter<'a> {
                             prim,
                             funct.exp_type,
                             &applied_exprs,
-                            loc,
+                            SrcLoc::from(loc),
                         ) {
                             // an external: expand its FFI spec here; %raw
                             // parses and classifies its snippet
@@ -7157,14 +7245,14 @@ impl<'a> RawLambdaConverter<'a> {
                                             },
                                         ),
                                         vec![],
-                                        loc,
+                                        self.lam_loc(loc),
                                     )
                                 }
                                 _ => {
                                     let env = self.env_for_expr(funct);
                                     let env = env.as_deref().unwrap_or(self.env);
                                     self.transl_external_application(
-                                        loc,
+                                        SrcLoc::from(loc),
                                         env,
                                         prim,
                                         desc.val_type,
@@ -7177,7 +7265,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.report_polymorphic_comparison_warning(
                                     loc_idx, &primitive, &arg_lams,
                                 );
-                                self.mk_builtin(primitive, arg_lams, loc)
+                                self.mk_builtin(primitive, arg_lams, SrcLoc::from(loc))
                             }
                         }
                     };
@@ -7220,13 +7308,14 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         lam: RawLambda,
         sargs: &[ApplyArg],
-        loc: Location,
+        loc: LocIdx,
         transformed_jsx: bool,
         uncurried_partial_application: Option<i32>,
         inlined: InlineAttribute,
     ) -> RawLambda {
+        let loc = loc;
         fn lapply(
-            loc: Location,
+            loc: LamLoc,
             func: RawLambda,
             args: Vec<RawLambda>,
             transformed_jsx: bool,
@@ -7253,7 +7342,7 @@ impl<'a> RawLambdaConverter<'a> {
             lam: RawLambda,
             mut args_rev: Vec<(RawLambda, bool)>,
             mut pending: std::collections::VecDeque<(Option<RawLambda>, bool)>,
-            loc: Location,
+            loc: LamLoc,
             transformed_jsx: bool,
             inlined: InlineAttribute,
         ) -> RawLambda {
@@ -7369,13 +7458,13 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
-                let body = lapply(loc, lam, ap_args, transformed_jsx, inlined);
+                let body = lapply(self.lam_loc(loc), lam, ap_args, transformed_jsx, inlined);
                 RawLambda::function_(
                     (none_ids.len() + extra_ids.len()) as i32,
                     none_ids.into_iter().chain(extra_ids).collect(),
                     body,
                     FunctionAttribute::default(),
-                    loc,
+                    self.lam_loc(loc),
                 )
             }
             None => {
@@ -7395,7 +7484,7 @@ impl<'a> RawLambdaConverter<'a> {
                     lam,
                     Vec::new(),
                     pending.into(),
-                    loc,
+                    self.lam_loc(loc),
                     transformed_jsx,
                     inlined,
                 )
@@ -7406,7 +7495,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// `Translcore.transl_primitive`: eta-expand a primitive used as a value.
     fn translate_primitive_raw_in_env(
         &mut self,
-        loc: Location,
+        loc: SrcLoc,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
         env: &crate::types::env::Env,
@@ -7426,10 +7515,10 @@ impl<'a> RawLambdaConverter<'a> {
                         RawLambda::prim(
                             Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                             vec![lam, RawLambda::var(param)],
-                            loc,
+                            self.lam_loc(loc),
                         ),
                         FunctionAttribute::default(),
-                        loc,
+                        self.lam_loc(loc),
                     )
                 }
                 _ => RawLambda::unit(),
@@ -7453,7 +7542,7 @@ impl<'a> RawLambdaConverter<'a> {
         let Some(primitive) = self.specialize_primitive_raw_with_env(prim, ty, env) else {
             if raw_name == "%import" || raw_name == "#import" {
                 self.report_diagnostic(
-                    loc,
+                    self.loc(loc),
                     "Dynamic import must be applied directly to a module or a value from another module; it cannot be used as a first-class value.".to_string(),
                 );
                 return RawLambda::unit();
@@ -7476,7 +7565,7 @@ impl<'a> RawLambdaConverter<'a> {
                 params,
                 body,
                 FunctionAttribute::default(),
-                loc,
+                self.lam_loc(loc),
             );
         };
         if let Some(warn_loc) = warn_loc {
@@ -7507,7 +7596,7 @@ impl<'a> RawLambdaConverter<'a> {
                 params,
                 body,
                 FunctionAttribute::default(),
-                loc,
+                self.lam_loc(loc),
             )
         }
     }
@@ -7520,7 +7609,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         primitive: Primitive,
         args: Vec<RawLambda>,
-        loc: Location,
+        loc: SrcLoc,
     ) -> RawLambda {
         match primitive {
             Primitive::Pidentity => {
@@ -7532,9 +7621,9 @@ impl<'a> RawLambdaConverter<'a> {
             // `Lambda.seq`. Keep it as `Pignore` so lowering does the same.
             Primitive::Pignore => {
                 let [arg] = <[RawLambda; 1]>::try_from(args).expect("%ignore takes one argument");
-                RawLambda::prim(Primitive::Pignore, vec![arg], loc)
+                RawLambda::prim(Primitive::Pignore, vec![arg], self.lam_loc(loc))
             }
-            primitive => RawLambda::prim_folded(primitive, args, loc),
+            primitive => RawLambda::prim_folded(primitive, args, self.lam_loc(loc)),
         }
     }
 

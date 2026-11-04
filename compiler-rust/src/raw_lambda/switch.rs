@@ -12,8 +12,8 @@
 //!   for the Case Statement", SPE Vol. 24(2) (Feb 1994)
 
 use crate::fast_hash::AHashMap;
+use crate::lambda::LamLoc;
 use crate::lambda::{Comparison, Constant, LetKind, Primitive};
-use crate::location::Location;
 use crate::raw_lambda::{RawLambda, RawLambdaSwitch, RawPrimInfo};
 
 // ── Action store (port of Switch.Store) ────────────────────────────────
@@ -78,7 +78,7 @@ fn make_prim(prim: Primitive, args: Vec<RawLambda>) -> RawLambda {
     RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: prim,
         args,
-        loc: Location::none(),
+        loc: LamLoc::NONE,
     }))
 }
 

@@ -6,6 +6,7 @@
 //! the production pipeline yet.
 
 use ahash::AHashSet;
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
@@ -17,7 +18,6 @@ use crate::lambda::{
     ApInfo, Apply, Constant, DirectionFlag, FunctionAttribute, LFunction, Lambda, LambdaSwitch,
     PrimInfo, Primitive, SwitchDispatch, SwitchKey,
 };
-use crate::location::Location;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -85,13 +85,13 @@ struct GlobalPayload(Ident);
 #[derive(Clone)]
 struct ApplyPayload(NodeId, ItemRange, ApInfo, bool);
 #[derive(Clone)]
-struct FunctionPayload(i32, ItemRange, NodeId, FunctionAttribute, Location);
+struct FunctionPayload(i32, ItemRange, NodeId, FunctionAttribute, LamLoc);
 #[derive(Clone)]
 struct LetPayload(LetKind, Ident, NodeId, NodeId);
 #[derive(Clone)]
 struct LetRecPayload(ItemRange, NodeId);
 #[derive(Clone)]
-struct PrimPayload(Primitive, ItemRange, Location);
+struct PrimPayload(Primitive, ItemRange, LamLoc);
 #[derive(Clone)]
 struct SwitchPayload {
     scrutinee: NodeId,
@@ -128,10 +128,10 @@ pub(crate) enum NodeView<'a> {
     GlobalModule(&'a Ident),
     Const(&'a Constant),
     Apply(NodeId, &'a [NodeId], &'a ApInfo, bool),
-    Function(i32, &'a [Ident], NodeId, &'a FunctionAttribute, Location),
+    Function(i32, &'a [Ident], NodeId, &'a FunctionAttribute, LamLoc),
     Let(LetKind, &'a Ident, NodeId, NodeId),
     LetRec(&'a [(Ident, NodeId)], NodeId),
-    Prim(&'a Primitive, &'a [NodeId], &'a Location),
+    Prim(&'a Primitive, &'a [NodeId], &'a LamLoc),
     Switch {
         scrutinee: NodeId,
         consts_full: bool,
@@ -164,10 +164,10 @@ pub(crate) enum NodeSnapshot {
     GlobalModule(Ident),
     Const(Constant),
     Apply(NodeId, Vec<NodeId>, ApInfo, bool),
-    Function(i32, Vec<Ident>, NodeId, FunctionAttribute, Location),
+    Function(i32, Vec<Ident>, NodeId, FunctionAttribute, LamLoc),
     Let(LetKind, Ident, NodeId, NodeId),
     LetRec(Vec<(Ident, NodeId)>, NodeId),
-    Prim(Primitive, Vec<NodeId>, Location),
+    Prim(Primitive, Vec<NodeId>, LamLoc),
     Switch {
         scrutinee: NodeId,
         consts_full: bool,
@@ -1463,7 +1463,7 @@ mod tests {
     fn round_trip_preserves_node_families_and_order() {
         let x = id("x", 1);
         let y = id("y", 2);
-        let loc = Location::none();
+        let loc = LamLoc::NONE;
         let var = || Lambda::Lvar(x);
         let int = || Lambda::Lconst(Constant::int(1));
         for leaf in [
@@ -1488,7 +1488,7 @@ mod tests {
                 ap_transformed_jsx: true,
             })),
             Lambda::Lfunction(Box::new(LFunction {
-                loc: crate::location::Location::none(),
+                loc: LamLoc::NONE,
                 arity: 2,
                 params: vec![x, y],
                 body: Box::new(var()),

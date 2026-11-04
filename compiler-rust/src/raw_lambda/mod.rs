@@ -11,6 +11,7 @@
 
 pub mod convert;
 pub(crate) mod lambda_scc;
+pub mod loc;
 pub mod lower;
 pub mod matching;
 pub mod print;
@@ -18,9 +19,9 @@ pub mod switch;
 pub(crate) mod typeopt;
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::{ApInfo, DirectionFlag, FunctionAttribute, Lambda, LetKind};
 use crate::lambda::{Comparison, Constant, Primitive};
-use crate::location::Location;
 
 /// Raw-lambda switch construct.
 #[derive(Debug, Clone)]
@@ -51,7 +52,7 @@ pub struct RawLFunction {
     /// Function attributes.
     pub attr: FunctionAttribute,
     /// Source location (`lfunction.loc`, compiler/ml/lambda.mli:374-379).
-    pub loc: Location,
+    pub loc: LamLoc,
 }
 
 /// Raw-lambda primitive operation payload.
@@ -62,7 +63,7 @@ pub struct RawPrimInfo {
     /// Arguments to the primitive.
     pub args: Vec<RawLambda>,
     /// Source location.
-    pub loc: Location,
+    pub loc: LamLoc,
 }
 
 /// Raw-lambda function application.
@@ -255,7 +256,7 @@ impl RawLambda {
         params: Vec<Ident>,
         body: RawLambda,
         attr: FunctionAttribute,
-        loc: Location,
+        loc: LamLoc,
     ) -> Self {
         RawLambda::Lfunction(Box::new(RawLFunction {
             arity,
@@ -277,7 +278,7 @@ impl RawLambda {
     }
 
     /// Create a primitive operation.
-    pub fn prim(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
+    pub fn prim(primitive: Primitive, args: Vec<RawLambda>, loc: LamLoc) -> Self {
         RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive,
             args,
@@ -291,7 +292,7 @@ impl RawLambda {
     /// so they are taken from [`Lambda::prim`], applied to the constants in
     /// the form OCaml builds them (raw constants keep a few encodings, such
     /// as an int-named polymorphic variant, until they are lowered).
-    pub fn prim_folded(primitive: Primitive, args: Vec<RawLambda>, loc: Location) -> Self {
+    pub fn prim_folded(primitive: Primitive, args: Vec<RawLambda>, loc: LamLoc) -> Self {
         if matches!(args.len(), 1 | 2) && args.iter().all(|arg| matches!(arg, RawLambda::Lconst(_)))
         {
             let consts = args
@@ -609,7 +610,7 @@ impl RawLambda {
 }
 
 /// `Lambda.has_boolean_type` (`compiler/ml/lambda.ml:1137-1147`).
-fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
+fn raw_has_boolean_type(lam: &RawLambda) -> Option<LamLoc> {
     match lam {
         RawLambda::Lprim(info)
             if matches!(
@@ -633,7 +634,7 @@ fn raw_has_boolean_type(lam: &RawLambda) -> Option<Location> {
 }
 
 /// `Lambda.not_` (`compiler/ml/lambda.ml:1131-1135`).
-fn raw_not(loc: Location, lam: RawLambda) -> RawLambda {
+fn raw_not(loc: LamLoc, lam: RawLambda) -> RawLambda {
     match lam {
         RawLambda::Lprim(mut info)
             if matches!(info.primitive, Primitive::Pintcomp(Comparison::Neq)) =>

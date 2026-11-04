@@ -3,6 +3,7 @@
 //! keeps the canonical root, append-only arena, and ID-bearing metadata.
 
 use ahash::AHashMap;
+use crate::lambda::LamLoc;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -339,7 +340,7 @@ mod tests {
     use crate::lambda::lam_pass_exits as tree;
     use crate::lambda::lam_primitive::Primitive;
     use crate::lambda::{DirectionFlag, Lambda, LambdaSwitch, SwitchDispatch, SwitchKey};
-    use crate::location::Location;
+    use LamLoc;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -507,7 +508,7 @@ mod tests {
 
     #[test]
     fn rewritten_children_use_the_same_smart_constructor_decisions() {
-        let loc = crate::location::Location::none();
+        let loc = LamLoc::NONE;
         let caught = |body: Lambda, handler: Lambda| {
             Lambda::LstaticCatch(Box::new(body), (70, vec![]), Box::new(handler))
         };
@@ -629,7 +630,7 @@ mod tests {
                         loc: loc,
                     })),
                     crate::lambda::FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             caught(
@@ -656,7 +657,7 @@ mod tests {
                         loc: loc,
                     })),
                     crate::lambda::FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ),
             caught(
@@ -676,8 +677,8 @@ mod tests {
     #[test]
     fn substitution_keeps_jsx_and_shares_unchanged_nodes_like_ocaml() {
         let parameter = id("parameter", 180);
-        let outer_loc = Location::new_for_error("subst.res", 20, 30);
-        let inner_loc = Location::new_for_error("subst.res", 10, 15);
+        let outer_loc = LamLoc::for_test(15);
+        let inner_loc = LamLoc::for_test(16);
         let handler = Lambda::Lapply(Box::new(crate::lambda::Apply {
             ap_func: Box::new(Lambda::Lvar(id("g", 181))),
             ap_args: vec![Lambda::Lapply(Box::new(crate::lambda::Apply {
@@ -727,13 +728,13 @@ mod tests {
             Box::new(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
                 args: vec![Lambda::true_()],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             }))),
             Box::new(Lambda::Lapply(Box::new(crate::lambda::Apply {
                 ap_func: Box::new(Lambda::Lvar(id("empty", 183))),
                 ap_args: vec![],
                 ap_info: crate::lambda::ApInfo {
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                     inlined: crate::lambda::InlineAttribute::Default,
                     status: crate::lambda::ApplyStatus::Na,
                 },
@@ -758,8 +759,8 @@ mod tests {
         ];
         for (index, wrapper) in wrappers.into_iter().enumerate() {
             for nested in [false, true] {
-                let body_loc = Location::new_for_error("eta.res", 1, 2);
-                let apply_loc = Location::new_for_error("eta.res", 10, 20);
+                let body_loc = LamLoc::for_test(17);
+                let apply_loc = LamLoc::for_test(18);
                 let left = id("left", 200 + index as i32 * 2);
                 let right = id("right", 201 + index as i32 * 2);
                 let inner = if nested {
@@ -785,7 +786,7 @@ mod tests {
                         loc: body_loc,
                     })),
                     crate::lambda::FunctionAttribute::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 );
                 let apply = Lambda::Lapply(Box::new(crate::lambda::Apply {
                     ap_func: Box::new(Lambda::LstaticRaise(91, vec![])),
@@ -839,10 +840,10 @@ mod tests {
             Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Ptypeof,
                 args: vec![Lambda::Lconst(Constant::int(0))],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             })),
             attr,
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let result = simplify_indexed(
             Lambda::LstaticCatch(
@@ -850,7 +851,7 @@ mod tests {
                     ap_func: Box::new(Lambda::LstaticRaise(92, vec![])),
                     ap_args: vec![Lambda::Lvar(parameter)],
                     ap_info: crate::lambda::ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         inlined: crate::lambda::InlineAttribute::Always,
                         status: crate::lambda::ApplyStatus::InferFull,
                     },
@@ -913,7 +914,7 @@ mod tests {
 
     #[test]
     fn no_catch_keeps_nodes_and_rebuilds_use_reference_smart_constructors() {
-        let loc = Location::none();
+        let loc = LamLoc::NONE;
         let not_true = || {
             Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pnot,
@@ -1027,7 +1028,7 @@ mod tests {
             let result = rebuild_indexed(Lambda::Lprim(Box::new(crate::lambda::PrimInfo {
                 primitive: Primitive::Pintcomp(operation),
                 args: vec![Lambda::Lconst(left), Lambda::Lconst(right)],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             })));
             assert_eq!(
                 format!("{result:?}"),
@@ -1104,7 +1105,7 @@ mod tests {
 
     #[test]
     fn storage_metrics_partition_large_child_and_case_payloads() {
-        let loc = Location::none();
+        let loc = LamLoc::NONE;
         let cases = (0..32)
             .map(|case| {
                 // A dead catch in each payload makes the pass rewrite it
@@ -1181,7 +1182,7 @@ mod tests {
                     inline: crate::lambda::InlineAttribute::Always,
                     ..crate::lambda::FunctionAttribute::default()
                 },
-                crate::location::Location::none(),
+                LamLoc::NONE,
             )),
             Box::new(Lambda::Lvar(f)),
         );
