@@ -473,6 +473,18 @@ pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAs
     Ok(ast)
 }
 
+/// The located arena of a fresh parse of `source`, for placing the warnings
+/// of a location-free compile (`CompilerOptions::warning_locations`).
+pub(crate) fn reparse_arena_with_locations(
+    source: &ParseSource,
+) -> Option<rescript_compiler::parse_arena::ParseArena> {
+    let (_, ast, _) = parse_saved_source(source, true).ok()?;
+    match ast {
+        StoredAst::Structure(ast) => Arc::try_unwrap(ast).ok().map(|ast| ast.arena),
+        StoredAst::Signature(ast) => Arc::try_unwrap(ast).ok().map(|ast| ast.arena),
+    }
+}
+
 const SOURCE_TRIGGERED_PPXES: &[(&[&str], &str)] = &[
     (&["graphql-ppx", "graphql_ppx"], "%graphql"),
     (&["spice"], "@spice"),
@@ -572,6 +584,7 @@ fn parse_source(
 
             let mut arena = parser.into_arena();
             rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
+            arena.finish_parse_locations();
             let stored =
                 super::build_types::StoredAst::Signature(Arc::new(super::build_types::StoredSignatureAst {
                     arena,
@@ -605,6 +618,7 @@ fn parse_source(
 
             let mut arena = parser.into_arena();
             rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
+            arena.finish_parse_locations();
             let stored =
                 super::build_types::StoredAst::Structure(Arc::new(super::build_types::StoredStructureAst {
                     arena,
@@ -759,6 +773,56 @@ mod tests {
             .unwrap();
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("frontend timed out or failed");
+    }
+
+    /// Warnings of a location-free compile are placed in a located parse by
+    /// identity, which needs both parses to issue the same location slots.
+    #[test]
+    fn location_free_parse_issues_the_located_parse_slots() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/tests/src");
+                let mut sources: Vec<_> = std::fs::read_dir(&root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "res" || ext == "resi"))
+                    .collect();
+                sources.sort();
+                assert!(sources.len() > 100, "{}", root.display());
+                let mut checked = 0;
+                for path in sources {
+                    let name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let source = super::ParseSource {
+                        file_path: path.clone(),
+                        source: std::fs::read(&path).unwrap(),
+                        source_path_for_ast: name,
+                        open_deps: Vec::new(),
+                        options: rescript_compiler::driver::CompilerOptions {
+                            jsx_version: Some(4),
+                            ..Default::default()
+                        },
+                    };
+                    let Ok((_, free, _)) = super::parse_saved_source(&source, false) else {
+                        continue;
+                    };
+                    let located = super::reparse_arena_with_locations(&source).unwrap();
+                    assert!(!free.arena().stores_locations());
+                    assert_eq!(
+                        free.arena().parse_location_slot_count(),
+                        located.parse_location_slot_count(),
+                        "{}",
+                        path.display()
+                    );
+                    checked += 1;
+                }
+                assert!(checked > 100);
+                tx.send(()).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("parsing the runtime test sources timed out or failed");
     }
 
     #[test]

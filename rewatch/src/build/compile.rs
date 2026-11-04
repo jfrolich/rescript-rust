@@ -2211,6 +2211,7 @@ fn build_package_compiler_options(
         runtime_path,
         open_modules,
         collect_unit_reads: true,
+        warning_locations: None,
         warning_specs: parsed_flags.warning_specs,
         warning_error_specs: parsed_flags.warning_error_specs,
         source_map,
@@ -3687,23 +3688,35 @@ pub(crate) fn runtime_compiler_options(
 fn compile_with_location_retry<T>(
     ast: &StoredAst,
     build: &BuildCommandState,
-    mut compile: impl FnMut(&StoredAst) -> Result<T>,
-    has_warnings: impl FnOnce(&T) -> bool,
+    options: &rescript_compiler::driver::CompilerOptions,
+    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
 ) -> Result<T> {
     use rescript_compiler::driver::LocationRetry;
-    let result = compile(ast);
+    let result = match ast.retry_source() {
+        // A location-free compile places its warnings in a located parse of
+        // the same source; it returns `LocationRetry::Warning` when it cannot.
+        Some(source) if !ast.arena().stores_locations() => {
+            let source = source.clone();
+            let mut options = options.clone();
+            options.warning_locations = Some(Arc::new(move || {
+                super::parse::reparse_arena_with_locations(&source)
+            }));
+            compile(ast, &options)
+        }
+        _ => compile(ast, options),
+    };
     let local_retry = !ast.arena().stores_locations()
-        && match &result {
-            Err(error) => matches!(
+        && matches!(
+            &result,
+            Err(error) if matches!(
                 error.downcast_ref::<LocationRetry>(),
                 Some(LocationRetry::Output | LocationRetry::Warning)
-            ),
-            Ok(result) => has_warnings(result),
-        };
+            )
+        );
     if local_retry {
         // Warning sites and location-valued constants belong to this module.
         // No first-attempt signature or JavaScript has been published.
-        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located));
+        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
     }
     if !build.diagnostic_locations && build.dump.is_none() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
@@ -3804,10 +3817,8 @@ fn compile_module_in_process_to_js_boundary(
         let intf_source_abs = helpers::ocaml_absname(&Path::new(&package.path).join(&interface.path));
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
-            Some(ast @ StoredAst::Signature(_)) => compile_with_location_retry(
-                ast,
-                build_command_state,
-                |ast| {
+            Some(ast @ StoredAst::Signature(_)) => {
+                compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
                     let StoredAst::Signature(stored) = ast else {
                         unreachable!("interface retry changed AST kind")
                     };
@@ -3816,12 +3827,11 @@ fn compile_module_in_process_to_js_boundary(
                         &stored.signature,
                         &intf_source_abs.to_string_lossy(),
                         module_name,
-                        &options,
+                        options,
                         &local_registry,
                     )
-                },
-                |result| !result.warnings.is_empty(),
-            ),
+                })
+            }
             Some(_) => {
                 return Err(anyhow!(
                     "expected signature AST for {}",
@@ -3970,10 +3980,8 @@ fn compile_module_in_process_to_js_boundary(
         .entered();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match stored_asts.get(&impl_key) {
-                Some(ast @ StoredAst::Structure(_)) => compile_with_location_retry(
-                    ast,
-                    build_command_state,
-                    |ast| {
+                Some(ast @ StoredAst::Structure(_)) => {
+                    compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
                         let StoredAst::Structure(stored) = ast else {
                             unreachable!("implementation retry changed AST kind")
                         };
@@ -3989,15 +3997,14 @@ fn compile_module_in_process_to_js_boundary(
                             &stored.structure,
                             &source_abs.to_string_lossy(),
                             module_name,
-                            &options,
+                            options,
                             &local_registry,
                             has_interface,
                             gentype_ignore_interface,
                             signature_hook,
                         )
-                    },
-                    |result| !result.warnings.is_empty(),
-                ),
+                    })
+                }
                 Some(_) => panic!(
                     "in-process invariant violated: expected structure AST for {}, found another AST",
                     source_abs.display()

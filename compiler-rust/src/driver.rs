@@ -498,6 +498,50 @@ fn latin1_dump(bytes: Vec<u8>) -> String {
     bytes.into_iter().map(char::from).collect()
 }
 
+/// See [`CompilerOptions::warning_locations`].
+pub type WarningLocations =
+    std::sync::Arc<dyn Fn() -> Option<crate::parse_arena::ParseArena> + Send + Sync>;
+
+/// Place the warnings of a location-free compile in a located parse of the
+/// same source, replacing each warning's location identity with the matching
+/// location of `located` (parsed on first use). Returns false when any
+/// warning cannot be placed with certainty; the caller then retries the
+/// whole compile with locations. A located compile needs no placement.
+fn place_location_free_warnings(
+    arena: &crate::parse_arena::ParseArena,
+    options: &CompilerOptions,
+    located: &mut Option<crate::parse_arena::ParseArena>,
+    warnings: &mut [TypeCoreWarning],
+) -> bool {
+    if arena.stores_locations() || warnings.is_empty() {
+        return true;
+    }
+    let Some(slots) = warnings
+        .iter()
+        .map(|warning| arena.located_parse_slot(warning.loc))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if located.is_none() {
+        let Some(parse) = options.warning_locations.as_ref().and_then(|parse| parse()) else {
+            return false;
+        };
+        // Both parses must have issued the same locations, or identities and
+        // located indices do not correspond.
+        if !parse.stores_locations()
+            || parse.parse_location_slot_count() != arena.parse_location_slot_count()
+        {
+            return false;
+        }
+        *located = Some(parse);
+    }
+    for (warning, slot) in warnings.iter_mut().zip(slots) {
+        warning.loc = slot;
+    }
+    true
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -521,6 +565,10 @@ pub struct CompilerOptions {
     /// Record what an in-process compile read of other units
     /// (`unit_reads` of the results), for incremental builds.
     pub collect_unit_reads: bool,
+    /// For a location-free compile: parse the same source again with
+    /// locations (the same frontend included). Warnings are then placed in
+    /// that parse instead of compiling the unit a second time.
+    pub warning_locations: Option<WarningLocations>,
     /// Warning enable/disable specs from `-w` flags.
     pub warning_specs: Vec<String>,
     /// Warning-as-error specs from `-warn-error` flags.
@@ -773,6 +821,7 @@ impl Default for CompilerOptions {
             runtime_path: None,
             open_modules: Vec::new(),
             collect_unit_reads: false,
+            warning_locations: None,
             warning_specs: Vec::new(),
             warning_error_specs: Vec::new(),
             source_filename: None,
@@ -13917,7 +13966,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // typemod.ml:1769-1776 forces the delayed usage checks before Lambda
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
-    if !arena.stores_locations() && !tctx.warnings.is_empty() {
+    let mut located_warnings = None;
+    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
         return Err(LocationRetry::Warning.into());
     }
     let post_type_warning_start = tctx.warnings.len();
@@ -14175,37 +14225,51 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             return Err(UserDiagnostic::new(
                 format!(
                     "{}{report}\n",
-                    format_type_warnings_lazy(arena, &source, filename, &tctx.warnings)
+                    format_type_warnings_lazy(
+                        located_warnings.as_ref().unwrap_or(arena),
+                        &source,
+                        filename,
+                        &tctx.warnings,
+                    )
                 ),
                 2,
             )
             .into());
         }
     };
+    let mut raw_warnings = raw_warnings;
     if !arena.stores_locations() {
         if raw_diagnostic.is_some() {
             return Err(LocationRetry::Diagnostic.into());
         }
-        if !tctx.warnings.is_empty() || !raw_warnings.is_empty() {
-            return Err(LocationRetry::Warning.into());
-        }
         if arena.locations_required() {
             return Err(LocationRetry::Output.into());
         }
+        if !place_location_free_warnings(
+            arena,
+            options,
+            &mut located_warnings,
+            &mut tctx.warnings[post_type_warning_start..],
+        ) || !place_location_free_warnings(arena, options, &mut located_warnings, &mut raw_warnings)
+        {
+            return Err(LocationRetry::Warning.into());
+        }
     }
+    // Warnings of a location-free compile were placed in a located parse.
+    let warning_arena = located_warnings.as_ref().unwrap_or(arena);
 
     // The file compile reports the typing warnings, then Translmod's
     // (js_implementation.ml:161-167); a Translmod error escapes before
     // `Warnings.check_fatal`.
     let mut warnings = format_type_warnings_lazy(
-        arena,
+        warning_arena,
         &source,
         filename,
         &tctx.warnings[..post_type_warning_start],
     );
     if let Some(diagnostic) = raw_diagnostic {
         warnings.push_str(&format_type_warnings_lazy(
-            arena,
+            warning_arena,
             &source,
             filename,
             &raw_warnings,
@@ -14226,13 +14290,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
     warnings.push_str(&format_type_warnings_lazy(
-        arena,
+        warning_arena,
         &source,
         filename,
         late_type_warnings,
     ));
     warnings.push_str(&format_type_warnings_lazy(
-        arena,
+        warning_arena,
         &source,
         filename,
         &raw_warnings,
@@ -14658,10 +14722,16 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
-    if !arena.stores_locations() && !tctx.warnings.is_empty() {
+    let mut located_warnings = None;
+    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
         return Err(LocationRetry::Warning.into());
     }
-    let warnings = format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+    let warnings = format_type_warnings_lazy(
+        located_warnings.as_ref().unwrap_or(arena),
+        &source,
+        filename,
+        &tctx.warnings,
+    );
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(warnings, 2).into());
     }

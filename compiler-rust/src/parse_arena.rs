@@ -468,6 +468,15 @@ pub struct ParseArena {
     /// only by a fresh diagnostic compilation.
     store_locations: bool,
     next_location_identity: std::sync::atomic::AtomicU32,
+    /// Location-free builds: `next_location_identity` when parsing (including
+    /// the frontend) finished. Up to here each identity is the index the same
+    /// source's located parse gives its location, so warnings can be placed
+    /// with a fresh located parse instead of a second compilation.
+    parse_location_slots: Option<u32>,
+    /// Location-free identities the type checker re-imported from a
+    /// `Location`'s `origin`. Such a value may have come from another unit's
+    /// arena, so it is not known to name a slot of this unit's parse.
+    reimported_location_identities: std::sync::Mutex<Vec<u32>>,
     locations_required: std::sync::atomic::AtomicBool,
     /// File identity is unit metadata, not a source span. JSX uses it for names.
     absent_position: Position,
@@ -945,6 +954,8 @@ impl Default for ParseArena {
         Self {
             store_locations: true,
             next_location_identity: std::sync::atomic::AtomicU32::new(2),
+            parse_location_slots: None,
+            reimported_location_identities: std::sync::Mutex::new(Vec::new()),
             locations_required: std::sync::atomic::AtomicBool::new(false),
             absent_position: Position::default(),
             positions: Arena::default(),
@@ -1139,6 +1150,60 @@ impl ParseArena {
     pub fn locations_required(&self) -> bool {
         self.locations_required
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A location-free arena reuses an identity where a located arena appends
+    /// a location (a ghost or cloned copy, a re-imported `Location`). Advance
+    /// the identity counter anyway, so identities keep naming the slots a
+    /// located parse of the same source allocates.
+    fn skip_location_slot(&self) {
+        self.next_location_identity
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record the end of parsing for a location-free arena; see
+    /// [`ParseArena::located_parse_slot`].
+    pub fn finish_parse_locations(&mut self) {
+        if !self.store_locations {
+            self.parse_location_slots = Some(
+                self.next_location_identity
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+        }
+    }
+
+    /// The number of primary locations a parse allocated: for a location-free
+    /// arena the identities issued while parsing, otherwise the stored rows.
+    pub fn parse_location_slot_count(&self) -> Option<u32> {
+        if self.store_locations {
+            Some(self.locations.len() as u32)
+        } else {
+            self.parse_location_slots
+        }
+    }
+
+    /// The location a located parse of the same source gives the
+    /// location-free identity `idx`, when that is certain: `idx` was issued
+    /// while parsing (not by the type checker afterwards) and was not
+    /// re-imported from a `Location` that may belong to another unit.
+    /// Ghostness is dropped: only the span is read from the located arena.
+    pub fn located_parse_slot(&self, idx: LocIdx) -> Option<LocIdx> {
+        if self.store_locations {
+            return None;
+        }
+        let id = idx.0 & 0x3fff_ffff;
+        if id >= self.parse_location_slots? {
+            return None;
+        }
+        if self
+            .reimported_location_identities
+            .lock()
+            .expect("re-imported location identities lock")
+            .contains(&id)
+        {
+            return None;
+        }
+        Some(LocIdx(id))
     }
 
     fn fresh_location_identity(&self, ghost: bool) -> LocIdx {
@@ -1359,6 +1424,7 @@ impl ParseArena {
     /// Clone a location, creating fresh position objects with the same values.
     pub fn clone_loc(&mut self, loc: LocIdx) -> LocIdx {
         if !self.store_locations {
+            self.skip_location_slot();
             return loc;
         }
         let info = self.get_location(loc).clone();
@@ -1530,6 +1596,10 @@ impl ParseArena {
     ) -> LocIdx {
         if !self.store_locations {
             return if loc.origin.raw() != 0 {
+                self.reimported_location_identities
+                    .lock()
+                    .expect("re-imported location identities lock")
+                    .push(loc.origin.raw());
                 LocIdx(loc.origin.raw() | if loc.loc_ghost { 0x4000_0000 } else { 0 })
             } else {
                 self.fresh_location_identity(loc.loc_ghost)
@@ -1615,6 +1685,7 @@ impl ParseArena {
     /// Returns a new LocIdx with the same positions but loc_ghost=true.
     pub fn mk_ghost_loc(&mut self, idx: LocIdx) -> LocIdx {
         if !self.store_locations {
+            self.skip_location_slot();
             return LocIdx(idx.0 | 0x4000_0000);
         }
         let loc = self.get_location(idx);
@@ -1644,6 +1715,7 @@ impl ParseArena {
     /// Creates fresh positions to match OCaml behavior.
     pub fn from_location(&mut self, loc: &Location) -> LocIdx {
         if !self.store_locations && loc.origin.raw() != 0 {
+            self.skip_location_slot();
             return LocIdx(loc.origin.raw() | if loc.loc_ghost { 0x4000_0000 } else { 0 });
         }
         let start_idx = self.push_position(loc.loc_start);
