@@ -641,7 +641,7 @@ fn transform_react_component_binding(
     } else {
         Pattern {
             ppat_desc: PatternDesc::Ppat_record(Box::new((
-                patterns_with_label,
+                arena.push_pat_field_list(&patterns_with_label),
                 ClosedFlag::Open,
                 None,
             ))),
@@ -1687,9 +1687,8 @@ fn add_default_value_matches(
             let label_name_lid = arena.push_longident(Longident::Lident(label_name_str_idx));
             let none_lid = arena.push_longident(Longident::Lident(none_str_idx));
             let match_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_match(Box::new((
-                    match_scrutinee_idx,
-                    vec![
+                pexp_desc: ExpressionDesc::Pexp_match((match_scrutinee_idx, {
+                    let items = [
                         Case {
                             pc_bar: None,
                             pc_lhs: arena.push_pat(Pattern {
@@ -1732,8 +1731,9 @@ fn add_default_value_matches(
                             pc_guard: None,
                             pc_rhs: arena.push_expr(default.clone()),
                         },
-                    ],
-                ))),
+                    ];
+                    arena.push_case_list(&items)
+                })),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             };
@@ -3561,11 +3561,11 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                     arena.get_expr(*expr)
                 };
                 if let ExpressionDesc::Pexp_record(rec_inner) = &expr.pexp_desc {
-                    let (ref fields, _) = **rec_inner;
+                    let (ref fields, _) = *rec_inner;
                     let mut module_raw: Option<String> = None;
                     let mut version_raw: Option<i32> = None;
 
-                    for field in fields {
+                    for field in arena.expr_field_list(*fields) {
                         let last_idx = arena.get_longident(field.lid.txt).last_idx();
                         let last_str = arena.get_string(last_idx);
                         match last_str {
@@ -4042,30 +4042,34 @@ fn transform_expression(
             })
         }
         ExpressionDesc::Pexp_match(inner) => {
-            let (scrutinee, cases) = *inner;
+            let (scrutinee, cases) = inner;
             let scrutinee_expr = arena.get_expr(scrutinee).clone();
             let transformed_scrutinee = transform_expression(scrutinee_expr, config, arena);
-            let transformed_cases = cases
+            let transformed_cases = arena
+                .case_list(cases)
+                .to_vec()
                 .into_iter()
                 .map(|case| transform_case(case, config, arena))
-                .collect();
-            ExpressionDesc::Pexp_match(Box::new((
+                .collect::<Vec<_>>();
+            ExpressionDesc::Pexp_match((
                 arena.push_expr(transformed_scrutinee),
-                transformed_cases,
-            )))
+                arena.push_case_list(&transformed_cases),
+            ))
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (body, cases) = *inner;
+            let (body, cases) = inner;
             let body_expr = arena.get_expr(body).clone();
             let transformed_body = transform_expression(body_expr, config, arena);
-            let transformed_cases = cases
+            let transformed_cases = arena
+                .case_list(cases)
+                .to_vec()
                 .into_iter()
                 .map(|case| transform_case(case, config, arena))
-                .collect();
-            ExpressionDesc::Pexp_try(Box::new((
+                .collect::<Vec<_>>();
+            ExpressionDesc::Pexp_try((
                 arena.push_expr(transformed_body),
-                transformed_cases,
-            )))
+                arena.push_case_list(&transformed_cases),
+            ))
         }
         ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
             let items = arena
@@ -4104,27 +4108,27 @@ fn transform_expression(
             ExpressionDesc::Pexp_variant(Box::new((label, args)))
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, base) = *inner;
+            let (fields, base) = inner;
             let transformed_base = base.map(|e| {
                 let e_expr = arena.get_expr(e).clone();
                 let rw = transform_expression(e_expr, config, arena);
                 arena.push_expr(rw)
             });
-            ExpressionDesc::Pexp_record(Box::new((
-                fields
-                    .into_iter()
-                    .map(|f| ExpressionRecordField {
-                        lid: f.lid,
-                        expr: {
-                            let expr = arena.get_expr(f.expr).clone();
-                            let transformed = transform_expression(expr, config, arena);
-                            arena.push_expr(transformed)
-                        },
-                        opt: f.opt,
-                    })
-                    .collect(),
-                transformed_base,
-            )))
+            let fields: Vec<_> = arena
+                .expr_field_list(fields)
+                .to_vec()
+                .into_iter()
+                .map(|f| ExpressionRecordField {
+                    lid: f.lid,
+                    expr: {
+                        let expr = arena.get_expr(f.expr).clone();
+                        let transformed = transform_expression(expr, config, arena);
+                        arena.push_expr(transformed)
+                    },
+                    opt: f.opt,
+                })
+                .collect();
+            ExpressionDesc::Pexp_record((arena.push_expr_field_list(&fields), transformed_base))
         }
         ExpressionDesc::Pexp_field(obj, field) => {
             let obj_expr = arena.get_expr(obj).clone();
@@ -4798,7 +4802,10 @@ fn mk_record_from_props(
             }
         }
         _ => Expression {
-            pexp_desc: ExpressionDesc::Pexp_record(Box::new((record_fields, spread_base))),
+            pexp_desc: ExpressionDesc::Pexp_record((
+                arena.push_expr_field_list(&record_fields),
+                spread_base,
+            )),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         },
@@ -5048,7 +5055,7 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
             child(inner.0, memo)
-                || inner.1.iter().any(|case| {
+                || arena.case_list(inner.1).iter().any(|case| {
                     case.pc_guard.is_some_and(|guard| child(guard, memo))
                         || child(case.pc_rhs, memo)
                 })
@@ -5073,7 +5080,10 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
             .iter()
             .any(|arg| child(*arg, memo)),
         ExpressionDesc::Pexp_record(inner) => {
-            inner.0.iter().any(|field| child(field.expr, memo))
+            arena
+                .expr_field_list(inner.0)
+                .iter()
+                .any(|field| child(field.expr, memo))
                 || inner.1.is_some_and(|spread| child(spread, memo))
         }
         ExpressionDesc::Pexp_field(target, _) => child(*target, memo),

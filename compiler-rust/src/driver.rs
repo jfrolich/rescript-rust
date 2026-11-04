@@ -155,9 +155,9 @@ fn expression_has_string_literal(
                 })
         }
         ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
+            let (scrutinee, cases) = &*inner;
             expression_has_string_literal(arena.get_expr(*scrutinee), value, arena)
-                || cases.iter().any(|case| {
+                || arena.case_list(*cases).iter().any(|case| {
                     case.pc_guard.as_ref().is_some_and(|g| {
                         expression_has_string_literal(arena.get_expr(*g), value, arena)
                     }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
@@ -179,8 +179,8 @@ fn expression_has_string_literal(
                 .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
         }
         ED::Pexp_record(inner) => {
-            let (fields, base) = &**inner;
-            fields.iter().any(|field| {
+            let (fields, base) = &*inner;
+            arena.expr_field_list(*fields).iter().any(|field| {
                 expression_has_string_literal(arena.get_expr(field.expr), value, arena)
             }) || base.as_ref().is_some_and(|base| {
                 expression_has_string_literal(arena.get_expr(*base), value, arena)
@@ -339,7 +339,9 @@ fn pattern_has_string_literal(
         }
         PD::Ppat_record(inner) => {
             let (rows, _, _) = &**inner;
-            rows.iter()
+            arena
+                .pat_field_list(*rows)
+                .iter()
                 .any(|row| pattern_has_string_literal(arena.get_pat(row.pat), value, arena))
         }
         PD::Ppat_extension(inner) => {
@@ -1929,7 +1931,7 @@ fn invalid_enabled_let_unwrap_in_expr(
             }),
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
             invalid_enabled_let_unwrap_in_expr(inner.0, arena).or_else(|| {
-                inner.1.iter().find_map(|case| {
+                arena.case_list(inner.1).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
                         .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
@@ -1948,8 +1950,8 @@ fn invalid_enabled_let_unwrap_in_expr(
             .expr_list(inner.1.txt)
             .iter()
             .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_record(record) => record
-            .0
+        ExpressionDesc::Pexp_record(record) => arena
+            .expr_field_list(record.0)
             .iter()
             .find_map(|field| invalid_enabled_let_unwrap_in_expr(field.expr, arena))
             .or_else(|| {
@@ -2112,7 +2114,7 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             }),
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
             disabled_let_unwrap_loc_in_expr(inner.0, arena).or_else(|| {
-                inner.1.iter().find_map(|case| {
+                arena.case_list(inner.1).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
                         .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
@@ -2131,8 +2133,8 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             .expr_list(inner.1.txt)
             .iter()
             .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_record(record) => record
-            .0
+        ExpressionDesc::Pexp_record(record) => arena
+            .expr_field_list(record.0)
             .iter()
             .find_map(|field| disabled_let_unwrap_loc_in_expr(field.expr, arena))
             .or_else(|| {
@@ -12596,7 +12598,7 @@ fn config_payload_actions(
     let expr = arena.get_expr(*expr_idx);
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, with_obj) = &**inner;
+            let (fields, with_obj) = &*inner;
             if with_obj.is_some() {
                 push_config_warning(
                     warnings,
@@ -12608,7 +12610,7 @@ fn config_payload_actions(
                 return Ok(Vec::new());
             }
             let mut actions = Vec::with_capacity(fields.len());
-            for field in fields {
+            for field in arena.expr_field_list(*fields) {
                 let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
                     return Err(ConfigPayloadError {
                         loc: default_loc,

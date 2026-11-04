@@ -552,11 +552,11 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref expr, ref cases) = **inner;
+                let (ref expr, ref cases) = *inner;
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
-                for case in cases {
+                for case in self.arena.case_list(*cases) {
                     self.add_case(case);
                 }
             }
@@ -577,8 +577,8 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (ref fields, ref spread) = **inner;
-                for field in fields {
+                let (ref fields, ref spread) = *inner;
+                for field in self.arena.expr_field_list(*fields) {
                     self.add_lident_idx(field.lid.txt);
                     self.add_expr_idx(field.expr);
                 }
@@ -886,7 +886,7 @@ impl<'a> DependencyCollector<'a> {
             }
             PatternDesc::Ppat_record(inner) => {
                 let (ref fields, ref _closed, ref record_rest) = **inner;
-                for field in fields {
+                for field in self.arena.pat_field_list(*fields) {
                     self.add_lident_idx(field.lid.txt);
                     // field.pat is PatIdx
                     self.add_pat_idx_inner(field.pat, unpack_names);

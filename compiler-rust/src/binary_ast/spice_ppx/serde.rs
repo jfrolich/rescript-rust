@@ -93,11 +93,11 @@ fn get_serde_legacy(attr: &Attribute, arena: &ParseArena) -> SpiceResult<(bool, 
     let ExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
         return Err(invalid());
     };
-    let (fields, spread) = &**record;
+    let (fields, spread) = &*record;
     if spread.is_some() || fields.len() != 1 {
         return Err(invalid());
     }
-    let field = &fields[0];
+    let field = &arena.expr_field_list(*fields)[0];
     let value = arena.get_expr(field.expr);
     if longident_matches(arena, field.lid.txt, &["legacy"]) {
         let legacy = bool_value(value, arena).ok_or_else(invalid)?;

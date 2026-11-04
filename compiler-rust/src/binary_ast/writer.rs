@@ -312,8 +312,8 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                                 match &expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
                                     ExpressionDesc::Pexp_record(inner) => {
-                                        let (ref fields, _) = **inner;
-                                        for field in fields {
+                                        let (ref fields, _) = *inner;
+                                        for field in arena.expr_field_list(*fields) {
                                             let lid = arena.get_longident(field.lid.txt);
                                             if let Longident::Lident(s) = lid {
                                                 if arena.get_string(*s) == "no_export" {

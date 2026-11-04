@@ -2385,7 +2385,7 @@ fn payload_raw_source_info(payload: &Payload, arena: &ParseArena) -> Option<(Str
 fn payload_single_record_fields_without_spread<'a>(
     payload: &'a Payload,
     arena: &'a ParseArena,
-) -> Option<&'a Vec<ExpressionRecordField>> {
+) -> Option<&'a [ExpressionRecordField]> {
     match payload {
         Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
@@ -2394,7 +2394,7 @@ fn payload_single_record_fields_without_spread<'a>(
                     &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
                 {
                     if record.1.is_none() {
-                        return Some(&record.0);
+                        return Some(arena.expr_field_list(record.0));
                     }
                 }
             }
@@ -3605,11 +3605,11 @@ fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> 
             Some(arena.get_string(*name_idx).to_string())
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, with_obj) = &**inner;
+            let (fields, with_obj) = &*inner;
             if with_obj.is_some() || fields.len() != 1 {
                 return None;
             }
-            let field = &fields[0];
+            let field = &arena.expr_field_list(*fields)[0];
             let Longident::Lident(field_name_idx) = arena.get_longident(field.lid.txt) else {
                 return None;
             };
@@ -3648,11 +3648,11 @@ fn validate_return_wrapper_config_shape(
     let ExpressionDesc::Pexp_record(inner) = &expr.pexp_desc else {
         return Ok(());
     };
-    let (fields, with_obj) = &**inner;
+    let (fields, with_obj) = &*inner;
     if with_obj.is_some() {
         return Ok(());
     }
-    for field in fields {
+    for field in arena.expr_field_list(*fields) {
         if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {
             return Err(PpxError::at_loc(
                 expr.pexp_loc,
@@ -3684,7 +3684,7 @@ fn return_wrapper_config_warning(
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(inner) => {
-            let (_fields, with_obj) = &**inner;
+            let (_fields, with_obj) = &*inner;
             with_obj
                 .is_some()
                 .then_some((expr.pexp_loc, "`with` is not supported, discarding"))
@@ -3793,12 +3793,12 @@ fn validate_module_import_attributes_payload(
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
         return Ok(false);
     };
-    let (fields, _) = &**record_inner;
+    let (fields, _) = &*record_inner;
 
     let mut from_name = false;
     let mut with_fields: Option<&[ExpressionRecordField]> = None;
 
-    for field in fields {
+    for field in arena.expr_field_list(*fields) {
         let Longident::Lident(field_name_idx) = arena.get_longident(field.lid.txt) else {
             continue;
         };
@@ -3812,8 +3812,8 @@ fn validate_module_import_attributes_payload(
                 let field_expr =
                     crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr));
                 if let ExpressionDesc::Pexp_record(with_inner) = &field_expr.pexp_desc {
-                    let (import_fields, _) = &**with_inner;
-                    with_fields = Some(import_fields.as_slice());
+                    let (import_fields, _) = &*with_inner;
+                    with_fields = Some(arena.expr_field_list(*import_fields));
                 }
             }
             _ => {}
@@ -3875,12 +3875,12 @@ fn get_module_import_attributes(
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
         return None;
     };
-    let (fields, _) = &**record_inner;
+    let (fields, _) = &*record_inner;
 
     let mut from_name: Option<String> = None;
     let mut with_fields: Option<ImportAttributes> = None;
 
-    for field in fields {
+    for field in arena.expr_field_list(*fields) {
         let Longident::Lident(field_name_idx) = arena.get_longident(field.lid.txt) else {
             continue;
         };
@@ -3896,10 +3896,10 @@ fn get_module_import_attributes(
                 let ExpressionDesc::Pexp_record(with_inner) = &field_expr.pexp_desc else {
                     continue;
                 };
-                let (import_fields, _) = &**with_inner;
+                let (import_fields, _) = &*with_inner;
                 let mut import_attributes: ImportAttributes =
                     Vec::with_capacity(import_fields.len());
-                for import_field in import_fields {
+                for import_field in arena.expr_field_list(*import_fields) {
                     let Longident::Lident(key_idx) = arena.get_longident(import_field.lid.txt)
                     else {
                         continue;
@@ -5855,10 +5855,10 @@ fn spelunk_expression_for_await_module_types(
             spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
         ExpressionDesc::Pexp_match(inner) => {
-            let (ref scrut_idx, ref cases) = **inner;
+            let (ref scrut_idx, ref cases) = *inner;
             // `List.fold_left (fun acc case -> aux case.pc_rhs @ acc) [] cases`
             let mut case_results = Vec::new();
-            for case in cases {
+            for case in arena.case_list(*cases).to_vec() {
                 let case_rhs = arena.get_expr(case.pc_rhs).clone();
                 let mut results =
                     spelunk_expression_for_await_module_types(&case_rhs, context, arena);
@@ -6729,7 +6729,7 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
         let module_longident = arena.get_longident(module_lid.txt).clone();
         let mut flattened = Vec::with_capacity(lid_pats.len());
 
-        for field in lid_pats {
+        for field in arena.pat_field_list(*lid_pats).to_vec() {
             let field_name = match arena.get_longident(field.lid.txt) {
                 Longident::Lident(name) => *name,
                 _ => {
@@ -6871,18 +6871,23 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
                 }
             });
             PatternDesc::Ppat_record(Box::new((
-                fields
-                    .iter()
-                    .map(|f| {
-                        let pat = arena.get_pat(f.pat).clone();
-                        let rw_pat = rewrite_pattern(&pat, arena);
-                        PatternRecordField {
-                            lid: f.lid,
-                            pat: arena.push_pat(rw_pat),
-                            opt: f.opt,
-                        }
-                    })
-                    .collect(),
+                {
+                    let items = arena
+                        .pat_field_list(*fields)
+                        .to_vec()
+                        .iter()
+                        .map(|f| {
+                            let pat = arena.get_pat(f.pat).clone();
+                            let rw_pat = rewrite_pattern(&pat, arena);
+                            PatternRecordField {
+                                lid: f.lid,
+                                pat: arena.push_pat(rw_pat),
+                                opt: f.opt,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    arena.push_pat_field_list(&items)
+                },
                 *flag,
                 record_rest,
             )))
@@ -7054,17 +7059,20 @@ fn rewrite_method_callback_expression(
     let hidden_field_name = format!("I{total_arity}");
     let hidden_field = arena.push_lident(hidden_field_name.as_str());
     let method_record = Expression {
-        pexp_desc: ExpressionDesc::Pexp_record(Box::new((
-            vec![ExpressionRecordField {
-                lid: Located {
-                    txt: hidden_field,
-                    loc,
-                },
-                expr: arena.push_expr(method_body),
-                opt: false,
-            }],
+        pexp_desc: ExpressionDesc::Pexp_record((
+            {
+                let items = [ExpressionRecordField {
+                    lid: Located {
+                        txt: hidden_field,
+                        loc,
+                    },
+                    expr: arena.push_expr(method_body),
+                    opt: false,
+                }];
+                arena.push_expr_field_list(&items)
+            },
             None,
-        ))),
+        )),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -7726,10 +7734,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                             let mut attrs = expr.pexp_attributes.clone();
                             attrs.extend(vb.pvb_attributes.iter().cloned());
                             let rewritten = Expression {
-                                pexp_desc: ExpressionDesc::Pexp_match(Box::new((
+                                pexp_desc: ExpressionDesc::Pexp_match((
                                     vb.pvb_expr,
-                                    vec![early_case, cont_case],
-                                ))),
+                                    arena.push_case_list(&[early_case, cont_case]),
+                                )),
                                 pexp_loc: expr.pexp_loc,
                                 pexp_attributes: attrs,
                             };
@@ -7767,16 +7775,18 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     let mut attrs = expr.pexp_attributes.clone();
                     attrs.extend(vb.pvb_attributes.iter().cloned());
                     let attrs = rewrite_attributes(&attrs, arena);
+                    let scrutinee = arena.push_expr(rewritten_expr);
+                    let case = Case {
+                        pc_bar: None,
+                        pc_lhs: arena.push_pat(rewritten_pat),
+                        pc_guard: None,
+                        pc_rhs: arena.push_expr(rewritten_body),
+                    };
                     return Expression {
-                        pexp_desc: ExpressionDesc::Pexp_match(Box::new((
-                            arena.push_expr(rewritten_expr),
-                            vec![Case {
-                                pc_bar: None,
-                                pc_lhs: arena.push_pat(rewritten_pat),
-                                pc_guard: None,
-                                pc_rhs: arena.push_expr(rewritten_body),
-                            }],
-                        ))),
+                        pexp_desc: ExpressionDesc::Pexp_match((
+                            scrutinee,
+                            arena.push_case_list(&[case]),
+                        )),
                         pexp_loc: expr.pexp_loc,
                         pexp_attributes: attrs.into(),
                     };
@@ -7902,13 +7912,16 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_match(inner) => {
-            let (ref scrutinee, ref cases) = **inner;
+            let (ref scrutinee, ref cases) = *inner;
             // Boolean match → if-then-else conversion
             // OCaml's bs_builtin_ppx.ml (lines 138-167) converts:
             //   switch b { | true => t | false => f }
             // to:
             //   if b { t } else { f }
-            if cases.len() == 2 && cases[0].pc_guard.is_none() && cases[1].pc_guard.is_none() {
+            if cases.len() == 2
+                && arena.case_list(*cases)[0].pc_guard.is_none()
+                && arena.case_list(*cases)[1].pc_guard.is_none()
+            {
                 let is_true = |pat: &Pattern| -> bool {
                     if let PatternDesc::Ppat_construct(lid, args) = &pat.ppat_desc
                         && args.txt.is_empty()
@@ -7927,14 +7940,20 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                         false
                     }
                 };
-                let (t_exp, f_exp) = if is_true(arena.get_pat(cases[0].pc_lhs))
-                    && is_false(arena.get_pat(cases[1].pc_lhs))
+                let (t_exp, f_exp) = if is_true(arena.get_pat(arena.case_list(*cases)[0].pc_lhs))
+                    && is_false(arena.get_pat(arena.case_list(*cases)[1].pc_lhs))
                 {
-                    (Some(&cases[0].pc_rhs), Some(&cases[1].pc_rhs))
-                } else if is_false(arena.get_pat(cases[0].pc_lhs))
-                    && is_true(arena.get_pat(cases[1].pc_lhs))
+                    (
+                        Some(&arena.case_list(*cases)[0].pc_rhs),
+                        Some(&arena.case_list(*cases)[1].pc_rhs),
+                    )
+                } else if is_false(arena.get_pat(arena.case_list(*cases)[0].pc_lhs))
+                    && is_true(arena.get_pat(arena.case_list(*cases)[1].pc_lhs))
                 {
-                    (Some(&cases[1].pc_rhs), Some(&cases[0].pc_rhs))
+                    (
+                        Some(&arena.case_list(*cases)[1].pc_rhs),
+                        Some(&arena.case_list(*cases)[0].pc_rhs),
+                    )
                 } else {
                     (None, None)
                 };
@@ -7959,16 +7978,19 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
             let scrutinee_expr = arena.get_expr(*scrutinee).clone();
             let rw_scrutinee = rewrite_expression(&scrutinee_expr, arena);
-            let rw_cases = rewrite_cases(cases, arena);
-            ExpressionDesc::Pexp_match(Box::new((arena.push_expr(rw_scrutinee), rw_cases)))
+            let rw_cases = rewrite_cases(&arena.case_list(*cases).to_vec(), arena);
+            ExpressionDesc::Pexp_match((
+                arena.push_expr(rw_scrutinee),
+                arena.push_case_list(&rw_cases),
+            ))
         }
 
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = **inner;
+            let (ref body, ref cases) = *inner;
             let body_expr = arena.get_expr(*body).clone();
             let rw_body = rewrite_expression(&body_expr, arena);
-            let rw_cases = rewrite_cases(cases, arena);
-            ExpressionDesc::Pexp_try(Box::new((arena.push_expr(rw_body), rw_cases)))
+            let rw_cases = rewrite_cases(&arena.case_list(*cases).to_vec(), arena);
+            ExpressionDesc::Pexp_try((arena.push_expr(rw_body), arena.push_case_list(&rw_cases)))
         }
 
         ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
@@ -8052,8 +8074,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref spread) = **inner;
-            let new_fields = fields
+            let (ref fields, ref spread) = *inner;
+            let new_fields = arena
+                .expr_field_list(*fields)
+                .to_vec()
                 .iter()
                 .map(|f| current::ExpressionRecordField {
                     lid: f.lid,
@@ -8064,13 +8088,13 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     },
                     opt: f.opt,
                 })
-                .collect();
+                .collect::<Vec<_>>();
             let rw_spread = spread.map(|e| {
                 let inner_e = arena.get_expr(e).clone();
                 let rw = rewrite_expression(&inner_e, arena);
                 arena.push_expr(rw)
             });
-            ExpressionDesc::Pexp_record(Box::new((new_fields, rw_spread)))
+            ExpressionDesc::Pexp_record((arena.push_expr_field_list(&new_fields), rw_spread))
         }
 
         ExpressionDesc::Pexp_field(e, lid) => {
@@ -8551,11 +8575,12 @@ fn deriving_config_actions(
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(inner.0));
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(record) => {
-            let (fields, with_obj) = &**record;
+            let (fields, with_obj) = &*record;
             if with_obj.is_some() {
                 return Ok(Vec::new());
             }
-            fields
+            arena
+                .expr_field_list(*fields)
                 .iter()
                 .map(|field| {
                     let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
@@ -8611,8 +8636,8 @@ fn validate_js_converter_config(expr_idx: ExprIdx, arena: &ParseArena) -> PpxRes
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, _base) = &**inner;
-            let Some(field) = fields.first() else {
+            let (fields, _base) = &*inner;
+            let Some(field) = arena.expr_field_list(*fields).first() else {
                 return Err(PpxError::at_loc(
                     expr.pexp_loc,
                     "such configuration is not supported",
@@ -8778,8 +8803,8 @@ fn check_new_type_config(expr: &Expression, arena: &ParseArena) -> bool {
             false
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, _) = **inner;
-            for field in fields {
+            let (ref fields, _) = *inner;
+            for field in arena.expr_field_list(*fields) {
                 let lid = arena.get_longident(field.lid.txt);
                 if let Longident::Lident(s) = lid {
                     let field_name = arena.get_string(*s);
@@ -10161,7 +10186,7 @@ fn create_record_from_js_function(
         .collect();
 
     let record_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_record(Box::new((record_fields, None))),
+        pexp_desc: ExpressionDesc::Pexp_record((arena.push_expr_field_list(&record_fields), None)),
         pexp_loc: none_loc,
         pexp_attributes: Attributes::new(),
     };
@@ -10936,7 +10961,7 @@ fn validate_module_record_pattern_binding_error(
     }
 
     let (lid_pats, _, _) = &**record_inner;
-    for field in lid_pats {
+    for field in arena.pat_field_list(*lid_pats) {
         if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {
             return Err(PpxError::at_loc(
                 field.lid.loc,
@@ -13844,8 +13869,8 @@ mod tests {
         let ExpressionDesc::Pexp_match(match_expr) = &expr.pexp_desc else {
             panic!("expected rewritten let? match");
         };
-        let (_, cases) = &**match_expr;
-        let [early_case, continue_case] = cases.as_slice() else {
+        let (_, cases) = &*match_expr;
+        let [early_case, continue_case] = arena.case_list(*cases) else {
             panic!("expected early-return and continuation cases");
         };
         let PatternDesc::Ppat_alias(ctor_pat, _) = &arena.get_pat(early_case.pc_lhs).ppat_desc

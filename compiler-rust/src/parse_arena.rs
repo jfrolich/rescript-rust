@@ -34,9 +34,10 @@ use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
-    ArgLabel, Attributes, Constant, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam,
-    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringConst,
-    StringLoc, ValueBinding, ValueConstraint,
+    ArgLabel, Attributes, Case, Constant, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
+    ExpressionRecordField, FunParam, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc,
+    Pattern, PatternDesc, PatternRecordField, StringConst, StringLoc, ValueBinding,
+    ValueConstraint,
 };
 use crate::parser::longident::Longident;
 use crate::string_literal::StringLiteral;
@@ -516,6 +517,10 @@ pub struct ParseArena {
     type_lists: ListPool<CoreTypeIdx>,
     /// Pool behind `let` value binding lists (`Pexp_let`, `Pstr_value`).
     vb_lists: ListPool<ValueBinding>,
+    /// Pools behind record field lists and match/try case lists.
+    expr_field_lists: ListPool<ExpressionRecordField>,
+    pat_field_lists: ListPool<PatternRecordField>,
+    case_lists: ListPool<Case>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -983,6 +988,9 @@ impl Default for ParseArena {
             pat_lists: ListPool::default(),
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
+            expr_field_lists: ListPool::default(),
+            pat_field_lists: ListPool::default(),
+            case_lists: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
@@ -2620,6 +2628,48 @@ impl ParseArena {
         self.vb_lists.get(list)
     }
 
+    /// Store the fields of a record expression.
+    pub fn push_expr_field_list(&mut self, items: &[ExpressionRecordField]) -> ExprFieldList {
+        self.expr_field_lists.push(items)
+    }
+
+    /// `push_expr_field_list` for nodes the type checker synthesizes.
+    pub fn push_shared_expr_field_list(&self, items: &[ExpressionRecordField]) -> ExprFieldList {
+        self.expr_field_lists.push_shared(items)
+    }
+
+    pub fn expr_field_list(&self, list: ExprFieldList) -> &[ExpressionRecordField] {
+        self.expr_field_lists.get(list)
+    }
+
+    /// Store the fields of a record pattern.
+    pub fn push_pat_field_list(&mut self, items: &[PatternRecordField]) -> PatFieldList {
+        self.pat_field_lists.push(items)
+    }
+
+    /// `push_pat_field_list` for nodes the type checker synthesizes.
+    pub fn push_shared_pat_field_list(&self, items: &[PatternRecordField]) -> PatFieldList {
+        self.pat_field_lists.push_shared(items)
+    }
+
+    pub fn pat_field_list(&self, list: PatFieldList) -> &[PatternRecordField] {
+        self.pat_field_lists.get(list)
+    }
+
+    /// Store the cases of a `switch` or `try`.
+    pub fn push_case_list(&mut self, items: &[Case]) -> CaseList {
+        self.case_lists.push(items)
+    }
+
+    /// `push_case_list` for nodes the type checker synthesizes.
+    pub fn push_shared_case_list(&self, items: &[Case]) -> CaseList {
+        self.case_lists.push_shared(items)
+    }
+
+    pub fn case_list(&self, list: CaseList) -> &[Case] {
+        self.case_lists.get(list)
+    }
+
     /// The arguments of a `Pexp_apply`, in source order.
     pub fn apply_args(&self, args: ApplyArgs) -> &[(ArgLabel, ExprIdx)] {
         self.apply_args.get(args)
@@ -3006,8 +3056,10 @@ impl ParseArena {
             .flatten()
             .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (_, cases) = &**inner;
-                    cases.get(case_index).and_then(|case| case.pc_guard)
+                    let (_, cases) = &*inner;
+                    self.case_list(*cases)
+                        .get(case_index)
+                        .and_then(|case| case.pc_guard)
                 }
                 _ => None,
             })
@@ -3028,7 +3080,7 @@ impl ParseArena {
             .and_then(|o| o.record_spread)
             .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_record(inner) => {
-                    let (_, spread) = &**inner;
+                    let (_, spread) = &*inner;
                     *spread
                 }
                 _ => None,
@@ -3306,6 +3358,12 @@ pub type PatList = ArenaList<PatIdx>;
 pub type TypeList = ArenaList<CoreTypeIdx>;
 /// The value bindings of a `let`.
 pub type VbList = ArenaList<ValueBinding>;
+/// The fields of a record expression.
+pub type ExprFieldList = ArenaList<ExpressionRecordField>;
+/// The fields of a record pattern.
+pub type PatFieldList = ArenaList<PatternRecordField>;
+/// The cases of a `switch` or `try`.
+pub type CaseList = ArenaList<Case>;
 
 /// Lists pushed through a shared arena reference (by the type checker) set
 /// this bit in `ArenaList::start`; the rest is the slot in `ListPool::shared`.
@@ -3758,22 +3816,23 @@ mod tests {
         let case_rhs = arena.push_expr(case_rhs_node);
         let guard_expr_node = ident_expr(&mut arena, "guard");
         let guard_expr = arena.push_expr(guard_expr_node);
+        let cases = arena.push_case_list(&[Case {
+            pc_bar: None,
+            pc_lhs: case_lhs,
+            pc_guard: Some(guard_expr),
+            pc_rhs: case_rhs,
+        }]);
         let match_owner = arena.push_expr(Expression {
-            pexp_desc: ExpressionDesc::Pexp_match(Box::new((
-                rhs,
-                vec![Case {
-                    pc_bar: None,
-                    pc_lhs: case_lhs,
-                    pc_guard: Some(guard_expr),
-                    pc_rhs: case_rhs,
-                }],
-            ))),
+            pexp_desc: ExpressionDesc::Pexp_match((rhs, cases)),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });
 
         let record_owner = arena.push_expr(Expression {
-            pexp_desc: ExpressionDesc::Pexp_record(Box::new((vec![], Some(default_expr)))),
+            pexp_desc: ExpressionDesc::Pexp_record((
+                crate::parse_arena::ArenaList::EMPTY,
+                Some(default_expr),
+            )),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });

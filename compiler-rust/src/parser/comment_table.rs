@@ -1865,7 +1865,7 @@ fn walk_expression(
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref spread_idx) = **inner;
+            let (ref fields, ref spread_idx) = *inner;
             if fields.is_empty() {
                 t.attach_inside(expr.pexp_loc, comments, arena);
             } else {
@@ -1885,6 +1885,7 @@ fn walk_expression(
                     }
                 };
 
+                let fields = arena.expr_field_list(*fields).to_vec();
                 let nodes: Vec<Node<'_>> = fields
                     .iter()
                     .map(|f| Node::ExprRecordRow(&f.lid, f.expr))
@@ -2139,7 +2140,7 @@ fn walk_expression(
             t.attach_trailing(mod_expr.pmod_loc, after, arena);
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (ref match_expr_idx, ref cases) = **inner;
+            let (ref match_expr_idx, ref cases) = *inner;
             // Safety: arena is append-only, expression won't be invalidated
             let match_expr = arena.get_expr(*match_expr_idx).clone();
             let (before, inside, after) = partition_by_loc(comments, match_expr.pexp_loc, arena);
@@ -2160,6 +2161,7 @@ fn walk_expression(
             let (after_expr, rest) = partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
             t.attach_trailing(match_expr.pexp_loc, after_expr, arena);
 
+            let cases = arena.case_list(*cases).to_vec();
             let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
             walk_list(&nodes, t, rest, arena);
         }
@@ -3107,6 +3109,7 @@ fn walk_pattern(
         }
         PatternDesc::Ppat_record(inner) => {
             let (ref fields, _, ref record_rest) = **inner;
+            let fields = arena.pat_field_list(*fields).to_vec();
             let mut nodes: Vec<Node<'_>> = fields
                 .iter()
                 .map(|f| Node::PatternRecordRow(&f.lid, f.pat))

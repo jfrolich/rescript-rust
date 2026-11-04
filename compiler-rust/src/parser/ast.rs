@@ -12,8 +12,9 @@
 use std::borrow::Cow;
 
 use crate::parse_arena::{
-    ApplyArgs, ArityIdx, CoreTypeIdx, ExprIdx, ExprList, LidentIdx, LocIdx, Located, ModExprIdx,
-    ModTypeIdx, PatIdx, PatList, PosIdx, StrIdx, TypeList, VbList,
+    ApplyArgs, ArityIdx, CaseList, CoreTypeIdx, ExprFieldList, ExprIdx, ExprList, LidentIdx,
+    LocIdx, Located, ModExprIdx, ModTypeIdx, PatFieldList, PatIdx, PatList, PosIdx, StrIdx,
+    TypeList, VbList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -603,7 +604,7 @@ pub enum PatternDesc {
     /// Record: `{l1: P1, ..., ln: Pn}`.
     /// Record: `{l1: P1, ...}`, closed flag, and an optional `...Type.t as name` rest
     /// (compiler/ml/parsetree.ml:164-168).
-    Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag, Option<RecordPatRest>)>),
+    Ppat_record(Box<(PatFieldList, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
     Ppat_array(PatList),
     /// Or-pattern: `P1 | P2`.
@@ -621,7 +622,7 @@ pub enum PatternDesc {
 }
 
 /// A record field in a pattern.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PatternRecordField {
     /// Field name.
     pub lid: Loc<LidentIdx>,
@@ -742,9 +743,9 @@ pub enum ExpressionDesc {
     /// Application: `E(E1, E2, ...)`.
     Pexp_apply(PexpApply),
     /// Match: `switch E { | P1 => E1 | ... }`.
-    Pexp_match(Box<(ExprIdx, Vec<Case>)>),
+    Pexp_match((ExprIdx, CaseList)),
     /// Try: `try E { | P1 => E1 | ... }`.
-    Pexp_try(Box<(ExprIdx, Vec<Case>)>),
+    Pexp_try((ExprIdx, CaseList)),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(ExprList),
     /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument
@@ -753,7 +754,7 @@ pub enum ExpressionDesc {
     /// Variant: `#A`, `#A(E)` or `#A(E1, ..., En)`.
     Pexp_variant(Box<(Label, Loc<ExprList>)>),
     /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
-    Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
+    Pexp_record((ExprFieldList, Option<ExprIdx>)),
     /// Field access: `E.l`.
     Pexp_field(ExprIdx, Loc<LidentIdx>),
     /// Field set: `E.l = E'`.
@@ -816,7 +817,7 @@ pub enum ExpressionDesc {
 }
 
 /// A record field in an expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ExpressionRecordField {
     /// Field name.
     pub lid: Loc<LidentIdx>,
@@ -827,7 +828,7 @@ pub struct ExpressionRecordField {
 }
 
 /// A case in a match or try expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Case {
     /// Position of the `|` bar.
     pub pc_bar: Option<PosIdx>,

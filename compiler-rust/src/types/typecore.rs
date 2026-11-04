@@ -4828,7 +4828,7 @@ fn type_pattern_inner(
                 tctx,
                 env,
                 loc,
-                fields,
+                tctx.arena.pat_field_list(*fields),
                 *closed_flag,
                 record_rest.as_ref(),
                 expected_ty,
@@ -7389,7 +7389,7 @@ fn final_subexpression<'e>(
             ED::Pexp_braces(braces) => braces.expr,
             ED::Pexp_ifthenelse(inner) => inner.1,
             ED::Pexp_ternary(inner) => inner.1,
-            ED::Pexp_match(inner) => match inner.1.first() {
+            ED::Pexp_match(inner) => match arena.case_list(inner.1).first() {
                 Some(case) => case.pc_rhs,
                 None => return sexp,
             },
@@ -8237,7 +8237,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_match(inner) => {
-            let (ref scrutinee_idx, ref cases) = **inner;
+            let (ref scrutinee_idx, ref cases) = *inner;
             let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
 
             // Normal match expression
@@ -8246,14 +8246,14 @@ fn type_expect_with_recarg_unscoped<'a>(
                 env,
                 loc,
                 scrutinee,
-                cases,
+                tctx.arena.case_list(*cases),
                 expected_ty,
                 &expr.pexp_attributes,
             )
         }
 
         ED::Pexp_try(inner) => {
-            let (ref body_idx, ref handlers) = **inner;
+            let (ref body_idx, ref handlers) = *inner;
             // Try expression
             let body = tctx.arena.get_expr(*body_idx);
             type_try(
@@ -8261,7 +8261,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 env,
                 loc,
                 body,
-                handlers,
+                tctx.arena.case_list(*handlers),
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -8407,7 +8407,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_record(inner) => {
-            let (ref fields, ref base) = **inner;
+            let (ref fields, ref base) = *inner;
             // Record expression
             // OCaml quirk: in `Pexp_record (lid_sexp_list, Some sexp)`, the pattern
             // variable `sexp` shadows the outer function parameter, so
@@ -8421,7 +8421,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 tctx,
                 env,
                 loc,
-                fields,
+                tctx.arena.expr_field_list(*fields),
                 (*base).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 attrs,
@@ -11672,9 +11672,11 @@ fn pattern_contains_generalized_constructor(
                 pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*item))
             })
         }
-        crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
-            pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(field.pat))
-        }),
+        crate::parser::ast::PatternDesc::Ppat_record(inner) => {
+            tctx.arena.pat_field_list(inner.0).iter().any(|field| {
+                pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(field.pat))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_or(left, right) => {
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*left))
                 || pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*right))
@@ -11811,7 +11813,7 @@ fn collect_lident_idents_in_expression(
         }
         ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            for case in inner.1.iter() {
+            for case in arena.case_list(inner.1).iter() {
                 if let Some(guard) = case.pc_guard {
                     collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
                 }
@@ -11834,7 +11836,7 @@ fn collect_lident_idents_in_expression(
             }
         }
         ED::Pexp_record(inner) => {
-            for field in inner.0.iter() {
+            for field in arena.expr_field_list(inner.0).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(field.expr), out);
             }
             if let Some(base) = inner.1 {
@@ -12027,9 +12029,11 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
                 parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
             })
         }
-        crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
-            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
-        }),
+        crate::parser::ast::PatternDesc::Ppat_record(inner) => {
+            arena.pat_field_list(inner.0).iter().any(|field| {
+                parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(field.pat))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_exception(inner)
         | crate::parser::ast::PatternDesc::Ppat_alias(inner, _) => {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*inner))
@@ -12438,9 +12442,9 @@ fn desugar_nary_function_defaults(
             });
             let optional_default_attr = arena.intern_string("#optional_arg_default");
             let match_expr = arena.push_expr(ParsedExpression {
-                pexp_desc: ED::Pexp_match(Box::new((
+                pexp_desc: ED::Pexp_match((
                     scrutinee,
-                    vec![
+                    arena.push_shared_case_list(&[
                         crate::parser::ast::Case {
                             pc_bar: None,
                             pc_lhs: some_pat,
@@ -12453,8 +12457,8 @@ fn desugar_nary_function_defaults(
                             pc_guard: None,
                             pc_rhs: default_idx,
                         },
-                    ],
-                ))),
+                    ]),
+                )),
                 pexp_loc: sloc,
                 pexp_attributes: vec![(
                     Located::mknoloc(optional_default_attr),
@@ -13566,7 +13570,7 @@ fn type_construct(
         let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &tctx.arena.get_expr(*arg_idx).pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_ident(_) => true,
             crate::parser::ast::ExpressionDesc::Pexp_record(inner) => {
-                let (_, base) = &**inner;
+                let (_, base) = &*inner;
                 match base {
                     None => true,
                     Some(base_idx) => matches!(
@@ -19291,14 +19295,14 @@ fn type_approx_for_rec_let(
             Ok(ctx.new_type(TypeDesc::Tarrow { args, ret }))
         }
         ED::Pexp_match(inner) => {
-            let (_, cases) = &**inner;
-            match cases.first() {
+            let (_, cases) = &*inner;
+            match tctx.arena.case_list(*cases).first() {
                 Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(case.pc_rhs)),
                 None => Ok(ctx.new_var(None)),
             }
         }
         ED::Pexp_try(inner) => {
-            let (expr, _) = &**inner;
+            let (expr, _) = &*inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
         }
         ED::Pexp_tuple(items) => {
@@ -29859,14 +29863,14 @@ fn conv_counter_example(
                             opt: *optional,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 // TODO: Conv.conv_record_rest (parmatch.ml:1948-1959) keeps the
                 // rest binding with a `Typ.constr` annotation.
                 push_parsed_pattern(
                     arena,
                     loc,
                     P::Ppat_record(Box::new((
-                        fields,
+                        arena.push_shared_pat_field_list(&fields),
                         crate::parser::ast::ClosedFlag::Open,
                         None,
                     ))),
@@ -30053,7 +30057,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                             opt,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 let closed_flag = if saw_optional_rewrite {
                     crate::parser::ast::ClosedFlag::Closed
                 } else {
@@ -30070,7 +30074,11 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 push_parsed_pattern(
                     arena,
                     none,
-                    P::Ppat_record(Box::new((fields, closed_flag, rest))),
+                    P::Ppat_record(Box::new((
+                        arena.push_shared_pat_field_list(&fields),
+                        closed_flag,
+                        rest,
+                    ))),
                 )
             }
             PatternDesc::Tpat_array(items) => {

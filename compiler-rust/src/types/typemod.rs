@@ -937,7 +937,7 @@ fn parser_deprecated_payload_to_decl_payload(
     match &expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_constant(_) => None,
         crate::parser::ast::ExpressionDesc::Pexp_record(record) => {
-            let (fields, _base) = record.as_ref();
+            let fields = arena.expr_field_list(record.0);
             let mut reason = None;
             let mut can_be_automigrated = false;
             let mut migrate = None;

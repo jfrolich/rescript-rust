@@ -460,7 +460,7 @@ fn expr_variant(
 fn expr_match(expr: Expression, cases: Vec<Case>, arena: &mut ParseArena) -> Expression {
     let expr_idx = arena.push_expr(expr);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_match(Box::new((expr_idx, cases))),
+        pexp_desc: ExpressionDesc::Pexp_match((expr_idx, arena.push_case_list(&cases))),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -531,7 +531,7 @@ fn expr_record(
 ) -> Expression {
     let base_idx = base.map(|b| arena.push_expr(b));
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_record(Box::new((fields, base_idx))),
+        pexp_desc: ExpressionDesc::Pexp_record((arena.push_expr_field_list(&fields), base_idx)),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -2625,7 +2625,11 @@ fn variants_inline_record_payload_pattern(
     // `Pat.record` at the default location.
     let _ = loc;
     Pattern {
-        ppat_desc: PatternDesc::Ppat_record(Box::new((pattern_fields, ClosedFlag::Closed, None))),
+        ppat_desc: PatternDesc::Ppat_record(Box::new((
+            arena.push_pat_field_list(&pattern_fields),
+            ClosedFlag::Closed,
+            None,
+        ))),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -4845,9 +4849,12 @@ impl<'a> LocCloner<'a> {
             }
             PatternDesc::Ppat_record(inner) => {
                 let (ref mut fields, _, ref mut record_rest) = **inner;
-                for field in fields.iter_mut() {
+                // The rewritten node gets its own list; the original keeps its own.
+                let mut new_fields = self.arena.pat_field_list(*fields).to_vec();
+                for field in new_fields.iter_mut() {
                     self.pattern_record_field(field);
                 }
+                *fields = self.arena.push_pat_field_list(&new_fields);
                 if let Some(rest) = record_rest {
                     self.loc(&mut rest.rest_loc);
                     self.located(&mut rest.rest_name);
@@ -5064,11 +5071,13 @@ impl<'a> LocCloner<'a> {
                 *args = self.arena.push_apply_args(&new_args);
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref mut expr, ref mut cases) = **inner;
+                let (ref mut expr, ref mut cases) = *inner;
                 self.expression_idx(expr);
-                for case in cases.iter_mut() {
+                let mut new_cases = self.arena.case_list(*cases).to_vec();
+                for case in new_cases.iter_mut() {
                     self.case(case);
                 }
+                *cases = self.arena.push_case_list(&new_cases);
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
                 // The copy gets its own list; the original keeps its own.
@@ -5098,10 +5107,12 @@ impl<'a> LocCloner<'a> {
                 args.txt = self.arena.push_expr_list(&new_items);
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (ref mut fields, ref mut base) = **inner;
-                for field in fields.iter_mut() {
+                let (ref mut fields, ref mut base) = *inner;
+                let mut new_fields = self.arena.expr_field_list(*fields).to_vec();
+                for field in new_fields.iter_mut() {
                     self.expression_record_field(field);
                 }
+                *fields = self.arena.push_expr_field_list(&new_fields);
                 if let Some(expr) = base {
                     self.expression_idx(expr);
                 }

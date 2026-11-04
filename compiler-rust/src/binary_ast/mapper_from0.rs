@@ -1018,7 +1018,7 @@ impl<'a> Mapper<'a> {
                             opt: optional,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 // ast_mapper_from0.ml get_record_rest_attr: the rest row comes
                 // back from the internal `_res.record_rest` attribute.
                 let rest = pat
@@ -1031,7 +1031,11 @@ impl<'a> Mapper<'a> {
                         _ => None,
                     });
                 let rest = rest.and_then(|rest| self.record_rest_of_pattern(&rest));
-                current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(closed), rest)))
+                current::PatternDesc::Ppat_record(Box::new((
+                    self.arena.push_pat_field_list(&fields),
+                    map_closed_flag(closed),
+                    rest,
+                )))
             }
             pt0::PatternDesc::Array(pl) => current::PatternDesc::Ppat_array({
                 let items: Vec<_> = pl.iter().map(|p| self.push_pat(p)).collect();
@@ -1445,9 +1449,10 @@ impl<'a> Mapper<'a> {
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
                 });
-                let cases = cases.iter().map(|c| self.map_case(c)).collect();
+                let cases = cases.iter().map(|c| self.map_case(c)).collect::<Vec<_>>();
+                let cases = self.arena.push_case_list(&cases);
                 let body = self.arena.push_expr(current::Expression {
-                    pexp_desc: current::ExpressionDesc::Pexp_match(Box::new((scrutinee, cases))),
+                    pexp_desc: current::ExpressionDesc::Pexp_match((scrutinee, cases)),
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
                 });
@@ -1765,17 +1770,13 @@ impl<'a> Mapper<'a> {
             }
             pt0::ExpressionDesc::Match(e, cases) => {
                 let e_idx = self.push_expr(e);
-                current::ExpressionDesc::Pexp_match(Box::new((
-                    e_idx,
-                    cases.iter().map(|c| self.map_case(c)).collect(),
-                )))
+                let cases: Vec<_> = cases.iter().map(|c| self.map_case(c)).collect();
+                current::ExpressionDesc::Pexp_match((e_idx, self.arena.push_case_list(&cases)))
             }
             pt0::ExpressionDesc::Try(e, cases) => {
                 let e_idx = self.push_expr(e);
-                current::ExpressionDesc::Pexp_try(Box::new((
-                    e_idx,
-                    cases.iter().map(|c| self.map_case(c)).collect(),
-                )))
+                let cases: Vec<_> = cases.iter().map(|c| self.map_case(c)).collect();
+                current::ExpressionDesc::Pexp_try((e_idx, self.arena.push_case_list(&cases)))
             }
             pt0::ExpressionDesc::Tuple(el) => current::ExpressionDesc::Pexp_tuple({
                 let items: Vec<_> = el.iter().map(|e| self.push_expr(e)).collect();
@@ -1891,11 +1892,11 @@ impl<'a> Mapper<'a> {
                             opt: optional,
                         }
                     })
-                    .collect();
-                current::ExpressionDesc::Pexp_record(Box::new((
-                    fields,
+                    .collect::<Vec<_>>();
+                current::ExpressionDesc::Pexp_record((
+                    self.arena.push_expr_field_list(&fields),
                     base.as_ref().map(|e| self.push_expr(e)),
-                )))
+                ))
             }
             pt0::ExpressionDesc::Field(e, lid) => {
                 let e_idx = self.push_expr(e);

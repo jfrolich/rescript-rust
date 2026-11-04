@@ -98,7 +98,7 @@ fn parsed_deprecated_reason(arena: &ParseArena, payload: &Payload) -> Option<Str
     match &arena.get_expr(e).pexp_desc {
         ExpressionDesc::Pexp_record(record) => {
             let mut reason = String::new();
-            for field in &record.0 {
+            for field in arena.expr_field_list(record.0) {
                 if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
                     && arena.get_string(*txt) == "reason"
                     && let Some(msg) = string_constant(arena, field.expr)

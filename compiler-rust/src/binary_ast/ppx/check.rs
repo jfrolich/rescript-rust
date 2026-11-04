@@ -637,7 +637,7 @@ impl<'a> Checker<'a> {
             }
             PatternDesc::Ppat_record(inner) => {
                 let (fields, _closed, rest) = &**inner;
-                for field in fields {
+                for field in self.arena.pat_field_list(*fields).to_vec() {
                     self.pat(field.pat)?;
                 }
                 if let Some(rest_type) = rest.as_ref().and_then(|rest| rest.rest_type) {
@@ -740,10 +740,13 @@ impl<'a> Checker<'a> {
             },
             ExpressionDesc::Pexp_fun(fun) => self.function(expr, fun, old_in_function_def),
             ExpressionDesc::Pexp_apply(apply) => self.apply(expr, apply),
-            ExpressionDesc::Pexp_match(inner) if self.is_bool_match(&inner.1) => {
+            ExpressionDesc::Pexp_match(inner)
+                if self.is_bool_match(self.arena.case_list(inner.1)) =>
+            {
                 // Rewritten to `Pexp_ifthenelse (b, t, Some f)` and mapped by
                 // `default_expr_mapper`.
-                let (scrutinee, cases) = &**inner;
+                let (scrutinee, cases) = &*inner;
+                let cases = self.arena.case_list(*cases).to_vec();
                 self.attributes(&expr.pexp_attributes)?;
                 let (true_case, false_case) = if self.case_is_constructor(&cases[0], "true") {
                     (&cases[0], &cases[1])
@@ -938,8 +941,8 @@ impl<'a> Checker<'a> {
             | ExpressionDesc::Pexp_break
             | ExpressionDesc::Pexp_continue => Ok(()),
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (scrutinee, cases) = &**inner;
-                self.cases(cases)?;
+                let (scrutinee, cases) = &*inner;
+                self.cases(&self.arena.case_list(*cases).to_vec())?;
                 self.expr(*scrutinee)
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
@@ -975,11 +978,11 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (fields, spread) = &**inner;
+                let (fields, spread) = &*inner;
                 if let Some(spread) = spread {
                     self.expr(*spread)?;
                 }
-                for field in fields {
+                for field in self.arena.expr_field_list(*fields).to_vec() {
                     self.expr(field.expr)?;
                 }
                 Ok(())

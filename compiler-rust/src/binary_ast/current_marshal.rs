@@ -1520,7 +1520,7 @@ impl Marshal for ExpressionDesc {
                 w.write_int(if *transformed_jsx { 1 } else { 0 });
             }
             ExpressionDesc::Pexp_match(inner) => {
-                let (ref e, ref cases) = **inner;
+                let (ref e, ref cases) = *inner;
                 w.write_block_header(6, 2);
                 e.marshal(w);
                 if let Some(owner) = w.current_expr_idx() {
@@ -1532,7 +1532,7 @@ impl Marshal for ExpressionDesc {
                 }
             }
             ExpressionDesc::Pexp_try(inner) => {
-                let (ref e, ref cases) = **inner;
+                let (ref e, ref cases) = *inner;
                 w.write_block_header(7, 2);
                 e.marshal(w);
                 if let Some(owner) = w.current_expr_idx() {
@@ -1559,7 +1559,7 @@ impl Marshal for ExpressionDesc {
                 args.marshal(w);
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (ref fields, ref spread) = **inner;
+                let (ref fields, ref spread) = *inner;
                 let spread_idx = w
                     .current_expr_idx()
                     .and_then(|owner| w.get_arena().record_spread(owner))

@@ -849,7 +849,11 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     }
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     Pattern {
-        ppat_desc: PatternDesc::Ppat_record(Box::new((fields, closed, rest))),
+        ppat_desc: PatternDesc::Ppat_record(Box::new((
+            p.arena_mut().push_pat_field_list(&fields),
+            closed,
+            rest,
+        ))),
         ppat_loc: loc,
         ppat_attributes: attrs,
     }
@@ -889,7 +893,11 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
-        ppat_desc: PatternDesc::Ppat_record(Box::new((fields, ClosedFlag::Open, None))),
+        ppat_desc: PatternDesc::Ppat_record(Box::new((
+            p.arena_mut().push_pat_field_list(&fields),
+            ClosedFlag::Open,
+            None,
+        ))),
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(
             mknoloc(dict_idx),

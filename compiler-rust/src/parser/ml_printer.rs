@@ -1669,7 +1669,7 @@ fn print_expression_inner<W: Write>(
             }
         }
         ExpressionDesc::Pexp_match(inner) => {
-            let (ref scrutinee, ref cases) = **inner;
+            let (ref scrutinee, ref cases) = *inner;
             if use_parens {
                 f.string("(");
             }
@@ -1682,7 +1682,7 @@ fn print_expression_inner<W: Write>(
             f.space();
             f.string("with");
             f.close_box();
-            for case in cases {
+            for case in arena.case_list(*cases) {
                 f.space();
                 f.string("| ");
                 // OCaml: @[<2>%a%a@;->@;%a@]
@@ -1709,7 +1709,7 @@ fn print_expression_inner<W: Write>(
             }
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = **inner;
+            let (ref body, ref cases) = *inner;
             if use_parens {
                 f.string("(");
             }
@@ -1723,7 +1723,7 @@ fn print_expression_inner<W: Write>(
             f.space(); // @ break between try-box and with-box
             f.open_box(BoxKind::Box, 0);
             f.string("with");
-            for case in cases {
+            for case in arena.case_list(*cases) {
                 f.space();
                 f.string("| ");
                 f.open_box(BoxKind::Box, 2);
@@ -1823,7 +1823,7 @@ fn print_expression_inner<W: Write>(
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref base) = **inner;
+            let (ref fields, ref base) = *inner;
             // OCaml: pp f "@[<hv0>@[<hv2>{@;%a%a@]@;}@]"
             f.open_box(BoxKind::HV, 0);
             f.open_box(BoxKind::HV, 2);
@@ -1834,7 +1834,7 @@ fn print_expression_inner<W: Write>(
                 f.string(" with");
                 f.space(); // @; after "with"
             }
-            for (i, field) in fields.iter().enumerate() {
+            for (i, field) in arena.expr_field_list(*fields).iter().enumerate() {
                 if i > 0 {
                     f.string(";");
                     f.space(); // ;@; separator
@@ -2614,7 +2614,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.open_box(BoxKind::Box, 2);
             f.string("{");
             f.space(); // @; after {
-            for (i, field) in fields.iter().enumerate() {
+            for (i, field) in arena.pat_field_list(*fields).iter().enumerate() {
                 if i > 0 {
                     f.string(";");
                     f.space(); // ;@; separator

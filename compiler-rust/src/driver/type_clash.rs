@@ -764,9 +764,12 @@ fn print_object_vs_record_hint(
                     opt: false,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
         Some(crate::parser::ast::Expression {
-            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((rows, None))),
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_record((
+                a.push_expr_field_list(&rows),
+                None,
+            )),
             pexp_loc: exp.pexp_loc,
             pexp_attributes: crate::parser::ast::Attributes::new(),
         })
@@ -1033,17 +1036,17 @@ fn print_extra_type_clash_help_by_types(
             let x = a.push_expr(exp.clone());
             let none_loc = a.none_loc();
             Some(crate::parser::ast::Expression {
-                pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((
-                    vec![crate::parser::ast::ExpressionRecordField {
+                pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_record((
+                    a.push_expr_field_list(&[crate::parser::ast::ExpressionRecordField {
                         lid: crate::parser::ast::Loc {
                             txt: lid_txt,
                             loc: none_loc,
                         },
                         expr: x,
                         opt: false,
-                    }],
+                    }]),
                     None,
-                ))),
+                )),
                 ..exp
             })
         });

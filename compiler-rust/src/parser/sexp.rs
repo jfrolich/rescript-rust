@@ -658,7 +658,7 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
             Sexp::list(vec![
                 Sexp::atom("Ppat_record"),
                 closed_flag(flag),
-                Sexp::list(map_empty(fields, |f| {
+                Sexp::list(map_empty(arena.pat_field_list(*fields), |f| {
                     Sexp::list(vec![
                         longident_idx(arena, f.lid.txt),
                         pattern(arena, arena.get_pat(f.pat)),
@@ -805,19 +805,19 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_match(inner) => {
-            let (ref scrutinee, ref cases) = **inner;
+            let (ref scrutinee, ref cases) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_match"),
                 expression(arena, arena.get_expr(*scrutinee)),
-                Sexp::list(map_empty(cases, |c| case(arena, c))),
+                Sexp::list(map_empty(arena.case_list(*cases), |c| case(arena, c))),
             ])
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = **inner;
+            let (ref body, ref cases) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_try"),
                 expression(arena, arena.get_expr(*body)),
-                Sexp::list(map_empty(cases, |c| case(arena, c))),
+                Sexp::list(map_empty(arena.case_list(*cases), |c| case(arena, c))),
             ])
         }
         ExpressionDesc::Pexp_tuple(exprs) => Sexp::list(vec![
@@ -844,10 +844,10 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref opt_base) = **inner;
+            let (ref fields, ref opt_base) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_record"),
-                Sexp::list(map_empty(fields, |f| {
+                Sexp::list(map_empty(arena.expr_field_list(*fields), |f| {
                     Sexp::list(vec![
                         longident_idx(arena, f.lid.txt),
                         expression(arena, arena.get_expr(f.expr)),

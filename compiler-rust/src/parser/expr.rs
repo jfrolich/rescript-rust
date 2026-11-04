@@ -3095,7 +3095,10 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_record(Box::new((vec![], None))),
+                pexp_desc: ExpressionDesc::Pexp_record((
+                    crate::parse_arena::ArenaList::EMPTY,
+                    None,
+                )),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -3223,10 +3226,10 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                         p.next();
                         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                         Expression {
-                            pexp_desc: ExpressionDesc::Pexp_record(Box::new((
-                                vec![first_row],
+                            pexp_desc: ExpressionDesc::Pexp_record((
+                                p.arena_mut().push_expr_field_list(&[first_row]),
                                 None,
-                            ))),
+                            )),
                             pexp_loc: loc,
                             pexp_attributes: Attributes::new(),
                         }
@@ -3577,7 +3580,7 @@ fn parse_record_expr(
     let loc = p.mk_loc_idx_to_end(start_pos_idx);
     let spread = spread.map(|spread| p.arena_mut().push_expr(spread));
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_record(Box::new((rows, spread))),
+        pexp_desc: ExpressionDesc::Pexp_record((p.arena_mut().push_expr_field_list(&rows), spread)),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -3931,9 +3934,9 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     let any_pat_idx = p.arena_mut().push_pat(any_pat);
     let else_expr_idx = p.arena_mut().push_expr(else_expr);
     let if_let_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_match(Box::new((
+        pexp_desc: ExpressionDesc::Pexp_match((
             cond_idx,
-            vec![
+            p.arena_mut().push_case_list(&[
                 Case {
                     pc_bar: None,
                     pc_lhs: pattern_idx,
@@ -3946,8 +3949,8 @@ fn parse_if_let_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                     pc_guard: None,
                     pc_rhs: else_expr_idx,
                 },
-            ],
-        ))),
+            ]),
+        )),
         pexp_loc: loc,
         pexp_attributes: Attributes::from_vec(vec![
             if_let_attr(p.arena_mut()),
@@ -4116,7 +4119,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
     Expression {
         pexp_desc: {
             let s_idx = p.arena_mut().push_expr(scrutinee);
-            ExpressionDesc::Pexp_match(Box::new((s_idx, cases)))
+            ExpressionDesc::Pexp_match((s_idx, p.arena_mut().push_case_list(&cases)))
         },
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
@@ -4431,7 +4434,7 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
     Expression {
         pexp_desc: {
             let b_idx = p.arena_mut().push_expr(body);
-            ExpressionDesc::Pexp_try(Box::new((b_idx, cases)))
+            ExpressionDesc::Pexp_try((b_idx, p.arena_mut().push_case_list(&cases)))
         },
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),

@@ -1217,12 +1217,12 @@ pub fn print_expression(
         }
         // Record expression
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref spread) = **inner;
+            let (ref fields, ref spread) = *inner;
             print_record_expression(
                 state,
                 e.pexp_loc,
                 spread.as_ref().map(|idx| arena.get_expr(*idx)),
-                fields,
+                arena.expr_field_list(*fields),
                 cmt_tbl,
                 arena,
             )
@@ -1425,13 +1425,25 @@ pub fn print_expression(
         }
         // Match expression
         ExpressionDesc::Pexp_match(inner) => {
-            let (ref expr_idx, ref cases) = **inner;
-            print_match_expression(state, arena.get_expr(*expr_idx), cases, cmt_tbl, arena)
+            let (ref expr_idx, ref cases) = *inner;
+            print_match_expression(
+                state,
+                arena.get_expr(*expr_idx),
+                arena.case_list(*cases),
+                cmt_tbl,
+                arena,
+            )
         }
         // Try expression
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref expr_idx, ref cases) = **inner;
-            print_try_expression(state, arena.get_expr(*expr_idx), cases, cmt_tbl, arena)
+            let (ref expr_idx, ref cases) = *inner;
+            print_try_expression(
+                state,
+                arena.get_expr(*expr_idx),
+                arena.case_list(*cases),
+                cmt_tbl,
+                arena,
+            )
         }
         // Assert
         ExpressionDesc::Pexp_assert(expr_idx) => {
@@ -5339,9 +5351,16 @@ pub fn print_pattern(
             let (ref fields, ref closed, ref record_rest) = **inner;
             // Check if this is a dict pattern (has res.dictPattern attribute)
             if parsetree_viewer::has_dict_pattern_attribute(arena, &pat.ppat_attributes) {
-                print_dict_pattern(state, fields, cmt_tbl, arena)
+                print_dict_pattern(state, arena.pat_field_list(*fields), cmt_tbl, arena)
             } else {
-                print_record_pattern(state, fields, closed, record_rest.as_ref(), cmt_tbl, arena)
+                print_record_pattern(
+                    state,
+                    arena.pat_field_list(*fields),
+                    closed,
+                    record_rest.as_ref(),
+                    cmt_tbl,
+                    arena,
+                )
             }
         }
         // p | p

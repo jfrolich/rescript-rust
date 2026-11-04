@@ -462,9 +462,9 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             }
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &**inner;
+            let (scrutinee, cases) = &*inner;
             v.expr(arena, *scrutinee);
-            for (index, case) in cases.iter().enumerate() {
+            for (index, case) in arena.case_list(*cases).iter().enumerate() {
                 v.case(arena, idx, index, case);
             }
         }
@@ -484,7 +484,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
-            for field in &inner.0 {
+            for field in arena.expr_field_list(inner.0) {
                 v.expr(arena, field.expr);
             }
             if let Some(spread) = arena.record_spread(idx) {
@@ -623,7 +623,7 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
             }
         }
         PatternDesc::Ppat_record(inner) => {
-            for field in &inner.0 {
+            for field in arena.pat_field_list(inner.0) {
                 v.pat(arena, field.pat);
             }
             if let Some(rest) = &inner.2

@@ -384,8 +384,8 @@ fn config_payload_flags_contains(
         let PExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
             return false;
         };
-        let (fields, _) = &**record;
-        fields.iter().any(|field| {
+        let (fields, _) = &*record;
+        arena.expr_field_list(*fields).iter().any(|field| {
             let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
                 return false;
             };

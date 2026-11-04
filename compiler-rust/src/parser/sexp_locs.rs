@@ -454,7 +454,8 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
                 Sexp::list(if fields.is_empty() {
                     vec![Sexp::list(vec![])]
                 } else {
-                    fields
+                    arena
+                        .pat_field_list(*fields)
                         .iter()
                         .map(|f| {
                             Sexp::list(vec![
@@ -632,19 +633,19 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_match(inner) => {
-            let (ref scrutinee, ref cases) = **inner;
+            let (ref scrutinee, ref cases) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_match"),
                 expression(arena.get_expr(*scrutinee), arena),
-                Sexp::list(map_empty_with_arena(cases, arena, case)),
+                Sexp::list(map_empty_with_arena(arena.case_list(*cases), arena, case)),
             ])
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = **inner;
+            let (ref body, ref cases) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_try"),
                 expression(arena.get_expr(*body), arena),
-                Sexp::list(map_empty_with_arena(cases, arena, case)),
+                Sexp::list(map_empty_with_arena(arena.case_list(*cases), arena, case)),
             ])
         }
         ExpressionDesc::Pexp_tuple(exprs) => Sexp::list(vec![
@@ -680,13 +681,14 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref opt_base) = **inner;
+            let (ref fields, ref opt_base) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_record"),
                 Sexp::list(if fields.is_empty() {
                     vec![Sexp::list(vec![])]
                 } else {
-                    fields
+                    arena
+                        .expr_field_list(*fields)
                         .iter()
                         .map(|f| {
                             Sexp::list(vec![

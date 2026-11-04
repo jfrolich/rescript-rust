@@ -133,15 +133,15 @@ pub fn collect_if_expressions<'a>(
             ExpressionDesc::Pexp_match(inner)
                 if is_if_let_expr(arena, current)
                     && inner.1.len() == 2
-                    && inner.1[0].pc_guard.is_none()
+                    && arena.case_list(inner.1)[0].pc_guard.is_none()
                     && matches!(
-                        &arena.get_expr(inner.1[1].pc_rhs).pexp_desc,
+                        &arena.get_expr(arena.case_list(inner.1)[1].pc_rhs).pexp_desc,
                         ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
                     ) =>
             {
-                let (ref condition_idx, ref cases) = **inner;
-                let pattern: &Pattern = arena.get_pat(cases[0].pc_lhs);
-                let then_expr: &Expression = arena.get_expr(cases[0].pc_rhs);
+                let (ref condition_idx, ref cases) = *inner;
+                let pattern: &Pattern = arena.get_pat(arena.case_list(*cases)[0].pc_lhs);
+                let then_expr: &Expression = arena.get_expr(arena.case_list(*cases)[0].pc_rhs);
                 let condition: &Expression = arena.get_expr(*condition_idx);
                 acc.push((
                     expr_loc,
@@ -154,12 +154,12 @@ pub fn collect_if_expressions<'a>(
             ExpressionDesc::Pexp_match(inner)
                 if is_if_let_expr(arena, current)
                     && inner.1.len() == 2
-                    && inner.1[0].pc_guard.is_none() =>
+                    && arena.case_list(inner.1)[0].pc_guard.is_none() =>
             {
-                let (ref condition_idx, ref cases) = **inner;
-                let pattern: &Pattern = arena.get_pat(cases[0].pc_lhs);
-                let then_expr: &Expression = arena.get_expr(cases[0].pc_rhs);
-                let else_expr: &Expression = arena.get_expr(cases[1].pc_rhs);
+                let (ref condition_idx, ref cases) = *inner;
+                let pattern: &Pattern = arena.get_pat(arena.case_list(*cases)[0].pc_lhs);
+                let then_expr: &Expression = arena.get_expr(arena.case_list(*cases)[0].pc_rhs);
+                let else_expr: &Expression = arena.get_expr(arena.case_list(*cases)[1].pc_rhs);
                 let condition: &Expression = arena.get_expr(*condition_idx);
                 acc.push((
                     expr_loc,

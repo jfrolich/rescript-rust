@@ -1115,7 +1115,9 @@ impl<'a> Mapper<'a> {
             current::PatternDesc::Ppat_record(inner) => {
                 let (ref fields, ref flag, _) = **inner;
                 pt0::PatternDesc::Record(
-                    fields
+                    self.arena
+                        .pat_field_list(*fields)
+                        .to_vec()
                         .iter()
                         .map(|f| {
                             let lid = self.map_longident_loc(&f.lid);
@@ -1503,10 +1505,12 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Apply(Box::new(mapped_funct), mapped_args)
             }
             current::ExpressionDesc::Pexp_match(inner) => {
-                let (ref e_idx, ref cases) = **inner;
+                let (ref e_idx, ref cases) = *inner;
                 pt0::ExpressionDesc::Match(
                     Box::new(self.map_expr_idx(*e_idx)),
-                    cases
+                    self.arena
+                        .case_list(*cases)
+                        .to_vec()
                         .iter()
                         .enumerate()
                         .map(|(case_index, c)| self.map_case(c, owner_idx, case_index))
@@ -1514,10 +1518,12 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_try(inner) => {
-                let (ref e_idx, ref cases) = **inner;
+                let (ref e_idx, ref cases) = *inner;
                 pt0::ExpressionDesc::Try(
                     Box::new(self.map_expr_idx(*e_idx)),
-                    cases
+                    self.arena
+                        .case_list(*cases)
+                        .to_vec()
                         .iter()
                         .enumerate()
                         .map(|(case_index, c)| self.map_case(c, owner_idx, case_index))
@@ -1546,12 +1552,14 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Variant(label.to_string(), arg)
             }
             current::ExpressionDesc::Pexp_record(inner) => {
-                let (ref fields, ref spread) = **inner;
+                let (ref fields, ref spread) = *inner;
                 let spread_idx = owner_idx
                     .and_then(|owner| self.arena.record_spread(owner))
                     .or(*spread);
                 pt0::ExpressionDesc::Record(
-                    fields
+                    self.arena
+                        .expr_field_list(*fields)
+                        .to_vec()
                         .iter()
                         .map(|f| {
                             let lid = self.map_longident_loc(&f.lid);
