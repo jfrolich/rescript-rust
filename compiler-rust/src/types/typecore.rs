@@ -3929,22 +3929,22 @@ fn push_synthetic_pat(arena: &ParseArena, pat: ParsedPattern) -> crate::parse_ar
 fn normalize_constructor_pat_args(
     arena: &ParseArena,
     arity: i32,
-    sargs: &Located<Vec<crate::parse_arena::PatIdx>>,
+    sargs: &Located<crate::parse_arena::PatList>,
 ) -> Vec<crate::parse_arena::PatIdx> {
-    match sargs.txt.as_slice() {
+    match arena.pat_list(sargs.txt) {
         [sp] if arity > 1 => match &arena.get_pat(*sp).ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_tuple(args) => args.to_vec(),
-            _ => sargs.txt.clone(),
+            crate::parser::ast::PatternDesc::Ppat_tuple(args) => arena.pat_list(*args).to_vec(),
+            _ => vec![*sp],
         },
         [_, _, ..] if arity == 1 => vec![push_synthetic_pat(
             arena,
             ParsedPattern {
-                ppat_desc: crate::parser::ast::PatternDesc::Ppat_tuple(Box::new(sargs.txt.clone())),
+                ppat_desc: crate::parser::ast::PatternDesc::Ppat_tuple(sargs.txt),
                 ppat_loc: sargs.loc,
                 ppat_attributes: Attributes::new(),
             },
         )],
-        _ => sargs.txt.clone(),
+        items => items.to_vec(),
     }
 }
 
@@ -3952,19 +3952,19 @@ fn normalize_constructor_pat_args(
 fn normalize_constructor_expr_args(
     arena: &ParseArena,
     arity: i32,
-    sargs: &Located<Vec<crate::parse_arena::ExprIdx>>,
+    sargs: &Located<crate::parse_arena::ExprList>,
 ) -> Vec<crate::parse_arena::ExprIdx> {
-    match sargs.txt.as_slice() {
+    match arena.expr_list(sargs.txt) {
         [se] if arity > 1 => match &arena.get_expr(*se).pexp_desc {
-            crate::parser::ast::ExpressionDesc::Pexp_tuple(args) => args.to_vec(),
-            _ => sargs.txt.clone(),
+            crate::parser::ast::ExpressionDesc::Pexp_tuple(args) => arena.expr_list(*args).to_vec(),
+            _ => vec![*se],
         },
         [_, _, ..] if arity == 1 => vec![arena.push_shared_expr(ParsedExpression {
-            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_tuple(Box::new(sargs.txt.clone())),
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_tuple(sargs.txt),
             pexp_loc: sargs.loc,
             pexp_attributes: Attributes::new(),
         })],
-        _ => sargs.txt.clone(),
+        items => items.to_vec(),
     }
 }
 
@@ -4199,7 +4199,7 @@ fn build_ppat_or_for_variant_spread(
         let parsed = ParsedPattern {
             ppat_desc: crate::parser::ast::PatternDesc::Ppat_construct(
                 cstr_lid,
-                crate::parser::ast::ctor_args(cstr_args, lident.loc),
+                tctx.arena.shared_pat_ctor_args(&cstr_args, lident.loc),
             ),
             ppat_loc: lident.loc,
             ppat_attributes: vec![pat_from_variant_spread_attr.clone()].into(),
@@ -4494,7 +4494,12 @@ fn type_pattern_inner(
             assert!(pats.len() >= 2, "Tuple must have at least 2 elements");
 
             // Create fresh type variables for each element
-            let elem_types: Vec<TypeExprRef> = pats.iter().map(|_| ctx.new_var(None)).collect();
+            let elem_types: Vec<TypeExprRef> = tctx
+                .arena
+                .pat_list(*pats)
+                .iter()
+                .map(|_| ctx.new_var(None))
+                .collect();
 
             // Create tuple type and unify
             let tuple_ty = ctx.new_tuple(elem_types.clone());
@@ -4502,7 +4507,7 @@ fn type_pattern_inner(
 
             // Type check each element
             let mut typed_pats = Vec::new();
-            for (p, ty) in pats.iter().zip(elem_types.iter()) {
+            for (p, ty) in tctx.arena.pat_list(*pats).iter().zip(elem_types.iter()) {
                 let typed_pat = type_pattern_inner(
                     tctx,
                     env,
@@ -4741,7 +4746,7 @@ fn type_pattern_inner(
             unify_pattern_types(tctx, loc, array_ty, expected_ty)?;
 
             let mut typed_pats = Vec::new();
-            for p in pats.iter() {
+            for p in tctx.arena.pat_list(*pats).iter() {
                 let typed_pat = type_pattern_inner(
                     tctx,
                     env,
@@ -4786,13 +4791,13 @@ fn type_pattern_inner(
             check_polyvar_name(loc, label)?;
             // typecore.ml Ppat_variant: several arguments form one tuple
             // payload located at the argument list.
-            let sarg = match sargs.txt.as_slice() {
+            let sarg = match tctx.arena.pat_list(sargs.txt) {
                 [] => None,
                 [sarg] => Some(*sarg),
                 args => Some(push_synthetic_pat(
                     tctx.arena,
                     ParsedPattern {
-                        ppat_desc: PD::Ppat_tuple(Box::new(args.to_vec())),
+                        ppat_desc: PD::Ppat_tuple(tctx.arena.push_shared_pat_list(&args.to_vec())),
                         ppat_loc: sargs.loc,
                         ppat_attributes: Attributes::new(),
                     },
@@ -5427,7 +5432,7 @@ fn type_pattern_construct(
     env: &Env,
     loc: LocIdx,
     lid: &Located<crate::parse_arena::LidentIdx>,
-    sargs: &Located<Vec<crate::parse_arena::PatIdx>>,
+    sargs: &Located<crate::parse_arena::PatList>,
     expected_ty: TypeExprRef,
     mode: PatternMode,
     allow_existentials: bool,
@@ -7821,7 +7826,12 @@ fn type_expect_with_recarg_unscoped<'a>(
             assert!(exprs.len() >= 2, "Tuple must have at least 2 elements");
 
             // Create fresh type variables for each element
-            let elem_types: Vec<TypeExprRef> = exprs.iter().map(|_| ctx.new_var(None)).collect();
+            let elem_types: Vec<TypeExprRef> = tctx
+                .arena
+                .expr_list(*exprs)
+                .iter()
+                .map(|_| ctx.new_var(None))
+                .collect();
 
             // Create tuple type and unify (instance generic expected_ty to avoid corruption)
             let tuple_ty = ctx.new_tuple(elem_types.clone());
@@ -7831,7 +7841,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
             // Type check each element
             let mut typed_exprs = Vec::new();
-            for (e, ty) in exprs.iter().zip(elem_types.iter()) {
+            for (e, ty) in tctx.arena.expr_list(*exprs).iter().zip(elem_types.iter()) {
                 let typed_expr = type_expect(tctx, env, tctx.arena.get_expr(*e), *ty, None)?;
                 typed_exprs.push(typed_expr);
             }
@@ -8066,7 +8076,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             unify_expression_types(tctx, loc, array_ty, expected_ty, None)?;
 
             let mut typed_exprs = Vec::new();
-            for e in exprs.iter() {
+            for e in tctx.arena.expr_list(*exprs).iter() {
                 let typed_e = type_expect(
                     tctx,
                     env,
@@ -8366,11 +8376,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             check_polyvar_name(loc, label)?;
             // typecore.ml Pexp_variant: several arguments form one tuple
             // payload located at the argument list.
-            let sarg = match sargs.txt.as_slice() {
+            let sarg = match tctx.arena.expr_list(sargs.txt) {
                 [] => None,
                 [sarg] => Some(*sarg),
                 args => Some(tctx.arena.push_shared_expr(ParsedExpression {
-                    pexp_desc: ED::Pexp_tuple(Box::new(args.to_vec())),
+                    pexp_desc: ED::Pexp_tuple(tctx.arena.push_shared_expr_list(&args.to_vec())),
                     pexp_loc: sargs.loc,
                     pexp_attributes: Attributes::new(),
                 })),
@@ -11641,7 +11651,7 @@ fn pattern_contains_generalized_constructor(
                     .any(|desc| desc.cstr_generalized)
             };
             is_generalized
-                || arg.txt.iter().any(|inner| {
+                || tctx.arena.pat_list(arg.txt).iter().any(|inner| {
                     pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*inner))
                 })
         }
@@ -11649,9 +11659,11 @@ fn pattern_contains_generalized_constructor(
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*inner))
         }
         crate::parser::ast::PatternDesc::Ppat_tuple(items)
-        | crate::parser::ast::PatternDesc::Ppat_array(items) => items.iter().any(|item| {
-            pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*item))
-        }),
+        | crate::parser::ast::PatternDesc::Ppat_array(items) => {
+            tctx.arena.pat_list(*items).iter().any(|item| {
+                pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(*item))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_record(inner) => inner.0.iter().any(|field| {
             pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(field.pat))
         }),
@@ -11799,17 +11811,17 @@ fn collect_lident_idents_in_expression(
             }
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => {
-            for item in items.iter() {
+            for item in arena.expr_list(*items).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*item), out);
             }
         }
         ED::Pexp_construct(_, args) => {
-            for arg in args.txt.iter() {
+            for arg in arena.expr_list(args.txt).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
             }
         }
         ED::Pexp_variant(inner) => {
-            for arg in inner.1.txt.iter() {
+            for arg in arena.expr_list(inner.1.txt).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
             }
         }
@@ -11993,15 +12005,17 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
         crate::parser::ast::PatternDesc::Ppat_variant(_)
         | crate::parser::ast::PatternDesc::Ppat_type(_) => true,
         crate::parser::ast::PatternDesc::Ppat_array(pats)
-        | crate::parser::ast::PatternDesc::Ppat_tuple(pats) => pats.iter().any(|pat_idx| {
-            parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
-        }),
+        | crate::parser::ast::PatternDesc::Ppat_tuple(pats) => {
+            arena.pat_list(*pats).iter().any(|pat_idx| {
+                parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
+            })
+        }
         crate::parser::ast::PatternDesc::Ppat_or(p1, p2) => {
             parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p1))
                 || parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*p2))
         }
         crate::parser::ast::PatternDesc::Ppat_construct(_, args) => {
-            args.txt.iter().any(|pat_idx| {
+            arena.pat_list(args.txt).iter().any(|pat_idx| {
                 parsed_pattern_contains_polymorphic_variant(arena, arena.get_pat(*pat_idx))
             })
         }
@@ -12379,7 +12393,7 @@ fn desugar_nary_function_defaults(
                         txt: arena.predef_some_lid(),
                         loc: noloc,
                     },
-                    crate::parser::ast::ctor_args(vec![matched_pat], default_loc),
+                    arena.shared_pat_ctor_args(&[matched_pat], default_loc),
                 ),
                 ppat_loc: default_loc,
                 ppat_attributes: Attributes::new(),
@@ -12390,7 +12404,10 @@ fn desugar_nary_function_defaults(
                         txt: arena.predef_none_lid(),
                         loc: noloc,
                     },
-                    crate::parser::ast::ctor_args(Vec::new(), default_loc),
+                    crate::parse_arena::Located::new(
+                        crate::parse_arena::PatList::EMPTY,
+                        default_loc,
+                    ),
                 ),
                 ppat_loc: default_loc,
                 ppat_attributes: Attributes::new(),
@@ -13297,7 +13314,7 @@ fn type_construct(
     env: &Env,
     loc: LocIdx,
     lid: &Located<LidentIdx>,
-    sargs: &Located<Vec<crate::parse_arena::ExprIdx>>,
+    sargs: &Located<crate::parse_arena::ExprList>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -19273,7 +19290,9 @@ fn type_approx_for_rec_let(
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
         }
         ED::Pexp_tuple(items) => {
-            let tys: TypeCoreResult<Vec<_>> = items
+            let tys: TypeCoreResult<Vec<_>> = tctx
+                .arena
+                .expr_list(*items)
                 .iter()
                 .map(|item| type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*item)))
                 .collect();
@@ -29777,8 +29796,12 @@ fn conv_counter_example(
                 let items = items
                     .iter()
                     .map(|item| lp(tctx, item, counter, none))
-                    .collect();
-                push_parsed_pattern(arena, loc, P::Ppat_tuple(Box::new(items)))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_tuple(arena.push_shared_pat_list(&items)),
+                )
             }
             PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
                 let id = fresh(counter, &cstr.cstr_name);
@@ -29793,7 +29816,7 @@ fn conv_counter_example(
                 push_parsed_pattern(
                     arena,
                     loc,
-                    P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)),
+                    P::Ppat_construct(lid, arena.shared_pat_ctor_args(&items, none)),
                 )
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
@@ -29805,7 +29828,10 @@ fn conv_counter_example(
                 push_parsed_pattern(
                     arena,
                     loc,
-                    P::Ppat_variant(Box::new((label.clone().into(), Located::new(args, none)))),
+                    P::Ppat_variant(Box::new((
+                        label.clone().into(),
+                        arena.shared_pat_ctor_args(&args, none),
+                    ))),
                 )
             }
             PatternDesc::Tpat_record(fields, _, _) => {
@@ -29838,8 +29864,12 @@ fn conv_counter_example(
                 let items = items
                     .iter()
                     .map(|item| lp(tctx, item, counter, none))
-                    .collect();
-                push_parsed_pattern(arena, loc, P::Ppat_array(Box::new(items)))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_array(arena.push_shared_pat_list(&items)),
+                )
             }
         }
     }
@@ -29931,17 +29961,27 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
             ),
             PatternDesc::Tpat_alias(inner, _, _) => untype(arena, inner),
             PatternDesc::Tpat_tuple(items) => {
-                let items = items.iter().map(|item| untype(arena, item)).collect();
-                push_parsed_pattern(arena, none, P::Ppat_tuple(Box::new(items)))
+                let items = items
+                    .iter()
+                    .map(|item| untype(arena, item))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_tuple(arena.push_shared_pat_list(&items)),
+                )
             }
             PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
                 let lid = Located::new(arena.push_typecheck_lident(&cstr.cstr_name), cstr_lid.loc);
                 // pattern_printer.ml untype: `mknoloc (List.map loop lst)`.
-                let items: Vec<_> = args.iter().map(|arg| untype(arena, arg)).collect();
+                let items: Vec<_> = args
+                    .iter()
+                    .map(|arg| untype(arena, arg))
+                    .collect::<Vec<_>>();
                 push_parsed_pattern(
                     arena,
                     none,
-                    P::Ppat_construct(lid, crate::parser::ast::ctor_args(items, none)),
+                    P::Ppat_construct(lid, arena.shared_pat_ctor_args(&items, none)),
                 )
             }
             PatternDesc::Tpat_variant(label, arg, _) => {
@@ -29953,7 +29993,10 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 push_parsed_pattern(
                     arena,
                     none,
-                    P::Ppat_variant(Box::new((label.clone().into(), Located::new(args, none)))),
+                    P::Ppat_variant(Box::new((
+                        label.clone().into(),
+                        arena.shared_pat_ctor_args(&args, none),
+                    ))),
                 )
             }
             PatternDesc::Tpat_record(subpatterns, closed_flag, rest) => {
@@ -29978,7 +30021,10 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                                         none,
                                         P::Ppat_construct(
                                             none_lid,
-                                            crate::parser::ast::ctor_args(Vec::new(), none),
+                                            crate::parse_arena::Located::new(
+                                                crate::parse_arena::PatList::EMPTY,
+                                                none,
+                                            ),
                                         ),
                                     ),
                                 )
@@ -30016,8 +30062,15 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
                 )
             }
             PatternDesc::Tpat_array(items) => {
-                let items = items.iter().map(|item| untype(arena, item)).collect();
-                push_parsed_pattern(arena, none, P::Ppat_array(Box::new(items)))
+                let items = items
+                    .iter()
+                    .map(|item| untype(arena, item))
+                    .collect::<Vec<_>>();
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_array(arena.push_shared_pat_list(&items)),
+                )
             }
         }
     }

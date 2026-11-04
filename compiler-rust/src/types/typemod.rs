@@ -641,7 +641,8 @@ fn parser_attr_to_decl_attr(
                         }
                     } else if let crate::parser::ast::ExpressionDesc::Pexp_tuple(elements) =
                         &expr.pexp_desc
-                        && let Some(strings) = elements
+                        && let Some(strings) = arena
+                            .expr_list(*elements)
                             .iter()
                             .map(|element| match &arena.get_expr(*element).pexp_desc {
                                 crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {

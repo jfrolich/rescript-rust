@@ -617,19 +617,19 @@ impl<'a> Checker<'a> {
                 self.pat(*inner)
             }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-                for item in items.iter() {
+                for item in self.arena.pat_list(*items).to_vec().iter() {
                     self.pat(*item)?;
                 }
                 Ok(())
             }
             PatternDesc::Ppat_construct(_, args) => {
-                for arg in args.txt.iter() {
+                for arg in self.arena.pat_list(args.txt).to_vec().iter() {
                     self.pat(*arg)?;
                 }
                 Ok(())
             }
             PatternDesc::Ppat_variant(inner) => {
-                for arg in inner.1.txt.iter() {
+                for arg in self.arena.pat_list(inner.1.txt).to_vec().iter() {
                     self.pat(*arg)?;
                 }
                 Ok(())
@@ -941,7 +941,7 @@ impl<'a> Checker<'a> {
                 self.expr(*scrutinee)
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-                for item in items.iter() {
+                for item in self.arena.expr_list(*items).to_vec().iter() {
                     self.expr(*item)?;
                 }
                 Ok(())
@@ -961,13 +961,13 @@ impl<'a> Checker<'a> {
                 self.expr(template.tag)
             }
             ExpressionDesc::Pexp_construct(_, args) => {
-                for arg in args.txt.iter() {
+                for arg in self.arena.expr_list(args.txt).to_vec().iter() {
                     self.expr(*arg)?;
                 }
                 Ok(())
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                for arg in inner.1.txt.iter() {
+                for arg in self.arena.expr_list(inner.1.txt).to_vec().iter() {
                     self.expr(*arg)?;
                 }
                 Ok(())

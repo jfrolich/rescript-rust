@@ -250,7 +250,7 @@ fn classify_let_unwrap_pattern(
         _ => return None,
     };
 
-    let var_name = match payload.txt.as_slice() {
+    let var_name = match arena.pat_list(payload.txt) {
         [inner] => Some(*inner),
         _ => None,
     }
@@ -2415,7 +2415,7 @@ fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<
             match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc {
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
-                    for expr in exprs.iter() {
+                    for expr in arena.expr_list(*exprs).iter() {
                         result.push(expr_semantic_string(arena.get_expr(*expr), arena)?);
                     }
                     Some(result)
@@ -2442,7 +2442,7 @@ fn payload_string_literals_or_error_loc(
             match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc {
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
-                    for expr in exprs.iter() {
+                    for expr in arena.expr_list(*exprs).iter() {
                         match expr_semantic_string(arena.get_expr(*expr), arena) {
                             Some(s) => result.push(s),
                             None => return Err(items[0].pstr_loc),
@@ -4813,7 +4813,7 @@ fn handle_debugger(
                 loc,
             },
             // ast_literal.ml `val_unit ~loc`: the argument list takes `loc`.
-            crate::parser::ast::ctor_args(Vec::new(), loc),
+            crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
         ),
         pexp_loc: none_loc,
         pexp_attributes: Attributes::new(),
@@ -5829,7 +5829,7 @@ fn spelunk_expression_for_await_module_types(
             results
         }
         ExpressionDesc::Pexp_construct(_, args) if args.txt.len() == 1 => {
-            let e_expr = arena.get_expr(args.txt[0]).clone();
+            let e_expr = arena.get_expr(arena.expr_list(args.txt)[0]).clone();
             spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
         ExpressionDesc::Pexp_fun(inner) => {
@@ -6574,9 +6574,14 @@ fn destruct_open_tuple_inner(
             let cont_expr = arena.get_expr(*cont);
             destruct_open_tuple_inner(cont_expr, acc, arena)
         }
-        ExpressionDesc::Pexp_tuple(es) => {
-            Some((acc, es.iter().map(|e| arena.get_expr(*e).clone()).collect()))
-        }
+        ExpressionDesc::Pexp_tuple(es) => Some((
+            acc,
+            arena
+                .expr_list(*es)
+                .iter()
+                .map(|e| arena.get_expr(*e).clone())
+                .collect(),
+        )),
         _ => None,
     }
 }
@@ -6666,13 +6671,16 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
     let pvb_attributes = rewrite_attributes(&vb.pvb_attributes, arena);
 
     if let PatternDesc::Ppat_tuple(ref pats) = pvb_pat.ppat_desc {
-        if pats
+        if arena
+            .pat_list(*pats)
             .iter()
             .all(|p| is_simple_pattern(arena.get_pat(*p), arena))
         {
             if let Some((opens, exprs)) = destruct_open_tuple(&pvb_expr, arena) {
                 if exprs.len() == pats.len() {
-                    return pats
+                    return arena
+                        .pat_list(*pats)
+                        .to_vec()
                         .iter()
                         .zip(exprs.iter())
                         .map(|(pat, expr)| {
@@ -6800,21 +6808,23 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Tuple pattern: recurse into all elements
         PatternDesc::Ppat_tuple(pats) => {
-            let rewritten_pats = pats
+            let rewritten_pats = arena
+                .pat_list(*pats)
+                .to_vec()
                 .iter()
                 .map(|p| {
                     let pat = arena.get_pat(*p).clone();
                     let rw = rewrite_pattern(&pat, arena);
                     arena.push_pat(rw)
                 })
-                .collect();
-            PatternDesc::Ppat_tuple(Box::new(rewritten_pats))
+                .collect::<Vec<_>>();
+            PatternDesc::Ppat_tuple(arena.push_pat_list(&rewritten_pats))
         }
 
         // Constructor pattern: recurse into optional payload
         PatternDesc::Ppat_construct(lid, args) => {
             let mut args = args.clone();
-            for p in args.txt.iter_mut() {
+            for p in arena.pat_list(args.txt).to_vec().iter_mut() {
                 let pat = arena.get_pat(*p).clone();
                 let rw = rewrite_pattern(&pat, arena);
                 *p = arena.push_pat(rw);
@@ -6826,11 +6836,14 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         PatternDesc::Ppat_variant(inner) => {
             let (ref label, ref args) = **inner;
             let mut args = args.clone();
-            for p in args.txt.iter_mut() {
+            // The rewritten node gets its own list; the original keeps its own.
+            let mut new_items = arena.pat_list(args.txt).to_vec();
+            for p in new_items.iter_mut() {
                 let pat = arena.get_pat(*p).clone();
                 let rw = rewrite_pattern(&pat, arena);
                 *p = arena.push_pat(rw);
             }
+            args.txt = arena.push_pat_list(&new_items);
             PatternDesc::Ppat_variant(Box::new((label.clone(), args)))
         }
 
@@ -6868,15 +6881,17 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Array pattern: recurse into all elements
         PatternDesc::Ppat_array(pats) => {
-            let rewritten_pats = pats
+            let rewritten_pats = arena
+                .pat_list(*pats)
+                .to_vec()
                 .iter()
                 .map(|p| {
                     let pat = arena.get_pat(*p).clone();
                     let rw = rewrite_pattern(&pat, arena);
                     arena.push_pat(rw)
                 })
-                .collect();
-            PatternDesc::Ppat_array(Box::new(rewritten_pats))
+                .collect::<Vec<_>>();
+            PatternDesc::Ppat_array(arena.push_pat_list(&rewritten_pats))
         }
 
         // Or pattern: recurse into both alternatives
@@ -7269,7 +7284,7 @@ fn pipe_tuple_map(
                     Expression {
                         pexp_desc: ExpressionDesc::Pexp_construct(
                             *ctor,
-                            crate::parser::ast::ctor_args(vec![a_idx], a_loc),
+                            arena.expr_ctor_args(&[a_idx], a_loc),
                         ),
                         pexp_loc: fn_expr.pexp_loc,
                         pexp_attributes: fn_expr.pexp_attributes.clone(),
@@ -7318,7 +7333,7 @@ fn pipe_tuple_map(
         .collect();
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_tuple(Box::new(mapped)),
+        pexp_desc: ExpressionDesc::Pexp_tuple(arena.push_expr_list(&mapped)),
         pexp_attributes: f.pexp_attributes.clone(),
         pexp_loc: f.pexp_loc,
     }
@@ -7403,10 +7418,10 @@ fn rewrite_pipe_rhs(
             let label = inner.0.clone();
             let a_loc = a.pexp_loc;
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_variant(Box::new((
-                    label,
-                    Located::new(vec![arena.push_expr(a)], a_loc),
-                ))),
+                pexp_desc: ExpressionDesc::Pexp_variant(Box::new((label, {
+                    let a = arena.push_expr(a);
+                    arena.expr_ctor_args(&[a], a_loc)
+                }))),
                 pexp_loc: loc,
                 pexp_attributes: f.pexp_attributes.clone(),
             }
@@ -7415,7 +7430,8 @@ fn rewrite_pipe_rhs(
         ExpressionDesc::Pexp_construct(ctor, args) if args.txt.is_empty() => Expression {
             pexp_desc: ExpressionDesc::Pexp_construct(*ctor, {
                 let a_loc = a.pexp_loc;
-                crate::parser::ast::ctor_args(vec![arena.push_expr(a)], a_loc)
+                let a = arena.push_expr(a);
+                arena.expr_ctor_args(&[a], a_loc)
             }),
             pexp_loc: loc,
             pexp_attributes: f.pexp_attributes.clone(),
@@ -7449,7 +7465,7 @@ fn rewrite_pipe_rhs(
         // a -> (x, y) distributes the pipe: becomes (x(a), y(a)), binding a
         // non-identifier `a` first.
         ExpressionDesc::Pexp_tuple(xs) => {
-            let xs = xs.to_vec();
+            let xs = arena.expr_list(*xs).to_vec();
             pipe_bound(false, &f, a, arena, |a, arena| {
                 pipe_tuple_map(a, &xs, &f, arena)
             })
@@ -7661,7 +7677,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                         txt: early_ctor_lid,
                                         loc,
                                     },
-                                    crate::parser::ast::ctor_args(early_ctor_payload_pat, loc),
+                                    arena.pat_ctor_args(&early_ctor_payload_pat, loc),
                                 ),
                                 ppat_loc: loc,
                                 ppat_attributes: Attributes::new(),
@@ -7946,16 +7962,19 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             ExpressionDesc::Pexp_try(Box::new((arena.push_expr(rw_body), rw_cases)))
         }
 
-        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple(Box::new(
-            exprs
+        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
+            let items = arena
+                .expr_list(*exprs)
+                .to_vec()
                 .iter()
                 .map(|e| {
                     let tuple_expr = arena.get_expr(*e).clone();
                     let rw = rewrite_expression(&tuple_expr, arena);
                     arena.push_expr(rw)
                 })
-                .collect(),
-        )),
+                .collect::<Vec<_>>();
+            arena.push_expr_list(&items)
+        }),
 
         // Ast_mapper: `Exp.template (List.map map_loc source_segments)
         // (List.map (sub.expr sub) values)`.
@@ -7998,22 +8017,28 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
         ExpressionDesc::Pexp_construct(ctor, args) => {
             let mut args = args.clone();
-            for e in args.txt.iter_mut() {
+            // The rewritten node gets its own list; the original keeps its own.
+            let mut new_items = arena.expr_list(args.txt).to_vec();
+            for e in new_items.iter_mut() {
                 let inner_e = arena.get_expr(*e).clone();
                 let rw = rewrite_expression(&inner_e, arena);
                 *e = arena.push_expr(rw);
             }
+            args.txt = arena.push_expr_list(&new_items);
             ExpressionDesc::Pexp_construct(*ctor, args)
         }
 
         ExpressionDesc::Pexp_variant(inner) => {
             let (ref label, ref args) = **inner;
             let mut args = args.clone();
-            for e in args.txt.iter_mut() {
+            // The rewritten node gets its own list; the original keeps its own.
+            let mut new_items = arena.expr_list(args.txt).to_vec();
+            for e in new_items.iter_mut() {
                 let inner_e = arena.get_expr(*e).clone();
                 let rw = rewrite_expression(&inner_e, arena);
                 *e = arena.push_expr(rw);
             }
+            args.txt = arena.push_expr_list(&new_items);
             ExpressionDesc::Pexp_variant(Box::new((label.clone(), args)))
         }
 
@@ -8058,16 +8083,19 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             )))
         }
 
-        ExpressionDesc::Pexp_array(exprs) => ExpressionDesc::Pexp_array(Box::new(
-            exprs
+        ExpressionDesc::Pexp_array(exprs) => ExpressionDesc::Pexp_array({
+            let items = arena
+                .expr_list(*exprs)
+                .to_vec()
                 .iter()
                 .map(|e| {
                     let array_expr = arena.get_expr(*e).clone();
                     let rw = rewrite_expression(&array_expr, arena);
                     arena.push_expr(rw)
                 })
-                .collect(),
-        )),
+                .collect::<Vec<_>>();
+            arena.push_expr_list(&items)
+        }),
 
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (ref cond, ref then_branch, ref else_branch) = **inner;
@@ -11843,7 +11871,7 @@ fn generate_variant_accessors_and_sigs(
                         txt: ctor_lid,
                         loc: ctor_loc,
                     },
-                    crate::parser::ast::ctor_args(Vec::new(), ctor_loc),
+                    crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, ctor_loc),
                 ),
                 pexp_loc: none_loc,
                 pexp_attributes: Attributes::new(),
@@ -11925,7 +11953,7 @@ fn generate_variant_accessors_and_sigs(
                         txt: ctor_lid,
                         loc: ctor_loc,
                     },
-                    crate::parser::ast::ctor_args(ctor_args, ctor_loc),
+                    arena.expr_ctor_args(&ctor_args, ctor_loc),
                 ),
                 pexp_loc: none_loc,
                 pexp_attributes: Attributes::new(),

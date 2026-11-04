@@ -48,7 +48,10 @@ fn construct_lident(
         p.push_longident(Longident::Lident(name_idx))
     };
     pat(
-        PatternDesc::Ppat_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)),
+        PatternDesc::Ppat_construct(
+            with_loc(lid_idx, loc),
+            crate::parse_arena::Located::new(crate::parse_arena::PatList::EMPTY, loc),
+        ),
         loc,
         attrs,
     )
@@ -219,7 +222,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             } else {
                 let loc = constr.loc;
                 pat(
-                    PatternDesc::Ppat_construct(constr, ctor_args(Vec::new(), loc)),
+                    PatternDesc::Ppat_construct(
+                        constr,
+                        crate::parse_arena::Located::new(crate::parse_arena::PatList::EMPTY, loc),
+                    ),
                     loc,
                     attrs.clone(),
                 )
@@ -261,7 +267,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                         PatternDesc::Ppat_variant(Box::new((
                             Cow::Owned(ident),
                             Located {
-                                txt: Vec::new(),
+                                txt: crate::parse_arena::PatList::EMPTY,
                                 loc,
                             },
                         ))),
@@ -449,7 +455,7 @@ pub fn parse_tuple_pattern(
         .map(|pattern| p.arena_mut().push_pat(pattern))
         .collect();
     pat(
-        PatternDesc::Ppat_tuple(Box::new(pattern_indices)),
+        PatternDesc::Ppat_tuple(p.arena_mut().push_pat_list(&pattern_indices)),
         loc,
         Attributes::from_vec(attrs),
     )
@@ -560,7 +566,7 @@ fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
         .map(|pattern| p.arena_mut().push_pat(pattern))
         .collect();
     pat(
-        PatternDesc::Ppat_array(Box::new(pattern_indices)),
+        PatternDesc::Ppat_array(p.arena_mut().push_pat_list(&pattern_indices)),
         loc,
         attrs,
     )
@@ -569,7 +575,7 @@ fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
 /// OCaml `parse_pattern_args` (res_core.ml): the parenthesized argument
 /// list of a constructor or polymorphic variant pattern, located at its
 /// parentheses. `C()` is `C(())`.
-fn parse_pattern_args(p: &mut Parser<'_>) -> Located<Vec<PatIdx>> {
+fn parse_pattern_args(p: &mut Parser<'_>) -> Located<crate::parse_arena::PatList> {
     let lparen = p.start_pos_idx();
     p.expect(Token::Lparen);
     let args = super::core::parse_comma_delimited_region(
@@ -585,11 +591,11 @@ fn parse_pattern_args(p: &mut Parser<'_>) -> Located<Vec<PatIdx>> {
     } else {
         args
     };
-    let txt = args
+    let txt: Vec<PatIdx> = args
         .into_iter()
         .map(|a| p.arena_mut().push_pat(a))
         .collect();
-    Located { txt, loc }
+    p.arena_mut().pat_ctor_args(&txt, loc)
 }
 
 /// OCaml `parse_constructor_pattern_args` (res_core.ml).
@@ -601,11 +607,7 @@ fn parse_constructor_pattern_args(
 ) -> Pattern {
     let args = parse_pattern_args(p);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    pat(
-        PatternDesc::Ppat_construct(constr, Box::new(args)),
-        loc,
-        attrs,
-    )
+    pat(PatternDesc::Ppat_construct(constr, args), loc, attrs)
 }
 
 /// OCaml `parse_variant_pattern_args` (res_core.ml).

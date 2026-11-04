@@ -340,7 +340,7 @@ fn expr_fun_with_loc(
 fn expr_tuple(items: Vec<Expression>, arena: &mut ParseArena) -> Expression {
     let items_idx: Vec<ExprIdx> = items.into_iter().map(|e| arena.push_expr(e)).collect();
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_tuple(Box::new(items_idx)),
+        pexp_desc: ExpressionDesc::Pexp_tuple(arena.push_expr_list(&items_idx)),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -349,7 +349,7 @@ fn expr_tuple(items: Vec<Expression>, arena: &mut ParseArena) -> Expression {
 fn expr_array(items: Vec<Expression>, arena: &mut ParseArena) -> Expression {
     let items_idx: Vec<ExprIdx> = items.into_iter().map(|e| arena.push_expr(e)).collect();
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_array(Box::new(items_idx)),
+        pexp_desc: ExpressionDesc::Pexp_array(arena.push_expr_list(&items_idx)),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -365,18 +365,21 @@ fn bridge_expr_args(
     arg: Option<Expression>,
     node_loc: LocIdx,
     arena: &mut ParseArena,
-) -> Located<Vec<ExprIdx>> {
+) -> Located<crate::parse_arena::ExprList> {
     match arg {
-        None => Located::new(Vec::new(), node_loc),
+        None => Located::new(crate::parse_arena::ExprList::EMPTY, node_loc),
         Some(arg) => {
             let loc = arg.pexp_loc;
-            match &arg.pexp_desc {
+            match arg.pexp_desc {
                 ExpressionDesc::Pexp_tuple(items)
                     if split_tuple && arg.pexp_attributes.is_empty() =>
                 {
-                    Located::new(items.to_vec(), loc)
+                    Located::new(items, loc)
                 }
-                _ => Located::new(vec![arena.push_expr(arg)], loc),
+                _ => {
+                    let arg = arena.push_expr(arg);
+                    arena.expr_ctor_args(&[arg], loc)
+                }
             }
         }
     }
@@ -388,16 +391,19 @@ fn bridge_pat_args(
     arg: Option<Pattern>,
     node_loc: LocIdx,
     arena: &mut ParseArena,
-) -> Located<Vec<PatIdx>> {
+) -> Located<crate::parse_arena::PatList> {
     match arg {
-        None => Located::new(Vec::new(), node_loc),
+        None => Located::new(crate::parse_arena::PatList::EMPTY, node_loc),
         Some(arg) => {
             let loc = arg.ppat_loc;
-            match &arg.ppat_desc {
+            match arg.ppat_desc {
                 PatternDesc::Ppat_tuple(items) if split_tuple && arg.ppat_attributes.is_empty() => {
-                    Located::new(items.to_vec(), loc)
+                    Located::new(items, loc)
                 }
-                _ => Located::new(vec![arena.push_pat(arg)], loc),
+                _ => {
+                    let arg = arena.push_pat(arg);
+                    arena.pat_ctor_args(&[arg], loc)
+                }
             }
         }
     }
@@ -431,7 +437,7 @@ fn expr_construct_with_locs(
     let split_tuple = arena.is_lident(lid_idx, "::");
     let args = bridge_expr_args(split_tuple, arg, expr_loc, arena);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_construct(Located::new(lid_idx, lid_loc), Box::new(args)),
+        pexp_desc: ExpressionDesc::Pexp_construct(Located::new(lid_idx, lid_loc), args),
         pexp_loc: expr_loc,
         pexp_attributes: Attributes::new(),
     }
@@ -589,7 +595,7 @@ fn pat_var_dummy(arena: &mut ParseArena, name: &str) -> Pattern {
 fn pat_tuple(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
     let items_idx: Vec<PatIdx> = items.into_iter().map(|p| arena.push_pat(p)).collect();
     Pattern {
-        ppat_desc: PatternDesc::Ppat_tuple(Box::new(items_idx)),
+        ppat_desc: PatternDesc::Ppat_tuple(arena.push_pat_list(&items_idx)),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -598,7 +604,7 @@ fn pat_tuple(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
 fn pat_array(items: Vec<Pattern>, arena: &mut ParseArena) -> Pattern {
     let items_idx: Vec<PatIdx> = items.into_iter().map(|p| arena.push_pat(p)).collect();
     Pattern {
-        ppat_desc: PatternDesc::Ppat_array(Box::new(items_idx)),
+        ppat_desc: PatternDesc::Ppat_array(arena.push_pat_list(&items_idx)),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -619,7 +625,7 @@ fn pat_construct_with_loc(
     let split_tuple = arena.is_lident(lid_idx, "::");
     let args = bridge_pat_args(split_tuple, arg, pat_loc, arena);
     Pattern {
-        ppat_desc: PatternDesc::Ppat_construct(Located::new(lid_idx, loc), Box::new(args)),
+        ppat_desc: PatternDesc::Ppat_construct(Located::new(lid_idx, loc), args),
         ppat_loc: pat_loc,
         ppat_attributes: Attributes::new(),
     }
@@ -4794,23 +4800,31 @@ impl<'a> LocCloner<'a> {
                 self.located(name);
             }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-                for item in items.iter_mut() {
+                // The copy gets its own list; the original keeps its own.
+                let mut new_items = self.arena.pat_list(*items).to_vec();
+                for item in new_items.iter_mut() {
                     self.pattern_idx(item);
                 }
+                *items = self.arena.push_pat_list(&new_items);
             }
             PatternDesc::Ppat_construct(lid, args) => {
                 self.located(lid);
-                self.located(&mut **args);
-                for arg in args.txt.iter_mut() {
+                self.located(&mut *args);
+                let mut new_args = self.arena.pat_list(args.txt).to_vec();
+                for arg in new_args.iter_mut() {
                     self.pattern_idx(arg);
                 }
+                args.txt = self.arena.push_pat_list(&new_args);
             }
             PatternDesc::Ppat_variant(inner) => {
                 let (_, ref mut args) = **inner;
                 self.located(args);
-                for arg in args.txt.iter_mut() {
+                // The rewritten node gets its own list; the original keeps its own.
+                let mut new_items = self.arena.pat_list(args.txt).to_vec();
+                for arg in new_items.iter_mut() {
                     self.pattern_idx(arg);
                 }
+                args.txt = self.arena.push_pat_list(&new_items);
             }
             PatternDesc::Ppat_record(inner) => {
                 let (ref mut fields, _, ref mut record_rest) = **inner;
@@ -5038,23 +5052,31 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-                for item in items.iter_mut() {
+                // The copy gets its own list; the original keeps its own.
+                let mut new_items = self.arena.expr_list(*items).to_vec();
+                for item in new_items.iter_mut() {
                     self.expression_idx(item);
                 }
+                *items = self.arena.push_expr_list(&new_items);
             }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.located(lid);
-                self.located(&mut **args);
-                for expr in args.txt.iter_mut() {
+                self.located(&mut *args);
+                let mut new_args = self.arena.expr_list(args.txt).to_vec();
+                for expr in new_args.iter_mut() {
                     self.expression_idx(expr);
                 }
+                args.txt = self.arena.push_expr_list(&new_args);
             }
             ExpressionDesc::Pexp_variant(inner) => {
                 let (_, ref mut args) = **inner;
                 self.located(args);
-                for expr in args.txt.iter_mut() {
+                // The rewritten node gets its own list; the original keeps its own.
+                let mut new_items = self.arena.expr_list(args.txt).to_vec();
+                for expr in new_items.iter_mut() {
                     self.expression_idx(expr);
                 }
+                args.txt = self.arena.push_expr_list(&new_items);
             }
             ExpressionDesc::Pexp_record(inner) => {
                 let (ref mut fields, ref mut base) = **inner;

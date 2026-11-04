@@ -12,8 +12,8 @@
 use std::borrow::Cow;
 
 use crate::parse_arena::{
-    ApplyArgs, ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx,
-    PatIdx, PosIdx, StrIdx,
+    ApplyArgs, ArityIdx, CoreTypeIdx, ExprIdx, ExprList, LidentIdx, LocIdx, Located, ModExprIdx,
+    ModTypeIdx, PatIdx, PatList, PosIdx, StrIdx,
 };
 use serde::{Deserialize, Serialize};
 
@@ -593,19 +593,19 @@ pub enum PatternDesc {
     /// Interval: `'a'..'z'`.
     Ppat_interval(Box<(Constant, Constant)>),
     /// Tuple: `(P1, P2, ..., Pn)`.
-    Ppat_tuple(Box<Vec<PatIdx>>),
+    Ppat_tuple(PatList),
     /// Constructor: `C`, `C(P)` or `C(P1, ..., Pn)`. The arguments are the
     /// source list, located at the argument parentheses (or the enclosing
     /// node when there are none); see parsetree.ml `Ppat_construct`.
-    Ppat_construct(Loc<LidentIdx>, Box<Loc<Vec<PatIdx>>>),
+    Ppat_construct(Loc<LidentIdx>, Loc<PatList>),
     /// Variant: `#A`, `#A(P)` or `#A(P1, ..., Pn)`.
-    Ppat_variant(Box<(Label, Loc<Vec<PatIdx>>)>),
+    Ppat_variant(Box<(Label, Loc<PatList>)>),
     /// Record: `{l1: P1, ..., ln: Pn}`.
     /// Record: `{l1: P1, ...}`, closed flag, and an optional `...Type.t as name` rest
     /// (compiler/ml/parsetree.ml:164-168).
     Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
-    Ppat_array(Box<Vec<PatIdx>>),
+    Ppat_array(PatList),
     /// Or-pattern: `P1 | P2`.
     Ppat_or(PatIdx, PatIdx),
     /// Constraint: `(P: T)`.
@@ -746,12 +746,12 @@ pub enum ExpressionDesc {
     /// Try: `try E { | P1 => E1 | ... }`.
     Pexp_try(Box<(ExprIdx, Vec<Case>)>),
     /// Tuple: `(E1, E2, ..., En)`.
-    Pexp_tuple(Box<Vec<ExprIdx>>),
+    Pexp_tuple(ExprList),
     /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument
     /// list located at its parentheses (parsetree.ml `Pexp_construct`).
-    Pexp_construct(Loc<LidentIdx>, Box<Loc<Vec<ExprIdx>>>),
+    Pexp_construct(Loc<LidentIdx>, Loc<ExprList>),
     /// Variant: `#A`, `#A(E)` or `#A(E1, ..., En)`.
-    Pexp_variant(Box<(Label, Loc<Vec<ExprIdx>>)>),
+    Pexp_variant(Box<(Label, Loc<ExprList>)>),
     /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
     Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
     /// Field access: `E.l`.
@@ -759,7 +759,7 @@ pub enum ExpressionDesc {
     /// Field set: `E.l = E'`.
     Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
-    Pexp_array(Box<Vec<ExprIdx>>),
+    Pexp_array(ExprList),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Ternary: `E1 ? E2 : E3`.

@@ -510,6 +510,10 @@ pub struct ParseArena {
     expressions: Arena<Expression, ExprIdx>,
     /// Pool behind every `Pexp_apply` argument list.
     apply_args: ListPool<(ArgLabel, ExprIdx)>,
+    /// Pools behind expression, pattern and core type index lists.
+    expr_lists: ListPool<ExprIdx>,
+    pat_lists: ListPool<PatIdx>,
+    type_lists: ListPool<CoreTypeIdx>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -973,6 +977,9 @@ impl Default for ParseArena {
             expr_overrides: crate::fast_hash::AHashMap::default(),
             expressions: Arena::default(),
             apply_args: ListPool::default(),
+            expr_lists: ListPool::default(),
+            pat_lists: ListPool::default(),
+            type_lists: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
@@ -2538,6 +2545,64 @@ impl ParseArena {
         self.apply_args.push(args)
     }
 
+    /// Store an expression index list.
+    pub fn push_expr_list(&mut self, items: &[ExprIdx]) -> ExprList {
+        self.expr_lists.push(items)
+    }
+
+    /// `push_expr_list` for nodes the type checker synthesizes.
+    pub fn push_shared_expr_list(&self, items: &[ExprIdx]) -> ExprList {
+        self.expr_lists.push_shared(items)
+    }
+
+    pub fn expr_list(&self, list: ExprList) -> &[ExprIdx] {
+        self.expr_lists.get(list)
+    }
+
+    /// Constructor arguments of a `Pexp_construct`: the argument list and the
+    /// span of its parentheses.
+    pub fn expr_ctor_args(&mut self, items: &[ExprIdx], loc: LocIdx) -> Located<ExprList> {
+        Located::new(self.push_expr_list(items), loc)
+    }
+
+    /// Constructor arguments of a `Ppat_construct`.
+    pub fn pat_ctor_args(&mut self, items: &[PatIdx], loc: LocIdx) -> Located<PatList> {
+        Located::new(self.push_pat_list(items), loc)
+    }
+
+    /// `pat_ctor_args` for patterns the type checker synthesizes.
+    pub fn shared_pat_ctor_args(&self, items: &[PatIdx], loc: LocIdx) -> Located<PatList> {
+        Located::new(self.push_shared_pat_list(items), loc)
+    }
+
+    /// Store a pattern index list.
+    pub fn push_pat_list(&mut self, items: &[PatIdx]) -> PatList {
+        self.pat_lists.push(items)
+    }
+
+    /// `push_pat_list` for nodes the type checker synthesizes.
+    pub fn push_shared_pat_list(&self, items: &[PatIdx]) -> PatList {
+        self.pat_lists.push_shared(items)
+    }
+
+    pub fn pat_list(&self, list: PatList) -> &[PatIdx] {
+        self.pat_lists.get(list)
+    }
+
+    /// Store a core type index list.
+    pub fn push_type_list(&mut self, items: &[CoreTypeIdx]) -> TypeList {
+        self.type_lists.push(items)
+    }
+
+    /// `push_type_list` for nodes the type checker synthesizes.
+    pub fn push_shared_type_list(&self, items: &[CoreTypeIdx]) -> TypeList {
+        self.type_lists.push_shared(items)
+    }
+
+    pub fn type_list(&self, list: TypeList) -> &[CoreTypeIdx] {
+        self.type_lists.get(list)
+    }
+
     /// The arguments of a `Pexp_apply`, in source order.
     pub fn apply_args(&self, args: ApplyArgs) -> &[(ArgLabel, ExprIdx)] {
         self.apply_args.get(args)
@@ -3216,15 +3281,32 @@ impl<'de, T> Deserialize<'de> for ArenaList<T> {
 /// Arguments of a `Pexp_apply`.
 pub type ApplyArgs = ArenaList<(ArgLabel, ExprIdx)>;
 
-/// Backing storage for one kind of `ArenaList`.
+/// An expression index list (tuple, array and constructor arguments).
+pub type ExprList = ArenaList<ExprIdx>;
+/// A pattern index list.
+pub type PatList = ArenaList<PatIdx>;
+/// A core type index list.
+pub type TypeList = ArenaList<CoreTypeIdx>;
+
+/// Lists pushed through a shared arena reference (by the type checker) set
+/// this bit in `ArenaList::start`; the rest is the slot in `ListPool::shared`.
+const SHARED_LIST_FLAG: u32 = 1 << 31;
+
+/// Backing storage for one kind of `ArenaList`: one buffer for lists built
+/// while the arena is exclusively borrowed, plus append-only slots for the
+/// few lists built through a shared reference during type checking.
 #[derive(Debug)]
 struct ListPool<T> {
     items: Vec<T>,
+    shared: elsa::sync::FrozenVec<Box<[T]>>,
 }
 
 impl<T> Default for ListPool<T> {
     fn default() -> Self {
-        Self { items: Vec::new() }
+        Self {
+            items: Vec::new(),
+            shared: elsa::sync::FrozenVec::new(),
+        }
     }
 }
 
@@ -3233,7 +3315,10 @@ impl<T: Clone> ListPool<T> {
         if items.is_empty() {
             return ArenaList::EMPTY;
         }
-        let start = u32::try_from(self.items.len()).expect("list pool exceeds u32 items");
+        let start = u32::try_from(self.items.len())
+            .ok()
+            .filter(|start| start & SHARED_LIST_FLAG == 0)
+            .expect("list pool exceeds 2^31 items");
         self.items.extend_from_slice(items);
         ArenaList {
             start,
@@ -3242,7 +3327,29 @@ impl<T: Clone> ListPool<T> {
         }
     }
 
+    fn push_shared(&self, items: &[T]) -> ArenaList<T> {
+        if items.is_empty() {
+            return ArenaList::EMPTY;
+        }
+        let slot = self.shared.len() as u32;
+        self.shared.push(items.to_vec().into_boxed_slice());
+        ArenaList {
+            start: SHARED_LIST_FLAG | slot,
+            len: items.len() as u32,
+            _items: std::marker::PhantomData,
+        }
+    }
+
     fn get(&self, list: ArenaList<T>) -> &[T] {
+        if list.len == 0 {
+            return &[];
+        }
+        if list.start & SHARED_LIST_FLAG != 0 {
+            return self
+                .shared
+                .get((list.start & !SHARED_LIST_FLAG) as usize)
+                .expect("shared list slot");
+        }
         &self.items[list.start as usize..][..list.len as usize]
     }
 }

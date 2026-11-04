@@ -75,11 +75,12 @@ impl<'a> Mapper<'a> {
     /// `Ast_mapper_from0.decode_args`).
     fn encode_pat_args(
         &mut self,
-        args: &crate::parse_arena::Located<Vec<PatIdx>>,
+        args: &[PatIdx],
+        loc: LocIdx,
         mark_args: bool,
     ) -> Option<Box<pt0::Pattern>> {
-        let args_loc = self.loc(args.loc);
-        let mut mapped: Vec<pt0::Pattern> = args.txt.iter().map(|p| self.map_pat_idx(*p)).collect();
+        let args_loc = self.loc(loc);
+        let mut mapped: Vec<pt0::Pattern> = args.iter().map(|p| self.map_pat_idx(*p)).collect();
         match mapped.len() {
             0 => None,
             1 => Some(Box::new(mapped.pop().expect("one argument"))),
@@ -99,12 +100,12 @@ impl<'a> Mapper<'a> {
     /// `Ast_mapper_to0.encode_args` for expressions.
     fn encode_expr_args(
         &mut self,
-        args: &crate::parse_arena::Located<Vec<ExprIdx>>,
+        args: &[ExprIdx],
+        loc: LocIdx,
         mark_args: bool,
     ) -> Option<Box<pt0::Expression>> {
-        let args_loc = self.loc(args.loc);
-        let mut mapped: Vec<pt0::Expression> =
-            args.txt.iter().map(|e| self.map_expr_idx(*e)).collect();
+        let args_loc = self.loc(loc);
+        let mut mapped: Vec<pt0::Expression> = args.iter().map(|e| self.map_expr_idx(*e)).collect();
         match mapped.len() {
             0 => None,
             1 => Some(Box::new(mapped.pop().expect("one argument"))),
@@ -1080,18 +1081,25 @@ impl<'a> Mapper<'a> {
                 let (ref c1, ref c2) = **inner;
                 pt0::PatternDesc::Interval(self.map_constant(c1), self.map_constant(c2))
             }
-            current::PatternDesc::Ppat_tuple(pats) => {
-                pt0::PatternDesc::Tuple(pats.iter().map(|p| self.map_pat_idx(*p)).collect())
-            }
+            current::PatternDesc::Ppat_tuple(pats) => pt0::PatternDesc::Tuple(
+                self.arena
+                    .pat_list(*pats)
+                    .to_vec()
+                    .iter()
+                    .map(|p| self.map_pat_idx(*p))
+                    .collect(),
+            ),
             current::PatternDesc::Ppat_construct(lid, args) => {
                 let is_cons = self.arena.is_lident(lid.txt, "::");
                 let lid = self.map_longident_loc(lid);
-                let arg = self.encode_pat_args(args, !is_cons);
+                let items = self.arena.pat_list(args.txt).to_vec();
+                let arg = self.encode_pat_args(&items, args.loc, !is_cons);
                 pt0::PatternDesc::Construct(lid, arg)
             }
             current::PatternDesc::Ppat_variant(inner) => {
                 let (ref label, ref args) = **inner;
-                let arg = self.encode_pat_args(args, true);
+                let items = self.arena.pat_list(args.txt).to_vec();
+                let arg = self.encode_pat_args(&items, args.loc, true);
                 pt0::PatternDesc::Variant(label.to_string(), arg)
             }
             current::PatternDesc::Ppat_record(inner) => {
@@ -1109,9 +1117,14 @@ impl<'a> Mapper<'a> {
                     self.map_closed_flag(*flag),
                 )
             }
-            current::PatternDesc::Ppat_array(pats) => {
-                pt0::PatternDesc::Array(pats.iter().map(|p| self.map_pat_idx(*p)).collect())
-            }
+            current::PatternDesc::Ppat_array(pats) => pt0::PatternDesc::Array(
+                self.arena
+                    .pat_list(*pats)
+                    .to_vec()
+                    .iter()
+                    .map(|p| self.map_pat_idx(*p))
+                    .collect(),
+            ),
             current::PatternDesc::Ppat_or(p1, p2) => pt0::PatternDesc::Or(
                 Box::new(self.map_pat_idx(*p1)),
                 Box::new(self.map_pat_idx(*p2)),
@@ -1499,18 +1512,25 @@ impl<'a> Mapper<'a> {
                         .collect(),
                 )
             }
-            current::ExpressionDesc::Pexp_tuple(exprs) => {
-                pt0::ExpressionDesc::Tuple(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
-            }
+            current::ExpressionDesc::Pexp_tuple(exprs) => pt0::ExpressionDesc::Tuple(
+                self.arena
+                    .expr_list(*exprs)
+                    .to_vec()
+                    .iter()
+                    .map(|e| self.map_expr_idx(*e))
+                    .collect(),
+            ),
             current::ExpressionDesc::Pexp_construct(lid, args) => {
                 let is_cons = self.arena.is_lident(lid.txt, "::");
                 let lid = self.map_longident_loc(lid);
-                let arg = self.encode_expr_args(args, !is_cons);
+                let items = self.arena.expr_list(args.txt).to_vec();
+                let arg = self.encode_expr_args(&items, args.loc, !is_cons);
                 pt0::ExpressionDesc::Construct(lid, arg)
             }
             current::ExpressionDesc::Pexp_variant(inner) => {
                 let (ref label, ref args) = **inner;
-                let arg = self.encode_expr_args(args, true);
+                let items = self.arena.expr_list(args.txt).to_vec();
+                let arg = self.encode_expr_args(&items, args.loc, true);
                 pt0::ExpressionDesc::Variant(label.to_string(), arg)
             }
             current::ExpressionDesc::Pexp_record(inner) => {
@@ -1543,9 +1563,14 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_expr_idx(*e2_idx)),
                 )
             }
-            current::ExpressionDesc::Pexp_array(exprs) => {
-                pt0::ExpressionDesc::Array(exprs.iter().map(|e| self.map_expr_idx(*e)).collect())
-            }
+            current::ExpressionDesc::Pexp_array(exprs) => pt0::ExpressionDesc::Array(
+                self.arena
+                    .expr_list(*exprs)
+                    .to_vec()
+                    .iter()
+                    .map(|e| self.map_expr_idx(*e))
+                    .collect(),
+            ),
             current::ExpressionDesc::Pexp_ifthenelse(inner) => {
                 let (ref e1_idx, ref e2_idx, ref e3) = **inner;
                 let else_idx = owner_idx

@@ -469,17 +469,17 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
             }
         }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            for e in items.iter() {
+            for e in arena.expr_list(*items).iter() {
                 v.expr(arena, *e);
             }
         }
         ExpressionDesc::Pexp_construct(_, args) => {
-            for arg in &args.txt {
+            for arg in arena.expr_list(args.txt) {
                 v.expr(arena, *arg);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            for arg in &inner.1.txt {
+            for arg in arena.expr_list(inner.1.txt) {
                 v.expr(arena, *arg);
             }
         }
@@ -608,17 +608,17 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
         | PatternDesc::Ppat_unpack(_) => {}
         PatternDesc::Ppat_alias(p, _) | PatternDesc::Ppat_exception(p) => v.pat(arena, *p),
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-            for p in pats.iter() {
+            for p in arena.pat_list(*pats).iter() {
                 v.pat(arena, *p);
             }
         }
         PatternDesc::Ppat_construct(_, args) => {
-            for arg in &args.txt {
+            for arg in arena.pat_list(args.txt) {
                 v.pat(arena, *arg);
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            for arg in &inner.1.txt {
+            for arg in arena.pat_list(inner.1.txt) {
                 v.pat(arena, *arg);
             }
         }

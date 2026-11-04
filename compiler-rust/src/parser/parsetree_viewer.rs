@@ -579,8 +579,12 @@ pub fn collect_spread_dict_expr_parts<'a>(
     };
 
     let mut parts = Vec::with_capacity(source_indices.len() + 1);
-    for part in std::iter::once(target).chain(source_indices.iter().map(|idx| arena.get_expr(*idx)))
-    {
+    for part in std::iter::once(target).chain(
+        arena
+            .expr_list(*source_indices)
+            .iter()
+            .map(|idx| arena.get_expr(*idx)),
+    ) {
         if let Some(rows) = literal_dict_rows(arena, part) {
             if !matches!(&rows.pexp_desc, ExpressionDesc::Pexp_array(items) if items.is_empty()) {
                 parts.push(DictExprPart::Rows(rows));
@@ -596,7 +600,8 @@ pub fn collect_spread_dict_expr_parts<'a>(
 /// Used to detect dict{} syntax which desugars to Primitive_dict.make([("key", value), ...])
 pub fn is_tuple_array(arena: &ParseArena, expr: &Expression) -> bool {
     if let ExpressionDesc::Pexp_array(items) = &expr.pexp_desc {
-        items
+        arena
+            .expr_list(*items)
             .iter()
             .all(|e| matches!(&arena.get_expr(*e).pexp_desc, ExpressionDesc::Pexp_tuple(_)))
     } else {
@@ -642,11 +647,11 @@ pub fn collect_list_expressions<'a>(
                 return (acc, None);
             }
             ExpressionDesc::Pexp_construct(lid, args) if arena.is_lident(lid.txt, "::") => {
-                let pair = match args.txt.as_slice() {
+                let pair = match arena.expr_list(args.txt) {
                     [head, tail] => Some((*head, *tail)),
                     [arg] => match &arena.get_expr(*arg).pexp_desc {
                         ExpressionDesc::Pexp_tuple(exprs) if exprs.len() == 2 => {
-                            Some((exprs[0], exprs[1]))
+                            Some((arena.expr_list(*exprs)[0], arena.expr_list(*exprs)[1]))
                         }
                         _ => None,
                     },
@@ -681,10 +686,12 @@ pub fn collect_list_patterns<'a>(
         if let PatternDesc::Ppat_construct(lid, args) = &current.ppat_desc
             && arena.is_lident(lid.txt, "::")
         {
-            let pair = match args.txt.as_slice() {
+            let pair = match arena.pat_list(args.txt) {
                 [head, rest] => Some((*head, *rest)),
                 [arg] => match &arena.get_pat(*arg).ppat_desc {
-                    PatternDesc::Ppat_tuple(pats) if pats.len() == 2 => Some((pats[0], pats[1])),
+                    PatternDesc::Ppat_tuple(pats) if pats.len() == 2 => {
+                        Some((arena.pat_list(*pats)[0], arena.pat_list(*pats)[1]))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -709,9 +716,14 @@ pub fn collect_array_expressions<'a>(
     expr: &'a Expression,
 ) -> (Vec<&'a Expression>, Option<&'a Expression>) {
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_array(exprs) => {
-            (exprs.iter().map(|idx| arena.get_expr(*idx)).collect(), None)
-        }
+        ExpressionDesc::Pexp_array(exprs) => (
+            arena
+                .expr_list(*exprs)
+                .iter()
+                .map(|idx| arena.get_expr(*idx))
+                .collect(),
+            None,
+        ),
         _ => (vec![], Some(expr)),
     }
 }

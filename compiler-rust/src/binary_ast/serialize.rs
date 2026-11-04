@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 
 use super::marshal::MarshalWriter;
+use crate::parse_arena::ArenaList;
 
 /// Trait for types that can be serialized to OCaml Marshal format
 pub trait Marshal {
@@ -121,6 +122,36 @@ impl<T: Marshal> Marshal for [T] {
             item.marshal(w);
         }
         w.write_int(0); // Nil
+    }
+}
+
+/// Arena-pooled index lists marshal exactly like the `Vec` they replace.
+pub trait PooledListItem: Marshal + Sized {
+    fn items(arena: &crate::parse_arena::ParseArena, list: ArenaList<Self>) -> &[Self];
+}
+
+impl PooledListItem for crate::parse_arena::ExprIdx {
+    fn items(arena: &crate::parse_arena::ParseArena, list: ArenaList<Self>) -> &[Self] {
+        arena.expr_list(list)
+    }
+}
+
+impl PooledListItem for crate::parse_arena::PatIdx {
+    fn items(arena: &crate::parse_arena::ParseArena, list: ArenaList<Self>) -> &[Self] {
+        arena.pat_list(list)
+    }
+}
+
+impl PooledListItem for crate::parse_arena::CoreTypeIdx {
+    fn items(arena: &crate::parse_arena::ParseArena, list: ArenaList<Self>) -> &[Self] {
+        arena.type_list(list)
+    }
+}
+
+impl<T: PooledListItem> Marshal for ArenaList<T> {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let arena = w.get_arena();
+        T::items(arena, *self).marshal(w);
     }
 }
 

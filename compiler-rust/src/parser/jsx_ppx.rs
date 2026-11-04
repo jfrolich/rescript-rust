@@ -1679,6 +1679,7 @@ fn add_default_value_matches(
                 ppat_attributes: Attributes::new(),
             });
             let some_lid = arena.push_longident(Longident::Lident(some_str_idx));
+            let some_args = arena.pat_ctor_args(&[some_inner_pat_idx], empty_loc());
             let label_name_lid = arena.push_longident(Longident::Lident(label_name_str_idx));
             let none_lid = arena.push_longident(Longident::Lident(none_str_idx));
             let match_expr = Expression {
@@ -1693,7 +1694,7 @@ fn add_default_value_matches(
                                         txt: some_lid,
                                         loc: empty_loc(),
                                     },
-                                    ctor_args(vec![some_inner_pat_idx], empty_loc()),
+                                    some_args,
                                 ),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -1716,7 +1717,10 @@ fn add_default_value_matches(
                                         txt: none_lid,
                                         loc: empty_loc(),
                                     },
-                                    ctor_args(Vec::new(), empty_loc()),
+                                    crate::parse_arena::Located::new(
+                                        crate::parse_arena::PatList::EMPTY,
+                                        empty_loc(),
+                                    ),
                                 ),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
@@ -2981,7 +2985,7 @@ fn unit_expr(arena: &mut ParseArena, loc: &Location) -> Expression {
                 txt: arena.push_longident(Longident::Lident(unit_str_idx)),
                 loc: *loc,
             },
-            ctor_args(Vec::new(), *loc),
+            crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, *loc),
         ),
         pexp_loc: *loc,
         pexp_attributes: Attributes::new(),
@@ -4049,31 +4053,40 @@ fn transform_expression(
                 transformed_cases,
             )))
         }
-        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple(Box::new(
-            exprs
+        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
+            let items = arena
+                .expr_list(exprs)
+                .to_vec()
                 .into_iter()
                 .map(|e| {
                     let e_expr = arena.get_expr(e).clone();
                     let transformed = transform_expression(e_expr, config, arena);
                     arena.push_expr(transformed)
                 })
-                .collect(),
-        )),
+                .collect::<Vec<_>>();
+            arena.push_expr_list(&items)
+        }),
         ExpressionDesc::Pexp_construct(lid, mut args) => {
-            for e in args.txt.iter_mut() {
+            // The rewritten node gets its own list; the original keeps its own.
+            let mut new_items = arena.expr_list(args.txt).to_vec();
+            for e in new_items.iter_mut() {
                 let e_expr = arena.get_expr(*e).clone();
                 let rw = transform_expression(e_expr, config, arena);
                 *e = arena.push_expr(rw);
             }
+            args.txt = arena.push_expr_list(&new_items);
             ExpressionDesc::Pexp_construct(lid, args)
         }
         ExpressionDesc::Pexp_variant(inner) => {
             let (label, mut args) = *inner;
-            for e in args.txt.iter_mut() {
+            // The rewritten node gets its own list; the original keeps its own.
+            let mut new_items = arena.expr_list(args.txt).to_vec();
+            for e in new_items.iter_mut() {
                 let e_expr = arena.get_expr(*e).clone();
                 let transformed = transform_expression(e_expr, config, arena);
                 *e = arena.push_expr(transformed);
             }
+            args.txt = arena.push_expr_list(&new_items);
             ExpressionDesc::Pexp_variant(Box::new((label, args)))
         }
         ExpressionDesc::Pexp_record(inner) => {
@@ -4147,16 +4160,19 @@ fn transform_expression(
                     .collect(),
             ))
         }
-        ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array(Box::new(
-            elems
+        ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array({
+            let items = arena
+                .expr_list(elems)
+                .to_vec()
                 .into_iter()
                 .map(|e| {
                     let e_expr = arena.get_expr(e).clone();
                     let transformed = transform_expression(e_expr, config, arena);
                     arena.push_expr(transformed)
                 })
-                .collect(),
-        )),
+                .collect::<Vec<_>>();
+            arena.push_expr_list(&items)
+        }),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (cond, then_expr, else_expr) = *inner;
             let cond_expr = arena.get_expr(cond).clone();
@@ -4601,16 +4617,17 @@ fn append_children_prop(
 
         // Array literal containing children - ghost location
         let children_array = Expression {
-            pexp_desc: ExpressionDesc::Pexp_array(Box::new(
-                children
+            pexp_desc: ExpressionDesc::Pexp_array({
+                let items = children
                     .into_iter()
                     .map(|c| {
                         let c_expr = arena.get_expr(c).clone();
                         let transformed = transform_expression(c_expr, config, arena);
                         arena.push_expr(transformed)
                     })
-                    .collect(),
-            )),
+                    .collect::<Vec<_>>();
+                arena.push_expr_list(&items)
+            }),
             pexp_loc: empty_loc(), // Ghost location for the array
             pexp_attributes: Attributes::new(),
         };
@@ -5024,11 +5041,19 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         ExpressionDesc::Pexp_tagged_template(template) => {
             child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
         }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-            items.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_construct(_, args) => args.txt.iter().any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_variant(inner) => inner.1.txt.iter().any(|arg| child(*arg, memo)),
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
+            .expr_list(*items)
+            .to_vec()
+            .iter()
+            .any(|item| child(*item, memo)),
+        ExpressionDesc::Pexp_construct(_, args) => arena
+            .expr_list(args.txt)
+            .iter()
+            .any(|arg| child(*arg, memo)),
+        ExpressionDesc::Pexp_variant(inner) => arena
+            .expr_list(inner.1.txt)
+            .iter()
+            .any(|arg| child(*arg, memo)),
         ExpressionDesc::Pexp_record(inner) => {
             inner.0.iter().any(|field| child(field.expr, memo))
                 || inner.1.is_some_and(|spread| child(spread, memo))

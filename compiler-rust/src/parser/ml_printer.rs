@@ -328,7 +328,7 @@ fn list_is_complete(expr: &Expression, arena: &ParseArena) -> bool {
         if args.txt.is_empty() {
             return name == "[]";
         }
-        match args.txt.as_slice() {
+        match arena.expr_list(args.txt) {
             [_, tail] if name == "::" => current = arena.get_expr(*tail),
             _ => return false,
         }
@@ -363,7 +363,7 @@ fn collect_list_elements<'a>(
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
                     let name = arena.get_string(*name_idx);
                     if name == "::"
-                        && let [e1, e2] = args.txt.as_slice()
+                        && let [e1, e2] = arena.expr_list(args.txt)
                     {
                         elements.push(arena.get_expr(*e1));
                         current = arena.get_expr(*e2);
@@ -1746,7 +1746,7 @@ fn print_expression_inner<W: Write>(
             }
         }
         ExpressionDesc::Pexp_tuple(exprs) => {
-            print_expr_tuple(f, arena, exprs, ctx);
+            print_expr_tuple(f, arena, arena.expr_list(*exprs), ctx);
         }
         ExpressionDesc::Pexp_construct(lid, arg) => {
             // Special handling for list syntax
@@ -1789,7 +1789,7 @@ fn print_expression_inner<W: Write>(
                     return;
                 }
             }
-            match arg.txt.as_slice() {
+            match arena.expr_list(arg.txt) {
                 [] => print_longident_idx(f, arena, lid.txt),
                 args => {
                     // OCaml: @[<2>%a@;%a@] with (simple_expr ctxt) for arg
@@ -1812,7 +1812,7 @@ fn print_expression_inner<W: Write>(
                 f.string("`");
                 f.string(label);
                 f.space();
-                match arg.txt.as_slice() {
+                match arena.expr_list(arg.txt) {
                     [a] => print_expression_simple_ctx(f, arena, arena.get_expr(*a), ctx),
                     args => print_expr_tuple(f, arena, args, ctx),
                 }
@@ -1909,7 +1909,7 @@ fn print_expression_inner<W: Write>(
             f.open_box(BoxKind::Box, 0);
             f.open_box(BoxKind::Box, 2);
             f.string("[|");
-            for (i, e) in elems.iter().enumerate() {
+            for (i, e) in arena.expr_list(*elems).iter().enumerate() {
                 if i > 0 {
                     f.string(";");
                 }
@@ -2534,7 +2534,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
         }
         PatternDesc::Ppat_tuple(pats) => {
-            print_pat_tuple(f, arena, pats);
+            print_pat_tuple(f, arena, arena.pat_list(*pats));
         }
         PatternDesc::Ppat_construct(lid, arg) => {
             // Special case for cons pattern - no outer parens by default
@@ -2545,8 +2545,8 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                         {
                             let elements = &arg.txt;
                             if elements.len() == 2 {
-                                let left = arena.get_pat(elements[0]);
-                                let right = arena.get_pat(elements[1]);
+                                let left = arena.get_pat(arena.pat_list(*elements)[0]);
+                                let right = arena.get_pat(arena.pat_list(*elements)[1]);
                                 // Left element needs parens if it's an alias or constraint
                                 let left_needs_parens = pattern_needs_parens_as_param(left, arena);
                                 if left_needs_parens {
@@ -2574,7 +2574,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     }
                 }
             }
-            match arg.txt.as_slice() {
+            match arena.pat_list(arg.txt) {
                 [] => print_longident_idx(f, arena, lid.txt),
                 args => {
                     // OCaml: @[<2>%a@;%a@] with simple_pattern for arg
@@ -2597,7 +2597,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                 f.string("`");
                 f.string(label);
                 f.space();
-                match arg.txt.as_slice() {
+                match arena.pat_list(arg.txt) {
                     [a] => print_simple_pattern(f, arena, arena.get_pat(*a)),
                     args => print_pat_tuple(f, arena, args),
                 }
@@ -2689,7 +2689,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             // OCaml: pp f "@[<2>[|%a|]@]" with sep ";"
             f.open_box(BoxKind::Box, 2);
             f.string("[|");
-            for (i, p) in pats.iter().enumerate() {
+            for (i, p) in arena.pat_list(*pats).iter().enumerate() {
                 if i > 0 {
                     f.string(";");
                 }

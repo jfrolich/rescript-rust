@@ -1081,7 +1081,10 @@ fn print_extra_type_clash_help_by_types(
                 Some(crate::parser::ast::Expression {
                     pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
                         std::borrow::Cow::Owned(s),
-                        crate::parse_arena::Located::new(Vec::new(), exp.pexp_loc),
+                        crate::parse_arena::Located::new(
+                            crate::parse_arena::ExprList::EMPTY,
+                            exp.pexp_loc,
+                        ),
                     ))),
                     ..exp
                 })
@@ -1131,7 +1134,10 @@ fn print_extra_type_clash_help_by_types(
                                 txt: lid,
                                 loc: exp.pexp_loc,
                             },
-                            crate::parser::ast::ctor_args(Vec::new(), exp.pexp_loc),
+                            crate::parse_arena::Located::new(
+                                crate::parse_arena::ExprList::EMPTY,
+                                exp.pexp_loc,
+                            ),
                         ),
                         ..exp
                     })

@@ -339,7 +339,7 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
                         return Expression {
                             pexp_desc: ExpressionDesc::Pexp_construct(
                                 with_loc(lid_idx, ident_loc),
-                                Box::new(args),
+                                args,
                             ),
                             pexp_loc: loc,
                             pexp_attributes: Attributes::new(),
@@ -352,7 +352,10 @@ pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
                         return Expression {
                             pexp_desc: ExpressionDesc::Pexp_construct(
                                 with_loc(lid_idx, loc),
-                                ctor_args(Vec::new(), loc),
+                                crate::parse_arena::Located::new(
+                                    crate::parse_arena::ExprList::EMPTY,
+                                    loc,
+                                ),
                             ),
                             pexp_loc: loc,
                             pexp_attributes: Attributes::new(),
@@ -428,7 +431,7 @@ pub(super) fn parse_constrained_expr_region(p: &mut Parser<'_>) -> Option<Expres
 /// OCaml `parse_constructor_args` (compiler/syntax/src/res_core.ml:4299-4315).
 /// OCaml `parse_constructor_args` (res_core.ml): the argument list, located
 /// at its parentheses. `C()` is `C(())`.
-fn parse_constructor_args(p: &mut Parser<'_>) -> Located<Vec<ExprIdx>> {
+fn parse_constructor_args(p: &mut Parser<'_>) -> Located<crate::parse_arena::ExprList> {
     let lparen = p.start_pos_idx();
     p.expect(Token::Lparen);
     let args = super::core::parse_comma_delimited_region(
@@ -444,7 +447,7 @@ fn parse_constructor_args(p: &mut Parser<'_>) -> Located<Vec<ExprIdx>> {
         vec![Expression {
             pexp_desc: ExpressionDesc::Pexp_construct(
                 with_loc(lid_idx, loc),
-                ctor_args(Vec::new(), loc),
+                crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
             ),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
@@ -452,11 +455,11 @@ fn parse_constructor_args(p: &mut Parser<'_>) -> Located<Vec<ExprIdx>> {
     } else {
         args
     };
-    let txt = args
+    let txt: Vec<ExprIdx> = args
         .into_iter()
         .map(|e| p.arena_mut().push_expr(e))
         .collect();
-    Located { txt, loc }
+    p.arena_mut().expr_ctor_args(&txt, loc)
 }
 
 // ============================================================================
@@ -787,7 +790,7 @@ fn parse_es6_arrow_expression_internal(
         let unit_pat = Pattern {
             ppat_desc: PatternDesc::Ppat_construct(
                 with_loc(unit_lid, unit_pat_loc),
-                ctor_args(Vec::new(), unit_pat_loc),
+                crate::parse_arena::Located::new(crate::parse_arena::PatList::EMPTY, unit_pat_loc),
             ),
             ppat_loc: unit_pat_loc,
             ppat_attributes: Attributes::new(),
@@ -916,7 +919,7 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
                 let unit_pat = Pattern {
                     ppat_desc: PatternDesc::Ppat_construct(
                         with_loc(unit_lid, loc),
-                        ctor_args(Vec::new(), loc),
+                        crate::parse_arena::Located::new(crate::parse_arena::PatList::EMPTY, loc),
                     ),
                     ppat_loc: loc,
                     ppat_attributes: Attributes::new(),
@@ -1425,7 +1428,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_construct(
                     with_loc(lid_idx, loc),
-                    ctor_args(Vec::new(), loc),
+                    crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
                 ),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
@@ -1465,7 +1468,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 Expression {
                     pexp_desc: ExpressionDesc::Pexp_construct(
                         with_loc(lid_idx, loc),
-                        ctor_args(Vec::new(), loc),
+                        crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
                     ),
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
@@ -1536,7 +1539,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             };
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let arg = args.unwrap_or(Located {
-                txt: Vec::new(),
+                txt: crate::parse_arena::ExprList::EMPTY,
                 loc,
             });
             Expression {
@@ -1724,7 +1727,10 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                                     Pattern {
                                         ppat_desc: PatternDesc::Ppat_construct(
                                             *lid,
-                                            ctor_args(Vec::new(), expr.pexp_loc),
+                                            crate::parse_arena::Located::new(
+                                                crate::parse_arena::PatList::EMPTY,
+                                                expr.pexp_loc,
+                                            ),
                                         ),
                                         ppat_loc: expr.pexp_loc,
                                         ppat_attributes: Attributes::new(),
@@ -2190,7 +2196,7 @@ fn parse_call_args(p: &mut Parser<'_>) -> (Vec<(ArgLabel, Expression)>, bool) {
                     txt: lid_idx,
                     loc: unit_loc,
                 },
-                ctor_args(Vec::new(), unit_loc),
+                crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, unit_loc),
             ),
             pexp_loc: unit_loc,
             pexp_attributes: Attributes::new(),
@@ -2219,7 +2225,10 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
                         txt: lid_idx,
                         loc: LocIdx::none(),
                     },
-                    ctor_args(Vec::new(), LocIdx::none()),
+                    crate::parse_arena::Located::new(
+                        crate::parse_arena::ExprList::EMPTY,
+                        LocIdx::none(),
+                    ),
                 ),
                 pexp_loc: LocIdx::none(),
                 pexp_attributes: Attributes::new(),
@@ -2381,7 +2390,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
         .map(|e| p.arena_mut().push_expr(e))
         .collect();
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_tuple(Box::new(elements_idx)),
+        pexp_desc: ExpressionDesc::Pexp_tuple(p.arena_mut().push_expr_list(&elements_idx)),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -2423,7 +2432,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
             .map(|(_, e)| p.arena_mut().push_expr(e))
             .collect();
         return Expression {
-            pexp_desc: ExpressionDesc::Pexp_array(Box::new(elements)),
+            pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&elements)),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         };
@@ -2440,9 +2449,10 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
             // Flush any accumulated non-spread items as an array
             if !current_non_spread.is_empty() {
                 array_items.push(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_array(Box::new(std::mem::take(
-                        &mut current_non_spread,
-                    ))),
+                    pexp_desc: ExpressionDesc::Pexp_array(
+                        p.arena_mut()
+                            .push_expr_list(&std::mem::take(&mut current_non_spread)),
+                    ),
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
                 });
@@ -2457,7 +2467,9 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     // Flush remaining non-spread items
     if !current_non_spread.is_empty() {
         array_items.push(Expression {
-            pexp_desc: ExpressionDesc::Pexp_array(Box::new(current_non_spread)),
+            pexp_desc: ExpressionDesc::Pexp_array(
+                p.arena_mut().push_expr_list(&current_non_spread),
+            ),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         });
@@ -2469,7 +2481,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         .map(|e| p.arena_mut().push_expr(e))
         .collect();
     let outer_array = Expression {
-        pexp_desc: ExpressionDesc::Pexp_array(Box::new(array_items_idx)),
+        pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&array_items_idx)),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -2577,7 +2589,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 .collect();
 
             let array_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_array(Box::new(sub_exprs)),
+                pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&sub_exprs)),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -2669,7 +2681,7 @@ fn make_empty_list(p: &mut Parser<'_>, loc: Location) -> Expression {
                 txt: lid_idx,
                 loc: ghost_loc,
             },
-            ctor_args(Vec::new(), ghost_loc),
+            crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, ghost_loc),
         ),
         pexp_loc: ghost_loc,
         pexp_attributes: Attributes::new(),
@@ -2708,7 +2720,7 @@ fn make_list_expression_simple(
                     txt: lid_idx,
                     loc: cons_loc,
                 },
-                ctor_args(vec![item_idx, acc_idx], cons_loc),
+                p.arena_mut().expr_ctor_args(&[item_idx, acc_idx], cons_loc),
             ),
             pexp_loc: cons_loc,
             pexp_attributes: Attributes::new(),
@@ -2744,7 +2756,7 @@ fn make_list_expression_with_loc(
                     txt: nil_idx,
                     loc: ghost_loc,
                 },
-                ctor_args(Vec::new(), ghost_loc),
+                crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, ghost_loc),
             ),
             pexp_loc: ghost_loc,
             pexp_attributes: Attributes::new(),
@@ -2763,7 +2775,7 @@ fn make_list_expression_with_loc(
                     txt: cons_idx,
                     loc: cons_loc,
                 },
-                ctor_args(vec![item_idx, acc_idx], cons_loc),
+                p.arena_mut().expr_ctor_args(&[item_idx, acc_idx], cons_loc),
             ),
             pexp_loc: cons_loc,
             pexp_attributes: Attributes::new(),
@@ -2847,10 +2859,9 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                         let key_expr_idx = p.arena_mut().push_expr(key_expr);
                         let value_idx = p.arena_mut().push_expr(value);
                         let tuple = Expression {
-                            pexp_desc: ExpressionDesc::Pexp_tuple(Box::new(vec![
-                                key_expr_idx,
-                                value_idx,
-                            ])),
+                            pexp_desc: ExpressionDesc::Pexp_tuple(
+                                p.arena_mut().push_expr_list(&[key_expr_idx, value_idx]),
+                            ),
                             pexp_loc: tuple_loc,
                             pexp_attributes: Attributes::new(),
                         };
@@ -2905,7 +2916,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 .map(|e| p.arena_mut().push_expr(e))
                 .collect();
             let array_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_array(Box::new(kvp_idx)),
+                pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&kvp_idx)),
                 pexp_loc: chunk_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -2969,7 +2980,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             })
             .collect();
         let source_array = Expression {
-            pexp_desc: ExpressionDesc::Pexp_array(Box::new(source_expr_idx)),
+            pexp_desc: ExpressionDesc::Pexp_array(p.arena_mut().push_expr_list(&source_expr_idx)),
             pexp_loc: spread_loc,
             pexp_attributes: Attributes::new(),
         };

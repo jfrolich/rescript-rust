@@ -115,7 +115,8 @@ fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> 
             _ => None,
         },
         ExpressionDesc::Pexp_tuple(exprs) => {
-            let payloads = exprs
+            let payloads = arena
+                .expr_list(*exprs)
                 .iter()
                 .filter_map(|expr_idx| from_expr(arena, arena.get_expr(*expr_idx)))
                 .collect();

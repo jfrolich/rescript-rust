@@ -135,7 +135,7 @@ pub fn find_editor_complete_from_attribute(attrs: Attrs<'_>) -> Vec<ModulePathLi
                     continue;
                 };
                 let items: Vec<ExprIdx> = match &arena.get_expr(e).pexp_desc {
-                    ExpressionDesc::Pexp_array(items) => items.to_vec(),
+                    ExpressionDesc::Pexp_array(items) => arena.expr_list(*items).to_vec(),
                     _ => vec![e],
                 };
                 let mut from_array: Vec<ModulePathList> = items

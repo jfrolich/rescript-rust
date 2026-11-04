@@ -960,9 +960,10 @@ impl<'a> Mapper<'a> {
                 let c2 = self.map_pattern_constant(c2, loc);
                 current::PatternDesc::Ppat_interval(Box::new((c1, c2)))
             }
-            pt0::PatternDesc::Tuple(pl) => current::PatternDesc::Ppat_tuple(Box::new(
-                pl.iter().map(|p| self.push_pat(p)).collect(),
-            )),
+            pt0::PatternDesc::Tuple(pl) => current::PatternDesc::Ppat_tuple({
+                let items: Vec<_> = pl.iter().map(|p| self.push_pat(p)).collect();
+                self.arena.push_pat_list(&items)
+            }),
             pt0::PatternDesc::Construct(lid, arg) => {
                 let args_loc = match arg {
                     Some(arg) => self.loc(&arg.ppat_loc),
@@ -977,7 +978,7 @@ impl<'a> Mapper<'a> {
                 let args = self.decode_pat_args(arg.as_deref(), split_tuple);
                 current::PatternDesc::Ppat_construct(
                     self.map_longident_loc(lid),
-                    current::ctor_args(args, args_loc),
+                    self.arena.pat_ctor_args(&args, args_loc),
                 )
             }
             pt0::PatternDesc::Variant(tag, arg) => {
@@ -991,7 +992,7 @@ impl<'a> Mapper<'a> {
                 let args = self.decode_pat_args(arg.as_deref(), has_constructor_args);
                 current::PatternDesc::Ppat_variant(Box::new((
                     Cow::Owned(tag.clone()),
-                    Located::new(args, args_loc),
+                    self.arena.pat_ctor_args(&args, args_loc),
                 )))
             }
             pt0::PatternDesc::Record(fields, closed) => {
@@ -1031,9 +1032,10 @@ impl<'a> Mapper<'a> {
                 let rest = rest.and_then(|rest| self.record_rest_of_pattern(&rest));
                 current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(closed), rest)))
             }
-            pt0::PatternDesc::Array(pl) => current::PatternDesc::Ppat_array(Box::new(
-                pl.iter().map(|p| self.push_pat(p)).collect(),
-            )),
+            pt0::PatternDesc::Array(pl) => current::PatternDesc::Ppat_array({
+                let items: Vec<_> = pl.iter().map(|p| self.push_pat(p)).collect();
+                self.arena.push_pat_list(&items)
+            }),
             pt0::PatternDesc::Or(p1, p2) => {
                 current::PatternDesc::Ppat_or(self.push_pat(p1), self.push_pat(p2))
             }
@@ -1773,9 +1775,10 @@ impl<'a> Mapper<'a> {
                     cases.iter().map(|c| self.map_case(c)).collect(),
                 )))
             }
-            pt0::ExpressionDesc::Tuple(el) => current::ExpressionDesc::Pexp_tuple(Box::new(
-                el.iter().map(|e| self.push_expr(e)).collect(),
-            )),
+            pt0::ExpressionDesc::Tuple(el) => current::ExpressionDesc::Pexp_tuple({
+                let items: Vec<_> = el.iter().map(|e| self.push_expr(e)).collect();
+                self.arena.push_expr_list(&items)
+            }),
             pt0::ExpressionDesc::Construct(lid, arg) => {
                 // Check for JSX fragment (list with [@JSX] attribute)
                 if has_jsx_attribute(&expr.pexp_attributes) {
@@ -1844,7 +1847,10 @@ impl<'a> Mapper<'a> {
                     || has_explicit_arity_attr(self.arena, &attrs)
                     || self.is_lident(&lid.txt, "::");
                 let args = self.decode_expr_args(arg.as_deref(), split_tuple);
-                current::ExpressionDesc::Pexp_construct(lid1, current::ctor_args(args, args_loc))
+                current::ExpressionDesc::Pexp_construct(
+                    lid1,
+                    self.arena.expr_ctor_args(&args, args_loc),
+                )
             }
             pt0::ExpressionDesc::Variant(label, arg) => {
                 let (has_constructor_args, rest) =
@@ -1857,7 +1863,7 @@ impl<'a> Mapper<'a> {
                 let args = self.decode_expr_args(arg.as_deref(), has_constructor_args);
                 current::ExpressionDesc::Pexp_variant(Box::new((
                     Cow::Owned(label.clone()),
-                    Located::new(args, args_loc),
+                    self.arena.expr_ctor_args(&args, args_loc),
                 )))
             }
             pt0::ExpressionDesc::Record(fields, base) => {
@@ -1902,9 +1908,10 @@ impl<'a> Mapper<'a> {
                     e2_idx,
                 )))
             }
-            pt0::ExpressionDesc::Array(el) => current::ExpressionDesc::Pexp_array(Box::new(
-                el.iter().map(|e| self.push_expr(e)).collect(),
-            )),
+            pt0::ExpressionDesc::Array(el) => current::ExpressionDesc::Pexp_array({
+                let items: Vec<_> = el.iter().map(|e| self.push_expr(e)).collect();
+                self.arena.push_expr_list(&items)
+            }),
             pt0::ExpressionDesc::Ifthenelse(e1, e2, Some(e3))
                 if attrs.iter().any(|(name, payload)| {
                     self.arena.get_string(name.txt) == "res.ternary"

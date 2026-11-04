@@ -1145,7 +1145,7 @@ pub fn print_expression(
         // Other constructors
         ExpressionDesc::Pexp_construct(longident_loc, args) => {
             let constr = print_longident_location(longident_loc, cmt_tbl, arena);
-            let args_doc = print_expression_args(state, &args.txt, cmt_tbl, arena);
+            let args_doc = print_expression_args(state, arena.expr_list(args.txt), cmt_tbl, arena);
             Doc::group(Doc::concat(vec![constr, args_doc]))
         }
         // Identifier
@@ -1157,7 +1157,8 @@ pub fn print_expression(
                 Doc::soft_line(),
                 Doc::join(
                     Doc::concat(vec![Doc::text(","), Doc::line()]),
-                    exprs
+                    arena
+                        .expr_list(*exprs)
                         .iter()
                         .map(|expr_idx| {
                             let expr = arena.get_expr(*expr_idx);
@@ -1188,7 +1189,8 @@ pub fn print_expression(
                 Doc::soft_line(),
                 Doc::join(
                     Doc::concat(vec![Doc::text(","), Doc::line()]),
-                    exprs
+                    arena
+                        .expr_list(*exprs)
                         .iter()
                         .map(|expr_idx| {
                             let expr = arena.get_expr(*expr_idx);
@@ -1210,7 +1212,7 @@ pub fn print_expression(
         ExpressionDesc::Pexp_variant(inner) => {
             let (ref label, ref args) = **inner;
             let variant_name = Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
-            let args_doc = print_expression_args(state, &args.txt, cmt_tbl, arena);
+            let args_doc = print_expression_args(state, arena.expr_list(args.txt), cmt_tbl, arena);
             Doc::group(Doc::concat(vec![variant_name, args_doc]))
         }
         // Record expression
@@ -1285,7 +1287,7 @@ pub fn print_expression(
             let PexpApply { .. } = *apply_inner;
             let args = arena.apply_args(apply_inner.args);
             if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
-                print_belt_array_concat_apply(state, sub_lists, cmt_tbl, arena)
+                print_belt_array_concat_apply(state, arena.expr_list(*sub_lists), cmt_tbl, arena)
             } else {
                 Doc::nil() // Should never happen due to guard
             }
@@ -1308,7 +1310,7 @@ pub fn print_expression(
             let PexpApply { .. } = *apply_inner;
             let args = arena.apply_args(apply_inner.args);
             if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
-                print_belt_list_concat_apply(state, sub_lists, cmt_tbl, arena)
+                print_belt_list_concat_apply(state, arena.expr_list(*sub_lists), cmt_tbl, arena)
             } else {
                 Doc::nil() // Should never happen due to guard
             }
@@ -3098,14 +3100,15 @@ fn print_dict_rows(
     arena: &ParseArena,
 ) -> Doc {
     let rows: Vec<Doc> = if let ExpressionDesc::Pexp_array(items) = &key_values.pexp_desc {
-        items
+        arena
+            .expr_list(*items)
             .iter()
             .filter_map(|tuple_expr| {
                 let tuple_expr = arena.get_expr(*tuple_expr);
                 if let ExpressionDesc::Pexp_tuple(tuple_items) = &tuple_expr.pexp_desc {
                     if tuple_items.len() == 2 {
-                        let key_expr = arena.get_expr(tuple_items[0]);
-                        let value_expr = arena.get_expr(tuple_items[1]);
+                        let key_expr = arena.get_expr(arena.expr_list(*tuple_items)[0]);
+                        let value_expr = arena.get_expr(arena.expr_list(*tuple_items)[1]);
                         // Key should be a string constant
                         if let ExpressionDesc::Pexp_constant(c) = &key_expr.pexp_desc {
                             if let Constant::String(payload) = &*c {
@@ -5257,7 +5260,8 @@ pub fn print_pattern(
                 Doc::soft_line(),
                 Doc::join(
                     Doc::concat(vec![Doc::text(","), Doc::line()]),
-                    patterns
+                    arena
+                        .pat_list(*patterns)
                         .iter()
                         .map(|p| print_pattern(state, arena.get_pat(*p), cmt_tbl, arena))
                         .collect(),
@@ -5280,7 +5284,8 @@ pub fn print_pattern(
                 Doc::soft_line(),
                 Doc::join(
                     Doc::concat(vec![Doc::text(","), Doc::line()]),
-                    patterns
+                    arena
+                        .pat_list(*patterns)
                         .iter()
                         .map(|p| print_pattern(state, arena.get_pat(*p), cmt_tbl, arena))
                         .collect(),
@@ -5309,14 +5314,16 @@ pub fn print_pattern(
         // Constructor(args)
         PatternDesc::Ppat_construct(constr_name, constructor_args) => {
             let constr = print_longident_location(constr_name, cmt_tbl, arena);
-            let args_doc = print_pattern_args(state, &constructor_args.txt, cmt_tbl, arena);
+            let args_doc =
+                print_pattern_args(state, arena.pat_list(constructor_args.txt), cmt_tbl, arena);
             Doc::group(Doc::concat(vec![constr, args_doc]))
         }
         // #variant or #variant(args)
         PatternDesc::Ppat_variant(inner) => {
             let (ref label, ref variant_args) = **inner;
             let variant_name = Doc::concat(vec![Doc::text("#"), print_poly_var_ident(label)]);
-            let args_doc = print_pattern_args(state, &variant_args.txt, cmt_tbl, arena);
+            let args_doc =
+                print_pattern_args(state, arena.pat_list(variant_args.txt), cmt_tbl, arena);
             Doc::group(Doc::concat(vec![variant_name, args_doc]))
         }
         // {field1, field2: pat, ...spread} or dict{"key": pat}

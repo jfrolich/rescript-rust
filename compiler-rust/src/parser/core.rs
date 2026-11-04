@@ -854,7 +854,10 @@ pub mod ast_helper {
     pub fn make_unit(p: &mut Parser<'_>, loc: Location) -> Expression {
         let lid_idx = p.push_lident_static("()");
         make_expr(
-            ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)),
+            ExpressionDesc::Pexp_construct(
+                with_loc(lid_idx, loc),
+                crate::parse_arena::Located::new(crate::parse_arena::ExprList::EMPTY, loc),
+            ),
             loc,
         )
     }
@@ -946,9 +949,15 @@ pub mod ast_helper {
         lid_loc: Location,
         ppat_loc: Location,
     ) -> Pattern {
-        let args = args.into_iter().map(|p| arena.push_pat(p)).collect();
+        let args = args
+            .into_iter()
+            .map(|p| arena.push_pat(p))
+            .collect::<Vec<_>>();
         make_pat(
-            PatternDesc::Ppat_construct(with_loc(lid_idx, lid_loc), ctor_args(args, args_loc)),
+            PatternDesc::Ppat_construct(
+                with_loc(lid_idx, lid_loc),
+                arena.pat_ctor_args(&args, args_loc),
+            ),
             ppat_loc,
         )
     }
@@ -973,7 +982,13 @@ pub mod ast_helper {
                 let nil_loc = p.arena_mut().mk_ghost_loc(loc);
                 let nil = with_loc(nil_idx, nil_loc);
                 make_pat(
-                    PatternDesc::Ppat_construct(nil, ctor_args(Vec::new(), nil_loc)),
+                    PatternDesc::Ppat_construct(
+                        nil,
+                        crate::parse_arena::Located::new(
+                            crate::parse_arena::PatList::EMPTY,
+                            nil_loc,
+                        ),
+                    ),
                     nil_loc,
                 )
             }
@@ -990,7 +1005,11 @@ pub mod ast_helper {
             let result_idx = p.arena_mut().push_pat(result);
             let cons = with_loc(cons_idx, cons_loc);
             result = make_pat(
-                PatternDesc::Ppat_construct(cons, ctor_args(vec![item_idx, result_idx], cons_loc)),
+                PatternDesc::Ppat_construct(
+                    cons,
+                    p.arena_mut()
+                        .pat_ctor_args(&[item_idx, result_idx], cons_loc),
+                ),
                 cons_loc,
             );
         }

@@ -217,7 +217,7 @@ fn constructor_attributes_in(target: PayloadArena<'_>, cd: &ConstructorDeclarati
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_construct(
                     Located::new(lid, loc),
-                    Box::new(Located::new(Vec::new(), loc)),
+                    Located::new(crate::parse_arena::ExprList::EMPTY, loc),
                 ),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),

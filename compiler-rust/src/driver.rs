@@ -162,16 +162,18 @@ fn expression_has_string_literal(
                     }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
                 })
         }
-        ED::Pexp_tuple(items) | ED::Pexp_array(items) => items
+        ED::Pexp_tuple(items) | ED::Pexp_array(items) => arena
+            .expr_list(*items)
             .iter()
             .any(|item| expression_has_string_literal(arena.get_expr(*item), value, arena)),
-        ED::Pexp_construct(_, args) => args
-            .txt
+        ED::Pexp_construct(_, args) => arena
+            .expr_list(args.txt)
             .iter()
             .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
         ED::Pexp_variant(inner) => {
             let (_, args) = &**inner;
-            args.txt
+            arena
+                .expr_list(args.txt)
                 .iter()
                 .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
         }
@@ -315,16 +317,18 @@ fn pattern_has_string_literal(
             let (inner_pat, _) = &**inner;
             pattern_has_string_literal(arena.get_pat(*inner_pat), value, arena)
         }
-        PD::Ppat_tuple(items) | PD::Ppat_array(items) => items
+        PD::Ppat_tuple(items) | PD::Ppat_array(items) => arena
+            .pat_list(*items)
             .iter()
             .any(|item| pattern_has_string_literal(arena.get_pat(*item), value, arena)),
-        PD::Ppat_construct(_, args) => args
-            .txt
+        PD::Ppat_construct(_, args) => arena
+            .pat_list(args.txt)
             .iter()
             .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena)),
         PD::Ppat_variant(inner) => {
             let (_, args) = &**inner;
-            args.txt
+            arena
+                .pat_list(args.txt)
                 .iter()
                 .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
         }
@@ -1929,16 +1933,16 @@ fn invalid_enabled_let_unwrap_in_expr(
                 })
             })
         }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
+            .expr_list(*items)
             .iter()
             .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => payload
-            .txt
+        ExpressionDesc::Pexp_construct(_, payload) => arena
+            .expr_list(payload.txt)
             .iter()
             .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_variant(inner) => inner
-            .1
-            .txt
+        ExpressionDesc::Pexp_variant(inner) => arena
+            .expr_list(inner.1.txt)
             .iter()
             .find_map(|expr| invalid_enabled_let_unwrap_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_record(record) => record
@@ -2108,16 +2112,16 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
                 })
             })
         }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
+            .expr_list(*items)
             .iter()
             .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => payload
-            .txt
+        ExpressionDesc::Pexp_construct(_, payload) => arena
+            .expr_list(payload.txt)
             .iter()
             .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
-        ExpressionDesc::Pexp_variant(inner) => inner
-            .1
-            .txt
+        ExpressionDesc::Pexp_variant(inner) => arena
+            .expr_list(inner.1.txt)
             .iter()
             .find_map(|expr| disabled_let_unwrap_loc_in_expr(*expr, arena)),
         ExpressionDesc::Pexp_record(record) => record
@@ -12720,7 +12724,7 @@ fn config_flags_strings(
         });
     };
     let mut flags = Vec::with_capacity(elements.len());
-    for elem_idx in elements.iter() {
+    for elem_idx in arena.expr_list(*elements).iter() {
         let elem = arena.get_expr(*elem_idx);
         // rescript_compiler_main.ml file_level_flags_handler:
         // `Ast_payload.semantic_string_of_expression`.

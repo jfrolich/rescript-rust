@@ -606,11 +606,11 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
         match &current.ppat_desc {
             // `::` takes its head and rest as two arguments, or as one 2-tuple.
             PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "::") => {
-                let pair = match args.txt.as_slice() {
+                let pair = match arena.pat_list(args.txt) {
                     [pat, rest] => Some((*pat, *rest)),
                     [arg] => match &arena.get_pat(*arg).ppat_desc {
                         PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => {
-                            Some((tuple[0], tuple[1]))
+                            Some((arena.pat_list(*tuple)[0], arena.pat_list(*tuple)[1]))
                         }
                         _ => None,
                     },
@@ -648,11 +648,11 @@ fn collect_list_exprs(arena: &ParseArena, expr: &Expression) -> Vec<Expression> 
         match &current.pexp_desc {
             // `::` takes its head and rest as two arguments, or as one 2-tuple.
             ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "::") => {
-                let pair = match args.txt.as_slice() {
+                let pair = match arena.expr_list(args.txt) {
                     [expr, rest] => Some((*expr, *rest)),
                     [arg] => match &arena.get_expr(*arg).pexp_desc {
                         ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => {
-                            Some((tuple[0], tuple[1]))
+                            Some((arena.expr_list(*tuple)[0], arena.expr_list(*tuple)[1]))
                         }
                         _ => None,
                     },
@@ -1840,22 +1840,28 @@ fn walk_expression(
                 let (after_longident, rest) =
                     partition_adjacent_trailing(name.loc, trailing, arena);
                 t.attach_trailing(name.loc, after_longident, arena);
-                let nodes: Vec<Node<'_>> =
-                    args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+                let nodes: Vec<Node<'_>> = arena
+                    .expr_list(args.txt)
+                    .iter()
+                    .map(|e| Node::ExpressionIdx(*e))
+                    .collect();
                 walk_list(&nodes, t, rest, arena);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let nodes: Vec<Node<'_>> = inner
-                .1
-                .txt
+            let nodes: Vec<Node<'_>> = arena
+                .expr_list(inner.1.txt)
                 .iter()
                 .map(|e| Node::ExpressionIdx(*e))
                 .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
-            let nodes: Vec<Node<'_>> = exprs.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .expr_list(*exprs)
+                .iter()
+                .map(|e| Node::ExpressionIdx(*e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_record(inner) => {
@@ -2283,10 +2289,10 @@ fn walk_expression(
                 let arg = arena.get_expr(*arg_idx);
                 if let ExpressionDesc::Pexp_array(sub_arrays) = &arg.pexp_desc {
                     let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
-                    for sub_array_idx in sub_arrays.iter() {
+                    for sub_array_idx in arena.expr_list(*sub_arrays).iter() {
                         let sub_array = arena.get_expr(*sub_array_idx);
                         if let ExpressionDesc::Pexp_array(exprs) = &sub_array.pexp_desc {
-                            all_expr_idxs.extend(exprs.iter().copied());
+                            all_expr_idxs.extend(arena.expr_list(*exprs).iter().copied());
                         } else {
                             all_expr_idxs.push(*sub_array_idx);
                         }
@@ -2305,7 +2311,7 @@ fn walk_expression(
                 let arg = arena.get_expr(*arg_idx);
                 if let ExpressionDesc::Pexp_array(sub_lists) = &arg.pexp_desc {
                     let mut all_exprs: Vec<Expression> = Vec::new();
-                    for sub_list_idx in sub_lists.iter() {
+                    for sub_list_idx in arena.expr_list(*sub_lists).iter() {
                         let sub_list = arena.get_expr(*sub_list_idx);
                         let (exprs, spread) =
                             parsetree_viewer::collect_list_expressions(arena, sub_list);
@@ -3061,7 +3067,7 @@ fn walk_pattern(
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
-            match args.txt.as_slice() {
+            match arena.pat_list(args.txt).to_vec().as_slice() {
                 [] => t.attach_trailing(name.loc, trailing, arena),
                 [arg_pat_idx] => {
                     let (after_longident, rest) =
@@ -3084,11 +3090,19 @@ fn walk_pattern(
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            let nodes: Vec<Node<'_>> = inner.1.txt.iter().map(|p| Node::PatternIdx(*p)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .pat_list(inner.1.txt)
+                .iter()
+                .map(|p| Node::PatternIdx(*p))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-            let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::PatternIdx(*p)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .pat_list(*pats)
+                .iter()
+                .map(|p| Node::PatternIdx(*p))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {

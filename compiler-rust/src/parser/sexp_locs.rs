@@ -417,7 +417,9 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             Sexp::list(if pats.is_empty() {
                 vec![Sexp::list(vec![])]
             } else {
-                pats.iter()
+                arena
+                    .pat_list(*pats)
+                    .iter()
                     .map(|p| pattern(arena.get_pat(*p), arena))
                     .collect()
             }),
@@ -426,7 +428,7 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             Sexp::atom("Ppat_construct"),
             longident_idx(arena, lid.txt),
             location(lid.loc, arena),
-            Sexp::list(map_empty(&opt_pat.txt, |p| {
+            Sexp::list(map_empty(arena.pat_list(opt_pat.txt), |p| {
                 pattern(arena.get_pat(*p), arena)
             })),
             location(opt_pat.loc, arena),
@@ -436,7 +438,7 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             Sexp::list(vec![
                 Sexp::atom("Ppat_variant"),
                 Sexp::atom(&quote_string(lbl)),
-                Sexp::list(map_empty(&opt_pat.txt, |p| {
+                Sexp::list(map_empty(arena.pat_list(opt_pat.txt), |p| {
                     pattern(arena.get_pat(*p), arena)
                 })),
                 location(opt_pat.loc, arena),
@@ -483,7 +485,9 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             Sexp::list(if pats.is_empty() {
                 vec![Sexp::list(vec![])]
             } else {
-                pats.iter()
+                arena
+                    .pat_list(*pats)
+                    .iter()
                     .map(|p| pattern(arena.get_pat(*p), arena))
                     .collect()
             }),
@@ -642,7 +646,8 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             Sexp::list(if exprs.is_empty() {
                 vec![Sexp::list(vec![])]
             } else {
-                exprs
+                arena
+                    .expr_list(*exprs)
                     .iter()
                     .map(|e| expression(arena.get_expr(*e), arena))
                     .collect()
@@ -652,7 +657,7 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             Sexp::atom("Pexp_construct"),
             longident_idx(arena, lid.txt),
             location(lid.loc, arena),
-            Sexp::list(map_empty(&opt_expr.txt, |e| {
+            Sexp::list(map_empty(arena.expr_list(opt_expr.txt), |e| {
                 expression(arena.get_expr(*e), arena)
             })),
             location(opt_expr.loc, arena),
@@ -662,7 +667,7 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             Sexp::list(vec![
                 Sexp::atom("Pexp_variant"),
                 Sexp::atom(&quote_string(lbl)),
-                Sexp::list(map_empty(&opt_expr.txt, |e| {
+                Sexp::list(map_empty(arena.expr_list(opt_expr.txt), |e| {
                     expression(arena.get_expr(*e), arena)
                 })),
                 location(opt_expr.loc, arena),
@@ -717,7 +722,8 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             Sexp::list(if exprs.is_empty() {
                 vec![Sexp::list(vec![])]
             } else {
-                exprs
+                arena
+                    .expr_list(*exprs)
                     .iter()
                     .map(|e| expression(arena.get_expr(*e), arena))
                     .collect()

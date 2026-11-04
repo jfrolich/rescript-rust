@@ -561,18 +561,18 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_tuple(exprs) | ExpressionDesc::Pexp_array(exprs) => {
-                for expr in &**exprs {
+                for expr in self.arena.expr_list(*exprs) {
                     self.add_expr_idx(*expr);
                 }
             }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                for arg in &args.txt {
+                for arg in self.arena.expr_list(args.txt) {
                     self.add_expr_idx(*arg);
                 }
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                for arg in &inner.1.txt {
+                for arg in self.arena.expr_list(inner.1.txt) {
                     self.add_expr_idx(*arg);
                 }
             }
@@ -868,19 +868,19 @@ impl<'a> DependencyCollector<'a> {
                 let (_, _) = &**inner;
             }
             PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-                for pat in &**pats {
+                for pat in self.arena.pat_list(*pats) {
                     // pat is PatIdx
                     self.add_pat_idx_inner(*pat, unpack_names);
                 }
             }
             PatternDesc::Ppat_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
-                for arg in &args.txt {
+                for arg in self.arena.pat_list(args.txt) {
                     self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }
             PatternDesc::Ppat_variant(inner) => {
-                for arg in &inner.1.txt {
+                for arg in self.arena.pat_list(inner.1.txt) {
                     self.add_pat_idx_inner(*arg, unpack_names);
                 }
             }

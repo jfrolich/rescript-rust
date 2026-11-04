@@ -396,7 +396,7 @@ fn config_payload_flags_contains(
             let PExpressionDesc::Pexp_array(elements) = &field_expr.pexp_desc else {
                 return false;
             };
-            elements.iter().any(|elem_idx| {
+            arena.expr_list(*elements).iter().any(|elem_idx| {
                 let elem = arena.get_expr(*elem_idx);
                 matches!(
                     &elem.pexp_desc,
