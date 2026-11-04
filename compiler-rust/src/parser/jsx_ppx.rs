@@ -2771,10 +2771,10 @@ fn constrain_jsx_return(
             let constrained = constrain_jsx_return(arena, inner, config);
             let constrained_idx = arena.push_expr(constrained);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+                pexp_desc: ExpressionDesc::Pexp_braces(crate::parser::ast::PexpBraces {
                     expr: constrained_idx,
                     braces_loc: braces.braces_loc,
-                })),
+                }),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -4221,10 +4221,10 @@ fn transform_expression(
         ExpressionDesc::Pexp_braces(braces) => {
             let inner = arena.get_expr(braces.expr).clone();
             let inner = transform_expression(inner, config, arena);
-            ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+            ExpressionDesc::Pexp_braces(crate::parser::ast::PexpBraces {
                 expr: arena.push_expr(inner),
                 braces_loc: braces.braces_loc,
-            }))
+            })
         }
         ExpressionDesc::Pexp_sequence(e1, e2) => {
             let e1_expr = arena.get_expr(e1).clone();

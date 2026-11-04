@@ -713,7 +713,7 @@ pub struct PexpTaggedTemplate {
 /// OCaml `Pexp_braces {expr; braces_loc}`: explicit braces around an
 /// expression. The node's `pexp_loc` stays on the enclosed expression;
 /// `braces_loc` covers the delimiters for printing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PexpBraces {
     pub expr: ExprIdx,
     pub braces_loc: Location,
@@ -730,7 +730,7 @@ pub struct PexpRegexp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExpressionDesc {
     /// Explicit braces: `{E}`.
-    Pexp_braces(Box<PexpBraces>),
+    Pexp_braces(PexpBraces),
     /// Identifier: `x` or `M.x`.
     Pexp_ident(Loc<LidentIdx>),
     /// Constant: `1`, `'a'`, `"hello"`.

@@ -1334,10 +1334,10 @@ impl<'a> Mapper<'a> {
             let inner_idx = self.push_expr(&inner_expr);
             let inner_loc = self.arena.get_expr(inner_idx).pexp_loc;
             return current::Expression {
-                pexp_desc: current::ExpressionDesc::Pexp_braces(Box::new(current::PexpBraces {
+                pexp_desc: current::ExpressionDesc::Pexp_braces(current::PexpBraces {
                     expr: inner_idx,
                     braces_loc,
-                })),
+                }),
                 pexp_loc: inner_loc,
                 pexp_attributes: self.map_attributes(outer_attrs),
             };

@@ -6615,10 +6615,10 @@ fn restore_exp(expr: Expression, opens: &[OpenCtx], arena: &mut ParseArena) -> E
             braces_loc,
             attrs,
         } => Expression {
-            pexp_desc: ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
+            pexp_desc: ExpressionDesc::Pexp_braces(PexpBraces {
                 expr: arena.push_expr(inner),
                 braces_loc: *braces_loc,
-            })),
+            }),
             pexp_loc: *loc,
             pexp_attributes: attrs.clone().into(),
         },
@@ -7395,10 +7395,10 @@ fn rewrite_pipe_rhs(
             let expr = arena.push_expr(rewritten);
             rewrap(
                 &f,
-                ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
+                ExpressionDesc::Pexp_braces(PexpBraces {
                     expr,
                     braces_loc: braces.braces_loc,
-                })),
+                }),
             )
         }
         ExpressionDesc::Pexp_open(inner) => {
@@ -7517,10 +7517,10 @@ fn add_this_to_braced_function(
         ExpressionDesc::Pexp_braces(braces) => {
             let inner = add_this_to_braced_function(attrs, braces.expr, arena)?;
             Some(arena.push_expr(Expression {
-                pexp_desc: ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
+                pexp_desc: ExpressionDesc::Pexp_braces(PexpBraces {
                     expr: inner,
                     braces_loc: braces.braces_loc,
-                })),
+                }),
                 pexp_loc: e.pexp_loc,
                 pexp_attributes: e.pexp_attributes.clone(),
             }))
@@ -7597,10 +7597,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             // rewritten `{await e}` takes the ghost location of the await.
             let pexp_loc = rw.pexp_loc;
             return Expression {
-                pexp_desc: ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
+                pexp_desc: ExpressionDesc::Pexp_braces(PexpBraces {
                     expr: arena.push_expr(rw),
                     braces_loc: braces.braces_loc,
-                })),
+                }),
                 pexp_loc,
                 pexp_attributes: rewrite_attributes(&attrs, arena).into(),
             };

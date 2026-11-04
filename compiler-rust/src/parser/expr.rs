@@ -3045,10 +3045,10 @@ fn with_braces(p: &mut Parser<'_>, start_pos_idx: PosIdx, expr: Expression) -> E
     let loc = expr.pexp_loc;
     let inner = p.arena_mut().push_expr(expr);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+        pexp_desc: ExpressionDesc::Pexp_braces(crate::parser::ast::PexpBraces {
             expr: inner,
             braces_loc,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }

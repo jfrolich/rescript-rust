@@ -716,12 +716,12 @@ impl<'a> Checker<'a> {
                 match add_this_to_braced_function(&this_attrs, braces.expr, self.arena) {
                     Some(inner) => {
                         let rewritten = Expression {
-                            pexp_desc: ExpressionDesc::Pexp_braces(Box::new(
+                            pexp_desc: ExpressionDesc::Pexp_braces(
                                 crate::parser::ast::PexpBraces {
                                     expr: inner,
                                     braces_loc: braces.braces_loc,
                                 },
-                            )),
+                            ),
                             pexp_loc: expr.pexp_loc,
                             pexp_attributes: Attributes::from_vec(other_attrs),
                         };

@@ -1874,10 +1874,10 @@ fn print_pexp_fun(
                     .clone()
                     .concat(return_expr.pexp_attributes.clone());
                 let braced = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
+                    pexp_desc: ExpressionDesc::Pexp_braces(PexpBraces {
                         expr: expr_idx,
                         braces_loc: braces.braces_loc,
-                    })),
+                    }),
                     pexp_loc: arena.get_expr(expr_idx).pexp_loc,
                     pexp_attributes: attrs,
                 };
