@@ -414,7 +414,7 @@ pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: 
 // ============================================================================
 
 fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &StructureItem) {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(inner) => {
             let (ref expr_idx, ref attrs) = **inner;
             // OCaml: pp f "@[<hov2>;;%a@]%a"
@@ -547,7 +547,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             // OCaml: module_helper unwraps Pmod_functor with no attributes
             // and prints functor parameters inline: `module F(A:X) = body`
             let mut me = arena.get_mod_expr(mb.pmb_expr);
-            while let ModuleExprDesc::Pmod_functor(func_inner) = &*me.pmod_desc {
+            while let ModuleExprDesc::Pmod_functor(func_inner) = &me.pmod_desc {
                 let (ref name, ref mt, ref body) = **func_inner;
                 if me.pmod_attributes.is_empty() {
                     if let Some(mt) = mt {
@@ -566,10 +566,10 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             }
             // OCaml: special case for Pmod_constraint with ident or signature type
             // prints "module X : mt = me'" instead of "module X = (me' : mt)"
-            if let ModuleExprDesc::Pmod_constraint(inner_me, mt) = &*me.pmod_desc {
+            if let ModuleExprDesc::Pmod_constraint(inner_me, mt) = &me.pmod_desc {
                 let mt_ref = arena.get_mod_type(*mt);
                 let is_sugar_type = matches!(
-                    *mt_ref.pmty_desc,
+                    mt_ref.pmty_desc,
                     ModuleTypeDesc::Pmty_ident(..) | ModuleTypeDesc::Pmty_signature(..)
                 );
                 if is_sugar_type && me.pmod_attributes.is_empty() {
@@ -613,7 +613,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 f.string(arena.get_string(mb.pmb_name.txt));
                 // Check for constraint sugar: `A:Mt = Me` instead of `A = (Me : Mt)`
                 let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                if let ModuleExprDesc::Pmod_constraint(me, mt) = &*mb_expr.pmod_desc {
+                if let ModuleExprDesc::Pmod_constraint(me, mt) = &mb_expr.pmod_desc {
                     f.string(":");
                     print_module_type(f, arena, arena.get_mod_type(*mt));
                     f.space(); // @ before =
@@ -3297,7 +3297,7 @@ fn print_payload<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, payload: &P
             // Special case: single Pstr_eval prints just the expression
             // OCaml: pp f "@[<2>%a@]%a" (expression ctxt) e (item_attributes ctxt) attrs
             if items.len() == 1 {
-                if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                     let (ref expr_idx, ref attrs) = **eval_inner;
                     f.open_box(BoxKind::Box, 2);
                     print_expression(f, arena, arena.get_expr(*expr_idx));
@@ -3656,7 +3656,7 @@ fn print_module_expr<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mexpr: 
 }
 
 fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mexpr: &ModuleExpr) {
-    match &*mexpr.pmod_desc {
+    match &mexpr.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => {
             print_longident_idx(f, arena, lid.txt);
         }
@@ -3758,7 +3758,7 @@ fn print_module_type<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mtype: 
 }
 
 fn print_module_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, mtype: &ModuleType) {
-    match &*mtype.pmty_desc {
+    match &mtype.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => {
             print_longident_idx(f, arena, lid.txt);
         }
@@ -4014,7 +4014,7 @@ fn print_value_description_prim<W: Write>(
 }
 
 fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &SignatureItem) {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             // OCaml: pp f "@[<2>%s@ %a@ :@ %a@]%a"
             f.open_box(BoxKind::Box, 2);
@@ -4112,7 +4112,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.string("module ");
             f.string(arena.get_string(md.pmd_name.txt));
             let pmd_type = arena.get_mod_type(md.pmd_type);
-            if let ModuleTypeDesc::Pmty_alias(lid) = &*pmd_type.pmty_desc {
+            if let ModuleTypeDesc::Pmty_alias(lid) = &pmd_type.pmty_desc {
                 if pmd_type.pmty_attributes.is_empty() {
                     // module Name = Alias
                     f.string(" = ");

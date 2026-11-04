@@ -49,7 +49,7 @@ impl<'a> Checker<'a> {
 
     /// The work `structure_mapper` does for one item of the structure.
     pub(super) fn structure_mapper_item(&mut self, item: &StructureItem) -> PpxResult<()> {
-        if let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc {
+        if let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc {
             let ((ext_name, payload), _attrs) = &**inner;
             match self.arena.get_string(ext_name.txt) {
                 // `Ast_exp_handle_external.handle_raw_structure`: the Flow
@@ -74,7 +74,7 @@ impl<'a> Checker<'a> {
 
     /// `Bs_builtin_ppx.structure_item_mapper` (bs_builtin_ppx.ml:513-637).
     fn structure_item(&mut self, item: &StructureItem) -> PpxResult<()> {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
                 self.type_declarations_with_deriving(tdcls, true)
@@ -118,7 +118,7 @@ impl<'a> Checker<'a> {
 
     /// `Ast_mapper.M.map_structure_item` (ast_mapper.ml:236-255).
     fn default_structure_item(&mut self, item: &StructureItem) -> PpxResult<()> {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, attrs) = &**inner;
                 self.expr(*expr)?;
@@ -171,7 +171,7 @@ impl<'a> Checker<'a> {
 
     /// `Bs_builtin_ppx.signature_item_mapper` (bs_builtin_ppx.ml:435-511).
     fn signature_item(&mut self, item: &SignatureItem) -> PpxResult<()> {
-        match &*item.psig_desc {
+        match &item.psig_desc {
             SignatureItemDesc::Psig_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
                 self.type_declarations_with_deriving(tdcls, false)
@@ -449,7 +449,7 @@ impl<'a> Checker<'a> {
     fn module_expr(&mut self, idx: ModExprIdx) -> PpxResult<()> {
         let mod_expr = self.arena.get_mod_expr(idx).clone();
         self.attributes(&mod_expr.pmod_attributes)?;
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_ident(_) => Ok(()),
             ModuleExprDesc::Pmod_structure(items) => self.structure(items),
             ModuleExprDesc::Pmod_functor(inner) => {
@@ -477,7 +477,7 @@ impl<'a> Checker<'a> {
     fn module_type(&mut self, idx: ModTypeIdx) -> PpxResult<()> {
         let mod_type = self.arena.get_mod_type(idx).clone();
         self.attributes(&mod_type.pmty_attributes)?;
-        match &*mod_type.pmty_desc {
+        match &mod_type.pmty_desc {
             ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
             ModuleTypeDesc::Pmty_signature(items) => self.signature(items),
             ModuleTypeDesc::Pmty_functor(inner) => {

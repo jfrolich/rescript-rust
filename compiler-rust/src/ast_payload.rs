@@ -18,7 +18,7 @@ pub fn unwrap_braces<'a>(arena: &'a ParseArena, expression: &'a Expression) -> &
 pub fn payload_expression(payload: &Payload) -> Option<ExprIdx> {
     if let Payload::PStr(items) = payload
         && let [item] = items.as_slice()
-        && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+        && let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc
     {
         return Some(eval.0);
     }

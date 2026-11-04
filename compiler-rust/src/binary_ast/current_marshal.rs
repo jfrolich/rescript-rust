@@ -138,14 +138,14 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     }
 
     let mod_expr_ref = arena.get_mod_expr(*mod_expr);
-    let ModuleExprDesc::Pmod_structure(items) = &*mod_expr_ref.pmod_desc else {
+    let ModuleExprDesc::Pmod_structure(items) = &mod_expr_ref.pmod_desc else {
         return false;
     };
     if items.len() != 1 {
         return false;
     }
 
-    let StructureItemDesc::Pstr_primitive(vd) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_primitive(vd) = &items[0].pstr_desc else {
         return false;
     };
     if arena.get_string(vd.pval_name.txt) != "unsafe_expr" {

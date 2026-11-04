@@ -277,7 +277,7 @@ pub fn walk_extension_constructor<V: AstIter + ?Sized>(
 pub fn walk_module_type<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ModTypeIdx) {
     let mty = arena.get_mod_type(idx);
     v.attributes(arena, mty.pmty_attributes.as_slice());
-    match &*mty.pmty_desc {
+    match &mty.pmty_desc {
         ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => {}
         ModuleTypeDesc::Pmty_signature(items) => walk_signature(v, arena, items),
         ModuleTypeDesc::Pmty_functor(inner) => {
@@ -309,7 +309,7 @@ pub fn walk_signature_item<V: AstIter + ?Sized>(
     arena: &ParseArena,
     item: &SignatureItem,
 ) {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => v.value_description(arena, vd),
         SignatureItemDesc::Psig_type(inner) => {
             for td in &inner.1 {
@@ -342,7 +342,7 @@ pub fn walk_signature_item<V: AstIter + ?Sized>(
 pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ModExprIdx) {
     let me = arena.get_mod_expr(idx);
     v.attributes(arena, me.pmod_attributes.as_slice());
-    match &*me.pmod_desc {
+    match &me.pmod_desc {
         ModuleExprDesc::Pmod_ident(_) => {}
         ModuleExprDesc::Pmod_structure(items) => walk_structure(v, arena, items),
         ModuleExprDesc::Pmod_functor(inner) => {
@@ -370,7 +370,7 @@ pub fn walk_structure_item<V: AstIter + ?Sized>(
     arena: &ParseArena,
     item: &StructureItem,
 ) {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(inner) => {
             let (e, attrs) = &**inner;
             v.expr(arena, *e);

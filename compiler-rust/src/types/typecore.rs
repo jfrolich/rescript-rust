@@ -65,7 +65,7 @@ fn extension_eval_string(
     arena: &ParseArena,
     item: &crate::parser::ast::StructureItem,
 ) -> Option<String> {
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
     let expr = arena.get_expr(eval.0);
@@ -86,7 +86,7 @@ fn builtin_extension_sub_errors(
 ) -> Option<Vec<BuiltinExtensionError>> {
     let mut sub = Vec::new();
     for item in items {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             crate::parser::ast::StructureItemDesc::Pstr_extension(extension) => {
                 sub.push(extension_error(arena, &extension.0)?);
             }
@@ -11699,11 +11699,11 @@ fn collect_lident_idents_in_module_expr(
     use crate::parser::ast::ModuleExprDesc as MED;
     use crate::parser::ast::StructureItemDesc as SID;
 
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         MED::Pmod_ident(_) | MED::Pmod_extension(_) => {}
         MED::Pmod_structure(items) => {
             for item in items.iter() {
-                match &*item.pstr_desc {
+                match &item.pstr_desc {
                     SID::Pstr_eval(inner) => {
                         collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
                     }
@@ -17476,8 +17476,7 @@ fn type_extension_expr(
                 let [item] = items.as_slice() else {
                     return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
                 };
-                let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
-                else {
+                let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
                     return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
                 };
                 let expr = tctx.arena.get_expr(eval.0);
@@ -18206,11 +18205,11 @@ fn type_letmodule(
         // Keep let-module member lookups stable for direct module aliases
         // (`module M = List` / constrained direct idents) by materializing
         // aliases/identifiers to signatures when the environment can resolve them.
-        let materialize_alias_sig = match &*module_expr.pmod_desc {
+        let materialize_alias_sig = match &module_expr.pmod_desc {
             crate::parser::ast::ModuleExprDesc::Pmod_ident(_) => true,
             crate::parser::ast::ModuleExprDesc::Pmod_constraint(inner, _) => {
                 matches!(
-                    &*arena.get_mod_expr(*inner).pmod_desc,
+                    &arena.get_mod_expr(*inner).pmod_desc,
                     crate::parser::ast::ModuleExprDesc::Pmod_ident(_)
                 )
             }

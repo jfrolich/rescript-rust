@@ -131,7 +131,7 @@ fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -
         if arena.get_string(name.txt) == "res.arity" {
             if let current::Payload::PStr(items) = payload {
                 if let Some(item) = items.first() {
-                    if let current::StructureItemDesc::Pstr_eval(inner) = item.pstr_desc.as_ref() {
+                    if let current::StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc {
                         let (ref eval_expr_idx, _) = **inner;
                         let eval_expr = arena.get_expr(*eval_expr_idx);
                         if let current::ExpressionDesc::Pexp_constant(c) = &eval_expr.pexp_desc {
@@ -742,9 +742,9 @@ impl<'a> Mapper<'a> {
         let item_loc = self.loc(&item.pstr_loc);
         Some(current::Payload::PStr(Box::new(vec![
             current::StructureItem {
-                pstr_desc: Box::new(current::StructureItemDesc::Pstr_eval(Box::new((
+                pstr_desc: current::StructureItemDesc::Pstr_eval(Box::new((
                     expression, eval_attrs,
-                )))),
+                ))),
                 pstr_loc: item_loc,
             },
         ])))
@@ -2341,10 +2341,10 @@ impl<'a> Mapper<'a> {
                 pexp_attributes: Attributes::new(),
             });
             current::StructureItem {
-                pstr_desc: Box::new(current::StructureItemDesc::Pstr_eval(Box::new((
+                pstr_desc: current::StructureItemDesc::Pstr_eval(Box::new((
                     expr,
                     Attributes::new(),
-                )))),
+                ))),
                 pstr_loc: loc_idx,
             }
         };
@@ -2502,7 +2502,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::ModuleExpr {
-            pmod_desc: Box::new(desc),
+            pmod_desc: desc,
             pmod_loc: loc,
             pmod_attributes: attrs,
         }
@@ -2553,7 +2553,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::ModuleType {
-            pmty_desc: Box::new(desc),
+            pmty_desc: desc,
             pmty_loc: loc,
             pmty_attributes: attrs,
         }
@@ -2650,7 +2650,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::StructureItem {
-            pstr_desc: Box::new(desc),
+            pstr_desc: desc,
             pstr_loc: loc,
         }
     }
@@ -2716,7 +2716,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::SignatureItem {
-            psig_desc: Box::new(desc),
+            psig_desc: desc,
             psig_loc: loc,
         }
     }

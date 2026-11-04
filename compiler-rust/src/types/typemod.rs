@@ -601,8 +601,7 @@ fn parser_attr_to_decl_attr(
             // OCaml's Lambda.find_name: extract string from @as("name") payloads.
             // PStr with a single Pstr_eval(Pexp_constant(String(value, _)), _) → Str(value)
             if let [item] = items.as_slice() {
-                if let crate::parser::ast::StructureItemDesc::Pstr_eval(eval_box) =
-                    item.pstr_desc.as_ref()
+                if let crate::parser::ast::StructureItemDesc::Pstr_eval(eval_box) = &item.pstr_desc
                 {
                     let (expr_idx, _attrs) = eval_box.as_ref();
                     let expr = arena.get_expr(*expr_idx);
@@ -711,7 +710,7 @@ fn parser_warning_attribute_payload<'a>(
     let [item] = items.as_slice() else {
         return None;
     };
-    let ParsedStructureItemDesc::Pstr_eval(eval_box) = item.pstr_desc.as_ref() else {
+    let ParsedStructureItemDesc::Pstr_eval(eval_box) = &item.pstr_desc else {
         return None;
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
@@ -855,7 +854,7 @@ fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Opti
     // `string_of_opt_payload` (builtin_attributes.ml:23-31).
     let string = match payload {
         ParsedPayload::PStr(items) => match items.as_slice() {
-            [item] => match item.pstr_desc.as_ref() {
+            [item] => match &item.pstr_desc {
                 ParsedStructureItemDesc::Pstr_eval(eval_box) => {
                     match &arena.get_expr(eval_box.0).pexp_desc {
                         crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
@@ -884,7 +883,7 @@ pub(crate) fn deprecated_of_str(
     items: &[ParsedStructureItem],
 ) -> Option<String> {
     for item in items {
-        let ParsedStructureItemDesc::Pstr_attribute(attr) = item.pstr_desc.as_ref() else {
+        let ParsedStructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc else {
             return None;
         };
         if let Some(txt) = parser_deprecated_of_attr(arena, attr) {
@@ -901,8 +900,7 @@ pub(crate) fn deprecated_of_sig(
     items: &[crate::parser::ast::SignatureItem],
 ) -> Option<String> {
     for item in items {
-        let crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) = item.psig_desc.as_ref()
-        else {
+        let crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc else {
             return None;
         };
         if let Some(txt) = parser_deprecated_of_attr(arena, attr) {
@@ -919,7 +917,7 @@ fn parser_deprecated_payload_to_decl_payload(
     let [item] = items else {
         return None;
     };
-    let ParsedStructureItemDesc::Pstr_eval(eval_box) = item.pstr_desc.as_ref() else {
+    let ParsedStructureItemDesc::Pstr_eval(eval_box) = &item.pstr_desc else {
         return None;
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
@@ -1216,7 +1214,7 @@ fn decl_attrs_to_parser_attrs(
 /// Try to convert a parsed module expression to a module path.
 /// Mirrors OCaml `Typemod.path_of_module` for applicative functor paths.
 fn path_of_parsed_module_expr(mod_expr: &ParsedModuleExpr, arena: &ParseArena) -> Option<Path> {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = arena.get_longident(lid.txt);
             Some(path_from_longident(longident, |idx| arena.get_string(idx)))
@@ -1262,7 +1260,7 @@ fn collect_functor_arg_module_aliases(
         mod_expr: &ParsedModuleExpr,
         arena: &ParseArena,
     ) -> Option<Path> {
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ParsedModuleExprDesc::Pmod_ident(lid) => {
                 let longident = arena.get_longident(lid.txt);
                 lookup_module_path_by_lid(
@@ -1297,9 +1295,9 @@ fn collect_functor_arg_module_aliases(
     }
 
     let mut aliases = HashMap::new();
-    if let ParsedModuleExprDesc::Pmod_structure(items) = &*arg_expr.pmod_desc {
+    if let ParsedModuleExprDesc::Pmod_structure(items) = &arg_expr.pmod_desc {
         for item in items.iter() {
-            if let ParsedStructureItemDesc::Pstr_module(mb) = &*item.pstr_desc {
+            if let ParsedStructureItemDesc::Pstr_module(mb) = &item.pstr_desc {
                 let name = arena.get_string(mb.pmb_name.txt).to_string();
                 let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                 if let Some(path) = resolved_path_of_parsed_module_expr(tctx, env, mod_expr, arena)
@@ -5559,7 +5557,7 @@ fn check_structure_item_names(
     arena: &ParseArena,
     item: &ParsedStructureItem,
 ) -> TypeModResult<()> {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         ParsedStructureItemDesc::Pstr_type(inner) => {
             let (_, decls) = &**inner;
             for decl in decls {
@@ -5627,7 +5625,7 @@ fn check_signature_item_names(
 ) -> TypeModResult<()> {
     use crate::parser::ast::SignatureItemDesc as PSigDesc;
 
-    match &*item.psig_desc {
+    match &item.psig_desc {
         PSigDesc::Psig_type(inner) => {
             let (_, decls) = &**inner;
             for decl in decls {
@@ -11365,7 +11363,7 @@ fn extract_functor_result_type<'b>(
             }
             // Resolve the argument path through the env to get the local ident
             // (e.g. Path/1028) instead of a persistent one (Path/0).
-            let arg_path = if let ParsedModuleExprDesc::Pmod_ident(lid) = &*arg_expr.pmod_desc {
+            let arg_path = if let ParsedModuleExprDesc::Pmod_ident(lid) = &arg_expr.pmod_desc {
                 let longident = arena.get_longident(lid.txt);
                 lookup_module_path_by_lid(
                     longident,
@@ -11654,7 +11652,7 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
         ))
     }
 
-    let result = match &*mod_expr.pmod_desc {
+    let result = match &mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             semantic_module_type_for_ident_expr(tctx, env, arena, lid)
         }
@@ -11872,7 +11870,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
     use crate::types::typedtree::ModuleTypeDesc as TypedMtyDesc;
     use crate::types::typedtree::TypedSignatureItemDesc as TypedSigDesc;
 
-    match &*mty.pmty_desc {
+    match &mty.pmty_desc {
         PMtyDesc::Pmty_signature(sig_items) => {
             let mut items = Vec::new();
             let mut sig_env = env.clone();
@@ -11892,7 +11890,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             }
             for (sig_index, sig_item) in sig_items.iter().enumerate() {
                 let typed_sig_item = typed_sig_items.and_then(|items| items.get(sig_index));
-                match &*sig_item.psig_desc {
+                match &sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
                         let val_id = match typed_sig_item.map(|item| &item.sig_desc) {
@@ -12768,7 +12766,7 @@ fn approx_modtype_rec<'a>(
         let mut items = Vec::new();
         let mut sig_env = env.clone();
         for sig_item in sig_items {
-            match &*sig_item.psig_desc {
+            match &sig_item.psig_desc {
                 PSigDesc::Psig_type(args) => {
                     let (rec_flag, decls) = &**args;
                     for (idx, (id, decl)) in approx_type_decls(tctx, arena, decls)
@@ -12890,7 +12888,7 @@ fn approx_modtype_rec<'a>(
         Ok(crate::types::includemod::simplify_signature(&items))
     }
 
-    match &*mty.pmty_desc {
+    match &mty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(
@@ -14979,7 +14977,7 @@ fn type_module_expr_with_alias_inner<'a>(
 ) -> TypeModResult<ModuleExpr> {
     let loc = mod_expr.pmod_loc;
 
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             // Module identifier: M
             // Look up the module path in the environment
@@ -15340,7 +15338,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     ..
                 }
             ) && !matches!(
-                &*arg.pmod_desc,
+                &arg.pmod_desc,
                 ParsedModuleExprDesc::Pmod_structure(items) if items.is_empty()
             ) {
                 return Err(TypeModError::ApplyGenerative {
@@ -15780,7 +15778,7 @@ fn type_module_type_of_expr_raw<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
 ) -> TypeModResult<ModuleExpr> {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(
@@ -15901,7 +15899,7 @@ fn transl_modtype<'a>(
     let attrs = smty.pmty_attributes.clone();
     let env_ref = tctx.type_ctx.store_typed_env(env);
 
-    let desc = match &*smty.pmty_desc {
+    let desc = match &smty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
             crate::types::typecore::mark_open_lid_use(
@@ -16055,7 +16053,7 @@ pub fn transl_signature<'a>(
         let env_before_item = sig_env.clone_preserve_id();
         let warnings_before_item = tctx.warnings.len();
         let item_index = typed_items.len();
-        let desc = match &*item.psig_desc {
+        let desc = match &item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
@@ -16136,7 +16134,7 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_typext(ext) => {
                 let structure_item = ParsedStructureItem {
-                    pstr_desc: Box::new(ParsedStructureItemDesc::Pstr_typext(ext.clone())),
+                    pstr_desc: ParsedStructureItemDesc::Pstr_typext(ext.clone()),
                     pstr_loc: loc,
                 };
                 let (typed_item, _item_sig, new_env) =
@@ -16155,7 +16153,7 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_exception(ext) => {
                 let structure_item = ParsedStructureItem {
-                    pstr_desc: Box::new(ParsedStructureItemDesc::Pstr_exception(ext.clone())),
+                    pstr_desc: ParsedStructureItemDesc::Pstr_exception(ext.clone()),
                     pstr_loc: loc,
                 };
                 let (typed_item, _item_sig, new_env) =
@@ -16582,7 +16580,7 @@ fn type_structure_item<'a>(
 ) -> TypeModResult<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)> {
     let loc = item.pstr_loc;
 
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         ParsedStructureItemDesc::Pstr_eval(inner) => {
             let (ref expr, ref attrs) = **inner;
             // Evaluated expression: E
@@ -19304,7 +19302,7 @@ fn type_structure_item<'a>(
             for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
                 let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                let (inner_expr, mty) = match &*mb_expr.pmod_desc {
+                let (inner_expr, mty) = match &mb_expr.pmod_desc {
                     ParsedModuleExprDesc::Pmod_constraint(inner_expr, mty) => (*inner_expr, *mty),
                     _ => {
                         return Err(TypeModError::RecursiveModuleRequiresExplicitType {

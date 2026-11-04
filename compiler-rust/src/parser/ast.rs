@@ -964,7 +964,7 @@ pub enum JsxProp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModuleExpr {
     /// Module expression description.
-    pub pmod_desc: Box<ModuleExprDesc>,
+    pub pmod_desc: ModuleExprDesc,
     /// Location.
     pub pmod_loc: Location,
     /// Attributes.
@@ -994,7 +994,7 @@ pub enum ModuleExprDesc {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModuleType {
     /// Module type description.
-    pub pmty_desc: Box<ModuleTypeDesc>,
+    pub pmty_desc: ModuleTypeDesc,
     /// Location.
     pub pmty_loc: Location,
     /// Attributes.
@@ -1041,7 +1041,7 @@ pub enum WithConstraint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StructureItem {
     /// Structure item description.
-    pub pstr_desc: Box<StructureItemDesc>,
+    pub pstr_desc: StructureItemDesc,
     /// Location.
     pub pstr_loc: Location,
 }
@@ -1081,7 +1081,7 @@ pub enum StructureItemDesc {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignatureItem {
     /// Signature item description.
-    pub psig_desc: Box<SignatureItemDesc>,
+    pub psig_desc: SignatureItemDesc,
     /// Location.
     pub psig_loc: Location,
 }

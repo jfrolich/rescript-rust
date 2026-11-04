@@ -2510,7 +2510,7 @@ impl ParseArena {
 
     fn placeholder_mod_expr() -> ModuleExpr {
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Self::placeholder_lident_loc())),
+            pmod_desc: ModuleExprDesc::Pmod_ident(Self::placeholder_lident_loc()),
             pmod_loc: LocIdx::default(),
             pmod_attributes: Attributes::new(),
         }
@@ -2518,7 +2518,7 @@ impl ParseArena {
 
     fn placeholder_mod_type() -> ModuleType {
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(Self::placeholder_lident_loc())),
+            pmty_desc: ModuleTypeDesc::Pmty_ident(Self::placeholder_lident_loc()),
             pmty_loc: LocIdx::default(),
             pmty_attributes: Attributes::new(),
         }
@@ -3894,11 +3894,11 @@ mod tests {
             CoreTypeDesc::Ptyp_any
         ));
         assert!(matches!(
-            &*arena.get_mod_expr(me_slot).pmod_desc,
+            &arena.get_mod_expr(me_slot).pmod_desc,
             ModuleExprDesc::Pmod_ident(_)
         ));
         assert!(matches!(
-            &*arena.get_mod_type(mt_slot).pmty_desc,
+            &arena.get_mod_type(mt_slot).pmty_desc,
             ModuleTypeDesc::Pmty_ident(_)
         ));
     }

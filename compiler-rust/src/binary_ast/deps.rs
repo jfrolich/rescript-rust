@@ -289,7 +289,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_structure_item(&mut self, item: &StructureItem) {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (ref expr, ref _attrs) = **inner;
                 self.add_expr_idx(*expr);
@@ -379,7 +379,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_signature_item(&mut self, item: &SignatureItem) {
-        match &*item.psig_desc {
+        match &item.psig_desc {
             SignatureItemDesc::Psig_value(vd) => {
                 self.add_value_description(vd);
             }
@@ -745,7 +745,7 @@ impl<'a> DependencyCollector<'a> {
                                 "ocaml.extension_constructor" | "extension_constructor"
                             ) =>
                     {
-                        match items[0].pstr_desc.as_ref() {
+                        match &items[0].pstr_desc {
                             StructureItemDesc::Pstr_eval(inner) => {
                                 match &self.arena.get_expr(inner.0).pexp_desc {
                                     ExpressionDesc::Pexp_construct(c, args)
@@ -1025,7 +1025,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Modules ==========
 
     fn add_module_expr(&mut self, me: &ModuleExpr) {
-        match &*me.pmod_desc {
+        match &me.pmod_desc {
             ModuleExprDesc::Pmod_ident(lid) => {
                 // Module ident uses full path (OCaml: addmodule)
                 self.add_lident_idx_full(lid.txt);
@@ -1078,7 +1078,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_module_type(&mut self, mt: &ModuleType) {
-        match &*mt.pmty_desc {
+        match &mt.pmty_desc {
             ModuleTypeDesc::Pmty_ident(lid) => {
                 // Pmty_ident uses add = add_parent (OCaml: add bv l)
                 // For simple Lidents like `Tree` or `Intf`, this adds nothing (correct)
@@ -1351,10 +1351,7 @@ mod tests {
 
     fn make_eval_item(expr_idx: ExprIdx) -> StructureItem {
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                expr_idx,
-                Attributes::new(),
-            )))),
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
             pstr_loc: LocIdx::none(),
         }
     }

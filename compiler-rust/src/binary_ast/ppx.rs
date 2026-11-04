@@ -1044,7 +1044,7 @@ fn builtin_warning_attribute_spec(
 
 /// The floating attributes (`@@attr`) at the start of a structure.
 fn leading_structure_attributes(structure: &[StructureItem]) -> impl Iterator<Item = &Attribute> {
-    structure.iter().map_while(|item| match &*item.pstr_desc {
+    structure.iter().map_while(|item| match &item.pstr_desc {
         StructureItemDesc::Pstr_attribute(attr) => Some(&**attr),
         _ => None,
     })
@@ -1052,7 +1052,7 @@ fn leading_structure_attributes(structure: &[StructureItem]) -> impl Iterator<It
 
 /// The floating attributes (`@@attr`) at the start of a signature.
 fn leading_signature_attributes(signature: &[SignatureItem]) -> impl Iterator<Item = &Attribute> {
-    signature.iter().map_while(|item| match &*item.psig_desc {
+    signature.iter().map_while(|item| match &item.psig_desc {
         SignatureItemDesc::Psig_attribute(attr) => Some(&**attr),
         _ => None,
     })
@@ -1222,7 +1222,7 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         }
         // `Pstr_type (Nonrecursive, [{ptype_kind = Ptype_variant ({pcd_res =
         // Some _} :: _)}])` raises (bs_ast_invariant.ml:81-89).
-        if let StructureItemDesc::Pstr_type(inner) = &*item.pstr_desc {
+        if let StructureItemDesc::Pstr_type(inner) = &item.pstr_desc {
             let (rec_flag, decls) = &**inner;
             if *rec_flag == RecFlag::Nonrecursive
                 && let [decl] = decls.as_slice()
@@ -2350,7 +2350,7 @@ fn payload_raw_source_info(payload: &Payload, arena: &ParseArena) -> Option<(Str
     let [item] = items.as_slice() else {
         return None;
     };
-    let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval_inner) = &item.pstr_desc else {
         return None;
     };
     // `Ast_payload.unwrap_payload_expression`.
@@ -2388,7 +2388,7 @@ fn payload_single_record_fields_without_spread<'a>(
 ) -> Option<&'a [ExpressionRecordField]> {
     match payload {
         Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                 let (expr, _) = &**eval_inner;
                 if let ExpressionDesc::Pexp_record(record) =
                     &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
@@ -2408,7 +2408,7 @@ fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<
     match payload {
         Payload::PStr(items) if items.is_empty() => Some(Vec::new()),
         Payload::PStr(items) if items.len() == 1 => {
-            let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+            let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
                 return None;
             };
             let (expr, _) = &**eval_inner;
@@ -2435,7 +2435,7 @@ fn payload_string_literals_or_error_loc(
     match payload {
         Payload::PStr(items) if items.is_empty() => Ok(Vec::new()),
         Payload::PStr(items) if items.len() == 1 => {
-            let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+            let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
                 return Err(default_loc);
             };
             let (expr, _) = &**eval_inner;
@@ -2487,7 +2487,7 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
             // Try to get int payload
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                         let (ref expr, _) = **eval_inner;
                         if let ExpressionDesc::Pexp_constant(c) =
                             &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
@@ -3591,7 +3591,7 @@ fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> 
     if items.len() != 1 {
         return None;
     }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &items[0].pstr_desc else {
         return None;
     };
     let (expr_idx, _) = &**inner;
@@ -3640,7 +3640,7 @@ fn validate_return_wrapper_config_shape(
     if items.len() != 1 {
         return Ok(());
     }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &items[0].pstr_desc else {
         return Ok(());
     };
     let (expr_idx, _) = &**inner;
@@ -3677,7 +3677,7 @@ fn return_wrapper_config_warning(
     if items.len() != 1 {
         return Some((default_loc, "invalid attribute config-record, ignoring"));
     }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &items[0].pstr_desc else {
         return Some((default_loc, "invalid attribute config-record, ignoring"));
     };
     let (expr_idx, _) = &**inner;
@@ -3705,7 +3705,7 @@ fn get_payload_int_result(
 ) -> PpxResult<Option<i32>> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                 let (ref expr, _) = **eval_inner;
                 if let ExpressionDesc::Pexp_constant(c) =
                     &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
@@ -3753,7 +3753,7 @@ fn get_payload_string_or_json(
     let [item] = items.as_slice() else {
         return None;
     };
-    let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval_inner) = &item.pstr_desc else {
         return None;
     };
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0));
@@ -3785,7 +3785,7 @@ fn validate_module_import_attributes_payload(
     if items.len() != 1 {
         return Ok(false);
     }
-    let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
         return Ok(false);
     };
     let (expr_idx, _) = &**eval_inner;
@@ -3867,7 +3867,7 @@ fn get_module_import_attributes(
     if items.len() != 1 {
         return None;
     }
-    let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
         return None;
     };
     let (expr_idx, _) = &**eval_inner;
@@ -4371,7 +4371,7 @@ fn find_inline_payload_expr<'a>(
             // @inline(expr) has PStr with a single Pstr_eval
             if let Some(items) = payload_str_items(payload) {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                         let (ref expr, _) = **eval_inner;
                         return Some(crate::ast_payload::unwrap_braces(
                             arena,
@@ -4519,18 +4519,16 @@ fn transform_inline_binding(
     if let Some(semantic) = inline_string_semantic(expr, arena) {
         let prim = inline_string_primitive(&semantic);
         return Some(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                ValueDescription {
-                    pval_name: Located {
-                        txt: pval_name.txt,
-                        loc: pval_name.loc,
-                    },
-                    pval_type: arena.ast_literal_type_string(),
-                    pval_prim: Some(prim),
-                    pval_attributes: Attributes::new(),
-                    pval_loc: pvb_loc,
+            pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                pval_name: Located {
+                    txt: pval_name.txt,
+                    loc: pval_name.loc,
                 },
-            ))),
+                pval_type: arena.ast_literal_type_string(),
+                pval_prim: Some(prim),
+                pval_attributes: Attributes::new(),
+                pval_loc: pvb_loc,
+            })),
             pstr_loc,
         });
     }
@@ -4542,18 +4540,16 @@ fn transform_inline_binding(
                 let i = arena.get_string(*s).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                        ValueDescription {
-                            pval_name: Located {
-                                txt: pval_name.txt,
-                                loc: pval_name.loc,
-                            },
-                            pval_type: arena.ast_literal_type_int(),
-                            pval_prim: Some(prim),
-                            pval_attributes: Attributes::new(),
-                            pval_loc: pvb_loc,
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
                         },
-                    ))),
+                        pval_type: arena.ast_literal_type_int(),
+                        pval_prim: Some(prim),
+                        pval_attributes: Attributes::new(),
+                        pval_loc: pvb_loc,
+                    })),
                     pstr_loc,
                 })
             }
@@ -4561,18 +4557,16 @@ fn transform_inline_binding(
             Constant::Float(s, None) => {
                 let prim = inline_float_primitive(arena.get_string(*s));
                 Some(StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                        ValueDescription {
-                            pval_name: Located {
-                                txt: pval_name.txt,
-                                loc: pval_name.loc,
-                            },
-                            pval_type: arena.ast_literal_type_float(),
-                            pval_prim: Some(prim),
-                            pval_attributes: Attributes::new(),
-                            pval_loc: pvb_loc,
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_name: Located {
+                            txt: pval_name.txt,
+                            loc: pval_name.loc,
                         },
-                    ))),
+                        pval_type: arena.ast_literal_type_float(),
+                        pval_prim: Some(prim),
+                        pval_attributes: Attributes::new(),
+                        pval_loc: pvb_loc,
+                    })),
                     pstr_loc,
                 })
             }
@@ -4586,18 +4580,16 @@ fn transform_inline_binding(
                 if name == "true" || name == "false" {
                     let prim = inline_bool_primitive(name == "true");
                     return Some(StructureItem {
-                        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                            ValueDescription {
-                                pval_name: Located {
-                                    txt: pval_name.txt,
-                                    loc: pval_name.loc,
-                                },
-                                pval_type: arena.ast_literal_type_bool(),
-                                pval_prim: Some(prim),
-                                pval_attributes: Attributes::new(),
-                                pval_loc: pvb_loc,
+                        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                            pval_name: Located {
+                                txt: pval_name.txt,
+                                loc: pval_name.loc,
                             },
-                        ))),
+                            pval_type: arena.ast_literal_type_bool(),
+                            pval_prim: Some(prim),
+                            pval_attributes: Attributes::new(),
+                            pval_loc: pvb_loc,
+                        })),
                         pstr_loc,
                     });
                 }
@@ -4792,12 +4784,12 @@ fn handle_debugger(
 
     // Create the module structure
     let mod_structure = vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
+        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(mod_structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -4914,12 +4906,12 @@ fn raw_local_external_apply(
 
     // Create the module structure: struct external unsafe_expr: _ -> _ = "#raw_expr" end
     let mod_structure = vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
+        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(mod_structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -4989,7 +4981,7 @@ fn handle_raw(
         let Payload::PStr(items) = payload else {
             unreachable!("payload_raw_source_info matched a structure payload")
         };
-        let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+        let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
             unreachable!("payload_raw_source_info matched an eval item")
         };
         let e = crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0));
@@ -5178,7 +5170,7 @@ fn handle_raw_structure(
         let Payload::PStr(items) = payload else {
             unreachable!("payload_raw_source_info matched a structure payload")
         };
-        let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+        let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc else {
             unreachable!("payload_raw_source_info matched an eval item")
         };
         let expr = arena.get_expr(eval_inner.0);
@@ -5239,12 +5231,12 @@ fn handle_raw_structure(
 
     // Create the module structure
     let mod_structure = vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
+        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(vd)),
         pstr_loc: loc,
     }];
 
     let mod_expr = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(mod_structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(mod_structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -5298,10 +5290,10 @@ fn handle_raw_structure(
     // Wrap in Pstr_eval - OCaml's Ast_helper.Str.eval uses default_loc (= Location.none)
     // when no ~loc is passed, so we use none_loc here
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
             arena.push_expr(letmodule_expr),
             Attributes::new(),
-        )))),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -5357,7 +5349,7 @@ fn private_extension_structure_items(
 /// expands itself (bs_builtin_ppx.ml:681-705).
 fn is_structure_mapper_extension(item: &StructureItem, arena: &ParseArena) -> bool {
     matches!(
-        &*item.pstr_desc,
+        &item.pstr_desc,
         StructureItemDesc::Pstr_extension(inner)
             if matches!(arena.get_string(inner.0.0.txt), "raw" | "private")
     )
@@ -5378,7 +5370,7 @@ fn check_private_extension_items(items: &[StructureItem], arena: &ParseArena) ->
 }
 
 fn private_extension_item_allowed(item: &StructureItem, arena: &ParseArena) -> bool {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(_)
         | StructureItemDesc::Pstr_value(_)
         | StructureItemDesc::Pstr_primitive(_)
@@ -5391,18 +5383,18 @@ fn private_extension_item_allowed(item: &StructureItem, arena: &ParseArena) -> b
 
 fn private_extension_include_allowed(incl: &IncludeDeclaration, arena: &ParseArena) -> bool {
     let mod_expr = arena.get_mod_expr(incl.pincl_mod);
-    let ModuleExprDesc::Pmod_constraint(inner_idx, _) = &*mod_expr.pmod_desc else {
+    let ModuleExprDesc::Pmod_constraint(inner_idx, _) = &mod_expr.pmod_desc else {
         return false;
     };
 
     let inner = arena.get_mod_expr(*inner_idx);
-    let ModuleExprDesc::Pmod_structure(items) = &*inner.pmod_desc else {
+    let ModuleExprDesc::Pmod_structure(items) = &inner.pmod_desc else {
         return false;
     };
 
     matches!(
         items.as_slice(),
-        [item] if matches!(&*item.pstr_desc, StructureItemDesc::Pstr_primitive(_))
+        [item] if matches!(&item.pstr_desc, StructureItemDesc::Pstr_primitive(_))
     )
 }
 
@@ -5452,7 +5444,7 @@ fn wrap_in_local_module(
             loc: combined_loc,
         },
         pmb_expr: arena.push_mod_expr(ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(rewritten_items))),
+            pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(rewritten_items)),
             pmod_loc: combined_loc,
             pmod_attributes: Attributes::new(),
         }),
@@ -5461,7 +5453,7 @@ fn wrap_in_local_module(
     };
 
     let module_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(module_binding))),
+        pstr_desc: StructureItemDesc::Pstr_module(Box::new(module_binding)),
         pstr_loc: combined_loc,
     };
 
@@ -5479,7 +5471,7 @@ fn wrap_in_local_module(
     };
 
     let open_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_open(Box::new(open_desc))),
+        pstr_desc: StructureItemDesc::Pstr_open(Box::new(open_desc)),
         pstr_loc: combined_loc,
     };
 
@@ -5717,7 +5709,7 @@ fn create_await_module_expression(
     // Create unpack(await_expr)
     // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
     current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(arena.push_expr(await_expr))),
+        pmod_desc: ModuleExprDesc::Pmod_unpack(arena.push_expr(await_expr)),
         pmod_loc: mod_expr.pmod_loc,
         // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -5741,7 +5733,7 @@ fn spelunk_expression_for_await_module_types(
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, ref mod_expr, ref body) = **inner;
             let mod_expr_val = arena.get_mod_expr(*mod_expr).clone();
-            let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc else {
+            let ModuleExprDesc::Pmod_ident(located_lid) = &mod_expr_val.pmod_desc else {
                 return vec![];
             };
             if !has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
@@ -5759,10 +5751,10 @@ fn spelunk_expression_for_await_module_types(
             let lid_loc = located_lid.loc;
 
             let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
+                pmod_desc: ModuleExprDesc::Pmod_ident(Located {
                     txt: located_lid.txt,
                     loc: lid_loc,
-                })),
+                }),
                 // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
                 // pmod_loc allocation (distinct from the lid location).
                 pmod_loc: mod_expr_val.pmod_loc,
@@ -5770,12 +5762,12 @@ fn spelunk_expression_for_await_module_types(
                 pmod_attributes: mod_expr_val.pmod_attributes.clone(),
             });
             let module_type_idx = arena.push_mod_type(current::ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
+                pmty_desc: ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx),
                 pmty_loc: lid_loc,
                 pmty_attributes: Attributes::new(),
             });
             let module_type_decl = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
+                pstr_desc: StructureItemDesc::Pstr_modtype(Box::new(
                     current::ModuleTypeDeclaration {
                         pmtd_name: Located {
                             txt: module_type_name_idx,
@@ -5785,7 +5777,7 @@ fn spelunk_expression_for_await_module_types(
                         pmtd_attributes: Attributes::new(),
                         pmtd_loc: lid_loc,
                     },
-                ))),
+                )),
                 pstr_loc: lid_loc,
             };
 
@@ -5920,7 +5912,7 @@ fn transform_module_await(
     }
 
     // Get the module identifier and its location
-    let (lid, lid_loc) = match &*mod_expr.pmod_desc {
+    let (lid, lid_loc) = match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_ident(located_lid) => (located_lid.txt, located_lid.loc),
         _ => return None, // Only handle Pmod_ident for now
     };
@@ -5937,10 +5929,10 @@ fn transform_module_await(
     // OCaml uses (Mty.typeof_ ~loc me) where `me` is the ORIGINAL module expression
     // This means the Pmty_typeof's inner module expr has the @res.await attribute
     let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
+        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
             txt: lid,
             loc: lid_loc,
-        })),
+        }),
         // OCaml: Mty.typeof_ ~loc me - uses the ORIGINAL `me`, whose pmod_loc
         // was overridden by parse_primary_mod_expr (a fresh allocation, not lid.loc)
         pmod_loc: mod_expr.pmod_loc,
@@ -5948,22 +5940,20 @@ fn transform_module_await(
         pmod_attributes: mod_expr.pmod_attributes.clone(),
     });
     let module_type_idx = arena.push_mod_type(current::ModuleType {
-        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
+        pmty_desc: current::ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx),
         pmty_loc: lid_loc,
         pmty_attributes: Attributes::new(),
     });
     let module_type_decl = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
-            current::ModuleTypeDeclaration {
-                pmtd_name: Located {
-                    txt: module_type_name_idx,
-                    loc: lid_loc,
-                },
-                pmtd_type: Some(module_type_idx),
-                pmtd_attributes: Attributes::new(),
-                pmtd_loc: lid_loc,
+        pstr_desc: StructureItemDesc::Pstr_modtype(Box::new(current::ModuleTypeDeclaration {
+            pmtd_name: Located {
+                txt: module_type_name_idx,
+                loc: lid_loc,
             },
-        ))),
+            pmtd_type: Some(module_type_idx),
+            pmtd_attributes: Attributes::new(),
+            pmtd_loc: lid_loc,
+        })),
         pstr_loc: lid_loc,
     };
 
@@ -5979,10 +5969,10 @@ fn transform_module_await(
     // actually remove the attribute because strings are different objects. So the inner
     // pack expression KEEPS @res.await in the actual output.
     let cleaned_mod_expr = current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
+        pmod_desc: ModuleExprDesc::Pmod_ident(Located {
             txt: lid,
             loc: lid_loc, // Preserve original Longident location
-        })),
+        }),
         pmod_loc: mod_expr.pmod_loc,
         // Keep attributes as-is to match OCaml's actual behavior (not its intended behavior)
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -6055,7 +6045,7 @@ fn transform_module_await(
     // Create unpack(await_expr)
     // OCaml: {e with pmod_desc = Pmod_unpack ...} - keeps original pmod_attributes (with @res.await)
     let transformed_mod_expr = current::ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_unpack(arena.push_expr(await_expr))),
+        pmod_desc: ModuleExprDesc::Pmod_unpack(arena.push_expr(await_expr)),
         pmod_loc: mod_expr.pmod_loc,
         // OCaml's {e with pmod_desc = ...} keeps the original attributes including @res.await
         pmod_attributes: mod_expr.pmod_attributes.clone(),
@@ -6065,14 +6055,12 @@ fn transform_module_await(
     // OCaml: {item with pstr_desc = Pstr_module {mb with pmb_expr = ...}}
     // This preserves original_pstr_loc (from item), not mb.pmb_loc
     let transformed_mb = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(
-            current::ModuleBinding {
-                pmb_name: mb.pmb_name,
-                pmb_expr: arena.push_mod_expr(transformed_mod_expr),
-                pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena).into(),
-                pmb_loc: mb.pmb_loc,
-            },
-        ))),
+        pstr_desc: StructureItemDesc::Pstr_module(Box::new(current::ModuleBinding {
+            pmb_name: mb.pmb_name,
+            pmb_expr: arena.push_mod_expr(transformed_mod_expr),
+            pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena).into(),
+            pmb_loc: mb.pmb_loc,
+        })),
         pstr_loc: original_pstr_loc, // Use original structure item location
     };
 
@@ -6716,7 +6704,7 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
     ) {
         let (ref lid_pats, _, _) = **record_inner;
         let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-        let module_lid = if let ModuleExprDesc::Pmod_ident(lid) = &*mod_expr.pmod_desc {
+        let module_lid = if let ModuleExprDesc::Pmod_ident(lid) = &mod_expr.pmod_desc {
             *lid
         } else {
             return vec![ValueBinding {
@@ -8304,7 +8292,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             //   -> module M = unpack(...) using BeltList
 
             // Check Case 1: Pmod_ident with await
-            if let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc {
+            if let ModuleExprDesc::Pmod_ident(located_lid) = &mod_expr_val.pmod_desc {
                 if has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
                     // Generate module type name: __Belt_List__
                     let module_type_name = local_module_type_name(located_lid.txt, arena);
@@ -8336,13 +8324,12 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             }
 
             // Check Case 2: Pmod_constraint(Pmod_ident, Pmty_ident mtyp_lid) with await
-            if let ModuleExprDesc::Pmod_constraint(inner_mod_idx, mty_idx) =
-                &*mod_expr_val.pmod_desc
+            if let ModuleExprDesc::Pmod_constraint(inner_mod_idx, mty_idx) = &mod_expr_val.pmod_desc
             {
                 let inner_mod = arena.get_mod_expr(*inner_mod_idx).clone();
                 let mty = arena.get_mod_type(*mty_idx).clone();
-                if let ModuleExprDesc::Pmod_ident(_) = &*inner_mod.pmod_desc {
-                    if let ModuleTypeDesc::Pmty_ident(mtyp_lid) = &*mty.pmty_desc {
+                if let ModuleExprDesc::Pmod_ident(_) = &inner_mod.pmod_desc {
+                    if let ModuleTypeDesc::Pmty_ident(mtyp_lid) = &mty.pmty_desc {
                         let mtyp_lid_copy = *mtyp_lid;
                         let inner_has_await =
                             has_await_attribute(&inner_mod.pmod_attributes, arena);
@@ -8569,7 +8556,7 @@ fn deriving_config_actions(
     let [item] = items.as_slice() else {
         return Ok(Vec::new());
     };
-    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
         return Ok(Vec::new());
     };
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(inner.0));
@@ -9053,7 +9040,7 @@ fn create_erase_type_str(arena: &mut ParseArena) -> StructureItem {
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(val_desc))),
+        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(val_desc)),
         pstr_loc: none_loc,
     }
 }
@@ -9113,7 +9100,7 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(val_desc))),
+        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(val_desc)),
         pstr_loc: none_loc,
     }
 }
@@ -9163,14 +9150,12 @@ fn create_map_binding(
     };
 
     let module_structure = vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-            unsafe_expr_prim,
-        ))),
+        pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(unsafe_expr_prim)),
         pstr_loc: loc,
     }];
 
     let module_expr = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(module_structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(module_structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -9247,10 +9232,10 @@ fn create_map_binding(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
             arena.push_vb_list(&[binding]),
-        ))),
+        )),
         pstr_loc: none_loc,
     }
 }
@@ -9285,10 +9270,10 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
             arena.push_vb_list(&[binding]),
-        ))),
+        )),
         pstr_loc: none_loc,
     }
 }
@@ -9428,10 +9413,10 @@ fn create_to_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
             arena.push_vb_list(&[binding]),
-        ))),
+        )),
         pstr_loc: none_loc,
     }
 }
@@ -9563,10 +9548,10 @@ fn create_from_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
             arena.push_vb_list(&[binding]),
-        ))),
+        )),
         pstr_loc: none_loc,
     }
 }
@@ -9607,7 +9592,7 @@ fn create_to_js_sig(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+        psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -9648,7 +9633,7 @@ fn create_from_js_sig(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+        psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -9902,10 +9887,7 @@ fn create_new_type_declaration(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![new_tdcl],
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((RecFlag::Nonrecursive, vec![new_tdcl]))),
         pstr_loc: none_loc,
     }
 }
@@ -9936,10 +9918,7 @@ fn create_new_type_sig_declaration(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![new_tdcl],
-        )))),
+        psig_desc: SignatureItemDesc::Psig_type(Box::new((RecFlag::Nonrecursive, vec![new_tdcl]))),
         psig_loc: none_loc,
     }
 }
@@ -10106,10 +10085,10 @@ fn create_record_to_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
             arena.push_vb_list(&[binding]),
-        ))),
+        )),
         pstr_loc: none_loc,
     }
 }
@@ -10306,10 +10285,10 @@ fn create_record_from_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
             arena.push_vb_list(&[binding]),
-        ))),
+        )),
         pstr_loc: none_loc,
     }
 }
@@ -10397,7 +10376,7 @@ fn create_record_to_js_sig(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+        psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -10458,7 +10437,7 @@ fn create_record_from_js_sig(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+        psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
         psig_loc: none_loc,
     }
 }
@@ -10471,22 +10450,22 @@ fn build_structure_signature_include(
     arena: &mut ParseArena,
 ) -> StructureItem {
     let inner_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(structure_items))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(structure_items)),
         pmod_loc: outer_loc,
         pmod_attributes: Attributes::new(),
     };
 
     let sig_mod_type = ModuleType {
-        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(signature_items))),
+        pmty_desc: ModuleTypeDesc::Pmty_signature(Box::new(signature_items)),
         pmty_loc: outer_loc,
         pmty_attributes: Attributes::new(),
     };
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
+        pmod_desc: ModuleExprDesc::Pmod_constraint(
             arena.push_mod_expr(inner_mod),
             arena.push_mod_type(sig_mod_type),
-        )),
+        ),
         pmod_loc: outer_loc,
         pmod_attributes: Attributes::new(),
     };
@@ -10498,7 +10477,7 @@ fn build_structure_signature_include(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(include_decl))),
+        pstr_desc: StructureItemDesc::Pstr_include(Box::new(include_decl)),
         pstr_loc: outer_loc,
     }
 }
@@ -10585,10 +10564,7 @@ fn handle_deriving_type(
             .map(|tdcl| rewrite_type_declaration(tdcl, arena))
             .collect();
         return vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-                rec_flag,
-                rewritten_tdcls,
-            )))),
+            pstr_desc: StructureItemDesc::Pstr_type(Box::new((rec_flag, rewritten_tdcls))),
             pstr_loc: item.pstr_loc,
         }];
     }
@@ -10632,9 +10608,7 @@ fn handle_deriving_type(
     }
 
     let type_str_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            rec_flag, new_tdcls,
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((rec_flag, new_tdcls))),
         pstr_loc: loc,
     };
 
@@ -10662,7 +10636,7 @@ fn handle_deriving_type(
     inner_structure.extend(include_items);
 
     let mod_expr = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(inner_structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(inner_structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -10674,7 +10648,7 @@ fn handle_deriving_type(
     };
 
     vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(include_decl))),
+        pstr_desc: StructureItemDesc::Pstr_include(Box::new(include_decl)),
         pstr_loc: loc,
     }]
 }
@@ -10947,7 +10921,7 @@ fn validate_module_record_pattern_binding_error(
     };
 
     let mod_expr = arena.get_mod_expr(*mod_expr_idx);
-    if !matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
+    if !matches!(&mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
         return Ok(());
     }
 
@@ -10974,11 +10948,11 @@ fn validate_module_record_pattern_binding_error(
 }
 
 fn letmodule_expr_has_await_payload(mod_expr: &current::ModuleExpr, arena: &ParseArena) -> bool {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_ident(_) => has_await_attribute(&mod_expr.pmod_attributes, arena),
         ModuleExprDesc::Pmod_constraint(inner_mod_idx, _mty_idx) => {
             let inner_mod = arena.get_mod_expr(*inner_mod_idx);
-            matches!(&*inner_mod.pmod_desc, ModuleExprDesc::Pmod_ident(_))
+            matches!(&inner_mod.pmod_desc, ModuleExprDesc::Pmod_ident(_))
                 && (has_await_attribute(&inner_mod.pmod_attributes, arena)
                     || has_await_attribute(&mod_expr.pmod_attributes, arena))
         }
@@ -11064,7 +11038,7 @@ fn handle_deriving_abstract(
         abstract_tdcls.push(abstract_tdcl);
         for vd in value_descriptions {
             primitives.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
+                pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(vd)),
                 pstr_loc: none_loc,
             });
         }
@@ -11072,53 +11046,43 @@ fn handle_deriving_abstract(
 
     // Create the inner include: include (struct <original type with record> end : sig end)
     let type_str_item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            rec_flag,
-            new_tdcls.to_vec(),
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((rec_flag, new_tdcls.to_vec()))),
         pstr_loc: loc,
     };
 
     let inner_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![
-            type_str_item,
-        ]))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(vec![type_str_item])),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
 
     let empty_sig = current::ModuleType {
-        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::default())),
+        pmty_desc: current::ModuleTypeDesc::Pmty_signature(Box::default()),
         pmty_loc: loc,
         pmty_attributes: Attributes::new(),
     };
 
     let constrained_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
+        pmod_desc: ModuleExprDesc::Pmod_constraint(
             arena.push_mod_expr(inner_mod),
             arena.push_mod_type(empty_sig),
-        )),
+        ),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
 
     let inner_include = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(
-            current::IncludeDeclaration {
-                pincl_mod: arena.push_mod_expr(constrained_mod),
-                pincl_loc: loc,
-                pincl_attributes: Attributes::new(),
-            },
-        ))),
+        pstr_desc: StructureItemDesc::Pstr_include(Box::new(current::IncludeDeclaration {
+            pincl_mod: arena.push_mod_expr(constrained_mod),
+            pincl_loc: loc,
+            pincl_attributes: Attributes::new(),
+        })),
         pstr_loc: loc,
     };
 
     // Create the abstract type declaration
     let abstract_type_str = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            rec_flag,
-            abstract_tdcls,
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((rec_flag, abstract_tdcls))),
         pstr_loc: none_loc,
     };
 
@@ -11127,7 +11091,7 @@ fn handle_deriving_abstract(
     outer_structure.extend(primitives);
 
     let outer_mod = ModuleExpr {
-        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(outer_structure))),
+        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(outer_structure)),
         pmod_loc: loc,
         pmod_attributes: Attributes::new(),
     };
@@ -11139,7 +11103,7 @@ fn handle_deriving_abstract(
     };
 
     vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(outer_include))),
+        pstr_desc: StructureItemDesc::Pstr_include(Box::new(outer_include)),
         pstr_loc: loc,
     }]
 }
@@ -11818,10 +11782,10 @@ fn generate_record_accessors_and_sigs(
         };
 
         structure_items.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+            pstr_desc: StructureItemDesc::Pstr_value((
                 RecFlag::Nonrecursive,
                 arena.push_vb_list(&[binding]),
-            ))),
+            )),
             pstr_loc: none_loc,
         });
 
@@ -11857,7 +11821,7 @@ fn generate_record_accessors_and_sigs(
         };
 
         signature_items.push(SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+            psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
             psig_loc: none_loc,
         });
     }
@@ -11941,10 +11905,10 @@ fn generate_variant_accessors_and_sigs(
             };
 
             structure_items.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+                pstr_desc: StructureItemDesc::Pstr_value((
                     RecFlag::Nonrecursive,
                     arena.push_vb_list(&[binding]),
-                ))),
+                )),
                 pstr_loc: none_loc,
             });
 
@@ -11961,7 +11925,7 @@ fn generate_variant_accessors_and_sigs(
             };
 
             signature_items.push(SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+                psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
                 psig_loc: none_loc,
             });
         } else {
@@ -12057,10 +12021,10 @@ fn generate_variant_accessors_and_sigs(
             };
 
             structure_items.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+                pstr_desc: StructureItemDesc::Pstr_value((
                     RecFlag::Nonrecursive,
                     arena.push_vb_list(&[binding]),
-                ))),
+                )),
                 pstr_loc: none_loc,
             });
 
@@ -12091,7 +12055,7 @@ fn generate_variant_accessors_and_sigs(
             };
 
             signature_items.push(SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(val_desc))),
+                psig_desc: SignatureItemDesc::Psig_value(Box::new(val_desc)),
                 psig_loc: none_loc,
             });
         }
@@ -12281,7 +12245,7 @@ fn structure_mapper_order(structure: &[StructureItem], arena: &ParseArena) -> Ve
     }
     for &(start, end, private) in units.iter().rev() {
         let head_first = !private
-            && match &*structure[start].pstr_desc {
+            && match &structure[start].pstr_desc {
                 StructureItemDesc::Pstr_value(_) => true,
                 StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
                 _ => false,
@@ -12349,7 +12313,7 @@ fn rewrite_structure_impl(
                 order.push_back(Event::WrapPrivate(unit_index));
             }
             Unit::Item(index) => {
-                let head_first = match &*structure[index].pstr_desc {
+                let head_first = match &structure[index].pstr_desc {
                     StructureItemDesc::Pstr_value(_) => true,
                     StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
                     _ => false,
@@ -12402,7 +12366,7 @@ fn rewrite_structure_impl(
                 }
                 let mut mapped = Vec::new();
                 for item in &structure[start..end] {
-                    let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc else {
+                    let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc else {
                         unreachable!("%%private run holds extensions")
                     };
                     let ((ext_name, payload), _attrs) = &**inner;
@@ -12453,7 +12417,7 @@ fn rewrite_structure_unit(
     await_context: &mut std::collections::HashSet<String>,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_module(mb) => {
             // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
             // and deduplicates generated module type declarations per structure.
@@ -12461,7 +12425,7 @@ fn rewrite_structure_unit(
                 transform_module_await(mb, item.pstr_loc, arena)
             {
                 let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
+                if let ModuleExprDesc::Pmod_ident(located_lid) = &mb_expr.pmod_desc {
                     let module_type_name = local_module_type_name(located_lid.txt, arena);
                     if await_context.insert(module_type_name) {
                         result.push(module_type_decl);
@@ -12522,7 +12486,7 @@ fn rewrite_structure_unit(
 /// before the rest of the structure (bs_builtin_ppx.ml:708-747).
 fn is_await_module_alias(mb: &current::ModuleBinding, arena: &ParseArena) -> bool {
     let mod_expr = arena.get_mod_expr(mb.pmb_expr);
-    matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_))
+    matches!(&mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_))
         && has_await_attribute(&mod_expr.pmod_attributes, arena)
 }
 
@@ -12549,7 +12513,7 @@ pub fn expand_extensions(
             let first_loc = structure[0].pstr_loc;
             let mut accumulated_items: Vec<StructureItem> = Vec::new();
             while i < structure.len() && is_private_extension(&structure[i], arena) {
-                if let StructureItemDesc::Pstr_extension(inner) = &*structure[i].pstr_desc {
+                if let StructureItemDesc::Pstr_extension(inner) = &structure[i].pstr_desc {
                     let (ext, _attrs) = &**inner;
                     let (ext_name, payload) = ext;
                     let items = private_extension_structure_items(payload, ext_name.loc)?;
@@ -12586,7 +12550,7 @@ pub fn expand_extensions(
 
 /// Check if a structure item is a %%private extension
 fn is_private_extension(item: &StructureItem, arena: &ParseArena) -> bool {
-    if let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc {
+    if let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc {
         let (ext, _attrs) = &**inner;
         let (ext_name, _payload) = ext;
         arena.get_string(ext_name.txt) == "private"
@@ -12599,7 +12563,7 @@ fn expand_extensions_item(
     item: &StructureItem,
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_extension(inner) => {
             let (ref ext, ref _attrs) = **inner;
             let (ext_name, payload) = ext;
@@ -12624,10 +12588,7 @@ fn expand_extensions_item(
             let new_expr = expand_extensions_expr(&expr, arena);
             let new_expr_idx = arena.push_expr(new_expr);
             Ok(vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    new_expr_idx,
-                    attrs.clone(),
-                )))),
+                pstr_desc: StructureItemDesc::Pstr_eval(Box::new((new_expr_idx, attrs.clone()))),
                 pstr_loc: item.pstr_loc,
             }])
         }
@@ -12650,24 +12611,21 @@ fn expand_extensions_item(
                 })
                 .collect();
             Ok(vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
-                    *rec,
-                    arena.push_vb_list(&new_bindings),
-                ))),
+                pstr_desc: StructureItemDesc::Pstr_value((*rec, arena.push_vb_list(&new_bindings))),
                 pstr_loc: item.pstr_loc,
             }])
         }
         StructureItemDesc::Pstr_module(mb) => {
             let new_expr_idx = expand_extensions_mod_expr(mb.pmb_expr, arena)?;
             Ok(vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(
+                pstr_desc: StructureItemDesc::Pstr_module(Box::new(
                     crate::parser::ast::ModuleBinding {
                         pmb_name: mb.pmb_name,
                         pmb_expr: new_expr_idx,
                         pmb_attributes: mb.pmb_attributes.clone(),
                         pmb_loc: mb.pmb_loc,
                     },
-                ))),
+                )),
                 pstr_loc: item.pstr_loc,
             }])
         }
@@ -12743,11 +12701,11 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
 /// Recursively expand extensions in module expressions (handles functors, structures, etc.)
 fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> PpxResult<ModExprIdx> {
     let me = arena.get_mod_expr(me_idx).clone();
-    match &*me.pmod_desc {
+    match &me.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => {
             let new_items = expand_extensions(items, arena)?;
             let new_me = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(new_items))),
+                pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(new_items)),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
             };
@@ -12757,11 +12715,7 @@ fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> Ppx
             let (ref name, ref mty, ref body) = **inner;
             let new_body_idx = expand_extensions_mod_expr(*body, arena)?;
             let new_me = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_functor(Box::new((
-                    *name,
-                    *mty,
-                    new_body_idx,
-                )))),
+                pmod_desc: ModuleExprDesc::Pmod_functor(Box::new((*name, *mty, new_body_idx))),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
             };
@@ -12771,7 +12725,7 @@ fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> Ppx
             let new_me1_idx = expand_extensions_mod_expr(*me1, arena)?;
             let new_me2_idx = expand_extensions_mod_expr(*me2, arena)?;
             let new_me = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_apply(new_me1_idx, new_me2_idx)),
+                pmod_desc: ModuleExprDesc::Pmod_apply(new_me1_idx, new_me2_idx),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
             };
@@ -12780,7 +12734,7 @@ fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> Ppx
         ModuleExprDesc::Pmod_constraint(inner_idx, mty) => {
             let new_inner_idx = expand_extensions_mod_expr(*inner_idx, arena)?;
             let new_me = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(new_inner_idx, *mty)),
+                pmod_desc: ModuleExprDesc::Pmod_constraint(new_inner_idx, *mty),
                 pmod_loc: me.pmod_loc,
                 pmod_attributes: me.pmod_attributes.clone(),
             };
@@ -12836,14 +12790,14 @@ struct NestedExternals {
 
 impl super::ast_iter::AstIter for NestedExternals {
     fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
-        if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
+        if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
             self.externals.push((**vd).clone());
         }
         super::ast_iter::walk_structure_item(self, arena, item);
     }
 
     fn signature_item(&mut self, arena: &ParseArena, item: &SignatureItem) {
-        if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
+        if let SignatureItemDesc::Psig_value(vd) = &item.psig_desc {
             self.externals.push((**vd).clone());
         }
         super::ast_iter::walk_signature_item(self, arena, item);
@@ -12885,7 +12839,7 @@ fn try_rewrite_signature_items(
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
                 .map_err(PpxError::message)?;
         for expanded in expanded_items {
-            if let SignatureItemDesc::Psig_value(vd) = &*expanded.psig_desc {
+            if let SignatureItemDesc::Psig_value(vd) = &expanded.psig_desc {
                 validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
             }
             validate_nested_signature_externals(&expanded, arena)?;
@@ -12919,7 +12873,7 @@ fn expand_signature_deriving_items(
     rewritten: SignatureItem,
     arena: &mut ParseArena,
 ) -> Vec<SignatureItem> {
-    let SignatureItemDesc::Psig_type(inner) = &*original.psig_desc else {
+    let SignatureItemDesc::Psig_type(inner) = &original.psig_desc else {
         return vec![rewritten];
     };
     let (rec_flag, tdcls) = &**inner;
@@ -12935,7 +12889,7 @@ fn expand_signature_deriving_items(
 
     // `new_tdcls tdcls new_attrs`: the processed `@deriving` is removed from
     // the last declaration; `new_tdcls_new_attrs` is that list mapped.
-    let SignatureItemDesc::Psig_type(rewritten_inner) = &*rewritten.psig_desc else {
+    let SignatureItemDesc::Psig_type(rewritten_inner) = &rewritten.psig_desc else {
         return vec![rewritten];
     };
     let mut new_tdcls: Vec<TypeDeclaration> = rewritten_inner.1.clone();
@@ -12958,42 +12912,35 @@ fn expand_signature_deriving_items(
         // 215-223): the abstract declarations, then one `val` per generated
         // external.
         let type_str_item = StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-                *rec_flag,
-                new_tdcls.clone(),
-            )))),
+            pstr_desc: StructureItemDesc::Pstr_type(Box::new((*rec_flag, new_tdcls.clone()))),
             pstr_loc: loc,
         };
         let inner_mod = arena.push_mod_expr(ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![
-                type_str_item,
-            ]))),
+            pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(vec![type_str_item])),
             pmod_loc: loc,
             pmod_attributes: Attributes::new(),
         });
         let empty_sig = arena.push_mod_type(current::ModuleType {
-            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::default())),
+            pmty_desc: current::ModuleTypeDesc::Pmty_signature(Box::default()),
             pmty_loc: loc,
             pmty_attributes: Attributes::new(),
         });
         let constrained = arena.push_mod_expr(ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(inner_mod, empty_sig)),
+            pmod_desc: ModuleExprDesc::Pmod_constraint(inner_mod, empty_sig),
             pmod_loc: loc,
             pmod_attributes: Attributes::new(),
         });
         let typeof_mty = arena.push_mod_type(current::ModuleType {
-            pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_typeof(constrained)),
+            pmty_desc: current::ModuleTypeDesc::Pmty_typeof(constrained),
             pmty_loc: loc,
             pmty_attributes: Attributes::new(),
         });
         let mut items = vec![SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
-                current::IncludeDescription {
-                    pincl_mod: typeof_mty,
-                    pincl_loc: loc,
-                    pincl_attributes: Attributes::new(),
-                },
-            ))),
+            psig_desc: SignatureItemDesc::Psig_include(Box::new(current::IncludeDescription {
+                pincl_mod: typeof_mty,
+                pincl_loc: loc,
+                pincl_attributes: Attributes::new(),
+            })),
             psig_loc: loc,
         }];
         let mut abstract_tdcls = Vec::with_capacity(original_tdcls_new_attrs.len());
@@ -13004,15 +12951,12 @@ fn expand_signature_deriving_items(
             values.extend(value_descriptions);
         }
         items.push(SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-                *rec_flag,
-                abstract_tdcls,
-            )))),
+            psig_desc: SignatureItemDesc::Psig_type(Box::new((*rec_flag, abstract_tdcls))),
             psig_loc: none_loc,
         });
         for vd in values {
             items.push(SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+                psig_desc: SignatureItemDesc::Psig_value(Box::new(vd)),
                 psig_loc: none_loc,
             });
         }
@@ -13021,9 +12965,7 @@ fn expand_signature_deriving_items(
         // `Sig.type_ ~loc rf new_tdcls_new_attrs ::
         //  Ast_derive.gen_signature tdcls actions rf` (ast_derive.ml:54-58).
         let mut items = vec![SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-                *rec_flag, new_tdcls,
-            )))),
+            psig_desc: SignatureItemDesc::Psig_type(Box::new((*rec_flag, new_tdcls))),
             psig_loc: loc,
         }];
         for action in &actions {
@@ -13077,18 +13019,16 @@ fn expand_signature_deriving_items(
 
     // `Ast_signature.fuse_all ~loc`: `include sig ... end`.
     let fused = arena.push_mod_type(current::ModuleType {
-        pmty_desc: Box::new(current::ModuleTypeDesc::Pmty_signature(Box::new(items))),
+        pmty_desc: current::ModuleTypeDesc::Pmty_signature(Box::new(items)),
         pmty_loc: loc,
         pmty_attributes: Attributes::new(),
     });
     vec![SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
-            current::IncludeDescription {
-                pincl_mod: fused,
-                pincl_loc: loc,
-                pincl_attributes: Attributes::new(),
-            },
-        ))),
+        psig_desc: SignatureItemDesc::Psig_include(Box::new(current::IncludeDescription {
+            pincl_mod: fused,
+            pincl_loc: loc,
+            pincl_attributes: Attributes::new(),
+        })),
         psig_loc: loc,
     }]
 }
@@ -13102,7 +13042,7 @@ fn try_rewrite_structure_item(
     for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
         .map_err(PpxError::message)?
     {
-        if let StructureItemDesc::Pstr_primitive(vd) = &*expanded.pstr_desc {
+        if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
             validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
         }
         validate_nested_structure_externals(&expanded, arena)?;
@@ -13125,7 +13065,7 @@ fn rewrite_structure_item_no_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
                 // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
@@ -13150,15 +13090,13 @@ fn rewrite_structure_item_no_spice(
                 let pval_type =
                     process_obj_type(&rewritten_type, vd.pval_loc, &vd.pval_attributes, arena);
                 let external_result = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                        ValueDescription {
-                            pval_prim: encoded.pval_prim,
-                            pval_attributes: encoded.pval_attributes.clone().into(),
-                            pval_name: vd.pval_name,
-                            pval_type: arena.push_core_type(pval_type.clone()),
-                            pval_loc: vd.pval_loc,
-                        },
-                    ))),
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_prim: encoded.pval_prim,
+                        pval_attributes: encoded.pval_attributes.clone().into(),
+                        pval_name: vd.pval_name,
+                        pval_type: arena.push_core_type(pval_type.clone()),
+                        pval_loc: vd.pval_loc,
+                    })),
                     pstr_loc: item.pstr_loc,
                 };
 
@@ -13174,40 +13112,29 @@ fn rewrite_structure_item_no_spice(
                         pval_loc: vd.pval_loc,
                     };
                     let inner_mod_idx = arena.push_mod_expr(ModuleExpr {
-                        pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![
-                            external_result,
-                        ]))),
+                        pmod_desc: ModuleExprDesc::Pmod_structure(Box::new(vec![external_result])),
                         pmod_loc: loc,
                         pmod_attributes: Attributes::new(),
                     });
                     let sig_mod_type_idx = arena.push_mod_type(ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::new(vec![
-                            SignatureItem {
-                                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(
-                                    sig_value,
-                                ))),
-                                psig_loc: loc,
-                            },
-                        ]))),
+                        pmty_desc: ModuleTypeDesc::Pmty_signature(Box::new(vec![SignatureItem {
+                            psig_desc: SignatureItemDesc::Psig_value(Box::new(sig_value)),
+                            psig_loc: loc,
+                        }])),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
                     });
                     let constrained_idx = arena.push_mod_expr(ModuleExpr {
-                        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(
-                            inner_mod_idx,
-                            sig_mod_type_idx,
-                        )),
+                        pmod_desc: ModuleExprDesc::Pmod_constraint(inner_mod_idx, sig_mod_type_idx),
                         pmod_loc: loc,
                         pmod_attributes: Attributes::new(),
                     });
                     vec![StructureItem {
-                        pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(
-                            IncludeDeclaration {
-                                pincl_mod: constrained_idx,
-                                pincl_loc: loc,
-                                pincl_attributes: Attributes::new(),
-                            },
-                        ))),
+                        pstr_desc: StructureItemDesc::Pstr_include(Box::new(IncludeDeclaration {
+                            pincl_mod: constrained_idx,
+                            pincl_loc: loc,
+                            pincl_attributes: Attributes::new(),
+                        })),
                         pstr_loc: loc,
                     }]
                 } else {
@@ -13219,15 +13146,13 @@ fn rewrite_structure_item_no_spice(
                 let vd_type = arena.get_core_type(vd.pval_type).clone();
                 let rewritten_type = rewrite_core_type(&vd_type, arena);
                 vec![StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
-                        ValueDescription {
-                            pval_name: vd.pval_name,
-                            pval_type: arena.push_core_type(rewritten_type),
-                            pval_prim: vd.pval_prim.clone(),
-                            pval_attributes: rewrite_attributes(&vd.pval_attributes, arena).into(),
-                            pval_loc: vd.pval_loc,
-                        },
-                    ))),
+                    pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
+                        pval_name: vd.pval_name,
+                        pval_type: arena.push_core_type(rewritten_type),
+                        pval_prim: vd.pval_prim.clone(),
+                        pval_attributes: rewrite_attributes(&vd.pval_attributes, arena).into(),
+                        pval_loc: vd.pval_loc,
+                    })),
                     pstr_loc: item.pstr_loc,
                 }]
             }
@@ -13283,7 +13208,7 @@ fn rewrite_structure_item_no_spice(
                     let original_pat = arena.get_pat(vb.pvb_pat).clone();
                     let rewritten_pat = rewrite_pattern(&original_pat, arena);
                     return vec![StructureItem {
-                        pstr_desc: Box::new(StructureItemDesc::Pstr_value((*rec_flag, {
+                        pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, {
                             let items = [ValueBinding {
                                 pvb_expr: arena.push_expr(pvb_expr),
                                 pvb_pat: arena.push_pat(rewritten_pat),
@@ -13292,7 +13217,7 @@ fn rewrite_structure_item_no_spice(
                                 pvb_loc: vb.pvb_loc,
                             }];
                             arena.push_vb_list(&items)
-                        }))),
+                        })),
                         pstr_loc: item.pstr_loc,
                     }];
                 }
@@ -13307,10 +13232,10 @@ fn rewrite_structure_item_no_spice(
                 flatten_value_bindings(&arena.vb_list(*bindings).to_vec(), arena)
             };
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+                pstr_desc: StructureItemDesc::Pstr_value((
                     *rec_flag,
                     arena.push_vb_list(&new_bindings),
-                ))),
+                )),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -13320,10 +13245,10 @@ fn rewrite_structure_item_no_spice(
             let expr_owned = arena.get_expr(*expr).clone();
             let rewritten_expr = rewrite_expression(&expr_owned, arena);
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
                     arena.push_expr(rewritten_expr),
                     rewrite_attributes(attrs, arena).into(),
-                )))),
+                ))),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -13333,14 +13258,12 @@ fn rewrite_structure_item_no_spice(
             let mb_expr = arena.get_mod_expr(mb.pmb_expr).clone();
             let rewritten_mb_expr = rewrite_module_expr(&mb_expr, arena);
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(
-                    current::ModuleBinding {
-                        pmb_name: mb.pmb_name,
-                        pmb_expr: arena.push_mod_expr(rewritten_mb_expr),
-                        pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena).into(),
-                        pmb_loc: mb.pmb_loc,
-                    },
-                ))),
+                pstr_desc: StructureItemDesc::Pstr_module(Box::new(current::ModuleBinding {
+                    pmb_name: mb.pmb_name,
+                    pmb_expr: arena.push_mod_expr(rewritten_mb_expr),
+                    pmb_attributes: rewrite_attributes(&mb.pmb_attributes, arena).into(),
+                    pmb_loc: mb.pmb_loc,
+                })),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -13360,7 +13283,7 @@ fn rewrite_structure_item_no_spice(
                 })
                 .collect();
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_recmodule(Box::new(new_mbs))),
+                pstr_desc: StructureItemDesc::Pstr_recmodule(Box::new(new_mbs)),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -13369,13 +13292,11 @@ fn rewrite_structure_item_no_spice(
             let incl_mod = arena.get_mod_expr(incl.pincl_mod).clone();
             let rewritten_incl_mod = rewrite_module_expr(&incl_mod, arena);
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_include(Box::new(
-                    current::IncludeDeclaration {
-                        pincl_mod: arena.push_mod_expr(rewritten_incl_mod),
-                        pincl_loc: incl.pincl_loc,
-                        pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena).into(),
-                    },
-                ))),
+                pstr_desc: StructureItemDesc::Pstr_include(Box::new(current::IncludeDeclaration {
+                    pincl_mod: arena.push_mod_expr(rewritten_incl_mod),
+                    pincl_loc: incl.pincl_loc,
+                    pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena).into(),
+                })),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -13397,10 +13318,10 @@ fn rewrite_structure_item_no_spice(
             } else {
                 // Rewrite payload for string transformation
                 vec![StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_extension(Box::new((
+                    pstr_desc: StructureItemDesc::Pstr_extension(Box::new((
                         (*ext_name, rewrite_payload(payload, arena)),
                         rewrite_attributes(attrs, arena).into(),
-                    )))),
+                    ))),
                     pstr_loc: item.pstr_loc,
                 }]
             }
@@ -13413,8 +13334,8 @@ fn rewrite_structure_item_no_spice(
         }
         StructureItemDesc::Pstr_attribute(attr) => {
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_attribute(Box::new(
-                    rewrite_attribute(attr, arena),
+                pstr_desc: StructureItemDesc::Pstr_attribute(Box::new(rewrite_attribute(
+                    attr, arena,
                 ))),
                 pstr_loc: item.pstr_loc,
             }]
@@ -13426,14 +13347,12 @@ fn rewrite_structure_item_no_spice(
         }
         // Handle open - rewrite attributes
         StructureItemDesc::Pstr_open(od) => vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_open(Box::new(
-                current::OpenDescription {
-                    popen_lid: od.popen_lid,
-                    popen_override: od.popen_override,
-                    popen_loc: od.popen_loc,
-                    popen_attributes: rewrite_attributes(&od.popen_attributes, arena).into(),
-                },
-            ))),
+            pstr_desc: StructureItemDesc::Pstr_open(Box::new(current::OpenDescription {
+                popen_lid: od.popen_lid,
+                popen_override: od.popen_override,
+                popen_loc: od.popen_loc,
+                popen_attributes: rewrite_attributes(&od.popen_attributes, arena).into(),
+            })),
             pstr_loc: item.pstr_loc,
         }],
         // Handle modtype - rewrite attributes
@@ -13444,49 +13363,45 @@ fn rewrite_structure_item_no_spice(
                 arena.push_mod_type(rewritten_mt)
             });
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
+                pstr_desc: StructureItemDesc::Pstr_modtype(Box::new(
                     current::ModuleTypeDeclaration {
                         pmtd_name: mtd.pmtd_name,
                         pmtd_type,
                         pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena).into(),
                         pmtd_loc: mtd.pmtd_loc,
                     },
-                ))),
+                )),
                 pstr_loc: item.pstr_loc,
             }]
         }
         // Handle exception - rewrite attributes
         StructureItemDesc::Pstr_exception(ec) => vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_exception(Box::new(
-                current::ExtensionConstructor {
-                    pext_name: ec.pext_name,
-                    pext_kind: ec.pext_kind.clone(),
-                    pext_loc: ec.pext_loc,
-                    pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
-                },
-            ))),
+            pstr_desc: StructureItemDesc::Pstr_exception(Box::new(current::ExtensionConstructor {
+                pext_name: ec.pext_name,
+                pext_kind: ec.pext_kind.clone(),
+                pext_loc: ec.pext_loc,
+                pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
+            })),
             pstr_loc: item.pstr_loc,
         }],
         // Handle type extension - rewrite attributes
         StructureItemDesc::Pstr_typext(te) => vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_typext(Box::new(
-                current::TypeExtension {
-                    ptyext_path: te.ptyext_path,
-                    ptyext_params: te.ptyext_params.clone(),
-                    ptyext_constructors: te
-                        .ptyext_constructors
-                        .iter()
-                        .map(|ec| current::ExtensionConstructor {
-                            pext_name: ec.pext_name,
-                            pext_kind: ec.pext_kind.clone(),
-                            pext_loc: ec.pext_loc,
-                            pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
-                        })
-                        .collect(),
-                    ptyext_private: te.ptyext_private,
-                    ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena).into(),
-                },
-            ))),
+            pstr_desc: StructureItemDesc::Pstr_typext(Box::new(current::TypeExtension {
+                ptyext_path: te.ptyext_path,
+                ptyext_params: te.ptyext_params.clone(),
+                ptyext_constructors: te
+                    .ptyext_constructors
+                    .iter()
+                    .map(|ec| current::ExtensionConstructor {
+                        pext_name: ec.pext_name,
+                        pext_kind: ec.pext_kind.clone(),
+                        pext_loc: ec.pext_loc,
+                        pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
+                    })
+                    .collect(),
+                ptyext_private: te.ptyext_private,
+                ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena).into(),
+            })),
             pstr_loc: item.pstr_loc,
         }],
     }
@@ -13497,7 +13412,7 @@ fn rewrite_module_expr(
     mod_expr: &current::ModuleExpr,
     arena: &mut ParseArena,
 ) -> current::ModuleExpr {
-    let new_desc = match &*mod_expr.pmod_desc {
+    let new_desc = match &mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
             let rewritten_items = rewrite_structure_impl(items, arena, false, true, None)
                 .unwrap_or_else(|error| {
@@ -13561,7 +13476,7 @@ fn rewrite_module_expr(
     };
 
     current::ModuleExpr {
-        pmod_desc: Box::new(new_desc),
+        pmod_desc: new_desc,
         pmod_loc: mod_expr.pmod_loc,
         pmod_attributes: rewrite_attributes(&mod_expr.pmod_attributes, arena).into(),
     }
@@ -13572,7 +13487,7 @@ fn rewrite_module_type(
     mod_type: &current::ModuleType,
     arena: &mut ParseArena,
 ) -> current::ModuleType {
-    let new_desc = match &*mod_type.pmty_desc {
+    let new_desc = match &mod_type.pmty_desc {
         current::ModuleTypeDesc::Pmty_signature(items) => {
             current::ModuleTypeDesc::Pmty_signature(Box::new(rewrite_signature_items(items, arena)))
         }
@@ -13623,14 +13538,14 @@ fn rewrite_module_type(
     };
 
     current::ModuleType {
-        pmty_desc: Box::new(new_desc),
+        pmty_desc: new_desc,
         pmty_loc: mod_type.pmty_loc,
         pmty_attributes: rewrite_attributes(&mod_type.pmty_attributes, arena).into(),
     }
 }
 
 fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena) -> SignatureItem {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_value(vd) => {
             // OCaml rewrites attributes (e.g. "js" -> "*j" in strings) before
             // encoding the external (ast_external.ml handle_external_in_sig,
@@ -13653,22 +13568,20 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 let pval_type =
                     process_obj_type(&rewritten_type, vd.pval_loc, &vd.pval_attributes, arena);
                 SignatureItem {
-                    psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(
-                        ValueDescription {
-                            pval_prim: encoded.pval_prim,
-                            pval_attributes: encoded.pval_attributes.into(),
-                            pval_name: vd.pval_name,
-                            pval_type: arena.push_core_type(pval_type),
-                            pval_loc: vd.pval_loc,
-                        },
-                    ))),
+                    psig_desc: SignatureItemDesc::Psig_value(Box::new(ValueDescription {
+                        pval_prim: encoded.pval_prim,
+                        pval_attributes: encoded.pval_attributes.into(),
+                        pval_name: vd.pval_name,
+                        pval_type: arena.push_core_type(pval_type),
+                        pval_loc: vd.pval_loc,
+                    })),
                     psig_loc: item.psig_loc,
                 }
             } else if let Some(inline_vd) = transform_inline_sig_value(vd, arena) {
                 // Handle @inline("value") let x: t in signature
                 // (bs_builtin_ppx.ml line 413-478)
                 SignatureItem {
-                    psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(inline_vd))),
+                    psig_desc: SignatureItemDesc::Psig_value(Box::new(inline_vd)),
                     psig_loc: item.psig_loc,
                 }
             } else {
@@ -13678,24 +13591,20 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 let vd_type = arena.get_core_type(vd.pval_type).clone();
                 let rewritten_type = rewrite_core_type(&vd_type, arena);
                 SignatureItem {
-                    psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(
-                        ValueDescription {
-                            pval_name: vd.pval_name,
-                            pval_type: arena.push_core_type(rewritten_type),
-                            pval_prim: vd.pval_prim.clone(),
-                            pval_attributes: rewritten_attrs.into(),
-                            pval_loc: vd.pval_loc,
-                        },
-                    ))),
+                    psig_desc: SignatureItemDesc::Psig_value(Box::new(ValueDescription {
+                        pval_name: vd.pval_name,
+                        pval_type: arena.push_core_type(rewritten_type),
+                        pval_prim: vd.pval_prim.clone(),
+                        pval_attributes: rewritten_attrs.into(),
+                        pval_loc: vd.pval_loc,
+                    })),
                     psig_loc: item.psig_loc,
                 }
             }
         }
         // Handle floating attributes (@@attr) - need to transform strings in payload
         SignatureItemDesc::Psig_attribute(attr) => SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_attribute(Box::new(
-                rewrite_attribute(attr, arena),
-            ))),
+            psig_desc: SignatureItemDesc::Psig_attribute(Box::new(rewrite_attribute(attr, arena))),
             psig_loc: item.psig_loc,
         },
         // Handle extensions - need to transform strings in payload
@@ -13703,23 +13612,21 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
             let (ref ext, ref attrs) = **inner;
             let (ext_name, payload) = ext;
             SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new((
+                psig_desc: SignatureItemDesc::Psig_extension(Box::new((
                     (*ext_name, rewrite_payload(payload, arena)),
                     rewrite_attributes(attrs, arena).into(),
-                )))),
+                ))),
                 psig_loc: item.psig_loc,
             }
         }
         // Handle open - rewrite attributes
         SignatureItemDesc::Psig_open(od) => SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_open(Box::new(
-                current::OpenDescription {
-                    popen_lid: od.popen_lid,
-                    popen_override: od.popen_override,
-                    popen_loc: od.popen_loc,
-                    popen_attributes: rewrite_attributes(&od.popen_attributes, arena).into(),
-                },
-            ))),
+            psig_desc: SignatureItemDesc::Psig_open(Box::new(current::OpenDescription {
+                popen_lid: od.popen_lid,
+                popen_override: od.popen_override,
+                popen_loc: od.popen_loc,
+                popen_attributes: rewrite_attributes(&od.popen_attributes, arena).into(),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle modtype - rewrite attributes and module type
@@ -13730,49 +13637,45 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 arena.push_mod_type(rewritten_mt)
             });
             SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_modtype(Box::new(
+                psig_desc: SignatureItemDesc::Psig_modtype(Box::new(
                     current::ModuleTypeDeclaration {
                         pmtd_name: mtd.pmtd_name,
                         pmtd_type,
                         pmtd_attributes: rewrite_attributes(&mtd.pmtd_attributes, arena).into(),
                         pmtd_loc: mtd.pmtd_loc,
                     },
-                ))),
+                )),
                 psig_loc: item.psig_loc,
             }
         }
         // Handle exception - rewrite attributes
         SignatureItemDesc::Psig_exception(ec) => SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_exception(Box::new(
-                current::ExtensionConstructor {
-                    pext_name: ec.pext_name,
-                    pext_kind: ec.pext_kind.clone(),
-                    pext_loc: ec.pext_loc,
-                    pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
-                },
-            ))),
+            psig_desc: SignatureItemDesc::Psig_exception(Box::new(current::ExtensionConstructor {
+                pext_name: ec.pext_name,
+                pext_kind: ec.pext_kind.clone(),
+                pext_loc: ec.pext_loc,
+                pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle type extension - rewrite attributes
         SignatureItemDesc::Psig_typext(te) => SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_typext(Box::new(
-                current::TypeExtension {
-                    ptyext_path: te.ptyext_path,
-                    ptyext_params: te.ptyext_params.clone(),
-                    ptyext_constructors: te
-                        .ptyext_constructors
-                        .iter()
-                        .map(|ec| current::ExtensionConstructor {
-                            pext_name: ec.pext_name,
-                            pext_kind: ec.pext_kind.clone(),
-                            pext_loc: ec.pext_loc,
-                            pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
-                        })
-                        .collect(),
-                    ptyext_private: te.ptyext_private,
-                    ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena).into(),
-                },
-            ))),
+            psig_desc: SignatureItemDesc::Psig_typext(Box::new(current::TypeExtension {
+                ptyext_path: te.ptyext_path,
+                ptyext_params: te.ptyext_params.clone(),
+                ptyext_constructors: te
+                    .ptyext_constructors
+                    .iter()
+                    .map(|ec| current::ExtensionConstructor {
+                        pext_name: ec.pext_name,
+                        pext_kind: ec.pext_kind.clone(),
+                        pext_loc: ec.pext_loc,
+                        pext_attributes: rewrite_attributes(&ec.pext_attributes, arena).into(),
+                    })
+                    .collect(),
+                ptyext_private: te.ptyext_private,
+                ptyext_attributes: rewrite_attributes(&te.ptyext_attributes, arena).into(),
+            })),
             psig_loc: item.psig_loc,
         },
         // Handle type declarations - rewrite attributes (including constructor/label attributes)
@@ -13783,10 +13686,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 .map(|tdcl| rewrite_type_declaration(tdcl, arena))
                 .collect();
             SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-                    *rec_flag,
-                    rewritten_tdcls,
-                )))),
+                psig_desc: SignatureItemDesc::Psig_type(Box::new((*rec_flag, rewritten_tdcls))),
                 psig_loc: item.psig_loc,
             }
         }
@@ -13795,13 +13695,11 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
             let incl_mod = arena.get_mod_type(incl.pincl_mod).clone();
             let rewritten_incl_mod = rewrite_module_type(&incl_mod, arena);
             SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_include(Box::new(
-                    current::IncludeDescription {
-                        pincl_mod: arena.push_mod_type(rewritten_incl_mod),
-                        pincl_loc: incl.pincl_loc,
-                        pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena).into(),
-                    },
-                ))),
+                psig_desc: SignatureItemDesc::Psig_include(Box::new(current::IncludeDescription {
+                    pincl_mod: arena.push_mod_type(rewritten_incl_mod),
+                    pincl_loc: incl.pincl_loc,
+                    pincl_attributes: rewrite_attributes(&incl.pincl_attributes, arena).into(),
+                })),
                 psig_loc: item.psig_loc,
             }
         }
@@ -13810,14 +13708,12 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
             let mod_type = arena.get_mod_type(md.pmd_type).clone();
             let rewritten_mod_type = rewrite_module_type(&mod_type, arena);
             SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_module(Box::new(
-                    current::ModuleDeclaration {
-                        pmd_name: md.pmd_name,
-                        pmd_type: arena.push_mod_type(rewritten_mod_type),
-                        pmd_attributes: rewrite_attributes(&md.pmd_attributes, arena).into(),
-                        pmd_loc: md.pmd_loc,
-                    },
-                ))),
+                psig_desc: SignatureItemDesc::Psig_module(Box::new(current::ModuleDeclaration {
+                    pmd_name: md.pmd_name,
+                    pmd_type: arena.push_mod_type(rewritten_mod_type),
+                    pmd_attributes: rewrite_attributes(&md.pmd_attributes, arena).into(),
+                    pmd_loc: md.pmd_loc,
+                })),
                 psig_loc: item.psig_loc,
             }
         }
@@ -13837,7 +13733,7 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
                 })
                 .collect();
             SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_recmodule(Box::new(new_mds))),
+                psig_desc: SignatureItemDesc::Psig_recmodule(Box::new(new_mds)),
                 psig_loc: item.psig_loc,
             }
         } // All SignatureItemDesc variants are covered above
@@ -13897,7 +13793,7 @@ let f = value => {
 "#;
         let (mut arena, structure) = parse_structure(source);
         let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
-        let StructureItemDesc::Pstr_value(value) = &*rewritten[0].pstr_desc else {
+        let StructureItemDesc::Pstr_value(value) = &rewritten[0].pstr_desc else {
             panic!("expected value binding");
         };
         let (_, bindings) = &*value;
@@ -13928,7 +13824,7 @@ let f = value => {
 
     fn obj_optional_label_nested_flags(source: &str) -> Vec<(String, bool)> {
         let (mut arena, structure) = parse_structure(source);
-        let StructureItemDesc::Pstr_primitive(vd) = &*structure[0].pstr_desc else {
+        let StructureItemDesc::Pstr_primitive(vd) = &structure[0].pstr_desc else {
             panic!("expected external");
         };
         let encoded = encode_external(vd, &mut arena);
@@ -14028,17 +13924,17 @@ type envelope = Story(Story.event)
 "#;
         let (mut arena, structure) = parse_structure(source);
         let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
-        let StructureItemDesc::Pstr_module(module) = &*rewritten[0].pstr_desc else {
+        let StructureItemDesc::Pstr_module(module) = &rewritten[0].pstr_desc else {
             panic!("expected nested module");
         };
         let module_expr = arena.get_mod_expr(module.pmb_expr);
-        let ModuleExprDesc::Pmod_structure(items) = &*module_expr.pmod_desc else {
+        let ModuleExprDesc::Pmod_structure(items) = &module_expr.pmod_desc else {
             panic!("expected nested module structure");
         };
 
         let codec_names = items
             .iter()
-            .filter_map(|item| match &*item.pstr_desc {
+            .filter_map(|item| match &item.pstr_desc {
                 StructureItemDesc::Pstr_value(value) => Some(arena.vb_list(value.1)),
                 _ => None,
             })

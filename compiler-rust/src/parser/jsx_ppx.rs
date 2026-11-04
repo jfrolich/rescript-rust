@@ -304,7 +304,7 @@ fn transform_structure_item_multi(
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<StructureItem> {
     // Check for @@jsxConfig attribute
-    if let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc {
+    if let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc {
         if arena.get_string(attr.0.txt) == "jsxConfig" {
             update_config_from_attribute(arena, attr, config);
         }
@@ -317,7 +317,7 @@ fn transform_structure_item_multi(
     }
 
     // Handle Pstr_value with potential @react.component
-    if let StructureItemDesc::Pstr_value(val_inner) = *item.pstr_desc {
+    if let StructureItemDesc::Pstr_value(val_inner) = item.pstr_desc {
         let (rec_flag, bindings) = val_inner;
         let bindings = arena.vb_list(bindings).to_vec();
         return transform_value_bindings(
@@ -331,7 +331,7 @@ fn transform_structure_item_multi(
     }
 
     // Handle Pstr_primitive (external) with potential @react.component
-    if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
+    if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
         let component_attr_count = count_react_component_attrs(arena, &vd.pval_attributes);
         let component_with_props_attr_count =
             count_react_component_with_props_attrs(arena, &vd.pval_attributes);
@@ -363,22 +363,17 @@ fn transform_structure_item_multi(
     }
 
     // Handle module definitions (for nested module tracking)
-    if let StructureItemDesc::Pstr_module(mb) = *item.pstr_desc {
+    if let StructureItemDesc::Pstr_module(mb) = item.pstr_desc {
         let transformed = transform_module_binding_with_tracking(*mb, config, arena, warnings);
         return vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_module(Box::new(transformed))),
+            pstr_desc: StructureItemDesc::Pstr_module(Box::new(transformed)),
             pstr_loc: item.pstr_loc,
         }];
     }
 
     // Default: just transform expressions within
     vec![StructureItem {
-        pstr_desc: Box::new(transform_structure_item_desc(
-            *item.pstr_desc,
-            config,
-            arena,
-            warnings,
-        )),
+        pstr_desc: transform_structure_item_desc(item.pstr_desc, config, arena, warnings),
         pstr_loc: item.pstr_loc,
     }]
 }
@@ -446,20 +441,20 @@ fn transform_value_bindings(
 
     let mut result = props_types;
     result.push(StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+        pstr_desc: StructureItemDesc::Pstr_value((
             rec_flag,
             arena.push_vb_list(&transformed_bindings),
-        ))),
+        )),
         pstr_loc: *loc,
     });
 
     if !new_bindings.is_empty() {
         // jsx_v4.ml:1045-1052: `{pstr_loc = empty_loc; ...}`.
         result.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+            pstr_desc: StructureItemDesc::Pstr_value((
                 RecFlag::Nonrecursive,
                 arena.push_vb_list(&new_bindings),
-            ))),
+            )),
             pstr_loc: config.empty_loc,
         });
     }
@@ -1808,7 +1803,7 @@ fn transform_signature_item_multi(
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<SignatureItem> {
     // Check for @@jsxConfig attribute
-    if let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc {
+    if let SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc {
         if arena.get_string(attr.0.txt) == "jsxConfig" {
             update_config_from_attribute(arena, attr, config);
         }
@@ -1821,7 +1816,7 @@ fn transform_signature_item_multi(
     }
 
     // Handle Psig_value with potential @react.component
-    if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
+    if let SignatureItemDesc::Psig_value(vd) = &item.psig_desc {
         match count_react_component_attrs(arena, &vd.pval_attributes) {
             0 => {}
             1 => {
@@ -1840,12 +1835,7 @@ fn transform_signature_item_multi(
     }
 
     vec![SignatureItem {
-        psig_desc: Box::new(transform_signature_item_desc(
-            *item.psig_desc,
-            config,
-            arena,
-            warnings,
-        )),
+        psig_desc: transform_signature_item_desc(item.psig_desc, config, arena, warnings),
         psig_loc: item.psig_loc,
     }]
 }
@@ -1984,7 +1974,7 @@ fn transform_react_component_sig(
     vec![
         props_type,
         SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(new_vd))),
+            psig_desc: SignatureItemDesc::Psig_value(Box::new(new_vd)),
             psig_loc: *loc,
         },
     ]
@@ -2120,7 +2110,7 @@ fn transform_react_component_external(
     vec![
         props_type,
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(new_vd))),
+            pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(new_vd)),
             pstr_loc: *loc,
         },
     ]
@@ -2210,7 +2200,7 @@ fn make_props_record_type_with_live(
     // OCaml uses ghost location for the generated props type structure_item
     let name_idx = arena.intern(name);
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((
             RecFlag::Nonrecursive,
             vec![TypeDeclaration {
                 ptype_name: Loc {
@@ -2226,7 +2216,7 @@ fn make_props_record_type_with_live(
                 ptype_attributes: Attributes::from_vec(vec![jsx_props_attr, live_attr]),
                 ptype_loc: *loc,
             }],
-        )))),
+        ))),
         pstr_loc: empty_loc(),
     }
 }
@@ -3358,10 +3348,7 @@ fn make_props_record_type(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![type_decl],
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((RecFlag::Nonrecursive, vec![type_decl]))),
         // OCaml's Str.type_ without ~loc uses Location.none
         pstr_loc: empty_loc(),
     }
@@ -3455,10 +3442,7 @@ fn make_props_record_type_sig(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![type_decl],
-        )))),
+        psig_desc: SignatureItemDesc::Psig_type(Box::new((RecFlag::Nonrecursive, vec![type_decl]))),
         // OCaml: Sig.type_ without ~loc uses Location.none
         psig_loc: empty_loc(),
     }
@@ -3495,10 +3479,7 @@ fn make_props_abstract_type(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![type_decl],
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_type(Box::new((RecFlag::Nonrecursive, vec![type_decl]))),
         // OCaml's Str.type_ without ~loc uses Location.none
         pstr_loc: empty_loc(),
     }
@@ -3534,10 +3515,7 @@ fn make_props_abstract_type_sig(
     };
 
     SignatureItem {
-        psig_desc: Box::new(SignatureItemDesc::Psig_type(Box::new((
-            RecFlag::Nonrecursive,
-            vec![type_decl],
-        )))),
+        psig_desc: SignatureItemDesc::Psig_type(Box::new((RecFlag::Nonrecursive, vec![type_decl]))),
         // OCaml: Sig.type_ without ~loc uses Location.none
         psig_loc: empty_loc(),
     }
@@ -3552,7 +3530,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
     // Matches OCaml's update_config behavior
     if let Payload::PStr(items) = &attr.1 {
         for item in items.iter() {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &item.pstr_desc {
                 let (ref expr, _) = **eval_inner;
                 // jsx_ppx.ml `get_payload_fields`: `Ast_payload.unwrap_payload_expression`.
                 let expr = if items.len() == 1 {
@@ -3712,7 +3690,7 @@ fn transform_module_type(
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleType {
     ModuleType {
-        pmty_desc: Box::new(match *mty.pmty_desc {
+        pmty_desc: match mty.pmty_desc {
             ModuleTypeDesc::Pmty_signature(sig_items) => {
                 // Save and reset has_component (OCaml: config.has_component <- false)
                 let old_has_component = config.has_component;
@@ -3745,7 +3723,7 @@ fn transform_module_type(
                 ModuleTypeDesc::Pmty_typeof(arena.push_mod_expr(transformed))
             }
             other => other,
-        }),
+        },
         pmty_loc: mty.pmty_loc,
         pmty_attributes: mty.pmty_attributes,
     }
@@ -3890,7 +3868,7 @@ fn transform_module_expr(
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleExpr {
     ModuleExpr {
-        pmod_desc: Box::new(match *mexpr.pmod_desc {
+        pmod_desc: match mexpr.pmod_desc {
             ModuleExprDesc::Pmod_structure(items) => {
                 // Transform structure with current config (preserving file_name and nested_modules)
                 ModuleExprDesc::Pmod_structure(Box::new(transform_structure_with_config(
@@ -3933,7 +3911,7 @@ fn transform_module_expr(
                 ModuleExprDesc::Pmod_unpack(arena.push_expr(transformed))
             }
             other => other,
-        }),
+        },
         pmod_loc: mexpr.pmod_loc,
         pmod_attributes: mexpr.pmod_attributes,
     }
@@ -5180,7 +5158,7 @@ let make = (~value: string) => React.null
         let transformed =
             transform_structure_result(structure, 4, "react", parser.arena_mut()).unwrap();
 
-        let StructureItemDesc::Pstr_value(value) = &*transformed
+        let StructureItemDesc::Pstr_value(value) = &transformed
             .last()
             .expect("expected generated component binding")
             .pstr_desc

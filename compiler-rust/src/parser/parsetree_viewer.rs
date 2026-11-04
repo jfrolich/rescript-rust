@@ -918,7 +918,7 @@ pub fn filter_fragile_match_attributes<'a>(
             let [item] = items.as_slice() else {
                 return true;
             };
-            let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+            let StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
                 return true;
             };
             !matches!(
@@ -1039,7 +1039,7 @@ fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bo
     let [item] = items.as_slice() else {
         return false;
     };
-    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
         return false;
     };
     matches!(
@@ -1283,7 +1283,7 @@ pub fn mod_expr_apply<'a>(
         acc: Vec<&'a ModuleExpr>,
         mod_expr: &'a ModuleExpr,
     ) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_apply(next_idx, arg_idx) => {
                 let arg: &ModuleExpr = arena.get_mod_expr(*arg_idx);
                 let next: &ModuleExpr = arena.get_mod_expr(*next_idx);
@@ -1319,7 +1319,7 @@ pub fn mod_expr_functor<'a>(
         acc: Vec<FunctorParam<'a>>,
         mod_expr: &'a ModuleExpr,
     ) -> (Vec<FunctorParam<'a>>, &'a ModuleExpr) {
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_functor(inner) => {
                 let (ref lbl, ref mod_type_idx, ref return_mod_expr_idx) = **inner;
                 let param = FunctorParam {
@@ -1436,7 +1436,7 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     let [item] = items.as_slice() else {
         return false;
     };
-    let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return false;
     };
     matches!(

@@ -4010,10 +4010,10 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
     (
         mknoloc(warning_str_idx),
         Payload::PStr(Box::new(vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
                 warning_expr_idx,
                 Attributes::new(),
-            )))),
+            ))),
             pstr_loc: loc,
         }])),
     )

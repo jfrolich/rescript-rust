@@ -376,7 +376,7 @@ fn config_payload_flags_contains(
     };
 
     items.iter().any(|item| {
-        let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
             return false;
         };
         let (expr_idx, _) = &**inner;
@@ -1534,7 +1534,7 @@ impl<'a> RawLambdaConverter<'a> {
         match payload {
             Payload::PStr(items) if items.is_empty() => InlineAttribute::Always,
             Payload::PStr(items) if items.len() == 1 => {
-                if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                     let (expr_idx, attrs) = &**eval_inner;
                     // translattribute.ml: `Ast_payload.unwrap_braces expression`.
                     let expr = crate::ast_payload::unwrap_braces(
@@ -5725,7 +5725,7 @@ impl<'a> RawLambdaConverter<'a> {
         let [item] = items.as_slice() else {
             return None;
         };
-        let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = item.pstr_desc.as_ref() else {
+        let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
             return None;
         };
         let expr = self.arena.get_expr(eval.0);
@@ -7883,8 +7883,9 @@ mod tests {
         let directive_attrs = Attributes::from_vec(vec![(
             Located::mknoloc(arena.intern_string("directive")),
             crate::parser::ast::Payload::PStr(Box::new(vec![crate::parser::ast::StructureItem {
-                pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new(
-                    (directive_expr_idx, Attributes::new()),
+                pstr_desc: crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new((
+                    directive_expr_idx,
+                    Attributes::new(),
                 ))),
                 pstr_loc: LocIdx::none(),
             }])),

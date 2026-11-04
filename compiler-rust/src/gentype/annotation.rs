@@ -141,7 +141,7 @@ pub fn get_attribute_payload(
             let payload = match payload {
                 Payload::PStr(items) => match items.first() {
                     None => Some(AttributePayload::UnrecognizedPayload),
-                    Some(structure_item) => match structure_item.pstr_desc.as_ref() {
+                    Some(structure_item) => match &structure_item.pstr_desc {
                         crate::parser::ast::StructureItemDesc::Pstr_eval(eval) => {
                             Some(from_expr(arena, arena.get_expr(eval.0))?)
                         }

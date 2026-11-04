@@ -165,10 +165,7 @@ fn put_back_as(
     let expression = target.push_expr(expression);
     let arena = target.arena();
     let item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-            expression,
-            Attributes::new(),
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expression, Attributes::new()))),
         pstr_loc: loc,
     };
     let name = arena.as_attribute_name();
@@ -277,7 +274,7 @@ mod tests {
             let Payload::PStr(items) = payload else {
                 return None;
             };
-            let StructureItemDesc::Pstr_eval(eval) = &*items.first()?.pstr_desc else {
+            let StructureItemDesc::Pstr_eval(eval) = &items.first()?.pstr_desc else {
                 return None;
             };
             match arena.get_expr(eval.0).pexp_desc {
@@ -301,7 +298,7 @@ mod tests {
         let arena = parser.into_arena();
         let mut seen = Vec::new();
         for item in &structure {
-            let StructureItemDesc::Pstr_type(decls) = &*item.pstr_desc else {
+            let StructureItemDesc::Pstr_type(decls) = &item.pstr_desc else {
                 continue;
             };
             for decl in &decls.1 {

@@ -857,7 +857,7 @@ fn walk_structure_item(
         return;
     }
 
-    match &*si.pstr_desc {
+    match &si.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {
@@ -903,7 +903,7 @@ fn walk_signature_item(
         return;
     }
 
-    match &*si.psig_desc {
+    match &si.psig_desc {
         SignatureItemDesc::Psig_value(vd) => walk_value_description(vd, t, comments, arena),
         SignatureItemDesc::Psig_type(inner) => {
             let (_, ref declarations) = **inner;
@@ -1065,7 +1065,7 @@ fn walk_module_binding(
 
     let pmb_expr = arena.get_mod_expr(mb.pmb_expr);
     let pmb_expr_loc = pmb_expr.pmod_loc;
-    let is_constraint = matches!(&*pmb_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(..));
+    let is_constraint = matches!(&pmb_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(..));
     let (leading, inside, trailing) = partition_by_loc(rest, pmb_expr_loc, arena);
 
     // Safety: arena is append-only, module expression won't be invalidated
@@ -3489,7 +3489,7 @@ fn walk_module_expr(
         return;
     }
 
-    match &*me.pmod_desc {
+    match &me.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
@@ -3538,7 +3538,7 @@ fn walk_module_expr(
 
             // Handle return expression, with special case for Pmod_constraint
             // where the constraint comes before the expression (: Set => expr)
-            match &*return_mod_expr.pmod_desc {
+            match &return_mod_expr.pmod_desc {
                 ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx) => {
                     let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
                     let mod_type = arena.get_mod_type(*mod_type_idx).clone();
@@ -3678,7 +3678,7 @@ fn walk_mod_type(
         return;
     }
 
-    match &*mt.pmty_desc {
+    match &mt.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
@@ -3898,7 +3898,7 @@ fn functor_type_params(
         modtype: &ModuleType,
         arena: &ParseArena,
     ) -> (Vec<OwnedModTypeFunctorParam>, ModuleType) {
-        match &*modtype.pmty_desc {
+        match &modtype.pmty_desc {
             ModuleTypeDesc::Pmty_functor(inner) => {
                 let (ref lbl, ref arg_type, ref return_type) = **inner;
                 acc.push(OwnedModTypeFunctorParam {

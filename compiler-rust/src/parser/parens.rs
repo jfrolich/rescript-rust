@@ -679,13 +679,13 @@ pub fn binary_expr_with_attrs(arena: &ParseArena, expr: &Expression, has_attrs: 
 
 /// Check if module type functor return needs parentheses.
 pub fn mod_type_functor_return(mod_type: &ModuleType) -> bool {
-    matches!(&*mod_type.pmty_desc, ModuleTypeDesc::Pmty_with(_))
+    matches!(&mod_type.pmty_desc, ModuleTypeDesc::Pmty_with(_))
 }
 
 /// Check if module type with operand needs parentheses.
 pub fn mod_type_with_operand(mod_type: &ModuleType) -> bool {
     matches!(
-        &*mod_type.pmty_desc,
+        &mod_type.pmty_desc,
         ModuleTypeDesc::Pmty_functor(_) | ModuleTypeDesc::Pmty_with(_)
     )
 }
@@ -693,7 +693,7 @@ pub fn mod_type_with_operand(mod_type: &ModuleType) -> bool {
 /// Check if module expression functor constraint needs parentheses.
 pub fn mod_expr_functor_constraint(mod_type: &ModuleType) -> bool {
     matches!(
-        &*mod_type.pmty_desc,
+        &mod_type.pmty_desc,
         ModuleTypeDesc::Pmty_functor(_) | ModuleTypeDesc::Pmty_with(_)
     )
 }
@@ -716,7 +716,7 @@ pub fn braced_expr(arena: &ParseArena, expr: &Expression) -> bool {
 
 /// Check if include module expression needs parentheses.
 pub fn include_mod_expr(mod_expr: &ModuleExpr) -> bool {
-    matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(_, _))
+    matches!(&mod_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(_, _))
 }
 
 /// Check if module expression needs parentheses.
@@ -725,16 +725,16 @@ pub fn include_mod_expr(mod_expr: &ModuleExpr) -> bool {
 /// - Pmod_constraint(_, Pmty_signature(Box::new([Psig_module]))) -> true
 /// - Otherwise -> false
 pub fn mod_expr_parens(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint(inner_idx, typ_idx) => {
             let inner = arena.get_mod_expr(*inner_idx);
             let typ = arena.get_mod_type(*typ_idx);
             // Check if typ is Pmty_signature with single Psig_module
-            if let ModuleTypeDesc::Pmty_signature(items) = &*typ.pmty_desc {
+            if let ModuleTypeDesc::Pmty_signature(items) = &typ.pmty_desc {
                 if items.len() == 1 {
-                    if let SignatureItemDesc::Psig_module(_) = &*items[0].psig_desc {
+                    if let SignatureItemDesc::Psig_module(_) = &items[0].psig_desc {
                         // Sig is [Psig_module] - return false if inner is Pmod_structure, true otherwise
-                        return !matches!(&*inner.pmod_desc, ModuleExprDesc::Pmod_structure(_));
+                        return !matches!(&inner.pmod_desc, ModuleExprDesc::Pmod_structure(_));
                     }
                 }
             }

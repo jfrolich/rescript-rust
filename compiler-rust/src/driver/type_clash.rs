@@ -275,15 +275,16 @@ fn reprint_expr_at_loc(
     let [item] = structure.as_slice() else {
         return None;
     };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
     let exp = sub_arena.get_expr(eval.0).clone();
     let exp = mapper(&mut sub_arena, exp)?;
     let exp_idx = sub_arena.push_expr(exp);
     let wrapped = crate::parser::ast::StructureItem {
-        pstr_desc: Box::new(crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new(
-            (exp_idx, crate::parser::ast::Attributes::new()),
+        pstr_desc: crate::parser::ast::StructureItemDesc::Pstr_eval(Box::new((
+            exp_idx,
+            crate::parser::ast::Attributes::new(),
         ))),
         pstr_loc: LocIdx::none(),
     };
@@ -317,7 +318,7 @@ fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
     ctx.push_reparse_warnings(parser.warnings());
     let arena = parser.into_arena();
     match structure.as_slice() {
-        [item] => match &*item.pstr_desc {
+        [item] => match &item.pstr_desc {
             crate::parser::ast::StructureItemDesc::Pstr_eval(eval) => matches!(
                 &arena.get_expr(eval.0).pexp_desc,
                 crate::parser::ast::ExpressionDesc::Pexp_constant(_)
@@ -337,7 +338,7 @@ fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
     let [item] = structure.as_slice() else {
         return None;
     };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
     match &arena.get_expr(eval.0).pexp_desc {

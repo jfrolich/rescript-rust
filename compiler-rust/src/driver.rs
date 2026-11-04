@@ -281,7 +281,7 @@ fn payload_has_string_literal(
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
     match payload {
-        Payload::PStr(items) => items.iter().any(|item| match &*item.pstr_desc {
+        Payload::PStr(items) => items.iter().any(|item| match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, _) = &**inner;
                 expression_has_string_literal(arena.get_expr(*expr), value, arena)
@@ -357,7 +357,7 @@ fn module_expr_has_config_string(
     value: &str,
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
-    match &*module_expr.pmod_desc {
+    match &module_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(structure) => {
             structure_has_config_string(structure, value, arena)
         }
@@ -389,8 +389,8 @@ fn module_type_has_config_string(
 ) -> bool {
     use crate::parser::ast::ModuleTypeDesc as MTD;
 
-    match &*module_type.pmty_desc {
-        MTD::Pmty_signature(sig_items) => sig_items.iter().any(|item| match &*item.psig_desc {
+    match &module_type.pmty_desc {
+        MTD::Pmty_signature(sig_items) => sig_items.iter().any(|item| match &item.psig_desc {
             crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) => {
                 payload_has_string_literal(&attr.1, value, arena)
             }
@@ -418,7 +418,7 @@ fn structure_has_config_string(
     value: &str,
     arena: &crate::parse_arena::ParseArena,
 ) -> bool {
-    structure.iter().any(|item| match &*item.pstr_desc {
+    structure.iter().any(|item| match &item.pstr_desc {
         StructureItemDesc::Pstr_attribute(attr) => {
             payload_has_string_literal(&attr.1, value, arena)
         }
@@ -1832,7 +1832,7 @@ fn invalid_enabled_let_unwrap_in_structure(
     arena: &ParseArena,
 ) -> Option<LetUnwrapPositionError> {
     for item in structure {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(eval) => {
                 if let Some(error) = invalid_enabled_let_unwrap_in_expr(eval.0, arena) {
                     return Some(error);
@@ -1882,7 +1882,7 @@ fn invalid_enabled_let_unwrap_in_mod_expr(
     arena: &ParseArena,
 ) -> Option<LetUnwrapPositionError> {
     let mod_expr = arena.get_mod_expr(mod_expr);
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => {
             invalid_enabled_let_unwrap_in_structure(items, arena)
         }
@@ -2035,7 +2035,7 @@ fn disabled_let_unwrap_loc_in_structure(
     arena: &ParseArena,
 ) -> Option<LocIdx> {
     for item in structure {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(eval) => {
                 if let Some(loc) = disabled_let_unwrap_loc_in_expr(eval.0, arena) {
                     return Some(loc);
@@ -2079,7 +2079,7 @@ fn disabled_let_unwrap_loc_in_structure(
 
 fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena) -> Option<LocIdx> {
     let mod_expr = arena.get_mod_expr(mod_expr);
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => disabled_let_unwrap_loc_in_structure(items, arena),
         ModuleExprDesc::Pmod_functor(functor) => {
             disabled_let_unwrap_loc_in_mod_expr(functor.2, arena)
@@ -4424,7 +4424,7 @@ fn parsed_signature_has_gentype_ignore_interface(
     // OCaml compiler/gentype/GenTypeMain.ml:93-134 discovers
     // @@genType.ignoreInterface while scanning the interface CMT before
     // deciding whether the implementation artifact should own GenType output.
-    signature.iter().any(|item| match item.psig_desc.as_ref() {
+    signature.iter().any(|item| match &item.psig_desc {
         SignatureItemDesc::Psig_attribute(attribute) => {
             let attributes = Attributes::from_vec(vec![attribute.as_ref().clone()]);
             crate::gentype::annotation::get_attribute_payload(
@@ -12481,7 +12481,7 @@ fn extract_file_directives_from_structure(
     let mut directives = Vec::new();
 
     for item in structure {
-        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+        let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc else {
             continue;
         };
         if arena.get_string(attr.0.txt) != "directive" {
@@ -12590,7 +12590,7 @@ fn config_payload_actions(
         push_invalid_config_record_warning(warnings, default_loc);
         return Ok(Vec::new());
     }
-    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+    let StructureItemDesc::Pstr_eval(inner) = &items[0].pstr_desc else {
         push_invalid_config_record_warning(warnings, default_loc);
         return Ok(Vec::new());
     };
@@ -12862,7 +12862,7 @@ fn first_config_attribute_of_structure<'s>(
     arena: &ParseArena,
 ) -> Option<&'s crate::parser::ast::Attribute> {
     for item in structure {
-        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+        let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc else {
             return None;
         };
         if arena.get_string(attr.0.txt) == "config" {
@@ -12878,7 +12878,7 @@ fn first_config_attribute_of_signature<'s>(
     arena: &ParseArena,
 ) -> Option<&'s crate::parser::ast::Attribute> {
     for item in signature {
-        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
+        let SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc else {
             return None;
         };
         if arena.get_string(attr.0.txt) == "config" {

@@ -2845,7 +2845,7 @@ fn collect_block_rows_inner(
             };
 
             // Handle module constraint: module M: T = E
-            let (name_doc, mod_expr_to_print) = match &*mod_expr.pmod_desc {
+            let (name_doc, mod_expr_to_print) = match &mod_expr.pmod_desc {
                 ModuleExprDesc::Pmod_constraint(inner_mod_idx, mod_type_idx)
                     if !parsetree_viewer::has_await_attribute(arena, &mod_expr.pmod_attributes) =>
                 {
@@ -6596,7 +6596,7 @@ fn print_mod_expr(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let doc = match &*mod_expr.pmod_desc {
+    let doc = match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => print_longident_location(lid, cmt_tbl, arena),
 
         ModuleExprDesc::Pmod_structure(structure) if structure.is_empty() => {
@@ -6690,13 +6690,13 @@ fn print_mod_expr(
 
             let is_unit_sugar = match args.as_slice() {
                 [arg] => {
-                    matches!(&*arg.pmod_desc, ModuleExprDesc::Pmod_structure(s) if s.is_empty())
+                    matches!(&arg.pmod_desc, ModuleExprDesc::Pmod_structure(s) if s.is_empty())
                 }
                 _ => false,
             };
 
             let should_hug = match args.as_slice() {
-                [arg] => matches!(&*arg.pmod_desc, ModuleExprDesc::Pmod_structure(_)),
+                [arg] => matches!(&arg.pmod_desc, ModuleExprDesc::Pmod_structure(_)),
                 _ => false,
             };
 
@@ -6750,7 +6750,7 @@ fn print_mod_expr(
 
     // Handle await attribute
     let doc = if parsetree_viewer::has_await_attribute(arena, &mod_expr.pmod_attributes) {
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_constraint(_, _) => {
                 Doc::concat(vec![Doc::text("await "), Doc::lparen(), doc, Doc::rparen()])
             }
@@ -6773,7 +6773,7 @@ fn print_mod_functor(
     let (parameters, return_mod_expr) = parsetree_viewer::mod_expr_functor(arena, mod_expr);
 
     // Extract return constraint if present
-    let (return_constraint, return_body) = match &*return_mod_expr.pmod_desc {
+    let (return_constraint, return_body) = match &return_mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint(inner_mod_expr_idx, mod_type_idx) => {
             let mod_type = arena.get_mod_type(*mod_type_idx);
             let constraint_doc = print_module_type(state, mod_type, cmt_tbl, arena);
@@ -6884,7 +6884,7 @@ fn print_mod_apply_arg(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(s) if s.is_empty() => Doc::text("()"),
         _ => print_mod_expr(state, mod_expr, cmt_tbl, arena),
     }
@@ -6899,13 +6899,13 @@ fn print_module_type(
 ) -> Doc {
     // Track whether attributes are printed inside the match arm
     let attrs_already_printed = matches!(
-        &*mty.pmty_desc,
+        &mty.pmty_desc,
         ModuleTypeDesc::Pmty_functor(_)
             | ModuleTypeDesc::Pmty_signature(_)
             | ModuleTypeDesc::Pmty_ident(_)
     );
 
-    let doc = match &*mty.pmty_desc {
+    let doc = match &mty.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => {
             // Print attributes with the identifier
             Doc::concat(vec![
@@ -7145,7 +7145,7 @@ fn print_module_type_functor(
     };
 
     // res_printer.ml:934-947: a signature result keeps its `{` after `=>`.
-    let arrow_sep = match &*return_mty.pmty_desc {
+    let arrow_sep = match &return_mty.pmty_desc {
         ModuleTypeDesc::Pmty_signature(_) => Doc::space(),
         _ => Doc::line(),
     };
@@ -7172,7 +7172,7 @@ fn mod_type_functor<'a>(
         Vec<(&'a [Attribute], &'a StringLoc, Option<&'a ModuleType>)>,
         &'a ModuleType,
     ) {
-        match &*mty.pmty_desc {
+        match &mty.pmty_desc {
             ModuleTypeDesc::Pmty_functor(inner) => {
                 let (ref lbl, ref mod_type_idx, ref return_mty_idx) = **inner;
                 let mut new_acc = acc;
@@ -8018,7 +8018,7 @@ fn print_attribute(
     if arena.get_string(name.txt) == "res.doc" {
         if let Payload::PStr(items) = payload {
             if let [single] = &items[..] {
-                if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc {
+                if let StructureItemDesc::Pstr_eval(eval_inner) = &single.pstr_desc {
                     let (ref expr_idx, _) = **eval_inner;
                     let expr = arena.get_expr(*expr_idx);
                     if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
@@ -8084,7 +8084,7 @@ fn print_payload(
         Payload::PStr(items) if items.is_empty() => Doc::nil(),
         Payload::PStr(items) => {
             if let [single] = &items[..] {
-                match &*single.pstr_desc {
+                match &single.pstr_desc {
                     StructureItemDesc::Pstr_eval(inner) => {
                         let (ref expr_idx, ref attrs) = **inner;
                         let expr = arena.get_expr(*expr_idx);
@@ -8252,7 +8252,7 @@ fn print_signature_item_sequential(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_value(_) | SignatureItemDesc::Psig_type(_) => {}
         SignatureItemDesc::Psig_typext(_)
         | SignatureItemDesc::Psig_exception(_)
@@ -8267,7 +8267,7 @@ fn print_signature_item_sequential(
         }
     }
 
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_value(val_desc) => {
             print_value_description(state, val_desc, cmt_tbl, arena)
         }
@@ -8342,7 +8342,7 @@ fn print_module_declaration(
     let name_doc = print_comments(name_doc, cmt_tbl, decl.pmd_name.loc, arena);
 
     // Check if this is a module alias (Pmty_alias) - uses "=" instead of ":"
-    let body_doc = match &*decl_mod_type.pmty_desc {
+    let body_doc = match &decl_mod_type.pmty_desc {
         ModuleTypeDesc::Pmty_alias(lid) => Doc::concat(vec![
             Doc::text(" = "),
             print_longident(arena, arena.get_longident(lid.txt)),
@@ -8386,7 +8386,7 @@ fn print_rec_module_declarations(
             let name_doc = print_comments(name_doc, cmt_tbl, decl.pmd_name.loc, arena);
 
             // Handle alias vs regular module type
-            let body_doc = match &*decl_mod_type.pmty_desc {
+            let body_doc = match &decl_mod_type.pmty_desc {
                 ModuleTypeDesc::Pmty_alias(lid) => Doc::concat(vec![
                     Doc::text(" = "),
                     print_longident(arena, arena.get_longident(lid.txt)),
@@ -8450,7 +8450,7 @@ fn print_structure_item_sequential(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_type(_) | StructureItemDesc::Pstr_primitive(_) => {}
         StructureItemDesc::Pstr_value(_)
         | StructureItemDesc::Pstr_typext(_)
@@ -8467,7 +8467,7 @@ fn print_structure_item_sequential(
         }
     }
 
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_value(inner) => {
             let (ref rec_flag, ref bindings) = *inner;
             print_value_bindings(state, arena.vb_list(*bindings), rec_flag, cmt_tbl, arena)
@@ -9380,7 +9380,7 @@ fn print_module_binding(
 
     // Handle Pmod_constraint specially - print constraint before equals sign (like OCaml)
     // module X: Int = Y  vs  module X = Y: Int
-    let (expr_doc, constraint_doc) = match &*binding_expr.pmod_desc {
+    let (expr_doc, constraint_doc) = match &binding_expr.pmod_desc {
         ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)
             if !parsetree_viewer::has_await_attribute(arena, &binding_expr.pmod_attributes) =>
         {
@@ -9448,7 +9448,7 @@ fn print_rec_module_bindings(
 
             // Handle Pmod_constraint specially - print constraint before equals sign (like OCaml)
             // module rec X: Int = Y  vs  module rec X = Y: Int
-            let (expr_doc, constraint_doc) = match &*binding_expr.pmod_desc {
+            let (expr_doc, constraint_doc) = match &binding_expr.pmod_desc {
                 ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)
                     if !parsetree_viewer::has_await_attribute(
                         arena,
@@ -9553,14 +9553,14 @@ fn print_include_declaration(
 
     // Special case: include Ident({single type alias})
     // Try to keep on one line if it fits
-    let mod_doc = if let ModuleExprDesc::Pmod_apply(_, _) = &*include_mod.pmod_desc {
+    let mod_doc = if let ModuleExprDesc::Pmod_apply(_, _) = &include_mod.pmod_desc {
         let (args, call_expr) = parsetree_viewer::mod_expr_apply(arena, include_mod);
 
         // Check if callee is an ident and single arg is structure with single type alias
-        if args.len() == 1 && matches!(&*call_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
-            if let ModuleExprDesc::Pmod_structure(items) = &*args[0].pmod_desc {
+        if args.len() == 1 && matches!(&call_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
+            if let ModuleExprDesc::Pmod_structure(items) = &args[0].pmod_desc {
                 if items.len() == 1 {
-                    if let StructureItemDesc::Pstr_type(type_inner) = &*items[0].pstr_desc {
+                    if let StructureItemDesc::Pstr_type(type_inner) = &items[0].pstr_desc {
                         let (_, ref decls) = **type_inner;
                         if decls.len() == 1
                             && matches!(decls[0].ptype_kind, TypeKind::Ptype_abstract)

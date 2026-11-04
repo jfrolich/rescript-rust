@@ -817,7 +817,7 @@ fn get_expression_from_payload(attr: &Attribute, arena: &ParseArena) -> Result<E
             if items.len() != 1 {
                 return Err("Expected expression as attribute payload".to_string());
             }
-            match &*items[0].pstr_desc {
+            match &items[0].pstr_desc {
                 StructureItemDesc::Pstr_eval(inner) => {
                     let (ref expr_idx, _) = **inner;
                     Ok(arena.get_expr(*expr_idx).clone())
@@ -4085,10 +4085,10 @@ fn polyvars_generate_codecs(
 fn unused_value_warning_attribute(arena: &mut ParseArena) -> Attribute {
     let warning = expr_constant_literal(arena, "-32");
     let item = StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((
             arena.push_expr(warning),
             Attributes::new(),
-        )))),
+        ))),
         pstr_loc: arena.dummy_loc(),
     };
     (
@@ -4403,7 +4403,7 @@ fn type_declaration_has_spice_attr(decl: &TypeDeclaration, arena: &ParseArena) -
 }
 
 fn module_type_contains_spice_type_decl(mod_type: &ModuleType, arena: &ParseArena) -> bool {
-    match &*mod_type.pmty_desc {
+    match &mod_type.pmty_desc {
         ModuleTypeDesc::Pmty_signature(items) => items
             .iter()
             .any(|item| signature_item_contains_spice_type_decl(item, arena)),
@@ -4439,7 +4439,7 @@ fn module_type_contains_spice_type_decl(mod_type: &ModuleType, arena: &ParseAren
 }
 
 fn module_expr_contains_spice_type_decl(mod_expr: &ModuleExpr, arena: &ParseArena) -> bool {
-    match &*mod_expr.pmod_desc {
+    match &mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => items
             .iter()
             .any(|item| structure_item_contains_spice_type_decl(item, arena)),
@@ -4467,7 +4467,7 @@ fn module_expr_contains_spice_type_decl(mod_expr: &ModuleExpr, arena: &ParseAren
 }
 
 fn signature_item_contains_spice_type_decl(item: &SignatureItem, arena: &ParseArena) -> bool {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_type(inner) => {
             let (_, decls) = &**inner;
             decls
@@ -4499,7 +4499,7 @@ fn signature_item_contains_spice_type_decl(item: &SignatureItem, arena: &ParseAr
 }
 
 fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseArena) -> bool {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (_, decls) = &**inner;
             decls
@@ -5563,7 +5563,7 @@ fn map_structure_item_spice(
     arena: &mut ParseArena,
     mapper_active: bool,
 ) -> SpiceResult<Vec<StructureItem>> {
-    match &*item.pstr_desc {
+    match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
             let mut vbs = Vec::new();
@@ -5581,10 +5581,7 @@ fn map_structure_item_spice(
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
 
                 let value_item = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_value((
-                        *rec_flag,
-                        arena.push_vb_list(&vbs),
-                    ))),
+                    pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, arena.push_vb_list(&vbs))),
                     pstr_loc: arena.dummy_loc(),
                 };
                 Ok(vec![mapped_item, value_item])
@@ -5698,7 +5695,7 @@ fn generate_sig_decls(
                 pval_loc: arena.dummy_loc(),
             };
             decls.push(SignatureItem {
-                psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+                psig_desc: SignatureItemDesc::Psig_value(Box::new(vd)),
                 psig_loc: arena.dummy_loc(),
             });
         }
@@ -5721,7 +5718,7 @@ fn generate_sig_decls(
             pval_loc: arena.dummy_loc(),
         };
         decls.push(SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+            psig_desc: SignatureItemDesc::Psig_value(Box::new(vd)),
             psig_loc: arena.dummy_loc(),
         });
     }
@@ -5734,7 +5731,7 @@ fn map_signature_item_spice(
     arena: &mut ParseArena,
     mapper_active: bool,
 ) -> SpiceResult<Vec<SignatureItem>> {
-    match &*item.psig_desc {
+    match &item.psig_desc {
         SignatureItemDesc::Psig_type(inner) => {
             let (_, ref decls) = **inner;
             let mut generated = Vec::new();

@@ -80,7 +80,7 @@ pub mod recover {
     /// Create a default module expression for error recovery.
     pub fn default_module_expr() -> ModuleExpr {
         ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::default())),
+            pmod_desc: ModuleExprDesc::Pmod_structure(Box::default()),
             pmod_loc: LocIdx::none(),
             pmod_attributes: Attributes::new(),
         }
@@ -89,7 +89,7 @@ pub mod recover {
     /// Create a default module type for error recovery.
     pub fn default_module_type() -> ModuleType {
         ModuleType {
-            pmty_desc: Box::new(ModuleTypeDesc::Pmty_signature(Box::default())),
+            pmty_desc: ModuleTypeDesc::Pmty_signature(Box::default()),
             pmty_loc: LocIdx::none(),
             pmty_attributes: Attributes::new(),
         }
@@ -101,10 +101,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.sigitemhole");
         let id = mknoloc(str_idx);
         SignatureItem {
-            psig_desc: Box::new(SignatureItemDesc::Psig_extension(Box::new((
+            psig_desc: SignatureItemDesc::Psig_extension(Box::new((
                 (id, Payload::PStr(Box::default())),
                 Attributes::new(),
-            )))),
+            ))),
             psig_loc: LocIdx::none(),
         }
     }
@@ -741,10 +741,7 @@ pub fn doc_comment_to_attribute(
     };
     let expr_idx = arena.push_expr(expr);
     let payload = Payload::PStr(Box::new(vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-            expr_idx,
-            Attributes::new(),
-        )))),
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
         pstr_loc: loc,
     }]));
     (name, payload)
