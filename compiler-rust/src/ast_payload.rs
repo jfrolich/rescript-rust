@@ -48,7 +48,7 @@ pub fn reject_json_literal_payload(
     payload: &Payload,
 ) -> Result<(), PayloadError> {
     if let Some(expression) = unwrapped_payload_expression(arena, payload) {
-        if let ExpressionDesc::Pexp_constant(constant) = &*expression.pexp_desc
+        if let ExpressionDesc::Pexp_constant(constant) = &expression.pexp_desc
             && let Constant::Json(_) = &**constant
         {
             return Err(PayloadError {
@@ -67,7 +67,7 @@ pub fn semantic_string_of_expression(
     expression: &Expression,
 ) -> Result<Option<String>, PayloadError> {
     let expression = unwrap_braces(arena, expression);
-    match &*expression.pexp_desc {
+    match &expression.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
             Constant::String(payload) => Ok(Some(payload.semantic().to_string())),
             _ => Ok(None),
@@ -83,7 +83,7 @@ fn template_semantic(
     arena: &ParseArena,
     expression: &Expression,
 ) -> Result<Option<String>, PayloadError> {
-    let ExpressionDesc::Pexp_template(template) = &*expression.pexp_desc else {
+    let ExpressionDesc::Pexp_template(template) = &expression.pexp_desc else {
         return Ok(None);
     };
     if template.source_segments.len() != 1 || !template.values.is_empty() {
@@ -118,7 +118,7 @@ pub fn string_literal_of_expression(
     expression: &Expression,
 ) -> Result<Option<crate::string_literal::StringLiteral>, PayloadError> {
     let expression = unwrap_braces(arena, expression);
-    match &*expression.pexp_desc {
+    match &expression.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match &**constant {
             Constant::String(payload) => Ok(Some(payload.clone())),
             _ => Ok(None),
@@ -141,7 +141,7 @@ pub fn string_literal_of_payload(
 }
 
 fn single_constant<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<&'a Constant> {
-    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
+    match &unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => Some(constant),
         _ => None,
     }
@@ -174,7 +174,7 @@ fn is_single_bigint(arena: &ParseArena, payload: &Payload) -> Option<String> {
 
 /// OCaml `Ast_payload.is_single_bool`.
 fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
-    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
+    match &unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, _) => match arena.get_longident(lid.txt) {
             crate::parser::longident::Longident::Lident(name) => match arena.get_string(*name) {
                 "true" => Some(true),
@@ -190,7 +190,7 @@ fn is_single_bool(arena: &ParseArena, payload: &Payload) -> Option<bool> {
 /// OCaml `Ast_payload.is_single_ident`, as the name of a simple identifier
 /// (`Some(None)` for any other identifier path).
 fn is_single_ident<'a>(arena: &'a ParseArena, payload: &Payload) -> Option<Option<&'a str>> {
-    match &*unwrapped_payload_expression(arena, payload)?.pexp_desc {
+    match &unwrapped_payload_expression(arena, payload)?.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => match arena.get_longident(lid.txt) {
             crate::parser::longident::Longident::Lident(name) => {
                 Some(Some(arena.get_string(*name)))

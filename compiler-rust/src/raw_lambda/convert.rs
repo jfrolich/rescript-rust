@@ -12,6 +12,7 @@ use crate::diagnostics::{Warning, WarningConfig};
 use crate::ident::{Ident, IdentFlags};
 use crate::js_ir::{Kind, ModuleId};
 use crate::lambda::Constant;
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo,
@@ -22,7 +23,6 @@ use crate::lambda::{
     ApInfo, ApplyStatus, FieldDbgInfo, FunctionAttribute, InlineAttribute, Lambda, Primitive,
     SetFieldDbgInfo,
 };
-use crate::lambda::LamLoc;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::MutableFlag as ParserMutableFlag;
@@ -381,7 +381,7 @@ fn config_payload_flags_contains(
         };
         let (expr_idx, _) = &**inner;
         let expr = arena.get_expr(*expr_idx);
-        let PExpressionDesc::Pexp_record(record) = &*expr.pexp_desc else {
+        let PExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
             return false;
         };
         let (fields, _) = &**record;
@@ -393,13 +393,13 @@ fn config_payload_flags_contains(
                 return false;
             }
             let field_expr = arena.get_expr(field.expr);
-            let PExpressionDesc::Pexp_array(elements) = &*field_expr.pexp_desc else {
+            let PExpressionDesc::Pexp_array(elements) = &field_expr.pexp_desc else {
                 return false;
             };
             elements.iter().any(|elem_idx| {
                 let elem = arena.get_expr(*elem_idx);
                 matches!(
-                    &*elem.pexp_desc,
+                    &elem.pexp_desc,
                     PExpressionDesc::Pexp_constant(c)
                         if matches!(&**c, PConstant::String(s) if s.semantic() == value)
                 )
@@ -785,7 +785,10 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn report_unknown_builtin_primitive(&mut self, loc: SrcLoc, prim_name: &str) {
         if prim_name.starts_with('%') {
-            self.report_diagnostic(self.loc(loc), format!("Unknown builtin primitive \"{prim_name}\""));
+            self.report_diagnostic(
+                self.loc(loc),
+                format!("Unknown builtin primitive \"{prim_name}\""),
+            );
         }
     }
 
@@ -825,10 +828,7 @@ impl<'a> RawLambdaConverter<'a> {
         let wrapped = RawLambda::let_(
             crate::lambda::lam_compat::LetKind::StrictOpt,
             id,
-            crate::raw_lambda::lower::wrap_exn_raw(
-                LamLoc::NONE,
-                RawLambda::var(raw_id.clone()),
-            ),
+            crate::raw_lambda::lower::wrap_exn_raw(LamLoc::NONE, RawLambda::var(raw_id.clone())),
             handler,
         );
         (raw_id, wrapped)
@@ -1542,7 +1542,7 @@ impl<'a> RawLambdaConverter<'a> {
                         self.arena.get_expr(*expr_idx),
                     );
                     if attrs.is_empty()
-                        && let ExpressionDesc::Pexp_ident(ident) = &*expr.pexp_desc
+                        && let ExpressionDesc::Pexp_ident(ident) = &expr.pexp_desc
                     {
                         let lid = self.arena.get_longident(ident.txt);
                         if let Longident::Lident(str_idx) = lid {
@@ -1947,11 +1947,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    fn value_path_loc_constant(
-        &self,
-        path: &crate::types::Path,
-        loc: SrcLoc,
-    ) -> Option<RawLambda> {
+    fn value_path_loc_constant(&self, path: &crate::types::Path, loc: SrcLoc) -> Option<RawLambda> {
         let crate::types::Path::Pdot(prefix, name, _) = path else {
             return None;
         };
@@ -2602,9 +2598,11 @@ impl<'a> RawLambdaConverter<'a> {
         match &prim.prim_kind {
             PrimKind::KindInlineConst(c) => RawLambda::const_(Self::lambda_of_inline_const(c)),
             PrimKind::KindExternal(spec) => match spec.as_ref() {
-                ExternalFfi::FfiObjCreate(labels) => {
-                    RawLambda::prim(Primitive::PjsObjectCreate(labels.clone()), argl, self.lam_loc(loc))
-                }
+                ExternalFfi::FfiObjCreate(labels) => RawLambda::prim(
+                    Primitive::PjsObjectCreate(labels.clone()),
+                    argl,
+                    self.lam_loc(loc),
+                ),
                 ExternalFfi::FfiBs(arg_types, result_type, decl) => {
                     let returns_unit = self.external_returns_unit(env, prim, val_type);
                     let call = RawLambda::prim(
@@ -2848,8 +2846,13 @@ impl<'a> RawLambdaConverter<'a> {
                 self.lam_loc(loc),
             )
         };
-        let callback =
-            RawLambda::function_(1, vec![m], adapted_value, FunctionAttribute::default(), self.lam_loc(loc));
+        let callback = RawLambda::function_(
+            1,
+            vec![m],
+            adapted_value,
+            FunctionAttribute::default(),
+            self.lam_loc(loc),
+        );
         RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "then".to_string(),
@@ -2908,7 +2911,11 @@ impl<'a> RawLambdaConverter<'a> {
             );
         }
         match self.import_source_of_arg(arg) {
-            Some(source) => RawLambda::prim(Primitive::Pimport(Box::new(source)), vec![], self.lam_loc(loc)),
+            Some(source) => RawLambda::prim(
+                Primitive::Pimport(Box::new(source)),
+                vec![],
+                self.lam_loc(loc),
+            ),
             None => RawLambda::unit(),
         }
     }
@@ -4682,13 +4689,11 @@ impl<'a> RawLambdaConverter<'a> {
                     self.apply_coercion_raw(loc, LetKind::Alias, cc_arg, RawLambda::var(param));
                 self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
             }
-            ModuleCoercion::Tcoerce_primitive(pc) => {
-                self.transl_primitive_raw(
-                    &pc.pc_desc,
-                    pc.pc_type,
-                    SrcLoc::from(self.type_ctx.resolve_loc(pc.pc_loc)),
-                )
-            }
+            ModuleCoercion::Tcoerce_primitive(pc) => self.transl_primitive_raw(
+                &pc.pc_desc,
+                pc.pc_type,
+                SrcLoc::from(self.type_ctx.resolve_loc(pc.pc_loc)),
+            ),
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
                     let translated = if let Some(env) = this.type_ctx.get_typed_env(*env_ref) {
@@ -5674,8 +5679,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
-                let body =
-                    self.rebind_included_idents_raw(&mid, &ids, body, incl.incl_loc);
+                let body = self.rebind_included_idents_raw(&mid, &ids, body, incl.incl_loc);
 
                 RawLambda::let_(
                     Self::pure_module(&incl.incl_mod),
@@ -6422,8 +6426,11 @@ impl<'a> RawLambdaConverter<'a> {
                             Primitive::PvalFromOption
                         }
                     });
-                let payload =
-                    RawLambda::prim(from_option, vec![RawLambda::var(*scrut_id)], self.lam_loc(pat_loc));
+                let payload = RawLambda::prim(
+                    from_option,
+                    vec![RawLambda::var(*scrut_id)],
+                    self.lam_loc(pat_loc),
+                );
                 // For Tpat_any, OCaml's matching.ml still creates a binding
                 if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
                     let match_id = self.fresh_ident("match");
@@ -7616,12 +7623,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// are erased at translation. `%identity` is its argument and `%ignore`
     /// sequences its argument with unit; every other primitive is built
     /// through the folding `Lambda.prim`.
-    fn mk_builtin(
-        &mut self,
-        primitive: Primitive,
-        args: Vec<RawLambda>,
-        loc: SrcLoc,
-    ) -> RawLambda {
+    fn mk_builtin(&mut self, primitive: Primitive, args: Vec<RawLambda>, loc: SrcLoc) -> RawLambda {
         match primitive {
             Primitive::Pidentity => {
                 let [arg] = <[RawLambda; 1]>::try_from(args).expect("%identity takes one argument");
@@ -7757,7 +7759,8 @@ mod tests {
             })),
         };
 
-        let lowered = converter.convert_construct_raw(SrcLoc::from(Location::none()), &cstr, &[arg]);
+        let lowered =
+            converter.convert_construct_raw(SrcLoc::from(Location::none()), &cstr, &[arg]);
 
         assert!(matches!(
             lowered,
@@ -7870,9 +7873,9 @@ mod tests {
         let any_ty = ctx.new_var(None);
 
         let directive_expr = crate::parser::ast::Expression {
-            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
                 crate::parser::ast::Constant::string("'use memo'"),
-            ))),
+            )),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         };
@@ -8468,8 +8471,10 @@ mod tests {
         let side_effect = Ident::create_persistent("Side_effect");
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
-        let lowered = converter
-            .translate_module_path_raw(&crate::types::Path::Pident(side_effect), SrcLoc::from(Location::none()));
+        let lowered = converter.translate_module_path_raw(
+            &crate::types::Path::Pident(side_effect),
+            SrcLoc::from(Location::none()),
+        );
         let possible_required_modules = converter.take_possible_required_modules();
 
         assert!(matches!(
@@ -8743,7 +8748,8 @@ mod tests {
             make.name().to_string(),
         );
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
-        let lowered = converter.translate_value_path_raw_in_env(&env, &path, SrcLoc::from(Location::none()));
+        let lowered =
+            converter.translate_value_path_raw_in_env(&env, &path, SrcLoc::from(Location::none()));
 
         let RawLambda::Lprim(make_info) = lowered else {
             panic!("expected value path to lower to make field access");

@@ -1144,10 +1144,10 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     let constraint_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                     let expr_idx = p.arena_mut().push_expr(expr);
                     Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                        pexp_desc: ExpressionDesc::Pexp_constraint(Box::new((
                             expr_idx,
                             pkg_type_idx,
-                        )))),
+                        ))),
                         pexp_loc: constraint_loc,
                         pexp_attributes: Attributes::new(),
                     }
@@ -1731,7 +1731,7 @@ fn parse_type_constraint(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, CoreTypeIdx
             let var_end_idx = p.end_pos_idx();
             p.next();
             let var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(name)),
                 ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
                 ptyp_attributes: Attributes::new(),
             };
@@ -1746,7 +1746,7 @@ fn parse_type_constraint(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, CoreTypeIdx
             p.err(DiagnosticCategory::Lident(token.clone().into_owned()));
             let loc = p.mk_loc_idx_to_prev_end(cstr_start_idx);
             let any = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                ptyp_desc: CoreTypeDesc::Ptyp_any,
                 ptyp_loc: LocIdx::none(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -2136,7 +2136,7 @@ fn parse_let_binding_body(
             let typ_idx = p.arena_mut().push_core_type(poly_type);
             (
                 Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
+                    ppat_desc: PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx))),
                     ppat_loc: loc,
                     ppat_attributes: Attributes::new(),
                 },
@@ -2337,7 +2337,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
             let param_idx = p.arena_mut().push_core_type(typ);
             let ret_idx = p.arena_mut().push_core_type(return_type);
             let arrow = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((
                     Box::new(TypeArg {
                         attrs: Attributes::new(),
                         lbl: ArgLabel::Nolabel,
@@ -2345,7 +2345,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
                     }),
                     ret_idx,
                     p.static_arity_1(),
-                )))),
+                ))),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
@@ -2502,7 +2502,7 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
         _ => return None,
     };
     let typ = CoreType {
-        ptyp_desc: Box::new(desc),
+        ptyp_desc: desc,
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -2747,10 +2747,7 @@ fn label_declaration(
 fn punned_field_type(p: &mut Parser<'_>, name: &Located<StrIdx>, attrs: Attributes) -> CoreType {
     let lid_idx = p.push_lident_from_idx(name.txt);
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
-            with_loc(lid_idx, name.loc),
-            vec![],
-        )))),
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, name.loc), vec![]))),
         ptyp_loc: name.loc,
         ptyp_attributes: attrs,
     }
@@ -2985,7 +2982,7 @@ fn object_fields_of_labels(fields: Vec<LabelDeclaration>, p: &mut Parser<'_>) ->
 
 fn object_type(fields: Vec<ObjectField>, closed: ClosedFlag, loc: LocIdx) -> CoreType {
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+        ptyp_desc: CoreTypeDesc::Ptyp_object(Box::new((fields, closed))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -4156,7 +4153,7 @@ pub(super) fn raw_source_extension_payload(
     {
         let expr_idx = eval.0;
         let expr = p.arena_mut().get_expr_mut(expr_idx);
-        if let ExpressionDesc::Pexp_constant(constant) = &mut *expr.pexp_desc
+        if let ExpressionDesc::Pexp_constant(constant) = &mut expr.pexp_desc
             && let Constant::String(literal) = &**constant
         {
             let source = literal.source().to_string();

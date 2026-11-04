@@ -124,7 +124,7 @@ pub fn field(
 
 fn constant_expression(loc: LocIdx, constant: Constant) -> Expression {
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(constant))),
+        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(constant)),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -220,10 +220,10 @@ fn constructor_attributes_in(target: PayloadArena<'_>, cd: &ConstructorDeclarati
         ConstructorTag::Pct_bool(b) => {
             let lid = arena.runtime_tag_lident(if *b { "true" } else { "false" });
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
+                pexp_desc: ExpressionDesc::Pexp_construct(
                     Located::new(lid, loc),
                     Box::new(Located::new(Vec::new(), loc)),
-                )),
+                ),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -235,7 +235,7 @@ fn constructor_attributes_in(target: PayloadArena<'_>, cd: &ConstructorDeclarati
                 "undefined"
             });
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located::new(lid, loc))),
+                pexp_desc: ExpressionDesc::Pexp_ident(Located::new(lid, loc)),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }

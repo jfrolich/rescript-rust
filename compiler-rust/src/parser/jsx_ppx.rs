@@ -480,7 +480,7 @@ fn spelunk_for_fun_expression(
     expr_idx: ExprIdx,
 ) -> (Option<Expression>, bool, Expression) {
     let expr = arena.get_expr(expr_idx).clone();
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => spelunk_for_fun_expression(arena, braces.expr),
         // let make = (~prop) => ...
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => (None, false, expr),
@@ -494,11 +494,11 @@ fn spelunk_for_fun_expression(
                 binding_wrapper,
                 has_forward_ref,
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                    pexp_desc: ExpressionDesc::Pexp_let(Box::new((
                         *rec_flag,
                         bindings.clone(),
                         inner_expr_idx,
-                    )))),
+                    ))),
                     pexp_loc: expr.pexp_loc,
                     pexp_attributes: expr.pexp_attributes.clone(),
                 },
@@ -524,10 +524,7 @@ fn spelunk_for_fun_expression(
                 binding_wrapper,
                 has_forward_ref,
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(
-                        wrapper_expr_idx,
-                        inner_expr_idx,
-                    )),
+                    pexp_desc: ExpressionDesc::Pexp_sequence(wrapper_expr_idx, inner_expr_idx),
                     pexp_loc: expr.pexp_loc,
                     pexp_attributes: expr.pexp_attributes.clone(),
                 },
@@ -635,17 +632,17 @@ fn transform_react_component_binding(
     // Create record pattern: {a, b, _}: props<'a, 'b>
     let record_pattern = if patterns_with_label.is_empty() {
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_desc: PatternDesc::Ppat_any,
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
         }
     } else {
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
+            ppat_desc: PatternDesc::Ppat_record(Box::new((
                 patterns_with_label,
                 ClosedFlag::Open,
                 None,
-            )))),
+            ))),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
         }
@@ -659,7 +656,7 @@ fn transform_react_component_binding(
             vec![]
         } else {
             vec![CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                ptyp_desc: CoreTypeDesc::Ptyp_any,
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             }]
@@ -679,13 +676,13 @@ fn transform_react_component_binding(
         .map(|ct| arena.push_core_type(ct.clone()))
         .collect();
     let props_constr = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: props_lid_idx,
                 loc: config.empty_loc,
             },
             props_type_params_idx,
-        )))),
+        ))),
         ptyp_loc: config.empty_loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -693,10 +690,7 @@ fn transform_react_component_binding(
     let record_pattern_idx = arena.push_pat(record_pattern);
     let props_constr_idx = arena.push_core_type(props_constr);
     let constrained_pattern = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-            record_pattern_idx,
-            props_constr_idx,
-        )))),
+        ppat_desc: PatternDesc::Ppat_constraint(Box::new((record_pattern_idx, props_constr_idx))),
         ppat_loc: empty_loc(),
         ppat_attributes: Attributes::new(),
     };
@@ -707,7 +701,7 @@ fn transform_react_component_binding(
         .into_iter()
         .map(|pattern| {
             let is_ref_var = matches!(
-                &*pattern.ppat_desc,
+                &pattern.ppat_desc,
                 PatternDesc::Ppat_var(name) if arena.get_string(name.txt) == "ref"
             );
             if !is_ref_var {
@@ -715,7 +709,7 @@ fn transform_react_component_binding(
             }
             // `ref_type Location.none`.
             let ref_type_var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref"))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -731,23 +725,20 @@ fn transform_react_component_binding(
             ));
             let ref_type_var_idx = arena.push_core_type(ref_type_var);
             let js_nullable_t = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
                     Loc {
                         txt: js_nullable_t_lid,
                         loc: empty_loc(),
                     },
                     vec![ref_type_var_idx],
-                )))),
+                ))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
             let pattern_idx = arena.push_pat(pattern);
             let js_nullable_t_idx = arena.push_core_type(js_nullable_t);
             Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                    pattern_idx,
-                    js_nullable_t_idx,
-                )))),
+                ppat_desc: PatternDesc::Ppat_constraint(Box::new((pattern_idx, js_nullable_t_idx))),
                 ppat_loc: empty_loc(),
                 ppat_attributes: Attributes::new(),
             }
@@ -779,14 +770,14 @@ fn transform_react_component_binding(
     // OCaml `Exp.fun_ ~async ~newtypes (props_param :: nolabel_params)` has no
     // location or attributes of its own.
     let inner_func_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+        pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: constrained_pattern_idx,
             rhs: expression_idx,
             arity,
             is_async,
-        }))),
+        })),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -794,7 +785,7 @@ fn transform_react_component_binding(
     // Current Parsetree stores locally abstract types directly on the n-ary
     // function rather than as nested Pexp_newtype wrappers.
     let func_expr = inner_func_expr;
-    if let ExpressionDesc::Pexp_fun(fun) = &*func_expr.pexp_desc
+    if let ExpressionDesc::Pexp_fun(fun) = &func_expr.pexp_desc
         && !newtypes.is_empty()
     {
         arena.set_nary_fun_newtypes(fun.lhs, newtypes);
@@ -840,10 +831,10 @@ fn transform_react_component_binding(
         );
         let inner_binding = ValueBinding {
             pvb_pat: arena.push_pat(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                ppat_desc: PatternDesc::Ppat_var(Loc {
                     txt: binding_name_idx,
                     loc: config.empty_loc,
-                })),
+                }),
                 ppat_loc: config.empty_loc,
                 ppat_attributes: Attributes::new(),
             }),
@@ -856,19 +847,19 @@ fn transform_react_component_binding(
         let binding_str_idx = arena.push_interned_string(&binding_name);
         let binding_lid_idx = arena.push_longident(Longident::Lident(binding_str_idx));
         let ident_expr_idx = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+            pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                 txt: binding_lid_idx,
                 loc: config.empty_loc,
-            })),
+            }),
             pexp_loc: *pstr_loc,
             pexp_attributes: Attributes::new(),
         });
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+            pexp_desc: ExpressionDesc::Pexp_let(Box::new((
                 RecFlag::Nonrecursive,
                 vec![inner_binding],
                 ident_expr_idx,
-            )))),
+            ))),
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
         }
@@ -887,12 +878,12 @@ fn transform_react_component_binding(
         let wrapper_idx = arena.push_expr(wrapper_expr);
         let full_expression_idx = arena.push_expr(full_expression);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct: wrapper_idx,
                 args: vec![(ArgLabel::Nolabel, full_expression_idx)],
                 partial: false,
                 transformed_jsx: false,
-            }))),
+            })),
             // OCaml uses ghost location for the outer Pexp_apply wrapper.
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
@@ -908,10 +899,10 @@ fn transform_react_component_binding(
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let transformed_binding = ValueBinding {
         pvb_pat: arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+            ppat_desc: PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
                 loc: empty_loc(),
-            })),
+            }),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
         }),
@@ -924,10 +915,10 @@ fn transform_react_component_binding(
         let fn_name_idx = arena.push_interned_string(&fn_name);
         Some(ValueBinding {
             pvb_pat: arena.push_pat(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                ppat_desc: PatternDesc::Ppat_var(Loc {
                     txt: fn_name_idx,
                     loc: fn_name_loc,
-                })),
+                }),
                 ppat_loc: fn_name_loc,
                 ppat_attributes: Attributes::new(),
             }),
@@ -991,30 +982,30 @@ fn transform_react_component_with_props_binding(
     let props_str_idx = arena.intern_string("props");
     let props_lid = arena.push_longident(Longident::Lident(props_str_idx));
     let funct_idx = arena.push_expr(Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+        pexp_desc: ExpressionDesc::Pexp_ident(Loc {
             txt: called_fn_lid,
             loc: config.empty_loc,
-        })),
+        }),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     });
     let applied_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct: funct_idx,
             args: vec![(
                 ArgLabel::Nolabel,
                 arena.push_expr(Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                         txt: props_lid,
                         loc: config.empty_loc,
-                    })),
+                    }),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
                 }),
             )],
             partial: false,
             transformed_jsx: false,
-        }))),
+        })),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -1032,14 +1023,14 @@ fn transform_react_component_with_props_binding(
     // Create wrapper expression: props => constrained_expr
     let constrained_expr_idx = arena.push_expr(constrained_expr);
     let wrapper_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+        pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: arena.push_pat(props_pattern),
             rhs: constrained_expr_idx,
             arity: arena.push_arity(Some(1)),
             is_async: false,
-        }))),
+        })),
         pexp_loc: empty_loc(),
         pexp_attributes: arena.get_expr(binding.pvb_expr).pexp_attributes.clone(),
     };
@@ -1048,14 +1039,14 @@ fn transform_react_component_with_props_binding(
     let full_module_name_idx = arena.push_interned_string(&full_module_name);
     let full_module_name_idx2 = arena.push_interned_string(&full_module_name);
     let internal_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+        pexp_desc: ExpressionDesc::Pexp_let(Box::new((
             RecFlag::Nonrecursive,
             vec![ValueBinding {
                 pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                    ppat_desc: PatternDesc::Ppat_var(Loc {
                         txt: full_module_name_idx,
                         loc: config.empty_loc,
-                    })),
+                    }),
                     ppat_loc: empty_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -1066,15 +1057,15 @@ fn transform_react_component_with_props_binding(
             {
                 let lid = arena.push_longident(Longident::Lident(full_module_name_idx2));
                 arena.push_expr(Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                         txt: lid,
                         loc: config.empty_loc,
-                    })),
+                    }),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
                 })
             },
-        )))),
+        ))),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -1088,10 +1079,10 @@ fn transform_react_component_with_props_binding(
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let new_binding = ValueBinding {
         pvb_pat: arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+            ppat_desc: PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
                 loc: config.empty_loc,
-            })),
+            }),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
         }),
@@ -1109,10 +1100,10 @@ fn transform_react_component_with_props_binding(
             let transformed_original = transform_expression(original_expr, config, arena);
             let modified_binding = ValueBinding {
                 pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                    ppat_desc: PatternDesc::Ppat_var(Loc {
                         txt: internal_fn_name_idx,
                         loc: empty_loc(),
-                    })),
+                    }),
                     ppat_loc: empty_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -1150,7 +1141,7 @@ fn wrap_function_body_with_constraint(
     expr: Expression,
     config: &JsxConfig,
 ) -> Expression {
-    match *expr.pexp_desc {
+    match expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
                 arg_label,
@@ -1165,14 +1156,14 @@ fn wrap_function_body_with_constraint(
             let wrapped_rhs = wrap_function_body_with_constraint(arena, rhs_expr, config);
             let wrapped_rhs_idx = arena.push_expr(wrapped_rhs);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                     arg_label,
                     default,
                     lhs,
                     rhs: wrapped_rhs_idx,
                     arity,
                     is_async,
-                }))),
+                })),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes,
             }
@@ -1186,16 +1177,16 @@ fn wrap_function_body_with_constraint(
 
 /// Create props pattern for componentWithProps based on the original function's pattern
 fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression, loc: Location) -> Pattern {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref lhs, .. } = **inner;
             let lhs = arena.get_pat(*lhs);
-            match &*lhs.ppat_desc {
+            match &lhs.ppat_desc {
                 PatternDesc::Ppat_constraint(inner) => {
                     let (_, ref typ_idx) = **inner;
                     let has_props_constraint_args = {
                         let typ = arena.get_core_type(*typ_idx);
-                        match &*typ.ptyp_desc {
+                        match &typ.ptyp_desc {
                             CoreTypeDesc::Ptyp_constr(inner)
                                 if arena.is_lident(inner.0.txt, "props") =>
                             {
@@ -1211,16 +1202,16 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression, loc: Locat
                             let props_lid = arena.push_longident(Longident::Lident(props_str_idx));
                             let inner_pat_name = arena.intern_string("props");
                             let inner_pat_idx = arena.push_pat(Pattern {
-                                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                                ppat_desc: PatternDesc::Ppat_var(Loc {
                                     txt: inner_pat_name,
                                     loc,
-                                })),
+                                }),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
                             });
                             let props_type_args = if has_args {
                                 let any_type_idx = arena.push_core_type(CoreType {
-                                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                                    ptyp_desc: CoreTypeDesc::Ptyp_any,
                                     ptyp_loc: empty_loc(),
                                     ptyp_attributes: Attributes::new(),
                                 });
@@ -1229,21 +1220,21 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression, loc: Locat
                                 vec![]
                             };
                             let props_type_idx = arena.push_core_type(CoreType {
-                                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
                                     Loc {
                                         txt: props_lid,
                                         loc,
                                     },
                                     props_type_args,
-                                )))),
+                                ))),
                                 ptyp_loc: empty_loc(),
                                 ptyp_attributes: Attributes::new(),
                             });
                             Pattern {
-                                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                                ppat_desc: PatternDesc::Ppat_constraint(Box::new((
                                     inner_pat_idx,
                                     props_type_idx,
-                                )))),
+                                ))),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
                             }
@@ -1261,10 +1252,10 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression, loc: Locat
 fn simple_props_pattern(arena: &mut ParseArena, loc: Location) -> Pattern {
     let props_str_idx = arena.intern_string("props");
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+        ppat_desc: PatternDesc::Ppat_var(Loc {
             txt: props_str_idx,
             loc,
-        })),
+        }),
         ppat_loc: empty_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -1279,20 +1270,20 @@ fn wrap_with_jsx_promise(arena: &mut ParseArena, expr: Expression) -> Expression
         promise_idx,
     ));
     let funct_idx = arena.push_expr(Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+        pexp_desc: ExpressionDesc::Pexp_ident(Loc {
             txt: promise_lid,
             loc: empty_loc(),
-        })),
+        }),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     });
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct: funct_idx,
             args: vec![(ArgLabel::Nolabel, arena.push_expr(expr))],
             partial: false,
             transformed_jsx: false,
-        }))),
+        })),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -1301,7 +1292,7 @@ fn wrap_with_jsx_promise(arena: &mut ParseArena, expr: Expression) -> Expression
 /// Check if expression is an async function
 fn is_async_function(arena: &ParseArena, expr_idx: ExprIdx) -> bool {
     let expr = arena.get_expr(expr_idx);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { ref is_async, .. } = **inner;
             *is_async
@@ -1330,10 +1321,10 @@ fn make_props_wrapper_expr_with_ref(
 ) -> Expression {
     let props_str_idx_pat = arena.intern_string("props");
     let props_pattern = Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+        ppat_desc: PatternDesc::Ppat_var(Loc {
             txt: props_str_idx_pat,
             loc: empty_loc(),
-        })),
+        }),
         ppat_loc: empty_loc(),
         ppat_attributes: Attributes::new(),
     };
@@ -1342,28 +1333,25 @@ fn make_props_wrapper_expr_with_ref(
     let final_pattern = if has_props {
         let props_str_idx = arena.intern_string("props");
         let any_type_idx = arena.push_core_type(CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+            ptyp_desc: CoreTypeDesc::Ptyp_any,
             ptyp_loc: empty_loc(),
             ptyp_attributes: Attributes::new(),
         });
         let props_type = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
                 Loc {
                     txt: arena.push_longident(Longident::Lident(props_str_idx)),
                     loc: empty_loc(),
                 },
                 vec![any_type_idx],
-            )))),
+            ))),
             ptyp_loc: empty_loc(),
             ptyp_attributes: Attributes::new(),
         };
         let props_pattern_idx = arena.push_pat(props_pattern);
         let props_type_idx = arena.push_core_type(props_type);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                props_pattern_idx,
-                props_type_idx,
-            )))),
+            ppat_desc: PatternDesc::Ppat_constraint(Box::new((props_pattern_idx, props_type_idx))),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
         }
@@ -1377,10 +1365,10 @@ fn make_props_wrapper_expr_with_ref(
     let mut apply_args = vec![(
         ArgLabel::Nolabel,
         arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+            pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                 txt: props_lid2,
                 loc: empty_loc(),
-            })),
+            }),
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
         }),
@@ -1393,10 +1381,10 @@ fn make_props_wrapper_expr_with_ref(
         apply_args.push((
             ArgLabel::Nolabel,
             arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: ref_lid,
                     loc: empty_loc(),
-                })),
+                }),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             }),
@@ -1409,20 +1397,20 @@ fn make_props_wrapper_expr_with_ref(
     let fn_str_idx2 = arena.push_interned_string(fn_name);
     let fn_lid = arena.push_longident(Longident::Lident(fn_str_idx2));
     let funct_idx = arena.push_expr(Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+        pexp_desc: ExpressionDesc::Pexp_ident(Loc {
             txt: fn_lid,
             loc: empty_loc(),
-        })),
+        }),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     });
     let apply_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct: funct_idx,
             args: apply_args,
             partial: false,
             transformed_jsx: false,
-        }))),
+        })),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -1440,23 +1428,23 @@ fn make_props_wrapper_expr_with_ref(
     let inner_expr = if has_forward_ref {
         let ref_str_idx_pat = arena.intern_string("ref");
         let ref_pattern = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+            ppat_desc: PatternDesc::Ppat_var(Loc {
                 txt: ref_str_idx_pat,
                 loc: empty_loc(),
-            })),
+            }),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),
         };
         let apply_expr_idx = arena.push_expr(apply_expr);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+            pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
                 default: None,
                 lhs: arena.push_pat(ref_pattern),
                 rhs: apply_expr_idx,
                 arity: arena.push_arity(None),
                 is_async: false,
-            }))),
+            })),
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
         }
@@ -1469,14 +1457,14 @@ fn make_props_wrapper_expr_with_ref(
     // OCaml line 632: ~attrs:binding.pvb_expr.pexp_attributes
     let inner_expr_idx = arena.push_expr(inner_expr);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+        pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: ArgLabel::Nolabel,
             default: None,
             lhs: arena.push_pat(final_pattern),
             rhs: inner_expr_idx,
             arity: arena.push_arity(Some(total_arity)),
             is_async: false,
-        }))),
+        })),
         pexp_loc: empty_loc(),
         pexp_attributes: expr_attrs,
     }
@@ -1485,12 +1473,12 @@ fn make_props_wrapper_expr_with_ref(
 /// Strip Ppat_constraint from a pattern, EXCEPT for Ptyp_package constraints (first-class modules)
 /// Matches OCaml's strip_constraint_unpack
 fn strip_pattern_constraint(arena: &ParseArena, pat: &Pattern) -> Pattern {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_constraint(inner) => {
             let (ref inner_idx, ref core_type_idx) = **inner;
             let core_type = arena.get_core_type(*core_type_idx);
             // Keep first-class module constraints (Ptyp_package)
-            if matches!(*core_type.ptyp_desc, CoreTypeDesc::Ptyp_package(..)) {
+            if matches!(core_type.ptyp_desc, CoreTypeDesc::Ptyp_package(..)) {
                 pat.clone()
             } else {
                 // Recursively strip other constraints
@@ -1521,7 +1509,7 @@ fn returned_expression(
     expr: &Expression,
     params_acc: &mut ReturnedParams,
 ) -> Expression {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_constraint(inner) => {
             let inner = arena.get_expr(inner.0).clone();
             returned_expression(arena, &inner, params_acc)
@@ -1536,7 +1524,7 @@ fn returned_expression(
             for (index, param) in params.iter().enumerate() {
                 let pattern = arena.get_pat(param.p_pat).clone();
                 if matches!(
-                    &*pattern.ppat_desc,
+                    &pattern.ppat_desc,
                     PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()")
                 ) {
                     let rest = &params[index + 1..];
@@ -1548,14 +1536,14 @@ fn returned_expression(
                     let unknown_arity = arena.push_arity(None);
                     arena.set_nary_fun_params(arity, rest.to_vec(), unknown_arity);
                     return Expression {
-                        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                        pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                             arg_label: rest[0].p_lbl,
                             default: rest[0].p_default,
                             lhs: rest[0].p_pat,
                             rhs: body_idx,
                             arity,
                             is_async: false,
-                        }))),
+                        })),
                         pexp_loc: empty_loc(),
                         pexp_attributes: Attributes::new(),
                     };
@@ -1602,10 +1590,10 @@ fn build_props_pattern_and_body(
         let mut pat = if *has_default {
             let prefixed_str_idx = arena.push_string(format!("__{}", label));
             Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                ppat_desc: PatternDesc::Ppat_var(Loc {
                     txt: prefixed_str_idx,
                     loc: base_pat.ppat_loc,
-                })),
+                }),
                 // OCaml compiler/syntax/src/jsx_v4.ml:693-700 calls Pat.var
                 // without an outer ~loc, so Ast_helper.Pat.var uses
                 // Location.none for ppat_loc while the inner variable loc
@@ -1668,18 +1656,18 @@ fn add_default_value_matches(
             let label_name_str_idx2 = arena.push_interned_string(&label_name);
             let scrutinee_lid = arena.push_longident(Longident::Lident(prefixed_str_idx));
             let match_scrutinee_idx = arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: scrutinee_lid,
                     loc: empty_loc(),
-                })),
+                }),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             });
             let some_inner_pat_idx = arena.push_pat(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                ppat_desc: PatternDesc::Ppat_var(Loc {
                     txt: label_name_str_idx2,
                     loc: empty_loc(),
-                })),
+                }),
                 ppat_loc: empty_loc(),
                 ppat_attributes: Attributes::new(),
             });
@@ -1687,28 +1675,28 @@ fn add_default_value_matches(
             let label_name_lid = arena.push_longident(Longident::Lident(label_name_str_idx));
             let none_lid = arena.push_longident(Longident::Lident(none_str_idx));
             let match_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_match(Box::new((
                     match_scrutinee_idx,
                     vec![
                         Case {
                             pc_bar: None,
                             pc_lhs: arena.push_pat(Pattern {
-                                ppat_desc: Box::new(PatternDesc::Ppat_construct(
+                                ppat_desc: PatternDesc::Ppat_construct(
                                     Loc {
                                         txt: some_lid,
                                         loc: empty_loc(),
                                     },
                                     ctor_args(vec![some_inner_pat_idx], empty_loc()),
-                                )),
+                                ),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
                             }),
                             pc_guard: None,
                             pc_rhs: arena.push_expr(Expression {
-                                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                                     txt: label_name_lid,
                                     loc: empty_loc(),
-                                })),
+                                }),
                                 pexp_loc: empty_loc(),
                                 pexp_attributes: Attributes::new(),
                             }),
@@ -1716,13 +1704,13 @@ fn add_default_value_matches(
                         Case {
                             pc_bar: None,
                             pc_lhs: arena.push_pat(Pattern {
-                                ppat_desc: Box::new(PatternDesc::Ppat_construct(
+                                ppat_desc: PatternDesc::Ppat_construct(
                                     Loc {
                                         txt: none_lid,
                                         loc: empty_loc(),
                                     },
                                     ctor_args(Vec::new(), empty_loc()),
-                                )),
+                                ),
                                 ppat_loc: empty_loc(),
                                 ppat_attributes: Attributes::new(),
                             }),
@@ -1730,7 +1718,7 @@ fn add_default_value_matches(
                             pc_rhs: arena.push_expr(default.clone()),
                         },
                     ],
-                )))),
+                ))),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             };
@@ -1739,10 +1727,10 @@ fn add_default_value_matches(
             let resolved_str_idx = arena.push_string(resolved_name.clone());
             let value_binding = ValueBinding {
                 pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                    ppat_desc: PatternDesc::Ppat_var(Loc {
                         txt: resolved_str_idx,
                         loc: arg.loc,
-                    })),
+                    }),
                     ppat_loc: empty_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -1755,10 +1743,10 @@ fn add_default_value_matches(
             let resolved_lid_str_idx = arena.intern_string(&resolved_name);
             let resolved_lid = arena.push_longident(Longident::Lident(resolved_lid_str_idx));
             let resolved_ident_idx = arena.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: resolved_lid,
                     loc: empty_loc(),
-                })),
+                }),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             });
@@ -1771,21 +1759,21 @@ fn add_default_value_matches(
 
             let expr_idx = arena.push_expr(expr);
             let inner_let = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
                     RecFlag::Nonrecursive,
                     vec![inner_binding],
                     expr_idx,
-                )))),
+                ))),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             };
             let inner_let_idx = arena.push_expr(inner_let);
             expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
                     RecFlag::Nonrecursive,
                     vec![value_binding],
                     inner_let_idx,
-                )))),
+                ))),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             };
@@ -1916,7 +1904,7 @@ fn transform_react_component_sig(
                 .iter()
                 .map(|_| {
                     arena.push_core_type(CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                        ptyp_desc: CoreTypeDesc::Ptyp_any,
                         ptyp_loc: empty_loc(),
                         ptyp_attributes: Attributes::new(),
                     })
@@ -1939,13 +1927,13 @@ fn transform_react_component_sig(
     // Typ.constr without ~loc uses Location.none for ptyp_loc
     let props_str_idx = arena.intern_string("props");
     let props_type_ref = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: arena.push_longident(Longident::Lident(props_str_idx)),
                 loc: *loc,
             }, // longident uses psig_loc
             props_type_params,
-        )))),
+        ))),
         ptyp_loc: empty_loc(), // OCaml: Typ.constr without ~loc defaults to Location.none
         ptyp_attributes: Attributes::new(),
     };
@@ -1956,7 +1944,7 @@ fn transform_react_component_sig(
     let component_str_idx = arena.intern_string("component");
     let props_type_ref_idx = arena.push_core_type(props_type_ref);
     let component_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: arena.push_longident(Longident::Ldot(
                     Box::new(Longident::Lident(react_str_idx)),
@@ -1965,7 +1953,7 @@ fn transform_react_component_sig(
                 loc: *loc, // OCaml: {loc = psig_loc; txt = ...}
             },
             vec![props_type_ref_idx],
-        )))),
+        ))),
         ptyp_loc: arena.get_core_type(vd.pval_type).ptyp_loc, // OCaml: {pval_type with ...} preserves ptyp_loc
         ptyp_attributes: Attributes::new(),
     };
@@ -2058,7 +2046,7 @@ fn transform_react_component_external(
                 .iter()
                 .map(|_| {
                     arena.push_core_type(CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+                        ptyp_desc: CoreTypeDesc::Ptyp_any,
                         ptyp_loc: empty_loc(),
                         ptyp_attributes: Attributes::new(),
                     })
@@ -2079,13 +2067,13 @@ fn transform_react_component_external(
     // OCaml uses the external's full location for the props type and its longident
     let props_str_idx = arena.intern_string("props");
     let props_type_ref = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: arena.push_longident(Longident::Lident(props_str_idx)),
                 loc: *loc,
             },
             props_type_params,
-        )))),
+        ))),
         ptyp_loc: *loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -2095,13 +2083,13 @@ fn transform_react_component_external(
     let component_str_idx = arena.intern_string("component");
     let props_type_ref_idx = arena.push_core_type(props_type_ref);
     let component_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: module_access_name_with_idx(arena, config, component_str_idx),
                 loc: *loc,
             },
             vec![props_type_ref_idx],
-        )))),
+        ))),
         ptyp_loc: arena.get_core_type(vd.pval_type).ptyp_loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -2138,8 +2126,8 @@ fn make_props_record_type_with_live(
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                    safe_type_from_value(&nt.label),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
+                    &nt.label,
                 )))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
@@ -2176,8 +2164,8 @@ fn make_props_record_type_with_live(
         .filter(|nt| nt.label != "key")
         .map(|nt| {
             let var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                    safe_type_from_value(&nt.label),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
+                    &nt.label,
                 )))),
                 ptyp_loc: nt.loc,
                 ptyp_attributes: Attributes::new(),
@@ -2243,10 +2231,10 @@ fn collect_prop_types_rec(
     typ: &CoreType,
     types: &mut Vec<(ArgLabel, Attributes, Location, CoreTypeIdx)>,
 ) {
-    if let CoreTypeDesc::Ptyp_arrow(ptyp_inner) = &*typ.ptyp_desc {
+    if let CoreTypeDesc::Ptyp_arrow(ptyp_inner) = &typ.ptyp_desc {
         let (ref first_arg, ref ret_idx, ref arity) = **ptyp_inner;
         let ret = arena.get_core_type(*ret_idx);
-        let ret_is_arrow = matches!(*ret.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
+        let ret_is_arrow = matches!(ret.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
         let args = arena.nary_arrow_args(first_arg, *arity);
         let last = args.len().saturating_sub(1);
         for (index, arg) in args.iter().enumerate() {
@@ -2356,12 +2344,12 @@ fn core_type_of_attrs(arena: &ParseArena, attrs: &Attributes) -> Option<CoreType
 
 /// Extract type variables from a core type (for sharedProps<'a, 'b>)
 fn typ_vars_of_core_type(arena: &ParseArena, typ: &CoreType) -> Vec<CoreType> {
-    match &*typ.ptyp_desc {
+    match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (_, ref args) = **inner;
             args.iter()
                 .map(|t| arena.get_core_type(*t))
-                .filter(|t| matches!(*t.ptyp_desc, CoreTypeDesc::Ptyp_var(_)))
+                .filter(|t| matches!(t.ptyp_desc, CoreTypeDesc::Ptyp_var(_)))
                 .cloned()
                 .collect()
         }
@@ -2371,7 +2359,7 @@ fn typ_vars_of_core_type(arena: &ParseArena, typ: &CoreType) -> Vec<CoreType> {
 
 /// Check if an expression is React.forwardRef
 fn is_forward_ref(arena: &ParseArena, expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_ident(loc) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_ident(loc) = &expr.pexp_desc {
         if let Longident::Ldot(base, field_idx) = arena.get_longident(loc.txt) {
             if let Longident::Lident(m_idx) = base.as_ref() {
                 let m = arena.get_string(*m_idx);
@@ -2390,7 +2378,7 @@ fn component_with_props_forward_ref_error_loc(
     expr_idx: ExprIdx,
 ) -> Option<Location> {
     let expr = arena.get_expr(expr_idx);
-    let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc else {
         return None;
     };
     match apply.args.as_slice() {
@@ -2406,7 +2394,7 @@ fn component_with_props_forward_ref_fun_error_loc(
     expr_idx: ExprIdx,
 ) -> Option<Location> {
     let expr = arena.get_expr(expr_idx);
-    let ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_fun(fun) = &expr.pexp_desc else {
         return None;
     };
     let has_labelled = arena
@@ -2430,7 +2418,7 @@ fn component_props_need_labelled_error_loc(
     has_application: bool,
 ) -> Option<Location> {
     let expr = arena.get_expr(expr_idx);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(fun) => {
             let params = arena.nary_fun_params(fun);
             let first = params.first()?;
@@ -2478,7 +2466,7 @@ fn find_function_expression(
     through_application: bool,
 ) -> Result<&Expression, &Expression> {
     let expr = arena.get_expr(expr_idx);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => Ok(expr),
         ExpressionDesc::Pexp_braces(braces) => {
             find_function_expression(arena, braces.expr, through_application)
@@ -2527,22 +2515,22 @@ fn component_call_needs_function_error_loc(
 }
 
 fn pattern_is_plain_name_or_constraint(pat: &Pattern, arena: &ParseArena) -> bool {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_var(_) => true,
         PatternDesc::Ppat_constraint(inner) => {
             let (inner_pat_idx, _) = &**inner;
             let inner_pat = arena.get_pat(*inner_pat_idx);
-            matches!(&*inner_pat.ppat_desc, PatternDesc::Ppat_var(_))
+            matches!(&inner_pat.ppat_desc, PatternDesc::Ppat_var(_))
         }
         _ => false,
     }
 }
 
 fn pattern_is_unit_or_any(arena: &ParseArena, pat: &Pattern) -> bool {
-    if matches!(&*pat.ppat_desc, PatternDesc::Ppat_any) {
+    if matches!(&pat.ppat_desc, PatternDesc::Ppat_any) {
         return true;
     }
-    if let PatternDesc::Ppat_construct(loc, _) = &*pat.ppat_desc {
+    if let PatternDesc::Ppat_construct(loc, _) = &pat.ppat_desc {
         return arena.is_lident(loc.txt, "()");
     }
     false
@@ -2562,7 +2550,7 @@ fn string_int_attribute_loc_in_core_type(
     if let Some(loc) = string_int_attribute_loc_in_attrs(arena, &typ.ptyp_attributes) {
         return Some(loc);
     }
-    match &*typ.ptyp_desc {
+    match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (arg, ret, _) = &**inner;
             string_int_attribute_loc_in_attrs(arena, &arg.attrs)
@@ -2611,7 +2599,7 @@ fn get_fn_name(
     pat: &Pattern,
     pat_loc: Location,
 ) -> String {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_var(loc) => arena.get_string(loc.txt).to_string(),
         PatternDesc::Ppat_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
@@ -2630,7 +2618,7 @@ fn get_fn_name(
 /// For Ppat_constraint, returns the OUTER constraint's location (not the inner pattern's)
 /// This matches OCaml's jsx_v4.ml: `let binding_pat_loc = binding.pvb_pat.ppat_loc`
 fn get_fn_name_loc(pat: &Pattern) -> Location {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_var(loc) => loc.loc,
         // For constrained patterns, use the constraint's location (the full span including type annotation)
         // OCaml uses binding.pvb_pat.ppat_loc which is the outer Ppat_constraint's location
@@ -2656,7 +2644,7 @@ fn make_module_name(config: &JsxConfig, fn_name: &str) -> String {
 /// jsx_v4.ml:114-118 `strip_option`: the first argument of an
 /// `option<...>` (unqualified `Lident "option"`); any other type is kept.
 fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
-    match &*core_type.ptyp_desc {
+    match &core_type.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref lid, ref args) = **inner;
             match arena.get_longident(lid.txt) {
@@ -2682,9 +2670,9 @@ fn make_props_type_param(
     } else if nt.label == "ref" {
         // If ref has a type annotation then use it, else 'ref (at the
         // prop's location).
-        match &*nt.interior_type.ptyp_desc {
+        match &nt.interior_type.ptyp_desc {
             CoreTypeDesc::Ptyp_any => Some(CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref"))),
                 ptyp_loc: nt.loc,
                 ptyp_attributes: Attributes::new(),
             }),
@@ -2703,7 +2691,7 @@ fn make_props_type_param(
 /// `nullable` / `Nullable.t` / `Stdlib.Nullable.t` annotation (none if it has
 /// no arguments); any other type is kept.
 fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
-    if let CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+    if let CoreTypeDesc::Ptyp_constr(inner) = &core_type.ptyp_desc {
         let (ref lid, ref args) = **inner;
         let is_nullable = match arena.get_longident(lid.txt) {
             Longident::Lident(name) => arena.get_string(*name) == "nullable",
@@ -2728,13 +2716,13 @@ fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreTyp
 fn jsx_element_type(arena: &mut ParseArena, config: &JsxConfig, loc: &Location) -> CoreType {
     let element_str_idx = arena.intern_string("element");
     CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
                 txt: module_access_name_with_idx(arena, config, element_str_idx),
                 loc: *loc,
             },
             vec![],
-        )))),
+        ))),
         ptyp_loc: *loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -2750,18 +2738,16 @@ fn constrain_jsx_return(
     let element_type = jsx_element_type(arena, config, loc);
     let element_type_idx = arena.push_core_type(element_type);
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) if is_function_expression(arena, braces.expr) => {
             let inner = arena.get_expr(braces.expr).clone();
             let constrained = constrain_jsx_return(arena, inner, config);
             let constrained_idx = arena.push_expr(constrained);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
-                    crate::parser::ast::PexpBraces {
-                        expr: constrained_idx,
-                        braces_loc: braces.braces_loc,
-                    },
-                ))),
+                pexp_desc: ExpressionDesc::Pexp_braces(Box::new(crate::parser::ast::PexpBraces {
+                    expr: constrained_idx,
+                    braces_loc: braces.braces_loc,
+                })),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -2779,14 +2765,14 @@ fn constrain_jsx_return(
             let constrained_rhs = constrain_jsx_return(arena, rhs_expr, config);
             let constrained_rhs_idx = arena.push_expr(constrained_rhs);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                     arg_label: *arg_label,
                     default: *default,
                     lhs: *lhs,
                     rhs: constrained_rhs_idx,
                     arity: *arity,
                     is_async: *is_async,
-                }))),
+                })),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -2797,10 +2783,7 @@ fn constrain_jsx_return(
             let constrained = constrain_jsx_return(arena, inner_expr, config);
             let constrained_idx = arena.push_expr(constrained);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((
-                    *param,
-                    constrained_idx,
-                )))),
+                pexp_desc: ExpressionDesc::Pexp_newtype(Box::new((*param, constrained_idx))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -2812,10 +2795,10 @@ fn constrain_jsx_return(
             let constrained = constrain_jsx_return(arena, inner_expr, config);
             let constrained_idx = arena.push_expr(constrained);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new((
                     constrained_idx,
                     element_type_idx,
-                )))),
+                ))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -2826,11 +2809,11 @@ fn constrain_jsx_return(
             let constrained_body = constrain_jsx_return(arena, body_expr, config);
             let constrained_body_idx = arena.push_expr(constrained_body);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
                     *rec_flag,
                     bindings.clone(),
                     constrained_body_idx,
-                )))),
+                ))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -2840,10 +2823,7 @@ fn constrain_jsx_return(
             let constrained_second = constrain_jsx_return(arena, second_expr, config);
             let constrained_second_idx = arena.push_expr(constrained_second);
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(
-                    *first,
-                    constrained_second_idx,
-                )),
+                pexp_desc: ExpressionDesc::Pexp_sequence(*first, constrained_second_idx),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -2853,10 +2833,7 @@ fn constrain_jsx_return(
             // OCaml uses ghost location for the synthesized Pexp_constraint wrapper
             let expr_idx = arena.push_expr(expr.clone());
             Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                    expr_idx,
-                    element_type_idx,
-                )))),
+                pexp_desc: ExpressionDesc::Pexp_constraint(Box::new((expr_idx, element_type_idx))),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             }
@@ -2919,21 +2896,21 @@ fn jsx_component_expr(
 ) -> Expression {
     let component_lid = module_access_name(arena, config, "component");
     let component_expr = arena.push_expr(Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+        pexp_desc: ExpressionDesc::Pexp_ident(Loc {
             txt: component_lid,
             loc,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     });
     let argument = arena.push_expr(expr);
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
             funct: component_expr,
             args: vec![(ArgLabel::Nolabel, argument)],
             partial: false,
             transformed_jsx: false,
-        }))),
+        })),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -2954,10 +2931,10 @@ fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLa
                 };
                 // OCaml: Exp.ident without ~loc defaults to Location.none (ghost)
                 let expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                         txt: arena.push_longident(Longident::Lident(key_str_idx)),
                         loc: name.loc,
-                    })),
+                    }),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
                 };
@@ -2987,13 +2964,13 @@ fn try_find_key_prop(arena: &mut ParseArena, props: &[JsxProp]) -> Option<(ArgLa
 fn unit_expr(arena: &mut ParseArena, loc: &Location) -> Expression {
     let unit_str_idx = arena.intern_string("()");
     Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
+        pexp_desc: ExpressionDesc::Pexp_construct(
             Loc {
                 txt: arena.push_longident(Longident::Lident(unit_str_idx)),
                 loc: *loc,
             },
             ctor_args(Vec::new(), *loc),
-        )),
+        ),
         pexp_loc: *loc,
         pexp_attributes: Attributes::new(),
     }
@@ -3055,7 +3032,7 @@ fn extract_args_rec(
     warnings: &mut Vec<JsxPreprocessorWarning>,
     error: &mut Option<(Location, &'static str)>,
 ) {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
             newtypes.extend(arena.nary_fun_newtypes(inner).iter().cloned());
             let params = arena.nary_fun_params(inner);
@@ -3141,14 +3118,14 @@ fn optional_argument_annotation_warning(
         return None;
     }
 
-    let PatternDesc::Ppat_constraint(inner) = &*lhs_pat.ppat_desc else {
+    let PatternDesc::Ppat_constraint(inner) = &lhs_pat.ppat_desc else {
         return None;
     };
 
     let (_, typ_idx) = **inner;
     let typ = arena.get_core_type(typ_idx);
 
-    match &*typ.ptyp_desc {
+    match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
             let last_idx = arena.get_longident(inner.0.txt).last_idx();
             if arena.get_string(last_idx) == "option" {
@@ -3158,7 +3135,7 @@ fn optional_argument_annotation_warning(
         _ => {}
     }
 
-    let current_type = match &*typ.ptyp_desc {
+    let current_type = match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
             let type_name = arena
                 .get_longident(inner.0.txt)
@@ -3183,7 +3160,7 @@ fn optional_argument_annotation_warning(
 }
 
 fn get_alias_from_pattern(arena: &ParseArena, pat: &Pattern, label: &ArgLabel) -> String {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_var(loc) => arena.get_string(loc.txt).to_string(),
         PatternDesc::Ppat_alias(_, loc) => arena.get_string(loc.txt).to_string(),
         PatternDesc::Ppat_constraint(inner) => {
@@ -3197,12 +3174,12 @@ fn get_alias_from_pattern(arena: &ParseArena, pat: &Pattern, label: &ArgLabel) -
 }
 
 fn get_type_from_pattern(_arena: &ParseArena, pat: &Pattern) -> Option<CoreType> {
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_constraint(inner) => {
             let (_, ref typ) = **inner;
             let typ = _arena.get_core_type(*typ);
             // Don't use package types
-            if matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) {
+            if matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_)) {
                 None
             } else {
                 Some(typ.clone())
@@ -3229,7 +3206,7 @@ fn arg_to_type(arena: &ParseArena, arg: &ExtractedArg) -> Option<NamedType> {
     };
 
     let interior_type = arg.type_.clone().unwrap_or_else(|| CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+        ptyp_desc: CoreTypeDesc::Ptyp_any,
         ptyp_loc: arg.loc,
         ptyp_attributes: Attributes::new(),
     });
@@ -3280,8 +3257,8 @@ fn make_props_record_type(
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                    safe_type_from_value(&nt.label),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
+                    &nt.label,
                 )))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
@@ -3319,8 +3296,8 @@ fn make_props_record_type(
         .map(|nt| {
             (
                 arena.push_core_type(CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                        safe_type_from_value(&nt.label),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
+                        &nt.label,
                     )))),
                     ptyp_loc: nt.loc,
                     ptyp_attributes: Attributes::new(),
@@ -3378,8 +3355,8 @@ fn make_props_record_type_sig(
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                    safe_type_from_value(&nt.label),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
+                    &nt.label,
                 )))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
@@ -3416,8 +3393,8 @@ fn make_props_record_type_sig(
         .map(|nt| {
             (
                 arena.push_core_type(CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                        safe_type_from_value(&nt.label),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
+                        &nt.label,
                     )))),
                     ptyp_loc: nt.loc,
                     ptyp_attributes: Attributes::new(),
@@ -3556,7 +3533,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                 } else {
                     arena.get_expr(*expr)
                 };
-                if let ExpressionDesc::Pexp_record(rec_inner) = &*expr.pexp_desc {
+                if let ExpressionDesc::Pexp_record(rec_inner) = &expr.pexp_desc {
                     let (ref fields, _) = **rec_inner;
                     let mut module_raw: Option<String> = None;
                     let mut version_raw: Option<i32> = None;
@@ -3567,7 +3544,7 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                         match last_str {
                             "version" => {
                                 if let ExpressionDesc::Pexp_constant(c) =
-                                    &*crate::ast_payload::unwrap_braces(
+                                    &crate::ast_payload::unwrap_braces(
                                         arena,
                                         arena.get_expr(field.expr),
                                     )
@@ -3964,7 +3941,7 @@ fn transform_expression(
     if !expression_may_change(&expr, arena, &mut config.unchanged_memo) {
         return expr;
     }
-    let new_desc = match *expr.pexp_desc {
+    let new_desc = match expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(jsx) => {
             transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
         }
@@ -4360,7 +4337,7 @@ fn transform_expression(
     };
 
     Expression {
-        pexp_desc: Box::new(new_desc),
+        pexp_desc: new_desc,
         pexp_loc: expr.pexp_loc,
         pexp_attributes: expr.pexp_attributes,
     }
@@ -4472,10 +4449,10 @@ fn mk_react_jsx(
         };
 
         let jsx_expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+            pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                 txt: jsx_path,
                 loc: empty_loc(),
-            })),
+            }),
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
         };
@@ -4546,20 +4523,20 @@ fn append_children_prop(
 
                 // OCaml: Exp.apply without ~loc uses Location.none (default_loc = ref Location.none)
                 let funct_idx = arena.push_expr(Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                    pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                         txt: some_element_path,
                         loc: empty_loc(),
-                    })),
+                    }),
                     pexp_loc: empty_loc(),
                     pexp_attributes: Attributes::new(),
                 });
                 Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                    pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                         funct: funct_idx,
                         args: vec![(ArgLabel::Nolabel, arena.push_expr(transformed_child))],
                         partial: false,
                         transformed_jsx: false,
-                    }))),
+                    })),
                     pexp_loc: empty_loc(), // OCaml: Exp.apply without ~loc defaults to Location.none
                     pexp_attributes: Attributes::new(),
                 }
@@ -4595,17 +4572,17 @@ fn append_children_prop(
 
         // React.array function - uses ghost location for ident, real loc for outer expr
         let array_fn = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+            pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                 txt: module_access_name(arena, config, "array"),
                 loc, // OCaml uses the children loc for the longident
-            })),
+            }),
             pexp_loc: empty_loc(), // Ghost location for the ident expression itself
             pexp_attributes: Attributes::new(),
         };
 
         // Array literal containing children - ghost location
         let children_array = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_array(Box::new(
+            pexp_desc: ExpressionDesc::Pexp_array(Box::new(
                 children
                     .into_iter()
                     .map(|c| {
@@ -4614,19 +4591,19 @@ fn append_children_prop(
                         arena.push_expr(transformed)
                     })
                     .collect(),
-            ))),
+            )),
             pexp_loc: empty_loc(), // Ghost location for the array
             pexp_attributes: Attributes::new(),
         };
 
         let array_fn_idx = arena.push_expr(array_fn);
         let children_expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                 funct: array_fn_idx,
                 args: vec![(ArgLabel::Nolabel, arena.push_expr(children_array))],
                 partial: false,
                 transformed_jsx: false,
-            }))),
+            })),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         };
@@ -4719,10 +4696,10 @@ fn mk_record_from_props(
                             loc: name.loc,
                         },
                         expr: arena.push_expr(Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                            pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                                 txt: name_lid,
                                 loc: name.loc,
-                            })),
+                            }),
                             pexp_loc: name.loc,
                             pexp_attributes: Attributes::new(),
                         }),
@@ -4768,10 +4745,7 @@ fn mk_record_from_props(
             }
         }
         _ => Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
-                record_fields,
-                spread_base,
-            )))),
+            pexp_desc: ExpressionDesc::Pexp_record(Box::new((record_fields, spread_base))),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         },
@@ -4789,10 +4763,10 @@ fn transform_jsx_fragment(
 
     // Fragment expression: React.jsxFragment (or Module.jsxFragment)
     let fragment_expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+        pexp_desc: ExpressionDesc::Pexp_ident(Loc {
             txt: module_access_name(arena, config, "jsxFragment"),
             loc: *loc,
-        })),
+        }),
         pexp_loc: *loc,
         pexp_attributes: Attributes::new(),
     };
@@ -4822,9 +4796,7 @@ fn transform_jsx_unary(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div />
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-                    name,
-                )))),
+                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(name))),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4843,13 +4815,13 @@ fn transform_jsx_unary(
             // Uppercase element like <MyModule /> -> MyModule.make
             let make_str_idx = arena.intern_string("make");
             let make_id = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Ldot(
                         Box::new(arena.get_longident(*path).clone()),
                         make_str_idx,
                     )),
                     loc: *tag_loc,
-                })),
+                }),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4868,13 +4840,13 @@ fn transform_jsx_unary(
             // Qualified lowercase like <MyModule.lowercase /> -> MyModule.lowercase
             let name_str_idx = arena.push_interned_string(name);
             let make_id = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Ldot(
                         Box::new(arena.get_longident(*path).clone()),
                         name_str_idx,
                     )),
                     loc: *tag_loc,
-                })),
+                }),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4915,9 +4887,7 @@ fn transform_jsx_container(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div>...</div>
             let component_name_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-                    name,
-                )))),
+                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(name))),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4936,13 +4906,13 @@ fn transform_jsx_container(
             // Uppercase element like <MyModule>...</MyModule> -> MyModule.make
             let make_str_idx = arena.intern_string("make");
             let make_id = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Ldot(
                         Box::new(arena.get_longident(*path).clone()),
                         make_str_idx,
                     )),
                     loc: *tag_loc,
-                })),
+                }),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4961,13 +4931,13 @@ fn transform_jsx_container(
             // Qualified lowercase like <MyModule.lowercase>...</MyModule.lowercase>
             let name_str_idx = arena.push_interned_string(name);
             let make_id = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                pexp_desc: ExpressionDesc::Pexp_ident(Loc {
                     txt: arena.push_longident(Longident::Ldot(
                         Box::new(arena.get_longident(*path).clone()),
                         name_str_idx,
                     )),
                     loc: *tag_loc,
-                })),
+                }),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -5001,7 +4971,7 @@ fn transform_jsx_container(
 /// component transform), or a construct this check does not inspect.
 fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u8>) -> bool {
     let child = |idx: ExprIdx, memo: &mut Vec<u8>| subtree_may_change(idx, arena, memo);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(_)
         | ExpressionDesc::Pexp_constant(_)
         | ExpressionDesc::Pexp_break
@@ -5140,12 +5110,11 @@ let make = (~value: string) => React.null
         };
         let (_, bindings) = &**value;
         let ExpressionDesc::Pexp_apply(apply) =
-            &*parser.arena().get_expr(bindings[0].pvb_expr).pexp_desc
+            &parser.arena().get_expr(bindings[0].pvb_expr).pexp_desc
         else {
             panic!("expected generated binding to apply React.component");
         };
-        let ExpressionDesc::Pexp_ident(component) =
-            &*parser.arena().get_expr(apply.funct).pexp_desc
+        let ExpressionDesc::Pexp_ident(component) = &parser.arena().get_expr(apply.funct).pexp_desc
         else {
             panic!("expected component identity function");
         };

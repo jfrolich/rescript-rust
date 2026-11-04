@@ -566,7 +566,7 @@ fn is_block_expr_idx(arena: &ParseArena, idx: ExprIdx) -> bool {
 }
 
 fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => is_block_expr_idx(arena, braces.expr),
         ExpressionDesc::Pexp_letmodule(..)
         | ExpressionDesc::Pexp_letexception(..)
@@ -592,7 +592,7 @@ fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
 /// (res_comments_table.ml `is_conditional_expr`).
 fn is_conditional_expr(expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &expr.pexp_desc,
         ExpressionDesc::Pexp_ifthenelse(..) | ExpressionDesc::Pexp_ternary(..)
     )
 }
@@ -603,12 +603,12 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
     let mut current = pattern;
 
     loop {
-        match &*current.ppat_desc {
+        match &current.ppat_desc {
             // `::` takes its head and rest as two arguments, or as one 2-tuple.
             PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "::") => {
                 let pair = match args.txt.as_slice() {
                     [pat, rest] => Some((*pat, *rest)),
-                    [arg] => match &*arena.get_pat(*arg).ppat_desc {
+                    [arg] => match &arena.get_pat(*arg).ppat_desc {
                         PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => {
                             Some((tuple[0], tuple[1]))
                         }
@@ -645,12 +645,12 @@ fn collect_list_exprs(arena: &ParseArena, expr: &Expression) -> Vec<Expression> 
     let mut current = expr;
 
     loop {
-        match &*current.pexp_desc {
+        match &current.pexp_desc {
             // `::` takes its head and rest as two arguments, or as one 2-tuple.
             ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "::") => {
                 let pair = match args.txt.as_slice() {
                     [expr, rest] => Some((*expr, *rest)),
-                    [arg] => match &*arena.get_expr(*arg).pexp_desc {
+                    [arg] => match &arena.get_expr(*arg).pexp_desc {
                         ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => {
                             Some((tuple[0], tuple[1]))
                         }
@@ -1152,7 +1152,7 @@ fn rewrite_value_binding_locs(
     let default = (pvb_pat.ppat_loc, vb.pvb_expr, pvb_expr_loc);
 
     // Check for the sugar cases that OCaml handles specially
-    match (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc) {
+    match (&pvb_pat.ppat_desc, &pvb_expr.pexp_desc) {
         // Case 1: Ppat_constraint with Pexp_constraint, empty Ptyp_poly
         // let x: t = (expr: typ)
         (PatternDesc::Ppat_constraint(pat_inner), ExpressionDesc::Pexp_constraint(expr_inner)) => {
@@ -1160,7 +1160,7 @@ fn rewrite_value_binding_locs(
             let (ref expr_idx, _) = **expr_inner;
             let pat_loc = arena.get_pat(*pat_idx).ppat_loc;
             let typ = arena.get_core_type(*typ_idx);
-            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if vars.is_empty() {
@@ -1186,7 +1186,7 @@ fn rewrite_value_binding_locs(
         (PatternDesc::Ppat_constraint(pat_inner), ExpressionDesc::Pexp_fun(_)) => {
             let (ref _pat_idx, ref typ_idx) = **pat_inner;
             let typ = arena.get_core_type(*typ_idx);
-            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if !vars.is_empty() {
@@ -1213,7 +1213,7 @@ fn rewrite_value_binding_locs(
             let (ref _pat_idx, ref typ_idx) = **pat_inner;
             let (_name, ref inner_expr_idx) = **newtype_inner;
             let typ = arena.get_core_type(*typ_idx);
-            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if !vars.is_empty() {
@@ -1222,7 +1222,7 @@ fn rewrite_value_binding_locs(
                     let constraint_expr_idx = {
                         let inner_expr = arena.get_expr(*inner_expr_idx).clone();
                         if let ExpressionDesc::Pexp_constraint(constraint_inner) =
-                            &*inner_expr.pexp_desc
+                            &inner_expr.pexp_desc
                         {
                             let (ref expr_idx, _) = **constraint_inner;
                             Some(*expr_idx)
@@ -1555,7 +1555,7 @@ fn walk_expression(
         return;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) if is_block_expr_idx(arena, braces.expr) => {
             let inner = arena.get_expr(braces.expr).clone();
             walk_expression(&inner, t, comments, arena);
@@ -1585,7 +1585,7 @@ fn walk_expression(
             // Safety: arena is append-only, expression won't be invalidated
             let body = arena.get_expr(*body_idx).clone();
             // Check if body is unit
-            let body_is_unit = matches!(&*body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
+            let body_is_unit = matches!(&body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
             if body_is_unit {
                 walk_value_bindings(bindings, t, comments, arena);
             } else {
@@ -1956,7 +1956,7 @@ fn walk_expression(
             }
         }
         ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_ternary(_) => {
-            let (cond_idx, then_idx, else_idx) = match &*expr.pexp_desc {
+            let (cond_idx, then_idx, else_idx) = match &expr.pexp_desc {
                 ExpressionDesc::Pexp_ifthenelse(inner) => (&inner.0, &inner.1, inner.2),
                 ExpressionDesc::Pexp_ternary(inner) => (&inner.0, &inner.1, Some(inner.2)),
                 _ => unreachable!(),
@@ -2167,7 +2167,7 @@ fn walk_expression(
             let funct_expr = arena.get_expr(*funct).clone();
             // Check for unary expressions
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
                         if matches!(op_str, "~+" | "~+." | "~-" | "~-." | "~~~" | "not" | "!") {
@@ -2187,7 +2187,7 @@ fn walk_expression(
 
             // Special case for Array.get: walk arguments directly like OCaml
             if args.len() == 2 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Ldot(base, method_idx) = arena.get_longident(ident.txt) {
                         if let Longident::Lident(module_idx) = base.as_ref() {
                             let module = arena.get_string(*module_idx);
@@ -2210,7 +2210,7 @@ fn walk_expression(
 
             // Special case for Array.set: walk arguments directly like OCaml
             if args.len() == 3 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Ldot(base, method_idx) = arena.get_longident(ident.txt) {
                         if let Longident::Lident(module_idx) = base.as_ref() {
                             let module = arena.get_string(*module_idx);
@@ -2253,7 +2253,7 @@ fn walk_expression(
             // Special case for Primitive_dict.make (dict{} syntax)
             // Match OCaml: just walk the key_values array expression
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
                         if arena.get_string(*method_idx) == "make" {
                             if let Longident::Lident(module_idx) = parent.as_ref() {
@@ -2284,11 +2284,11 @@ fn walk_expression(
             {
                 let (_, arg_idx) = &args[0];
                 let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_arrays) = &*arg.pexp_desc {
+                if let ExpressionDesc::Pexp_array(sub_arrays) = &arg.pexp_desc {
                     let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
                     for sub_array_idx in sub_arrays.iter() {
                         let sub_array = arena.get_expr(*sub_array_idx);
-                        if let ExpressionDesc::Pexp_array(exprs) = &*sub_array.pexp_desc {
+                        if let ExpressionDesc::Pexp_array(exprs) = &sub_array.pexp_desc {
                             all_expr_idxs.extend(exprs.iter().copied());
                         } else {
                             all_expr_idxs.push(*sub_array_idx);
@@ -2306,7 +2306,7 @@ fn walk_expression(
             if args.len() == 1 && parsetree_viewer::is_spread_belt_list_concat(arena, &funct_expr) {
                 let (_, arg_idx) = &args[0];
                 let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
+                if let ExpressionDesc::Pexp_array(sub_lists) = &arg.pexp_desc {
                     let mut all_exprs: Vec<Expression> = Vec::new();
                     for sub_list_idx in sub_lists.iter() {
                         let sub_list = arena.get_expr(*sub_list_idx);
@@ -2325,7 +2325,7 @@ fn walk_expression(
 
             // Check for binary expressions - match OCaml's special handling
             if args.len() == 2 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
                         if matches!(
@@ -2432,7 +2432,7 @@ fn walk_expression(
                                 label: ArgLabel::Nolabel,
                                 default_expr: None,
                                 pat: Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_var(name)),
+                                    ppat_desc: PatternDesc::Ppat_var(name),
                                     ppat_loc: name.loc,
                                     ppat_attributes: crate::parser::ast::Attributes::new(),
                                 },
@@ -2562,7 +2562,7 @@ fn walk_expression(
             }
 
             // Walk return expression
-            match &*return_expr.pexp_desc {
+            match &return_expr.pexp_desc {
                 ExpressionDesc::Pexp_constraint(constraint_inner)
                     if {
                         let inner_loc = arena.get_expr(constraint_inner.0).pexp_loc;
@@ -3016,7 +3016,7 @@ fn walk_pattern(
         return;
     }
 
-    match &*pattern.ppat_desc {
+    match &pattern.ppat_desc {
         PatternDesc::Ppat_any
         | PatternDesc::Ppat_constant { .. }
         | PatternDesc::Ppat_interval { .. } => {
@@ -3217,7 +3217,7 @@ fn walk_core_type(
         return;
     }
 
-    match &*ct.ptyp_desc {
+    match &ct.ptyp_desc {
         CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {
             let (leading, trailing) = partition_leading_trailing(comments, ct.ptyp_loc, arena);
             t.attach_leading(ct.ptyp_loc, leading, arena);

@@ -498,7 +498,7 @@ impl<'a> Mapper<'a> {
     // ========== Core Types ==========
 
     pub fn map_core_type(&mut self, ty: &current::CoreType) -> pt0::CoreType {
-        let current::CoreTypeDesc::Ptyp_arrow(inner) = &*ty.ptyp_desc else {
+        let current::CoreTypeDesc::Ptyp_arrow(inner) = &ty.ptyp_desc else {
             return pt0::CoreType {
                 ptyp_desc: self.map_core_type_desc(&ty.ptyp_desc),
                 ptyp_loc: self.loc(ty.ptyp_loc),
@@ -737,7 +737,7 @@ impl<'a> Mapper<'a> {
         // ast_mapper_to0.ml P.map Ppat_record: the rest row travels as an
         // internal `_res.record_rest` attribute carrying `rest` or
         // `(rest: t)`.
-        if let current::PatternDesc::Ppat_record(inner) = &*pat.ppat_desc
+        if let current::PatternDesc::Ppat_record(inner) = &pat.ppat_desc
             && let Some(rest) = &inner.2
         {
             let rest_pat = self.record_rest_to_pattern(rest);
@@ -1144,7 +1144,7 @@ impl<'a> Mapper<'a> {
         expr: &current::Expression,
         owner_idx: Option<ExprIdx>,
     ) -> pt0::Expression {
-        if let current::ExpressionDesc::Pexp_await(inner_idx) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_await(inner_idx) = &expr.pexp_desc {
             // ast_mapper_to0.ml Pexp_await: one v0 attribute slot for two
             // nodes, the await node's own attributes in front of the
             // `res.await` marker and the inner expression's after it.
@@ -1155,7 +1155,7 @@ impl<'a> Mapper<'a> {
             inner.pexp_attributes = attrs;
             return inner;
         }
-        if let current::ExpressionDesc::Pexp_braces(braces) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_braces(braces) = &expr.pexp_desc {
             // ast_mapper_to0.ml Pexp_braces: the braces node disappears into
             // a `res.braces` attribute located at the delimiters, after the
             // node's own attributes and before the inner expression's.
@@ -1170,22 +1170,22 @@ impl<'a> Mapper<'a> {
             inner.pexp_attributes = attrs;
             return inner;
         }
-        if let current::ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_fun(fun) = &expr.pexp_desc {
             return self.map_fun(expr, fun, owner_idx);
         }
-        if let current::ExpressionDesc::Pexp_jsx_element(jsx) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_jsx_element(jsx) = &expr.pexp_desc {
             return self.map_jsx(expr, jsx);
         }
-        if let current::ExpressionDesc::Pexp_template(template) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_template(template) = &expr.pexp_desc {
             return self.map_template(expr, template);
         }
-        if let current::ExpressionDesc::Pexp_tagged_template(template) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_tagged_template(template) = &expr.pexp_desc {
             return self.map_tagged_template(expr, template);
         }
 
         // Check if this is a JSX element that needs the [@JSX] attribute
         let is_jsx = matches!(
-            &*expr.pexp_desc,
+            &expr.pexp_desc,
             current::ExpressionDesc::Pexp_jsx_element(_)
         );
         let mut attrs = self.map_attributes(&expr.pexp_attributes);
@@ -1196,7 +1196,7 @@ impl<'a> Mapper<'a> {
         // a regular `for` loop carrying an `_res.for_of` / `_res.for_await_of`
         // attribute whose payload is the iterable (PPat (Pat.any (), Some
         // iterable)). Mirrors `compiler/ml/ast_mapper_to0.ml` after the PR.
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             current::ExpressionDesc::Pexp_for_of(inner) => {
                 let (_pat, iterable_idx, _body) = inner.as_ref();
                 let attr = self.mk_for_of_attr("_res.for_of", expr.pexp_loc, *iterable_idx);
@@ -1211,13 +1211,13 @@ impl<'a> Mapper<'a> {
         }
         // ast_mapper_to0.ml Pexp_ternary: an if-then-else carrying the
         // `res.ternary` marker.
-        if let current::ExpressionDesc::Pexp_ternary(_) = &*expr.pexp_desc {
+        if let current::ExpressionDesc::Pexp_ternary(_) = &expr.pexp_desc {
             let attr = self.internal_attr("res.ternary");
             attrs.insert(0, attr);
         }
         // ast_mapper_to0.ml Pexp_apply: `res.partial` marks a partial
         // application.
-        if let current::ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc
+        if let current::ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc
             && apply.partial
         {
             let attr = self.internal_attr("res.partial");
@@ -1416,7 +1416,7 @@ impl<'a> Mapper<'a> {
                     && matches!(&args[0].0, current::ArgLabel::Nolabel)
                     && matches!(&args[1].0, current::ArgLabel::Nolabel)
                 {
-                    if let current::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
+                    if let current::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
                         // Get the StrIdx first to avoid borrow conflicts
                         let op_idx = if let Longident::Lident(op) = self.get_longident(lid.txt) {
                             Some(*op)
@@ -1445,7 +1445,7 @@ impl<'a> Mapper<'a> {
                 };
 
                 let mapped_funct = if let Some(new_name) = converted_funct {
-                    if let current::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
+                    if let current::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
                         let full_loc = self.loc(lid.loc);
                         let new_name_idx = self.intern(new_name);
                         pt0::Expression {

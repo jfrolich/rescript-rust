@@ -319,7 +319,7 @@ fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
     match structure.as_slice() {
         [item] => match &*item.pstr_desc {
             crate::parser::ast::StructureItemDesc::Pstr_eval(eval) => matches!(
-                &*arena.get_expr(eval.0).pexp_desc,
+                &arena.get_expr(eval.0).pexp_desc,
                 crate::parser::ast::ExpressionDesc::Pexp_constant(_)
             ),
             _ => false,
@@ -340,7 +340,7 @@ fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
     let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
         return None;
     };
-    match &*arena.get_expr(eval.0).pexp_desc {
+    match &arena.get_expr(eval.0).pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
             crate::parser::ast::Constant::String(payload) => Some(payload.semantic().to_string()),
             _ => None,
@@ -745,8 +745,7 @@ fn print_object_vs_record_hint(
     tagged(ppf, TAG_INFO, "record");
     ppf.str(" is expected. Objects are written with quoted keys, and records with unquoted keys.");
     let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
-        let crate::parser::ast::ExpressionDesc::Pexp_object_literal(fields) = &*exp.pexp_desc
-        else {
+        let crate::parser::ast::ExpressionDesc::Pexp_object_literal(fields) = &exp.pexp_desc else {
             return None;
         };
         let rows = fields
@@ -765,9 +764,7 @@ fn print_object_vs_record_hint(
             })
             .collect();
         Some(crate::parser::ast::Expression {
-            pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((
-                rows, None,
-            )))),
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((rows, None))),
             pexp_loc: exp.pexp_loc,
             pexp_attributes: crate::parser::ast::Attributes::new(),
         })
@@ -884,12 +881,12 @@ fn print_extra_type_clash_help_by_types(
     // | _, Some ({desc = Tconstr (p1, _, _)}, {desc = Ttuple _}) when p1 = array
     if is(&p1, predef::path_array()) && matches!(d2, TypeDesc::Ttuple(_)) {
         let suggested = reprint_expr_at_loc(ctx, arena, source, loc, |_, exp| {
-            let crate::parser::ast::ExpressionDesc::Pexp_array(items) = &*exp.pexp_desc else {
+            let crate::parser::ast::ExpressionDesc::Pexp_array(items) = &exp.pexp_desc else {
                 return None;
             };
             let items = items.clone();
             Some(crate::parser::ast::Expression {
-                pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_tuple(items)),
+                pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_tuple(items),
                 ..exp
             })
         });
@@ -1027,14 +1024,14 @@ fn print_extra_type_clash_help_by_types(
         && is_record_type(ctx, env, b2)
     {
         let rewrite = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
-            let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*exp.pexp_desc else {
+            let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &exp.pexp_desc else {
                 return None;
             };
             let lid_txt = lid.txt;
             let x = a.push_expr(exp.clone());
             let none_loc = a.none_loc();
             Some(crate::parser::ast::Expression {
-                pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((
+                pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_record(Box::new((
                     vec![crate::parser::ast::ExpressionRecordField {
                         lid: crate::parser::ast::Loc {
                             txt: lid_txt,
@@ -1044,7 +1041,7 @@ fn print_extra_type_clash_help_by_types(
                         opt: false,
                     }],
                     None,
-                )))),
+                ))),
                 ..exp
             })
         });
@@ -1072,7 +1069,7 @@ fn print_extra_type_clash_help_by_types(
             let variant_constructors: Vec<String> =
                 row.row_fields.iter().map(|(l, _)| l.to_string()).collect();
             let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |_, exp| {
-                let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &*exp.pexp_desc else {
+                let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &exp.pexp_desc else {
                     return None;
                 };
                 let crate::parser::ast::Constant::String(payload) = &**c else {
@@ -1080,12 +1077,10 @@ fn print_extra_type_clash_help_by_types(
                 };
                 let s = payload.semantic().to_string();
                 Some(crate::parser::ast::Expression {
-                    pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_variant(
-                        Box::new((
-                            std::borrow::Cow::Owned(s),
-                            crate::parse_arena::Located::new(Vec::new(), exp.pexp_loc),
-                        )),
-                    )),
+                    pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
+                        std::borrow::Cow::Owned(s),
+                        crate::parse_arena::Located::new(Vec::new(), exp.pexp_loc),
+                    ))),
                     ..exp
                 })
             });
@@ -1122,20 +1117,20 @@ fn print_extra_type_clash_help_by_types(
             });
             if let Some(constructor_name) = matching {
                 let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
-                    if !matches!(&*exp.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_constant(c)
+                    if !matches!(&exp.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_constant(c)
                         if matches!(&**c, crate::parser::ast::Constant::String(..)))
                     {
                         return None;
                     }
                     let lid = a.push_lident(&constructor_name);
                     Some(crate::parser::ast::Expression {
-                        pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_construct(
+                        pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_construct(
                             crate::parser::ast::Loc {
                                 txt: lid,
                                 loc: exp.pexp_loc,
                             },
                             crate::parser::ast::ctor_args(Vec::new(), exp.pexp_loc),
-                        )),
+                        ),
                         ..exp
                     })
                 });

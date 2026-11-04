@@ -134,9 +134,7 @@ fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -
                     if let current::StructureItemDesc::Pstr_eval(inner) = item.pstr_desc.as_ref() {
                         let (ref eval_expr_idx, _) = **inner;
                         let eval_expr = arena.get_expr(*eval_expr_idx);
-                        if let current::ExpressionDesc::Pexp_constant(c) =
-                            eval_expr.pexp_desc.as_ref()
-                        {
+                        if let current::ExpressionDesc::Pexp_constant(c) = &eval_expr.pexp_desc {
                             if let current::Constant::Integer(s, _) = c.as_ref() {
                                 return s.parse().ok();
                             }
@@ -312,7 +310,7 @@ fn arity_of_attributes(attrs: &[pt0::Attribute]) -> Option<usize> {
 
 /// The arity `N` of `function$<_, [#Has_arityN]>`.
 fn has_arity_of_type(_fun_t: &current::CoreType, t_arity: &current::CoreType) -> Option<usize> {
-    let current::CoreTypeDesc::Ptyp_variant(variant) = &*t_arity.ptyp_desc else {
+    let current::CoreTypeDesc::Ptyp_variant(variant) = &t_arity.ptyp_desc else {
         return None;
     };
     match variant.0.as_slice() {
@@ -733,9 +731,9 @@ impl<'a> Mapper<'a> {
         let expr_loc = self.loc(&expr.pexp_loc);
         let expr_attrs = self.map_attributes(&expr.pexp_attributes);
         let expression = self.arena.push_expr(current::Expression {
-            pexp_desc: Box::new(current::ExpressionDesc::Pexp_constant(Box::new(
+            pexp_desc: current::ExpressionDesc::Pexp_constant(Box::new(
                 current::Constant::RawSource(Cow::Owned(source.clone())),
-            ))),
+            )),
             pexp_loc: expr_loc,
             pexp_attributes: expr_attrs,
         });
@@ -807,7 +805,7 @@ impl<'a> Mapper<'a> {
                 // n-ary arrow.
                 if self.is_lident(&lid.txt, "function$")
                     && let [fun_t, t_arity] = &mapped_types[..]
-                    && matches!(&*fun_t.ptyp_desc, current::CoreTypeDesc::Ptyp_arrow(_))
+                    && matches!(&fun_t.ptyp_desc, current::CoreTypeDesc::Ptyp_arrow(_))
                     && let Some(arity) = has_arity_of_type(fun_t, t_arity)
                 {
                     let (params, ret) = self.gather_arrow(fun_t, arity);
@@ -875,7 +873,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::CoreType {
-            ptyp_desc: Box::new(desc),
+            ptyp_desc: desc,
             ptyp_loc: loc,
             ptyp_attributes: attrs,
         }
@@ -898,7 +896,7 @@ impl<'a> Mapper<'a> {
                             std::mem::take(&mut typ.ptyp_attributes),
                         );
                         let loc = typ.ptyp_loc;
-                        let txt = match &*typ.ptyp_desc {
+                        let txt = match &typ.ptyp_desc {
                             current::CoreTypeDesc::Ptyp_tuple(args)
                                 if has_constructor_args && rest.is_empty() =>
                             {
@@ -1062,7 +1060,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::Pattern {
-            ppat_desc: Box::new(desc),
+            ppat_desc: desc,
             ppat_loc: loc,
             ppat_attributes: attrs,
         }
@@ -1332,12 +1330,10 @@ impl<'a> Mapper<'a> {
             let inner_idx = self.push_expr(&inner_expr);
             let inner_loc = self.arena.get_expr(inner_idx).pexp_loc;
             return current::Expression {
-                pexp_desc: Box::new(current::ExpressionDesc::Pexp_braces(Box::new(
-                    current::PexpBraces {
-                        expr: inner_idx,
-                        braces_loc,
-                    },
-                ))),
+                pexp_desc: current::ExpressionDesc::Pexp_braces(Box::new(current::PexpBraces {
+                    expr: inner_idx,
+                    braces_loc,
+                })),
                 pexp_loc: inner_loc,
                 pexp_attributes: self.map_attributes(outer_attrs),
             };
@@ -1355,7 +1351,7 @@ impl<'a> Mapper<'a> {
             };
             let await_idx = self.push_expr(&inner_expr);
             return current::Expression {
-                pexp_desc: Box::new(current::ExpressionDesc::Pexp_await(await_idx)),
+                pexp_desc: current::ExpressionDesc::Pexp_await(await_idx),
                 pexp_loc: loc,
                 pexp_attributes: self.map_attributes(await_attrs),
             };
@@ -1433,25 +1429,20 @@ impl<'a> Mapper<'a> {
                 // `function | p -> e` to `fun x -> match x with | p -> e`.
                 let param_name = self.mk_string_loc("*function*", &expr.pexp_loc);
                 let p_pat = self.arena.push_pat(current::Pattern {
-                    ppat_desc: Box::new(current::PatternDesc::Ppat_var(param_name)),
+                    ppat_desc: current::PatternDesc::Ppat_var(param_name),
                     ppat_loc: loc,
                     ppat_attributes: Attributes::new(),
                 });
                 let param_ident = self.arena.intern("*function*");
                 let lid = self.push_longident(Longident::Lident(param_ident));
                 let scrutinee = self.arena.push_expr(current::Expression {
-                    pexp_desc: Box::new(current::ExpressionDesc::Pexp_ident(Located {
-                        txt: lid,
-                        loc,
-                    })),
+                    pexp_desc: current::ExpressionDesc::Pexp_ident(Located { txt: lid, loc }),
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
                 });
                 let cases = cases.iter().map(|c| self.map_case(c)).collect();
                 let body = self.arena.push_expr(current::Expression {
-                    pexp_desc: Box::new(current::ExpressionDesc::Pexp_match(Box::new((
-                        scrutinee, cases,
-                    )))),
+                    pexp_desc: current::ExpressionDesc::Pexp_match(Box::new((scrutinee, cases))),
                     pexp_loc: loc,
                     pexp_attributes: Attributes::new(),
                 });
@@ -1688,8 +1679,8 @@ impl<'a> Mapper<'a> {
                         };
 
                         return current::Expression {
-                            pexp_desc: Box::new(current::ExpressionDesc::Pexp_jsx_element(
-                                Box::new(jsx_element),
+                            pexp_desc: current::ExpressionDesc::Pexp_jsx_element(Box::new(
+                                jsx_element,
                             )),
                             pexp_loc: loc,
                             pexp_attributes: jsx_attrs,
@@ -1750,7 +1741,7 @@ impl<'a> Mapper<'a> {
                     self.arena.push_expr(mapped)
                 };
                 return current::Expression {
-                    pexp_desc: Box::new(current::ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                    pexp_desc: current::ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                         funct: funct_idx,
                         args: args
                             .iter()
@@ -1758,7 +1749,7 @@ impl<'a> Mapper<'a> {
                             .collect(),
                         partial,
                         transformed_jsx: false,
-                    }))),
+                    })),
                     pexp_loc: loc,
                     pexp_attributes: attrs,
                 };
@@ -1797,8 +1788,8 @@ impl<'a> Mapper<'a> {
                                 closing: loc_end_idx,
                             });
                             return current::Expression {
-                                pexp_desc: Box::new(current::ExpressionDesc::Pexp_jsx_element(
-                                    Box::new(jsx_element),
+                                pexp_desc: current::ExpressionDesc::Pexp_jsx_element(Box::new(
+                                    jsx_element,
                                 )),
                                 pexp_loc: loc,
                                 pexp_attributes: jsx_attrs,
@@ -1818,7 +1809,7 @@ impl<'a> Mapper<'a> {
                     let arity = arity_of_attributes(&expr.pexp_attributes)
                         .expect("Function$ carries a res.arity attribute");
                     let e1 = self.map_expression(inner);
-                    let current::ExpressionDesc::Pexp_fun(f) = &*e1.pexp_desc else {
+                    let current::ExpressionDesc::Pexp_fun(f) = &e1.pexp_desc else {
                         unreachable!("a v0 fun maps to a function");
                     };
                     let is_async = f.is_async;
@@ -2143,7 +2134,7 @@ impl<'a> Mapper<'a> {
         };
 
         current::Expression {
-            pexp_desc: Box::new(desc),
+            pexp_desc: desc,
             pexp_loc: loc,
             pexp_attributes: attrs,
         }
@@ -2164,14 +2155,14 @@ impl<'a> Mapper<'a> {
         let first = params[0].clone();
         self.arena.set_nary_fun_params(arity, params, unknown_arity);
         current::Expression {
-            pexp_desc: Box::new(current::ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+            pexp_desc: current::ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: first.p_lbl,
                 default: first.p_default,
                 lhs: first.p_pat,
                 rhs: body,
                 arity,
                 is_async,
-            }))),
+            })),
             pexp_loc: loc,
             pexp_attributes: attrs,
         }
@@ -2189,11 +2180,7 @@ impl<'a> Mapper<'a> {
         let first = params[0].clone();
         self.arena.set_nary_arrow_args(arity, params);
         current::CoreType {
-            ptyp_desc: Box::new(current::CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(first),
-                ret,
-                arity,
-            )))),
+            ptyp_desc: current::CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), ret, arity))),
             ptyp_loc: loc,
             ptyp_attributes: attrs,
         }
@@ -2218,7 +2205,7 @@ impl<'a> Mapper<'a> {
         let mut current_expr = head.clone();
         let mut is_head = true;
         while remaining > 0 {
-            let current::ExpressionDesc::Pexp_fun(f) = &*current_expr.pexp_desc else {
+            let current::ExpressionDesc::Pexp_fun(f) = &current_expr.pexp_desc else {
                 break;
             };
             let level = self.fun_params(f);
@@ -2249,7 +2236,7 @@ impl<'a> Mapper<'a> {
         let mut current_typ = head.clone();
         let mut is_head = true;
         while remaining > 0 {
-            let current::CoreTypeDesc::Ptyp_arrow(inner) = &*current_typ.ptyp_desc else {
+            let current::CoreTypeDesc::Ptyp_arrow(inner) = &current_typ.ptyp_desc else {
                 break;
             };
             let (arg, level_ret, arity) = &**inner;
@@ -2303,7 +2290,7 @@ impl<'a> Mapper<'a> {
             .collect();
         if let Some(base) = base {
             let base1 = self.map_expression(base);
-            if let current::ExpressionDesc::Pexp_fun(f) = &*base1.pexp_desc
+            if let current::ExpressionDesc::Pexp_fun(f) = &base1.pexp_desc
                 && self.arena.nary_fun_newtypes(f).is_empty()
             {
                 self.arena.set_nary_fun_newtypes(f.lhs, newtypes);
@@ -2322,7 +2309,7 @@ impl<'a> Mapper<'a> {
             &expr.pexp_loc,
         );
         current::Expression {
-            pexp_desc: Box::new(current::ExpressionDesc::Pexp_extension(Box::new(error))),
+            pexp_desc: current::ExpressionDesc::Pexp_extension(Box::new(error)),
             pexp_loc: loc,
             pexp_attributes: attrs,
         }
@@ -2333,9 +2320,9 @@ impl<'a> Mapper<'a> {
         let loc_idx = self.loc(loc);
         let str_item = |mapper: &mut Self, s: &str| {
             let expr = mapper.arena.push_expr(current::Expression {
-                pexp_desc: Box::new(current::ExpressionDesc::Pexp_constant(Box::new(
+                pexp_desc: current::ExpressionDesc::Pexp_constant(Box::new(
                     current::Constant::string(s),
-                ))),
+                )),
                 pexp_loc: loc_idx,
                 pexp_attributes: Attributes::new(),
             });

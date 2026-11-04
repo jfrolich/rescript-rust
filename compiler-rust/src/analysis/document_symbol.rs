@@ -114,7 +114,7 @@ impl Collector {
 }
 
 fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
-    match &*arena.get_expr(idx).pexp_desc {
+    match &arena.get_expr(idx).pexp_desc {
         ExpressionDesc::Pexp_fun(_) => SymbolKind::Function,
         ExpressionDesc::Pexp_constraint(inner) => expr_kind(arena, inner.0),
         ExpressionDesc::Pexp_constant(constant) => match **constant {
@@ -130,9 +130,9 @@ fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
 impl AstIter for Collector {
     fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
         let pat = arena.get_pat(vb.pvb_pat);
-        let name = match &*pat.ppat_desc {
+        let name = match &pat.ppat_desc {
             PatternDesc::Ppat_var(name) => Some(name.txt),
-            PatternDesc::Ppat_constraint(inner) => match &*arena.get_pat(inner.0).ppat_desc {
+            PatternDesc::Ppat_constraint(inner) => match &arena.get_pat(inner.0).ppat_desc {
                 PatternDesc::Ppat_var(name) => Some(name.txt),
                 _ => None,
             },
@@ -151,7 +151,7 @@ impl AstIter for Collector {
 
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
         let e = arena.get_expr(idx);
-        match &*e.pexp_desc {
+        match &e.pexp_desc {
             ExpressionDesc::Pexp_letmodule(letmodule) => {
                 let (name, mod_expr, _) = &**letmodule;
                 // `{e.pexp_loc with loc_end = mod_expr.pmod_loc.loc_end}`.

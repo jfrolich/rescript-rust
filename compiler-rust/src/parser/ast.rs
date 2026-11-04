@@ -464,7 +464,7 @@ pub enum Payload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoreType {
     /// Type description.
-    pub ptyp_desc: Box<CoreTypeDesc>,
+    pub ptyp_desc: CoreTypeDesc,
     /// Location.
     pub ptyp_loc: Location,
     /// Attributes.
@@ -550,7 +550,7 @@ pub enum ObjectField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pattern {
     /// Pattern description.
-    pub ppat_desc: Box<PatternDesc>,
+    pub ppat_desc: PatternDesc,
     /// Location.
     pub ppat_loc: Location,
     /// Attributes.
@@ -629,7 +629,7 @@ pub struct RecordPatRest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Expression {
     /// Expression description.
-    pub pexp_desc: Box<ExpressionDesc>,
+    pub pexp_desc: ExpressionDesc,
     /// Location.
     pub pexp_loc: Location,
     /// Attributes.

@@ -68,7 +68,7 @@ fn payload_is_empty(attr: &Attribute) -> bool {
 }
 
 fn bool_value(expr: &Expression, arena: &ParseArena) -> Option<bool> {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => {
             if longident_matches(arena, lid.txt, &["true"]) {
                 Some(true)
@@ -90,7 +90,7 @@ fn get_serde_legacy(attr: &Attribute, arena: &ParseArena) -> SpiceResult<(bool, 
         return Ok((false, false));
     }
     let expr = get_expression_from_payload(attr, arena)?;
-    let ExpressionDesc::Pexp_record(record) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
         return Err(invalid());
     };
     let (fields, spread) = &**record;
@@ -394,7 +394,7 @@ fn validate(tag: Option<&str>, cases: &[SerdeCase], arena: &mut ParseArena) -> S
                     {
                         Ok(Some(attr)) => {
                             let expr = get_expression_from_payload(attr, arena)?;
-                            match &*expr.pexp_desc {
+                            match &expr.pexp_desc {
                                 ExpressionDesc::Pexp_constant(c) => match &**c {
                                     Constant::String(s) => s.semantic().to_string(),
                                     _ => txt,
@@ -693,10 +693,10 @@ fn decode_untagged(
 fn pat_alias(pat: Pattern, name: &str, arena: &mut ParseArena) -> Pattern {
     let name = arena.intern_string(name);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_alias(
+        ppat_desc: PatternDesc::Ppat_alias(
             arena.push_pat(pat),
             Located::new(name, arena.dummy_loc()),
-        )),
+        ),
         ppat_loc: arena.dummy_loc(),
         ppat_attributes: Attributes::new(),
     }
@@ -1138,9 +1138,7 @@ fn alias_cases(
         .filter(|alias| !constructors.contains(alias))
         .map(|alias| {
             let pattern = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constant(Box::new(Constant::string(
-                    alias,
-                )))),
+                ppat_desc: PatternDesc::Ppat_constant(Box::new(Constant::string(alias))),
                 ppat_loc: arena.dummy_loc(),
                 ppat_attributes: Attributes::new(),
             };

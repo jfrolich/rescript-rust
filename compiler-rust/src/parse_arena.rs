@@ -936,10 +936,10 @@ impl Default for ParseArena {
         // inserts the none location.
         let none_loc = LocIdx::none();
         let mk_ast_literal_type = |txt: LidentIdx| CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
                 Located { txt, loc: none_loc },
                 vec![],
-            )))),
+            ))),
             ptyp_loc: none_loc,
             ptyp_attributes: Attributes::new(),
         };
@@ -2387,7 +2387,7 @@ impl ParseArena {
 
     fn placeholder_expr() -> Expression {
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Self::placeholder_lident_loc())),
+            pexp_desc: ExpressionDesc::Pexp_ident(Self::placeholder_lident_loc()),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         }
@@ -2395,7 +2395,7 @@ impl ParseArena {
 
     fn placeholder_pat() -> Pattern {
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_desc: PatternDesc::Ppat_any,
             ppat_loc: LocIdx::default(),
             ppat_attributes: Attributes::new(),
         }
@@ -2403,7 +2403,7 @@ impl ParseArena {
 
     fn placeholder_core_type() -> CoreType {
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
+            ptyp_desc: CoreTypeDesc::Ptyp_any,
             ptyp_loc: LocIdx::default(),
             ptyp_attributes: Attributes::new(),
         }
@@ -2540,7 +2540,7 @@ impl ParseArena {
         self.expressions
             .as_slice()
             .iter()
-            .filter_map(|expr| match &*expr.pexp_desc {
+            .filter_map(|expr| match &expr.pexp_desc {
                 ExpressionDesc::Pexp_fun(fun) => Some(((**fun).clone(), expr.pexp_loc)),
                 _ => None,
             })
@@ -2564,7 +2564,7 @@ impl ParseArena {
         for i in 0..self.patterns.len() {
             let pat = self.patterns.get(PatIdx(i as u32));
             if !matches!(
-                &*pat.ppat_desc,
+                &pat.ppat_desc,
                 crate::parser::ast::PatternDesc::Ppat_interval(_)
             ) {
                 continue;
@@ -2613,7 +2613,7 @@ impl ParseArena {
             self.nary_fun_unknown_arity_by_first_pattern
                 .get(&fun.lhs)
                 .copied()
-                .or_else(|| match &*self.get_expr(fun.rhs).pexp_desc {
+                .or_else(|| match &self.get_expr(fun.rhs).pexp_desc {
                     ExpressionDesc::Pexp_fun(next) => Some(next.arity),
                     _ => None,
                 })
@@ -2653,29 +2653,23 @@ impl ParseArena {
         self.value_constraint_varify_errors.remove(&pattern);
         let body = self.push_core_type(body);
         let poly = self.push_core_type(CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
-                constraint.pvc_newtypes.clone(),
-                body,
-            )))),
+            ptyp_desc: CoreTypeDesc::Ptyp_poly(Box::new((constraint.pvc_newtypes.clone(), body))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         });
         constraint.pvc_pattern = Some(self.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pattern, poly)))),
+            ppat_desc: PatternDesc::Ppat_constraint(Box::new((pattern, poly))),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }));
         let mut wrapped = self.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                expression,
-                constraint.pvc_type,
-            )))),
+            pexp_desc: ExpressionDesc::Pexp_constraint(Box::new((expression, constraint.pvc_type))),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         });
         for name in constraint.pvc_newtypes.iter().rev() {
             wrapped = self.push_expr(Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((*name, wrapped)))),
+                pexp_desc: ExpressionDesc::Pexp_newtype(Box::new((*name, wrapped))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             });
@@ -2763,7 +2757,7 @@ impl ParseArena {
             if let Some(arity) = self.get_arity(fun.arity) {
                 let mut body = fun.rhs;
                 while params.len() < arity.max(1) as usize {
-                    let ExpressionDesc::Pexp_fun(next) = &*self.get_expr(body).pexp_desc else {
+                    let ExpressionDesc::Pexp_fun(next) = &self.get_expr(body).pexp_desc else {
                         break;
                     };
                     params.push(FunParam {
@@ -2790,7 +2784,7 @@ impl ParseArena {
         let mut consumed = 1;
         let mut body = fun.rhs;
         while consumed < arity.max(1) as usize {
-            let ExpressionDesc::Pexp_fun(next) = &*self.get_expr(body).pexp_desc else {
+            let ExpressionDesc::Pexp_fun(next) = &self.get_expr(body).pexp_desc else {
                 break;
             };
             consumed += 1;
@@ -2811,7 +2805,7 @@ impl ParseArena {
         self.expr_overrides
             .get(&owner.0)
             .and_then(|o| o.fun_default)
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+            .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_fun(inner) => inner.default,
                 _ => None,
             })
@@ -2837,7 +2831,7 @@ impl ParseArena {
             .and_then(|guards| guards.get(case_index))
             .copied()
             .flatten()
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+            .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                     let (_, cases) = &**inner;
                     cases.get(case_index).and_then(|case| case.pc_guard)
@@ -2859,7 +2853,7 @@ impl ParseArena {
         self.expr_overrides
             .get(&owner.0)
             .and_then(|o| o.record_spread)
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+            .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_record(inner) => {
                     let (_, spread) = &**inner;
                     *spread
@@ -2881,7 +2875,7 @@ impl ParseArena {
         self.expr_overrides
             .get(&owner.0)
             .and_then(|o| o.if_else_branch)
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+            .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_ifthenelse(inner) => {
                     let (_, _, else_branch) = &**inner;
                     *else_branch
@@ -2903,7 +2897,7 @@ impl ParseArena {
         self.expr_overrides
             .get(&owner.0)
             .and_then(|o| o.coerce_from_type)
-            .or_else(|| match &*self.get_expr(owner).pexp_desc {
+            .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_coerce(inner) => {
                     let (_, from_type, _) = &**inner;
                     *from_type
@@ -3107,10 +3101,10 @@ mod tests {
     fn ident_expr(arena: &mut ParseArena, name: &str) -> Expression {
         let lid = arena.push_lident(name);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
                 txt: lid,
                 loc: LocIdx::default(),
-            })),
+            }),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         }
@@ -3125,7 +3119,7 @@ mod tests {
         for index in 0..2048 {
             longidents.push(arena.push_typecheck_lident(&format!("Generated{index}")));
             patterns.push(arena.push_typecheck_pattern(Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_any),
+                ppat_desc: PatternDesc::Ppat_any,
                 ppat_loc: LocIdx::none(),
                 ppat_attributes: Attributes::new(),
             }));
@@ -3143,7 +3137,7 @@ mod tests {
             "Generated2047"
         );
         assert!(matches!(
-            &*arena.get_pat(patterns[2047]).ppat_desc,
+            &arena.get_pat(patterns[2047]).ppat_desc,
             PatternDesc::Ppat_any
         ));
     }
@@ -3347,7 +3341,7 @@ mod tests {
         let slot = arena.reserve_expr();
         let placeholder = arena.get_expr(slot);
         assert!(matches!(
-            &*placeholder.pexp_desc,
+            &placeholder.pexp_desc,
             ExpressionDesc::Pexp_ident(_)
         ));
 
@@ -3355,7 +3349,7 @@ mod tests {
         arena.initialize_expr(slot, expr);
 
         let initialized = arena.get_expr(slot);
-        match &*initialized.pexp_desc {
+        match &initialized.pexp_desc {
             ExpressionDesc::Pexp_ident(loc) => {
                 assert_eq!(
                     arena.get_string(arena.get_longident(loc.txt).last_idx()),
@@ -3403,7 +3397,7 @@ mod tests {
         let mut arena = ParseArena::new();
 
         let lhs = arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_desc: PatternDesc::Ppat_any,
             ppat_loc: LocIdx::default(),
             ppat_attributes: Attributes::new(),
         });
@@ -3412,20 +3406,20 @@ mod tests {
         let default_expr_node = ident_expr(&mut arena, "default");
         let default_expr = arena.push_expr(default_expr_node);
         let fun_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+            pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
                 default: Some(default_expr),
                 lhs,
                 rhs,
                 arity: arena.static_arity_none(),
                 is_async: false,
-            }))),
+            })),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });
 
         let case_lhs = arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_any),
+            ppat_desc: PatternDesc::Ppat_any,
             ppat_loc: LocIdx::default(),
             ppat_attributes: Attributes::new(),
         });
@@ -3434,7 +3428,7 @@ mod tests {
         let guard_expr_node = ident_expr(&mut arena, "guard");
         let guard_expr = arena.push_expr(guard_expr_node);
         let match_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_match(Box::new((
+            pexp_desc: ExpressionDesc::Pexp_match(Box::new((
                 rhs,
                 vec![Case {
                     pc_bar: None,
@@ -3442,26 +3436,19 @@ mod tests {
                     pc_guard: Some(guard_expr),
                     pc_rhs: case_rhs,
                 }],
-            )))),
+            ))),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });
 
         let record_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_record(Box::new((
-                vec![],
-                Some(default_expr),
-            )))),
+            pexp_desc: ExpressionDesc::Pexp_record(Box::new((vec![], Some(default_expr)))),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });
 
         let if_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ifthenelse(Box::new((
-                rhs,
-                case_rhs,
-                Some(guard_expr),
-            )))),
+            pexp_desc: ExpressionDesc::Pexp_ifthenelse(Box::new((rhs, case_rhs, Some(guard_expr)))),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });
@@ -3469,11 +3456,7 @@ mod tests {
         let from_type = arena.push_core_type(ParseArena::placeholder_core_type());
         let to_type = arena.push_core_type(ParseArena::placeholder_core_type());
         let coerce_owner = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
-                rhs,
-                Some(from_type),
-                to_type,
-            )))),
+            pexp_desc: ExpressionDesc::Pexp_coerce(Box::new((rhs, Some(from_type), to_type))),
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         });
@@ -3513,11 +3496,11 @@ mod tests {
         arena.initialize_mod_type(mt_slot, ParseArena::placeholder_mod_type());
 
         assert!(matches!(
-            &*arena.get_pat(pat_slot).ppat_desc,
+            &arena.get_pat(pat_slot).ppat_desc,
             PatternDesc::Ppat_any
         ));
         assert!(matches!(
-            &*arena.get_core_type(ty_slot).ptyp_desc,
+            &arena.get_core_type(ty_slot).ptyp_desc,
             CoreTypeDesc::Ptyp_any
         ));
         assert!(matches!(

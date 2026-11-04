@@ -120,7 +120,7 @@ pub fn walk_payload<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, payload:
 pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTypeIdx) {
     let typ = arena.get_core_type(idx);
     v.attributes(arena, typ.ptyp_attributes.as_slice());
-    match &*typ.ptyp_desc {
+    match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
         CoreTypeDesc::Ptyp_arrow(inner) => {
             // `Ptyp_arrow {params; ret}`: every parameter lives in the
@@ -423,7 +423,7 @@ fn walk_jsx_props<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, props: &[J
 pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprIdx) {
     let expr = arena.get_expr(idx);
     v.attributes(arena, expr.pexp_attributes.as_slice());
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => v.expr(arena, braces.expr),
         ExpressionDesc::Pexp_ternary(inner) => {
             v.expr(arena, inner.0);
@@ -599,7 +599,7 @@ pub fn walk_case<V: AstIter + ?Sized>(
 pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx) {
     let pat = arena.get_pat(idx);
     v.attributes(arena, pat.ppat_attributes.as_slice());
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PatternDesc::Ppat_any
         | PatternDesc::Ppat_var(_)
         | PatternDesc::Ppat_constant(_)

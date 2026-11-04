@@ -119,7 +119,7 @@ fn expression_has_string_literal(
 ) -> bool {
     use crate::parser::ast::ExpressionDesc as ED;
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ED::Pexp_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
         ED::Pexp_template(template) => template
             .values
@@ -306,7 +306,7 @@ fn pattern_has_string_literal(
 ) -> bool {
     use crate::parser::ast::PatternDesc as PD;
 
-    match &*pat.ppat_desc {
+    match &pat.ppat_desc {
         PD::Ppat_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
         PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) => {
             pattern_has_string_literal(arena.get_pat(*inner), value, arena)
@@ -1796,7 +1796,7 @@ fn let_unwrap_binding_loc(
 }
 
 fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &ParseArena) -> bool {
-    let PatternDesc::Ppat_construct(ctor_lid, payload) = &*pat.ppat_desc else {
+    let PatternDesc::Ppat_construct(ctor_lid, payload) = &pat.ppat_desc else {
         return false;
     };
     let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
@@ -1895,7 +1895,7 @@ fn invalid_enabled_let_unwrap_in_expr(
     arena: &ParseArena,
 ) -> Option<LetUnwrapPositionError> {
     let expr = arena.get_expr(expr);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => {
             let (_rec_flag, bindings, body) = &**inner;
             if let [binding] = bindings.as_slice()
@@ -2085,7 +2085,7 @@ fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena)
 
 fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<LocIdx> {
     let expr = arena.get_expr(expr);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => disabled_let_unwrap_loc_in_bindings(&inner.1, arena)
             .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
         ExpressionDesc::Pexp_fun(fun) => fun
@@ -11238,8 +11238,8 @@ fn format_compunit_mismatch_report(
     error: &crate::types::includemod::IncludeModError,
 ) -> String {
     let file_loc = Location::in_file(StrIdx::default());
-    let loc = &direct_compunit_error_location(error)
-        .map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
+    let loc =
+        &direct_compunit_error_location(error).map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
     let mut message = String::new();
     message.push_str("  The implementation ");
     message.push_str(impl_name);
@@ -12583,7 +12583,7 @@ fn config_payload_actions(
     };
     let (expr_idx, _) = &**inner;
     let expr = arena.get_expr(*expr_idx);
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(inner) => {
             let (fields, with_obj) = &**inner;
             if with_obj.is_some() {
@@ -12605,7 +12605,7 @@ fn config_payload_actions(
                     });
                 };
                 let field_expr = arena.get_expr(field.expr);
-                let punned = match &*field_expr.pexp_desc {
+                let punned = match &field_expr.pexp_desc {
                     // OCaml compiler/ml/ast_payload.ml:206-214 compares the
                     // label and identifier names, so separately interned Rust
                     // StrIdx values for `no_export: no_export` must still
@@ -12648,7 +12648,7 @@ fn validate_config_bool_literal(
     arena: &ParseArena,
 ) -> Result<(), ConfigPayloadError> {
     let expr = arena.get_expr(expr_idx);
-    let is_bool_literal = match &*expr.pexp_desc {
+    let is_bool_literal = match &expr.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => matches!(
             arena.get_longident(lid.txt),
             Longident::Lident(name_idx)
@@ -12713,7 +12713,7 @@ fn config_flags_strings(
         return Ok(None);
     };
     let expr = arena.get_expr(expr_idx);
-    let ExpressionDesc::Pexp_array(elements) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_array(elements) = &expr.pexp_desc else {
         return Err(ConfigPayloadError {
             loc: expr.pexp_loc,
             message: "string array expected".to_string(),
@@ -14250,8 +14250,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             options,
             &mut located_warnings,
             &mut tctx.warnings[post_type_warning_start..],
-        ) || !place_location_free_warnings(arena, options, &mut located_warnings, &mut raw_warnings)
-        {
+        ) || !place_location_free_warnings(
+            arena,
+            options,
+            &mut located_warnings,
+            &mut raw_warnings,
+        ) {
             return Err(LocationRetry::Warning.into());
         }
     }
@@ -14521,18 +14525,18 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         for target in js_targets.iter().skip(1) {
             let (program, module_path_resolver, _, _, _, target_lam_locs) =
                 compile_js_program_for_output(
-                lowered_lambda
-                    .as_ref()
-                    .expect("lowered lambda retained for secondary JS targets"),
-                &pre_js.hoisted_functions,
-                &pre_js.possible_required_modules,
-                options,
-                Some(&target.path),
-                Some(target.module_format),
-                persistent_env_for_js.clone(),
-                pre_js.jsx_preserve,
-                &pre_js.lam_locs,
-            )?;
+                    lowered_lambda
+                        .as_ref()
+                        .expect("lowered lambda retained for secondary JS targets"),
+                    &pre_js.hoisted_functions,
+                    &pre_js.possible_required_modules,
+                    options,
+                    Some(&target.path),
+                    Some(target.module_format),
+                    persistent_env_for_js.clone(),
+                    pre_js.jsx_preserve,
+                    &pre_js.lam_locs,
+                )?;
             check_module_path_resolution_errors(
                 &program,
                 &module_path_resolver,
@@ -14711,12 +14715,11 @@ pub fn typecheck_preprocessed_signature_in_process(
     };
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
-    let sig_type =
-        crate::types::typemod::decl_signature_from_typed_signature(
-            &typed_signature,
-            arena,
-            &type_ctx,
-        );
+    let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
+        &typed_signature,
+        arena,
+        &type_ctx,
+    );
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
@@ -14771,12 +14774,11 @@ pub fn typecheck_preprocessed_signature_in_process(
             true,
         )?;
     }
-    let decl_signature =
-        crate::types::typemod::decl_signature_from_typed_signature(
-            &typed_signature,
-            arena,
-            &type_ctx,
-        );
+    let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+        &typed_signature,
+        arena,
+        &type_ctx,
+    );
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),

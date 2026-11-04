@@ -309,7 +309,7 @@ fn has_no_export_config(structure: &[StructureItem], arena: &ParseArena) -> bool
                             {
                                 let (ref expr_idx, _) = **eval_inner;
                                 let expr = arena.get_expr(*expr_idx);
-                                match &*expr.pexp_desc {
+                                match &expr.pexp_desc {
                                     // @@config({no_export: ...}) - record form
                                     ExpressionDesc::Pexp_record(inner) => {
                                         let (ref fields, _) = **inner;
@@ -361,7 +361,7 @@ fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -
     use crate::parser::longident::Longident;
 
     let expr = arena.get_expr(expr_idx);
-    if let ExpressionDesc::Pexp_construct(lid_loc, args) = &*expr.pexp_desc
+    if let ExpressionDesc::Pexp_construct(lid_loc, args) = &expr.pexp_desc
         && args.txt.is_empty()
     {
         let lid = arena.get_longident(lid_loc.txt);
@@ -448,18 +448,18 @@ mod tests {
     ) -> StructureItem {
         let name_idx = arena.intern(name);
         let pat_idx = arena.push_pat(Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
+            ppat_desc: PatternDesc::Ppat_var(Located {
                 txt: name_idx,
                 loc: LocIdx::none(),
-            })),
+            }),
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
         });
         let expr_idx = arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
+            pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
                 std::borrow::Cow::Owned(value.to_string()),
                 None,
-            )))),
+            ))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         });
@@ -487,10 +487,10 @@ mod tests {
         let lid_idx =
             arena.push_longident(Longident::ldot(Longident::lident(module_idx), name_idx));
         arena.push_expr(Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
                 loc: LocIdx::none(),
-            })),
+            }),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         })

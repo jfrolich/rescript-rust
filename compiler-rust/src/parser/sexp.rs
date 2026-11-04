@@ -457,7 +457,7 @@ fn attributes(arena: &ParseArena, attrs: &[Attribute]) -> Sexp {
 // ============================================================================
 
 fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
-    let desc = match &*typ.ptyp_desc {
+    let desc = match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => Sexp::atom("Ptyp_any"),
         CoreTypeDesc::Ptyp_var(var) => {
             Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))])
@@ -608,7 +608,7 @@ fn package_type(
 // ============================================================================
 
 fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
-    let descr = match &*p.ppat_desc {
+    let descr = match &p.ppat_desc {
         PatternDesc::Ppat_any => Sexp::atom("Ppat_any"),
         PatternDesc::Ppat_var(var) => Sexp::list(vec![
             Sexp::atom("Ppat_var"),
@@ -718,7 +718,7 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
 // ============================================================================
 
 fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
-    let desc = match &*expr.pexp_desc {
+    let desc = match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => Sexp::list(vec![
             Sexp::atom("Pexp_braces"),
             Sexp::list(vec![

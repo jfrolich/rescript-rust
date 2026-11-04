@@ -438,7 +438,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Expressions ==========
 
     fn add_expression(&mut self, expr: &Expression) {
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             ExpressionDesc::Pexp_ident(lid) => {
                 self.add_lident_idx(lid.txt);
             }
@@ -753,7 +753,7 @@ impl<'a> DependencyCollector<'a> {
                     {
                         match items[0].pstr_desc.as_ref() {
                             StructureItemDesc::Pstr_eval(inner) => {
-                                match self.arena.get_expr(inner.0).pexp_desc.as_ref() {
+                                match &self.arena.get_expr(inner.0).pexp_desc {
                                     ExpressionDesc::Pexp_construct(c, args)
                                         if args.txt.is_empty() =>
                                     {
@@ -863,7 +863,7 @@ impl<'a> DependencyCollector<'a> {
     }
 
     fn add_pattern_inner(&mut self, pat: &Pattern, unpack_names: &mut HashSet<String>) {
-        match &*pat.ppat_desc {
+        match &pat.ppat_desc {
             PatternDesc::Ppat_any | PatternDesc::Ppat_var(_) | PatternDesc::Ppat_constant(_) => {}
             PatternDesc::Ppat_alias(pat_idx, _name) => {
                 // pat is PatIdx
@@ -943,7 +943,7 @@ impl<'a> DependencyCollector<'a> {
     // ========== Core Types ==========
 
     fn add_core_type(&mut self, ty: &CoreType) {
-        match &*ty.ptyp_desc {
+        match &ty.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
                 let (ref arg, ref ret, arity) = **inner;
@@ -1345,10 +1345,10 @@ mod tests {
     fn make_ident_expr(arena: &mut ParseArena, lid: Longident) -> ExprIdx {
         let lid_idx = arena.push_longident(lid);
         let expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
+            pexp_desc: ExpressionDesc::Pexp_ident(Located {
                 txt: lid_idx,
                 loc: LocIdx::none(),
-            })),
+            }),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         };

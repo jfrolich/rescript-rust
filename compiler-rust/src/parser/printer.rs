@@ -895,7 +895,7 @@ pub fn print_braces(doc: Doc, expr: &Expression, braces_loc: LocIdx, arena: &Par
     let over_multiple_lines = arena.loc_start(braces_loc).line != arena.loc_end(braces_loc).line;
 
     // These expression types already have braces when printed, so just return doc as-is
-    match &*parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
+    match &parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
         ExpressionDesc::Pexp_letmodule(_)
         | ExpressionDesc::Pexp_letexception(_)
         | ExpressionDesc::Pexp_let(_)
@@ -1048,7 +1048,7 @@ pub fn print_expression(
 ) -> Doc {
     // res_printer.ml print_expression: a pipe chain whose braces open on an
     // earlier line than the chain breaks.
-    let force_pipe_breaks = match &*e.pexp_desc {
+    let force_pipe_breaks = match &e.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => {
             arena.loc_start(braces.braces_loc).line + 1
                 < arena.loc_start(arena.get_expr(braces.expr).pexp_loc).line
@@ -1058,10 +1058,10 @@ pub fn print_expression(
     // `unwrap_braces_with_attributes`: the braces nodes disappear and their
     // attributes move in front of the enclosed expression's.
     let unwrapped;
-    let e: &Expression = if matches!(&*e.pexp_desc, ExpressionDesc::Pexp_braces(_)) {
+    let e: &Expression = if matches!(&e.pexp_desc, ExpressionDesc::Pexp_braces(_)) {
         let mut attrs: Vec<Attribute> = Vec::new();
         let mut current = e;
-        while let ExpressionDesc::Pexp_braces(braces) = &*current.pexp_desc {
+        while let ExpressionDesc::Pexp_braces(braces) = &current.pexp_desc {
             attrs.extend(current.pexp_attributes.iter().cloned());
             current = arena.get_expr(braces.expr);
         }
@@ -1077,7 +1077,7 @@ pub fn print_expression(
     } else {
         e
     };
-    let printed_expression = match &*e.pexp_desc {
+    let printed_expression = match &e.pexp_desc {
         // Every `Pexp_braces` layer was unwrapped above.
         ExpressionDesc::Pexp_braces(_) => unreachable!("braces are unwrapped above"),
         // (__x) => f(a, __x, c) -----> f(a, _, c)
@@ -1092,9 +1092,9 @@ pub fn print_expression(
                 } = **fun_inner;
                 matches!(arg_label, ArgLabel::Nolabel)
                     && default.is_none()
-                    && matches!(&*arena.get_pat(*lhs).ppat_desc, PatternDesc::Ppat_var(name) if arena.get_string(name.txt) == "__x")
+                    && matches!(&arena.get_pat(*lhs).ppat_desc, PatternDesc::Ppat_var(name) if arena.get_string(name.txt) == "__x")
                     && matches!(
-                        &*arena.get_expr(*rhs).pexp_desc,
+                        &arena.get_expr(*rhs).pexp_desc,
                         ExpressionDesc::Pexp_apply(_)
                     )
             } =>
@@ -1271,7 +1271,7 @@ pub fn print_expression(
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
                 && matches!(
-                    &*arena.get_expr(apply_inner.args[0].1).pexp_desc,
+                    &arena.get_expr(apply_inner.args[0].1).pexp_desc,
                     ExpressionDesc::Pexp_array(_)
                 )
                 && parsetree_viewer::is_spread_belt_array_concat(
@@ -1280,7 +1280,7 @@ pub fn print_expression(
                 ) =>
         {
             let PexpApply { ref args, .. } = **apply_inner;
-            if let ExpressionDesc::Pexp_array(sub_lists) = &*arena.get_expr(args[0].1).pexp_desc {
+            if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
                 print_belt_array_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
                 Doc::nil() // Should never happen due to guard
@@ -1291,7 +1291,7 @@ pub fn print_expression(
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
                 && matches!(
-                    &*arena.get_expr(apply_inner.args[0].1).pexp_desc,
+                    &arena.get_expr(apply_inner.args[0].1).pexp_desc,
                     ExpressionDesc::Pexp_array(_)
                 )
                 && parsetree_viewer::is_spread_belt_list_concat(
@@ -1300,7 +1300,7 @@ pub fn print_expression(
                 ) =>
         {
             let PexpApply { ref args, .. } = **apply_inner;
-            if let ExpressionDesc::Pexp_array(sub_lists) = &*arena.get_expr(args[0].1).pexp_desc {
+            if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
                 print_belt_list_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
                 Doc::nil() // Should never happen due to guard
@@ -1328,17 +1328,17 @@ pub fn print_expression(
         // Constraint with pack: module(M: S)
         ExpressionDesc::Pexp_constraint(constraint_inner)
             if matches!(
-                &*arena.get_expr(constraint_inner.0).pexp_desc,
+                &arena.get_expr(constraint_inner.0).pexp_desc,
                 ExpressionDesc::Pexp_pack(_)
             ) && matches!(
-                &*arena.get_core_type(constraint_inner.1).ptyp_desc,
+                &arena.get_core_type(constraint_inner.1).ptyp_desc,
                 CoreTypeDesc::Ptyp_package(_)
             ) =>
         {
             let (ref inner_idx, ref typ) = **constraint_inner;
             let inner = arena.get_expr(*inner_idx);
             let typ = arena.get_core_type(*typ);
-            match (&*inner.pexp_desc, &*typ.ptyp_desc) {
+            match (&inner.pexp_desc, &typ.ptyp_desc) {
                 (
                     ExpressionDesc::Pexp_pack(mod_expr_idx),
                     CoreTypeDesc::Ptyp_package(package_type),
@@ -1501,7 +1501,7 @@ pub fn print_expression(
                     ParenKind::Nothing => doc,
                 }
             };
-            let lead = if matches!(&*e.pexp_desc, ExpressionDesc::Pexp_for_await_of(_)) {
+            let lead = if matches!(&e.pexp_desc, ExpressionDesc::Pexp_for_await_of(_)) {
                 "for await "
             } else {
                 "for "
@@ -1602,7 +1602,7 @@ pub fn print_expression(
     // Some expression types print their own attributes (fun, newtype, apply, etc.)
     // so we skip attribute printing here for those cases to avoid duplication.
     // This matches OCaml's should_print_its_own_attributes check.
-    let should_print_its_own_attributes = match &*e.pexp_desc {
+    let should_print_its_own_attributes = match &e.pexp_desc {
         ExpressionDesc::Pexp_apply(_)
         | ExpressionDesc::Pexp_fun(_)
         | ExpressionDesc::Pexp_newtype(_)
@@ -1658,7 +1658,7 @@ fn print_expression_args(
     match args {
         [] => Doc::nil(),
         [arg]
-            if matches!(&*arena.get_expr(*arg).pexp_desc,
+            if matches!(&arena.get_expr(*arg).pexp_desc,
             ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")) =>
         {
             Doc::text("()")
@@ -1711,7 +1711,7 @@ fn print_pattern_args(
     match patterns {
         [] => Doc::nil(),
         [arg]
-            if matches!(&*arena.get_pat(*arg).ppat_desc,
+            if matches!(&arena.get_pat(*arg).ppat_desc,
             PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "()")) =>
         {
             Doc::concat(vec![
@@ -1720,7 +1720,7 @@ fn print_pattern_args(
                 Doc::rparen(),
             ])
         }
-        [arg] if matches!(&*arena.get_pat(*arg).ppat_desc, PatternDesc::Ppat_tuple(pats) if pats.is_empty()) => {
+        [arg] if matches!(&arena.get_pat(*arg).ppat_desc, PatternDesc::Ppat_tuple(pats) if pats.is_empty()) => {
             Doc::concat(vec![
                 Doc::lparen(),
                 print_comments_inside(cmt_tbl, arena.get_pat(*arg).ppat_loc, arena),
@@ -1844,18 +1844,18 @@ fn print_pexp_fun(
     // When extracting, merge the attributes from the constraint onto the inner expression
     // This preserves @res.braces on the body when it's inside a constraint
     let (return_expr_owned, typ_constraint): (Option<Expression>, Option<&CoreType>) =
-        match &*return_expr.pexp_desc {
+        match &return_expr.pexp_desc {
             // res_printer.ml print_pexp_fun: braces around a constraint keep
             // their braces around the constrained expression, with the
             // constraint's attributes in front of the braces node's.
             ExpressionDesc::Pexp_braces(braces)
                 if matches!(
-                    &*arena.get_expr(braces.expr).pexp_desc,
+                    &arena.get_expr(braces.expr).pexp_desc,
                     ExpressionDesc::Pexp_constraint(_)
                 ) =>
             {
                 let constrained = arena.get_expr(braces.expr);
-                let ExpressionDesc::Pexp_constraint(inner) = &*constrained.pexp_desc else {
+                let ExpressionDesc::Pexp_constraint(inner) = &constrained.pexp_desc else {
                     unreachable!()
                 };
                 let (expr_idx, typ_idx) = **inner;
@@ -1864,10 +1864,10 @@ fn print_pexp_fun(
                     .clone()
                     .concat(return_expr.pexp_attributes.clone());
                 let braced = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
+                    pexp_desc: ExpressionDesc::Pexp_braces(Box::new(PexpBraces {
                         expr: expr_idx,
                         braces_loc: braces.braces_loc,
-                    }))),
+                    })),
                     pexp_loc: arena.get_expr(expr_idx).pexp_loc,
                     pexp_attributes: attrs,
                 };
@@ -1903,7 +1903,7 @@ fn print_pexp_fun(
     // Print return expression
     let return_expr_doc = {
         let opt_braces = parsetree_viewer::process_braces(arena, return_expr).0;
-        let should_inline = match (&*return_expr.pexp_desc, opt_braces) {
+        let should_inline = match (&return_expr.pexp_desc, opt_braces) {
             (_, Some(_)) => true,
             (
                 ExpressionDesc::Pexp_array(_)
@@ -1914,7 +1914,7 @@ fn print_pexp_fun(
             (ExpressionDesc::Pexp_construct(_, args), _) if !args.txt.is_empty() => true,
             _ => false,
         };
-        let should_indent = match &*return_expr.pexp_desc {
+        let should_indent = match &return_expr.pexp_desc {
             ExpressionDesc::Pexp_sequence(_, _)
             | ExpressionDesc::Pexp_let(_)
             | ExpressionDesc::Pexp_letmodule(_)
@@ -2009,7 +2009,7 @@ fn print_expr_fun_parameters(
                 pat,
             },
         ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
-            && matches!(&*pat.ppat_desc, PatternDesc::Ppat_any) =>
+            && matches!(&pat.ppat_desc, PatternDesc::Ppat_any) =>
         {
             let doc = if has_constraint {
                 Doc::text("(_)")
@@ -2028,10 +2028,10 @@ fn print_expr_fun_parameters(
                 pat,
             },
         ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
-            && matches!(&*pat.ppat_desc, PatternDesc::Ppat_var(_))
+            && matches!(&pat.ppat_desc, PatternDesc::Ppat_var(_))
             && pat.ppat_attributes.is_empty() =>
         {
-            if let PatternDesc::Ppat_var(string_loc) = &*pat.ppat_desc {
+            if let PatternDesc::Ppat_var(string_loc) = &pat.ppat_desc {
                 let var = print_ident_like(arena.get_string(string_loc.txt), false, false);
                 let var = if has_constraint { add_parens(var) } else { var };
                 let doc = if is_async { add_async(var) } else { var };
@@ -2048,7 +2048,7 @@ fn print_expr_fun_parameters(
             },
         ] if !parsetree_viewer::has_non_parsing_attrs(arena, attrs)
             && matches!(
-                &*pat.ppat_desc,
+                &pat.ppat_desc,
                 PatternDesc::Ppat_construct(lid, args)
                     if arena.is_lident(lid.txt, "()") && args.txt.is_empty()
             ) =>
@@ -2159,7 +2159,7 @@ fn print_exp_fun_parameter(
                 None => Doc::nil(),
             };
 
-            let label_with_pattern = match (label, &*pat.ppat_desc) {
+            let label_with_pattern = match (label, &pat.ppat_desc) {
                 (ArgLabel::Nolabel, _) => print_pattern(state, pat, cmt_tbl, arena),
                 // ~d (punning)
                 (ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl), PatternDesc::Ppat_var(var))
@@ -2180,7 +2180,7 @@ fn print_exp_fun_parameter(
                 (
                     ArgLabel::Labelled(lbl) | ArgLabel::Optional(lbl),
                     PatternDesc::Ppat_constraint(ppat_inner),
-                ) if matches!(&*arena.get_pat(ppat_inner.0).ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) =>
+                ) if matches!(&arena.get_pat(ppat_inner.0).ppat_desc, PatternDesc::Ppat_var(v) if arena.get_string(lbl.txt) == arena.get_string(v.txt)) =>
                 {
                     let (ref var_pat_idx, ref typ) = **ppat_inner;
                     let var_pattern = arena.get_pat(*var_pat_idx);
@@ -2350,7 +2350,7 @@ fn print_record_expression(
     let spread_doc = match spread {
         Some(expr) => {
             // Print the expression, checking if it's just an identifier
-            let expr_doc = match &*expr.pexp_desc {
+            let expr_doc = match &expr.pexp_desc {
                 ExpressionDesc::Pexp_ident(path) => {
                     print_lident(arena, arena.get_longident(path.txt))
                 }
@@ -2449,7 +2449,7 @@ fn is_punned_record_field(arena: &ParseArena, field: &ExpressionRecordField) -> 
     }
 
     // Expression must be a simple Lident
-    if let ExpressionDesc::Pexp_ident(path) = &*expr.pexp_desc {
+    if let ExpressionDesc::Pexp_ident(path) = &expr.pexp_desc {
         if let Longident::Lident(ident_idx) = arena.get_longident(path.txt) {
             // Compare the LAST component of the label with the expression identifier
             let label_last = longident_last(arena, arena.get_longident(field.lid.txt));
@@ -2804,7 +2804,7 @@ fn collect_block_rows_inner(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (ref name, ref mod_expr, ref body_idx) = **inner;
             let mod_expr = arena.get_mod_expr(*mod_expr);
@@ -3054,7 +3054,7 @@ fn try_print_dict_expr(
     arena: &ParseArena,
 ) -> Option<Doc> {
     // Check if funct is Primitive_dict.make
-    if let ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc {
+    if let ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc {
         let longident = arena.get_longident(lid.txt);
         if let Longident::Ldot(parent_box, make_idx) = longident {
             let make_str = arena.get_string(*make_idx);
@@ -3089,17 +3089,17 @@ fn print_dict_rows(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let rows: Vec<Doc> = if let ExpressionDesc::Pexp_array(items) = &*key_values.pexp_desc {
+    let rows: Vec<Doc> = if let ExpressionDesc::Pexp_array(items) = &key_values.pexp_desc {
         items
             .iter()
             .filter_map(|tuple_expr| {
                 let tuple_expr = arena.get_expr(*tuple_expr);
-                if let ExpressionDesc::Pexp_tuple(tuple_items) = &*tuple_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_tuple(tuple_items) = &tuple_expr.pexp_desc {
                     if tuple_items.len() == 2 {
                         let key_expr = arena.get_expr(tuple_items[0]);
                         let value_expr = arena.get_expr(tuple_items[1]);
                         // Key should be a string constant
-                        if let ExpressionDesc::Pexp_constant(c) = &*key_expr.pexp_desc {
+                        if let ExpressionDesc::Pexp_constant(c) = &key_expr.pexp_desc {
                             if let Constant::String(payload) = &**c {
                                 let txt = payload.semantic();
                                 // Create combined location from key to value (for row comments)
@@ -3445,7 +3445,7 @@ fn print_template_literal(
 /// Get the body of an underscore apply sugar expression.
 /// (__x) => body -> body
 fn get_underscore_apply_body<'a>(expr: &'a Expression, arena: &'a ParseArena) -> &'a Expression {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => arena.get_expr(inner.rhs),
         _ => expr,
     }
@@ -3482,7 +3482,7 @@ fn print_underscore_apply_in_pipe(
 
     let body_expr = get_underscore_apply_body(expr, arena);
 
-    match &*body_expr.pexp_desc {
+    match &body_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) => {
             let PexpApply {
                 ref funct,
@@ -3560,7 +3560,7 @@ fn print_underscore_apply(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    match &*inner.pexp_desc {
+    match &inner.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) => {
             let PexpApply {
                 ref funct,
@@ -3628,7 +3628,7 @@ fn print_arguments_with_underscore_subst(
     // res_printer.ml print_arguments `force_break`.
     let force_break = args.iter().any(|(label, arg)| {
         let arg = arena.get_expr(*arg);
-        matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
+        matches!(&arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
             && (cmt_tbl.has_any_trailing_line_comment_at(PosRange::argument(arena, label, arg))
                 || cmt_tbl
                     .has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
@@ -3900,7 +3900,7 @@ fn print_array_access_member(
         }
     };
     let should_inline = matches!(
-        &*member_expr.pexp_desc,
+        &member_expr.pexp_desc,
         ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_ident(_)
             | ExpressionDesc::Pexp_braces(_)
@@ -3980,7 +3980,7 @@ fn print_array_set_apply(
         false
     } else {
         parsetree_viewer::is_binary_expression(arena, target_expr)
-            || match &*target_expr.pexp_desc {
+            || match &target_expr.pexp_desc {
                 ExpressionDesc::Pexp_ifthenelse(ite)
                     if target_expr.pexp_attributes.len() == 1
                         && arena.get_string(target_expr.pexp_attributes[0].0.txt)
@@ -4023,7 +4023,7 @@ fn print_send_apply(
     arena: &ParseArena,
 ) -> Doc {
     let parent_doc = print_unary_expr_operand(state, parent_expr, cmt_tbl, arena);
-    let member_doc = match &*member_expr.pexp_desc {
+    let member_doc = match &member_expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lident) => print_comments(
             print_longident(arena, arena.get_longident(lident.txt)),
             cmt_tbl,
@@ -4065,7 +4065,7 @@ fn print_object_set_expr(
 fn print_assignment_rhs(arena: &ParseArena, operator: &str, rhs: &Expression, rhs_doc: Doc) -> Doc {
     let should_indent = !parsetree_viewer::is_braced_expr(rhs)
         && (parsetree_viewer::is_binary_expression(arena, rhs)
-            || match &*rhs.pexp_desc {
+            || match &rhs.pexp_desc {
                 ExpressionDesc::Pexp_match(_) => !parsetree_viewer::is_if_let_expr(arena, rhs),
                 _ => false,
             });
@@ -4115,7 +4115,7 @@ fn print_pexp_apply(
 ) -> Doc {
     // res_printer.ml:3632-3641 (print_expression's Pexp_apply dispatch).
     if parsetree_viewer::is_unary_expression(arena, expr) {
-        let ExpressionDesc::Pexp_ident(ident) = &*funct.pexp_desc else {
+        let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc else {
             unreachable!()
         };
         let Longident::Lident(op) = arena.get_longident(ident.txt) else {
@@ -4129,7 +4129,7 @@ fn print_pexp_apply(
 
     // res_printer.ml:4549-4757 print_pexp_apply special forms.
     if let (ExpressionDesc::Pexp_ident(ident), [(ArgLabel::Nolabel, a0), (ArgLabel::Nolabel, a1)]) =
-        (&*funct.pexp_desc, args)
+        (&funct.pexp_desc, args)
     {
         let (a0, a1) = (arena.get_expr(*a0), arena.get_expr(*a1));
         if arena.is_lident(ident.txt, "##") {
@@ -4243,13 +4243,13 @@ fn binary_expression_parts<'a>(
     arena: &'a ParseArena,
     expr: &Expression,
 ) -> Option<(&'a str, LocIdx, &'a Expression, &'a Expression)> {
-    let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
+    let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc else {
         return None;
     };
     let [(_, left), (_, right)] = apply.args.as_slice() else {
         return None;
     };
-    let ExpressionDesc::Pexp_ident(ident) = &*arena.get_expr(apply.funct).pexp_desc else {
+    let ExpressionDesc::Pexp_ident(ident) = &arena.get_expr(apply.funct).pexp_desc else {
         return None;
     };
     let Longident::Lident(op) = arena.get_longident(ident.txt) else {
@@ -4394,7 +4394,7 @@ fn print_binary_operand_flatten(
             ])
         }
     } else {
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             ExpressionDesc::Pexp_setfield(inner) => {
                 let (lhs, ref field, rhs) = **inner;
                 let doc = print_set_field_expr(
@@ -4431,7 +4431,7 @@ fn print_binary_operand_flatten(
             }
             _ => {
                 let doc = print_expression_with_comments(state, expr, cmt_tbl, arena);
-                let parens = match &*expr.pexp_desc {
+                let parens = match &expr.pexp_desc {
                     ExpressionDesc::Pexp_fun(_) if parent_operator == ":=" && !is_lhs => {
                         parens::expr(arena, expr)
                     }
@@ -4449,7 +4449,7 @@ fn print_binary_operand_flatten(
 
 fn is_nolabel_pair_apply(expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &expr.pexp_desc,
         ExpressionDesc::Pexp_apply(apply)
             if matches!(apply.args.as_slice(), [(ArgLabel::Nolabel, _), (ArgLabel::Nolabel, _)])
     )
@@ -4951,7 +4951,7 @@ fn print_arguments(
     // enclosing call instead.
     let force_break = args.iter().any(|(label, arg)| {
         let arg = arena.get_expr(*arg);
-        matches!(&*arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
+        matches!(&arg.pexp_desc, ExpressionDesc::Pexp_fun(_))
             && (cmt_tbl.has_any_trailing_line_comment_at(PosRange::argument(arena, label, arg))
                 || cmt_tbl
                     .has_any_trailing_line_comment_at(PosRange::from_loc(arg.pexp_loc, arena)))
@@ -5043,7 +5043,7 @@ fn print_argument(
         ArgLabel::Labelled(name) => {
             let name_str = arena.get_string(name.txt);
             // Check for punning: ~name where expr is Pexp_ident(Lident(name))
-            if let ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &expr.pexp_desc {
                 if let Longident::Lident(ident_idx) = arena.get_longident(lid.txt) {
                     let ident_str = arena.get_string(*ident_idx);
                     if ident_str == name_str && expr.pexp_attributes.is_empty() {
@@ -5059,11 +5059,11 @@ fn print_argument(
                 }
             }
             // Check for punned with type constraint: ~name: type where expr is Pexp_constraint
-            if let ExpressionDesc::Pexp_constraint(inner) = &*expr.pexp_desc {
+            if let ExpressionDesc::Pexp_constraint(inner) = &expr.pexp_desc {
                 let (ref inner_expr_idx, ref typ) = **inner;
                 let inner_expr = arena.get_expr(*inner_expr_idx);
                 if expr.pexp_attributes.is_empty() {
-                    if let ExpressionDesc::Pexp_ident(lid) = &*inner_expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_ident(lid) = &inner_expr.pexp_desc {
                         if let Longident::Lident(ident_idx) = arena.get_longident(lid.txt) {
                             let ident_str = arena.get_string(*ident_idx);
                             if ident_str == name_str {
@@ -5113,7 +5113,7 @@ fn print_argument(
         ArgLabel::Optional(name) => {
             let name_str = arena.get_string(name.txt);
             // Check for punning: ~name? where expr is Pexp_ident(Lident(name))
-            if let ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc {
+            if let ExpressionDesc::Pexp_ident(lid) = &expr.pexp_desc {
                 if let Longident::Lident(ident_idx) = arena.get_longident(lid.txt) {
                     let ident_str = arena.get_string(*ident_idx);
                     if ident_str == name_str && expr.pexp_attributes.is_empty() {
@@ -5168,7 +5168,7 @@ fn make_combined_pos_range(
 
 /// Check if an expression is unit: `()`
 fn is_unit_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_construct(lid, _) => arena.is_lident(lid.txt, "()"),
         _ => false,
     }
@@ -5241,7 +5241,7 @@ pub fn print_pattern(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let pattern_without_attrs = match &*pat.ppat_desc {
+    let pattern_without_attrs = match &pat.ppat_desc {
         // _
         PatternDesc::Ppat_any => Doc::text("_"),
         // x
@@ -5337,7 +5337,7 @@ pub fn print_pattern(
                 .map(|(i, p)| {
                     let pattern_doc = print_pattern(state, p, cmt_tbl, arena);
                     // Wrap nested or-patterns in parentheses
-                    let pattern_doc = if matches!(&*p.ppat_desc, PatternDesc::Ppat_or(_, _)) {
+                    let pattern_doc = if matches!(&p.ppat_desc, PatternDesc::Ppat_or(_, _)) {
                         add_parens(pattern_doc)
                     } else {
                         pattern_doc
@@ -5363,10 +5363,10 @@ pub fn print_pattern(
         // module(M: S) - first-class module with package type
         PatternDesc::Ppat_constraint(ppat_c_inner)
             if matches!(
-                &*arena.get_pat(ppat_c_inner.0).ppat_desc,
+                &arena.get_pat(ppat_c_inner.0).ppat_desc,
                 PatternDesc::Ppat_unpack(_)
             ) && matches!(
-                &*arena.get_core_type(ppat_c_inner.1).ptyp_desc,
+                &arena.get_core_type(ppat_c_inner.1).ptyp_desc,
                 CoreTypeDesc::Ptyp_package(_)
             ) =>
         {
@@ -5374,7 +5374,7 @@ pub fn print_pattern(
             let inner = arena.get_pat(*inner_idx);
             let typ = arena.get_core_type(*typ);
             if let (PatternDesc::Ppat_unpack(name), CoreTypeDesc::Ptyp_package(package_type)) =
-                (&*inner.ppat_desc, &*typ.ptyp_desc)
+                (&inner.ppat_desc, &typ.ptyp_desc)
             {
                 let name_doc = Doc::text(arena.get_string(name.txt));
                 let name_doc = print_comments(name_doc, cmt_tbl, name.loc, arena);
@@ -5404,7 +5404,7 @@ pub fn print_pattern(
         PatternDesc::Ppat_alias(pat_idx, alias) => {
             let pat = arena.get_pat(*pat_idx);
             let needs_parens = matches!(
-                &*pat.ppat_desc,
+                &pat.ppat_desc,
                 PatternDesc::Ppat_or(_, _) | PatternDesc::Ppat_alias(_, _)
             );
             let pat_doc = print_pattern(state, pat, cmt_tbl, arena);
@@ -5429,7 +5429,7 @@ pub fn print_pattern(
         PatternDesc::Ppat_exception(pat_idx) => {
             let pat = arena.get_pat(*pat_idx);
             let needs_parens = matches!(
-                &*pat.ppat_desc,
+                &pat.ppat_desc,
                 PatternDesc::Ppat_or(_, _) | PatternDesc::Ppat_alias(_, _)
             );
             let pat_doc = print_pattern(state, pat, cmt_tbl, arena);
@@ -5496,7 +5496,7 @@ fn print_list_pattern(
     // res_printer.ml:2669-2710
     let (patterns, tail) = parsetree_viewer::collect_list_patterns(arena, pat);
     let tail_is_nil = matches!(
-        &*tail.ppat_desc,
+        &tail.ppat_desc,
         PatternDesc::Ppat_construct(lid, _) if arena.is_lident(lid.txt, "[]")
     );
     let should_hug = matches!(patterns.as_slice(), [single] if parsetree_viewer::is_huggable_pattern(single))
@@ -5762,7 +5762,7 @@ fn print_dict_pattern_row(
 fn is_punned_pattern_field(arena: &ParseArena, field: &PatternRecordField) -> bool {
     match (
         arena.get_longident(field.lid.txt),
-        &*arena.get_pat(field.pat).ppat_desc,
+        &arena.get_pat(field.pat).ppat_desc,
     ) {
         (Longident::Lident(name_idx), PatternDesc::Ppat_var(var)) => {
             let name_str = arena.get_string(*name_idx);
@@ -5783,7 +5783,7 @@ pub fn print_typ_expr(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let rendered_type = match &*typ.ptyp_desc {
+    let rendered_type = match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => Doc::text("_"),
 
         CoreTypeDesc::Ptyp_var(name) => {
@@ -5795,7 +5795,7 @@ pub fn print_typ_expr(
         CoreTypeDesc::Ptyp_alias(inner) => {
             let (ref inner_typ_idx, ref alias) = **inner;
             let inner_typ = arena.get_core_type(*inner_typ_idx);
-            let needs_parens = matches!(&*inner_typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
+            let needs_parens = matches!(&inner_typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
             let typ_doc = print_typ_expr(state, inner_typ, cmt_tbl, arena);
             if needs_parens {
                 Doc::concat(vec![
@@ -5850,7 +5850,7 @@ pub fn print_typ_expr(
             // Handle special case: object type inside type constructor
             if let [single_arg] = args.as_slice() {
                 let single_arg = arena.get_core_type(*single_arg);
-                if let CoreTypeDesc::Ptyp_object(obj_inner) = &*single_arg.ptyp_desc {
+                if let CoreTypeDesc::Ptyp_object(obj_inner) = &single_arg.ptyp_desc {
                     let (ref fields, ref open_flag) = **obj_inner;
                     let constr_name = print_lident_path(lid, cmt_tbl, arena);
                     Doc::concat(vec![
@@ -5861,7 +5861,7 @@ pub fn print_typ_expr(
                     ])
                 }
                 // Handle tuple inside constructor
-                else if let CoreTypeDesc::Ptyp_tuple(types) = &*single_arg.ptyp_desc {
+                else if let CoreTypeDesc::Ptyp_tuple(types) = &single_arg.ptyp_desc {
                     let constr_name = print_lident_path(lid, cmt_tbl, arena);
                     Doc::group(Doc::concat(vec![
                         constr_name,
@@ -5964,7 +5964,7 @@ pub fn print_typ_expr(
     };
 
     // Handle attributes
-    let should_print_its_own_attributes = matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
+    let should_print_its_own_attributes = matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
 
     let doc = if !typ.ptyp_attributes.is_empty() && !should_print_its_own_attributes {
         let (doc_comment_attrs, other_attrs) =
@@ -6001,7 +6001,7 @@ fn print_arrow_type(
     let _ = arity;
     let (attrs_before, args, return_type) = parsetree_viewer::arrow_type(arena, typ);
 
-    let return_type_needs_parens = matches!(*return_type.ptyp_desc, CoreTypeDesc::Ptyp_alias(_));
+    let return_type_needs_parens = matches!(return_type.ptyp_desc, CoreTypeDesc::Ptyp_alias(_));
 
     let return_doc = {
         let doc = print_typ_expr(state, return_type, cmt_tbl, arena);
@@ -6028,7 +6028,7 @@ fn print_arrow_type(
             };
             let typ_doc = {
                 let doc = print_typ_expr(state, arg.typ, cmt_tbl, arena);
-                match &*arg.typ.ptyp_desc {
+                match &arg.typ.ptyp_desc {
                     CoreTypeDesc::Ptyp_arrow(_)
                     | CoreTypeDesc::Ptyp_tuple(_)
                     | CoreTypeDesc::Ptyp_alias(_) => add_parens(doc),
@@ -6588,23 +6588,23 @@ fn print_mod_expr(
         ModuleExprDesc::Pmod_unpack(expr_idx) => {
             let expr = arena.get_expr(*expr_idx);
             // Check if we should "hug" the expression
-            let should_hug = match &*parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
+            let should_hug = match &parsetree_viewer::unwrap_braces(arena, expr).pexp_desc {
                 ExpressionDesc::Pexp_let(_) => true,
                 ExpressionDesc::Pexp_constraint(inner) => {
                     let (ref inner_expr_idx, ref typ) = **inner;
                     let typ = arena.get_core_type(*typ);
-                    matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_))
+                    matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_package(_))
                         && parsetree_viewer::is_block_expr(arena, arena.get_expr(*inner_expr_idx))
                 }
                 _ => false,
             };
 
             // Extract module constraint if present
-            let (expr_to_print, module_constraint) = match &*expr.pexp_desc {
+            let (expr_to_print, module_constraint) = match &expr.pexp_desc {
                 ExpressionDesc::Pexp_constraint(inner) => {
                     let (ref inner_expr_idx, ref typ) = **inner;
                     let typ = arena.get_core_type(*typ);
-                    match &*typ.ptyp_desc {
+                    match &typ.ptyp_desc {
                         CoreTypeDesc::Ptyp_package(package_type) => {
                             let package_doc =
                                 print_package_type(state, package_type, false, cmt_tbl, arena);
@@ -7398,7 +7398,7 @@ fn print_try_expression(
 fn case_pattern_needs_parens(pattern: &Pattern) -> bool {
     // res_printer.ml:5545-5549: every constrained case pattern is
     // parenthesized, `(module(M: S))` included.
-    matches!(&*pattern.ppat_desc, PatternDesc::Ppat_constraint(_))
+    matches!(&pattern.ppat_desc, PatternDesc::Ppat_constraint(_))
 }
 
 /// Get the position range for a case (from pattern start to rhs end).
@@ -7545,7 +7545,7 @@ fn print_case_content(
 
     // Check if RHS should be on the same line
     let should_inline_rhs = !is_block_rhs
-        && match &*rhs_expr.pexp_desc {
+        && match &rhs_expr.pexp_desc {
             ExpressionDesc::Pexp_construct(lid, _) => {
                 let name = match arena.get_longident(lid.txt) {
                     crate::parser::longident::Longident::Lident(s) => arena.get_string(*s),
@@ -7559,7 +7559,7 @@ fn print_case_content(
         };
 
     // Check if pattern should be indented
-    let should_indent_pattern = !matches!(&*lhs.ppat_desc, PatternDesc::Ppat_or(_, _));
+    let should_indent_pattern = !matches!(&lhs.ppat_desc, PatternDesc::Ppat_or(_, _));
 
     // Print pattern
     let pattern_doc = {
@@ -7717,17 +7717,17 @@ fn print_value_binding(
 
     // res_printer.ml:2393-2450: `Ppat_constraint (p, Ptyp_poly)` over a
     // `Pexp_fun` with newtypes.
-    let fun_has_newtypes = match &*arena.get_expr(vb.pvb_expr).pexp_desc {
+    let fun_has_newtypes = match &arena.get_expr(vb.pvb_expr).pexp_desc {
         ExpressionDesc::Pexp_fun(fun) => !arena.nary_fun_newtypes(fun).is_empty(),
         _ => false,
     };
     if let (PatternDesc::Ppat_constraint(pat_inner), true) =
-        (&*arena.get_pat(vb.pvb_pat).ppat_desc, fun_has_newtypes)
+        (&arena.get_pat(vb.pvb_pat).ppat_desc, fun_has_newtypes)
     {
         let (ref inner_pat_idx, ref pat_typ) = **pat_inner;
         let pat_typ = arena.get_core_type(*pat_typ);
         let inner_pat = arena.get_pat(*inner_pat_idx);
-        if matches!(*pat_typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(_)) {
+        if matches!(pat_typ.ptyp_desc, CoreTypeDesc::Ptyp_poly(_)) {
             let vb_expr = arena.get_expr(vb.pvb_expr);
             let (_, parameters, return_expr) = parsetree_viewer::fun_expr(arena, vb_expr);
 
@@ -7757,7 +7757,7 @@ fn print_value_binding(
             let pat_doc = print_pattern(state, inner_pat, cmt_tbl, arena);
 
             // Check if return_expr is Pexp_constraint
-            if let ExpressionDesc::Pexp_constraint(constraint_inner) = &*return_expr.pexp_desc {
+            if let ExpressionDesc::Pexp_constraint(constraint_inner) = &return_expr.pexp_desc {
                 let (ref expr_idx, ref typ) = **constraint_inner;
                 let expr = arena.get_expr(*expr_idx);
                 // Use the constraint's type and expression
@@ -7853,7 +7853,7 @@ fn print_value_binding(
     // This matches OCaml's value_binding logic for indentation
     let opt_braces = parsetree_viewer::process_braces(arena, vb_expr).0;
     let should_indent = opt_braces.is_none() && {
-        match &*vb_expr.pexp_desc {
+        match &vb_expr.pexp_desc {
             // Ternary without attributes: indent if condition is binary or has attrs
             ExpressionDesc::Pexp_ternary(inner) if vb_expr.pexp_attributes.is_empty() => {
                 let (ref if_expr_idx, _, _) = **inner;
@@ -7981,7 +7981,7 @@ fn print_attribute(
                 if let StructureItemDesc::Pstr_eval(eval_inner) = &*single.pstr_desc {
                     let (ref expr_idx, _) = **eval_inner;
                     let expr = arena.get_expr(*expr_idx);
-                    if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
+                    if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
                         if let Constant::String(payload) = &**c {
                             return Doc::concat(vec![
                                 Doc::text(if standalone { "/***" } else { "/**" }),
@@ -9750,7 +9750,7 @@ fn print_jsx_prop(
                 // to the function or first argument rather than the wrapper.
                 let leading_line_comment_present = match (
                     parens::jsx_prop_expr(arena, value),
-                    &*parsetree_viewer::unwrap_braces(arena, value).pexp_desc,
+                    &parsetree_viewer::unwrap_braces(arena, value).pexp_desc,
                 ) {
                     (parens::ParenKind::Braced(_), ExpressionDesc::Pexp_apply(apply_inner))
                         if !apply_inner.args.is_empty() =>
@@ -9770,7 +9770,7 @@ fn print_jsx_prop(
                         } else {
                             doc
                         };
-                        let multiline_before_value = match &*value.pexp_desc {
+                        let multiline_before_value = match &value.pexp_desc {
                             ExpressionDesc::Pexp_braces(braces) => {
                                 arena.loc_start(braces.braces_loc).line + 1
                                     < arena.loc_start(arena.get_expr(braces.expr).pexp_loc).line
@@ -9981,7 +9981,7 @@ fn get_line_sep_for_jsx_children(children: &[ExprIdx], arena: &ParseArena) -> Do
     if children.len() > 1
         || children.iter().any(|child| {
             matches!(
-                &*arena.get_expr(*child).pexp_desc,
+                &arena.get_expr(*child).pexp_desc,
                 ExpressionDesc::Pexp_jsx_element(_)
             )
         })

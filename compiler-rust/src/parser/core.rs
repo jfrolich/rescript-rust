@@ -48,10 +48,10 @@ pub mod recover {
         let str_idx = arena.intern("rescript.exprhole");
         let id = mknoloc(str_idx);
         Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+            pexp_desc: ExpressionDesc::Pexp_extension(Box::new((
                 id,
                 Payload::PStr(Box::default()),
-            )))),
+            ))),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         }
@@ -62,10 +62,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.typehole");
         let id = mknoloc(str_idx);
         CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_extension(Box::new((
-                id,
-                Payload::PStr(Box::default()),
-            )))),
+            ptyp_desc: CoreTypeDesc::Ptyp_extension(Box::new((id, Payload::PStr(Box::default())))),
             ptyp_loc: LocIdx::none(),
             ptyp_attributes: Attributes::new(),
         }
@@ -76,10 +73,7 @@ pub mod recover {
         let str_idx = arena.intern("rescript.patternhole");
         let id = mknoloc(str_idx);
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_extension(Box::new((
-                id,
-                Payload::PStr(Box::default()),
-            )))),
+            ppat_desc: PatternDesc::Ppat_extension(Box::new((id, Payload::PStr(Box::default())))),
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
         }
@@ -743,9 +737,7 @@ pub fn doc_comment_to_attribute(
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let expr = Expression {
-        pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-            &content.into(),
-        )))),
+        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(&content.into()))),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -820,7 +812,7 @@ pub mod ast_helper {
     /// Create an expression with the given description and location.
     pub fn make_expr(desc: ExpressionDesc, loc: Location) -> Expression {
         Expression {
-            pexp_desc: Box::new(desc),
+            pexp_desc: desc,
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         }
@@ -829,7 +821,7 @@ pub mod ast_helper {
     /// Create a pattern with the given description and location.
     pub fn make_pat(desc: PatternDesc, loc: Location) -> Pattern {
         Pattern {
-            ppat_desc: Box::new(desc),
+            ppat_desc: desc,
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }
@@ -838,7 +830,7 @@ pub mod ast_helper {
     /// Create a type with the given description and location.
     pub fn make_typ(desc: CoreTypeDesc, loc: Location) -> CoreType {
         CoreType {
-            ptyp_desc: Box::new(desc),
+            ptyp_desc: desc,
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -935,7 +927,7 @@ pub mod ast_helper {
     /// The caller should push the string to the arena first using `arena.push_string()`.
     pub fn make_var_pat(str_idx: StrIdx, loc: LocIdx) -> Pattern {
         Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_var(with_loc(str_idx, loc))),
+            ppat_desc: PatternDesc::Ppat_var(with_loc(str_idx, loc)),
             ppat_loc: loc,
             ppat_attributes: Attributes::new(),
         }
@@ -1049,7 +1041,7 @@ pub fn make_unary_expr(
     operand: Expression,
 ) -> Expression {
     // Handle numeric literal negation specially
-    match (&token, &*operand.pexp_desc) {
+    match (&token, &operand.pexp_desc) {
         (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(c))
             if matches!(**c, Constant::Integer(..) | Constant::Float(..)) =>
         {
@@ -1061,8 +1053,9 @@ pub fn make_unary_expr(
         {
             if let Constant::Integer(ref n, ref suffix) = **c {
                 return Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                        Constant::Integer(Cow::Owned(negate_string(n)), *suffix),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
+                        Cow::Owned(negate_string(n)),
+                        *suffix,
                     ))),
                     ..operand
                 };
@@ -1074,10 +1067,10 @@ pub fn make_unary_expr(
         {
             if let Constant::Float(ref n, ref suffix) = **c {
                 return Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
+                    pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
                         Cow::Owned(negate_string(n)),
                         *suffix,
-                    )))),
+                    ))),
                     ..operand
                 };
             }
@@ -1424,7 +1417,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let expr = recover::default_expr(&mut arena);
-        assert!(matches!(*expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
+        assert!(matches!(expr.pexp_desc, ExpressionDesc::Pexp_extension(_)));
     }
 
     #[test]
@@ -1432,7 +1425,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let pat = recover::default_pattern(&mut arena);
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_extension(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_extension(_)));
     }
 
     #[test]
@@ -1440,7 +1433,7 @@ mod tests {
         use crate::parse_arena::ParseArena;
         let mut arena = ParseArena::new();
         let typ = recover::default_type(&mut arena);
-        assert!(matches!(*typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
+        assert!(matches!(typ.ptyp_desc, CoreTypeDesc::Ptyp_extension(_)));
     }
 
     #[test]
@@ -1487,7 +1480,7 @@ mod tests {
             loc,
         );
         assert!(matches!(
-            &*expr.pexp_desc,
+            &expr.pexp_desc,
             ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(..))
         ));
     }
@@ -1498,7 +1491,7 @@ mod tests {
         let str_idx = arena.push_string("x".to_string());
         let loc = LocIdx::none();
         let pat = ast_helper::make_var_pat(str_idx, loc);
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_var(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
     #[test]

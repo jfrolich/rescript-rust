@@ -28,7 +28,7 @@ fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
 
 fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
     Pattern {
-        ppat_desc: Box::new(desc),
+        ppat_desc: desc,
         ppat_loc: loc,
         ppat_attributes: attrs,
     }
@@ -859,7 +859,7 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     }
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed, rest)))),
+        ppat_desc: PatternDesc::Ppat_record(Box::new((fields, closed, rest))),
         ppat_loc: loc,
         ppat_attributes: attrs,
     }
@@ -899,11 +899,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
-            fields,
-            ClosedFlag::Open,
-            None,
-        )))),
+        ppat_desc: PatternDesc::Ppat_record(Box::new((fields, ClosedFlag::Open, None))),
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(
             mknoloc(dict_idx),
@@ -929,49 +925,49 @@ mod tests {
     #[test]
     fn test_parse_pattern_underscore() {
         let pat = parse_pattern_with_timeout("_");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_any));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_any));
     }
 
     #[test]
     fn test_parse_pattern_var() {
         let pat = parse_pattern_with_timeout("foo");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_var(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
     #[test]
     fn test_parse_pattern_unit() {
         let pat = parse_pattern_with_timeout("()");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_construct(..)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_construct(..)));
     }
 
     #[test]
     fn test_parse_pattern_constant() {
         let pat = parse_pattern_with_timeout("42");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_constant(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_constant(_)));
     }
 
     #[test]
     fn test_parse_pattern_tuple() {
         let pat = parse_pattern_with_timeout("(a, b, c)");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_tuple(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_tuple(_)));
     }
 
     #[test]
     fn test_parse_pattern_array() {
         let pat = parse_pattern_with_timeout("[a, b]");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_array(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_array(_)));
     }
 
     #[test]
     fn test_parse_pattern_constructor() {
         let pat = parse_pattern_with_timeout("Some(x)");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_construct(..)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_construct(..)));
     }
 
     #[test]
     fn test_parse_pattern_record() {
         let pat = parse_pattern_with_timeout("{a, b: x}");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_record(..)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_record(..)));
     }
 
     #[test]
