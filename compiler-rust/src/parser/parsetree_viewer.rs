@@ -375,7 +375,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
         ExpressionDesc::Pexp_constant(c)
-            if matches!(&**c, Constant::Json(_) | Constant::Char { .. }) =>
+            if matches!(&*c, Constant::Json(_) | Constant::Char { .. }) =>
         {
             true
         }
@@ -387,9 +387,9 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         }
         ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
         _ if is_block_expr(arena, expr) => true,
-        ExpressionDesc::Pexp_constant(c) => match &**c {
-            Constant::String(payload) => is_multiline_text(payload.source()),
-            Constant::RawSource(source) => is_multiline_text(source),
+        ExpressionDesc::Pexp_constant(c) => match &*c {
+            Constant::String(payload) => is_multiline_text(payload.source(arena)),
+            Constant::RawSource(source) => is_multiline_text(arena.get_string(*source)),
             _ => false,
         },
         _ => false,
@@ -912,7 +912,7 @@ pub fn filter_fragile_match_attributes<'a>(
             !matches!(
                 &arena.get_expr(inner.0).pexp_desc,
                 ExpressionDesc::Pexp_constant(constant)
-                    if matches!(&**constant, Constant::String(s) if s.semantic() == "-4")
+                    if matches!(&*constant, Constant::String(s) if s.semantic(arena) == "-4")
             )
         })
         .collect()
@@ -1033,7 +1033,7 @@ fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bo
     matches!(
         &arena.get_expr(inner.0).pexp_desc,
         ExpressionDesc::Pexp_constant(constant)
-            if matches!(&**constant, Constant::String(s) if s.semantic() == "-4")
+            if matches!(&*constant, Constant::String(s) if s.semantic(arena) == "-4")
     )
 }
 
@@ -1429,7 +1429,7 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     };
     matches!(
         &arena.get_expr(eval.0).pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(..))
+        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(..))
     )
 }
 

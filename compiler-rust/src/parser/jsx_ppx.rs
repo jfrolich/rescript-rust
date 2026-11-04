@@ -3562,8 +3562,8 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                                     )
                                     .pexp_desc
                                 {
-                                    if let Constant::Integer(s, _) = &**c {
-                                        if let Ok(v) = s.parse::<i32>() {
+                                    if let Constant::Integer(s, _) = &*c {
+                                        if let Ok(v) = arena.get_string(*s).parse::<i32>() {
                                             version_raw = Some(v);
                                         }
                                     }
@@ -4818,7 +4818,7 @@ fn transform_jsx_unary(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div />
             let component_name_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(name))),
+                pexp_desc: ExpressionDesc::Pexp_constant(arena.string_constant(name)),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -4909,7 +4909,7 @@ fn transform_jsx_container(
         JsxTagName::Lower(name) => {
             // Lowercase element like <div>...</div>
             let component_name_expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(name))),
+                pexp_desc: ExpressionDesc::Pexp_constant(arena.string_constant(name)),
                 pexp_loc: *tag_loc,
                 pexp_attributes: Attributes::new(),
             };

@@ -4152,12 +4152,14 @@ pub(super) fn raw_source_extension_payload(
         && let StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
     {
         let expr_idx = eval.0;
-        let expr = p.arena_mut().get_expr_mut(expr_idx);
-        if let ExpressionDesc::Pexp_constant(constant) = &mut expr.pexp_desc
-            && let Constant::String(literal) = &**constant
+        if let ExpressionDesc::Pexp_constant(Constant::String(literal)) =
+            p.arena().get_expr(expr_idx).pexp_desc
         {
-            let source = literal.source().to_string();
-            **constant = Constant::RawSource(Cow::Owned(source));
+            let source = match literal {
+                StringConst::Valid { source, .. } | StringConst::InvalidSource(source) => source,
+            };
+            p.arena_mut().get_expr_mut(expr_idx).pexp_desc =
+                ExpressionDesc::Pexp_constant(Constant::RawSource(source));
         }
     }
     payload

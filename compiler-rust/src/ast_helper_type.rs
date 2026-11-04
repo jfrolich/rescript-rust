@@ -31,7 +31,7 @@ fn take_as<T>(
     arena: &mut ParseArena,
     attrs: Attributes,
     stop_at_invalid: bool,
-    decode: fn(&ParseArena, &Payload) -> Result<Option<T>, PayloadError>,
+    decode: fn(&mut ParseArena, &Payload) -> Result<Option<T>, PayloadError>,
 ) -> (Option<Located<T>>, Attributes) {
     let attrs = attrs.into_vec();
     let mut found = None;
@@ -102,14 +102,14 @@ pub fn field(
     typ: CoreTypeIdx,
 ) -> LabelDeclaration {
     let (pld_runtime_name, pld_attributes) = match runtime_name {
-        Some(txt) => (
-            Some(Located::new(
-                crate::string_literal::string_from_semantic(txt),
-                name.loc,
-            )),
-            attrs,
-        ),
-        None => take_as(arena, attrs, false, ast_payload::string_literal_of_payload),
+        Some(txt) => {
+            let literal = crate::string_literal::string_from_semantic(txt);
+            (
+                Some(Located::new(arena.push_string_literal(&literal), name.loc)),
+                attrs,
+            )
+        }
+        None => take_as(arena, attrs, false, ast_payload::string_const_of_payload),
     };
     LabelDeclaration {
         pld_name: name,
@@ -124,7 +124,7 @@ pub fn field(
 
 fn constant_expression(loc: LocIdx, constant: Constant) -> Expression {
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(constant)),
+        pexp_desc: ExpressionDesc::Pexp_constant(constant),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -201,24 +201,19 @@ pub fn constructor_attributes_owned(
 }
 
 fn constructor_attributes_in(target: PayloadArena<'_>, cd: &ConstructorDeclaration) -> Attributes {
-    let arena = target.arena();
     let Some(tag) = &cd.pcd_runtime_tag else {
         return cd.pcd_attributes.clone();
     };
     let loc = tag.loc;
-    let expression = match &tag.txt {
-        ConstructorTag::Pct_string(s) => constant_expression(loc, Constant::String(s.clone())),
-        ConstructorTag::Pct_int(i) => {
-            constant_expression(loc, Constant::Integer(i.clone().into(), None))
-        }
-        ConstructorTag::Pct_float(f) => {
-            constant_expression(loc, Constant::Float(f.clone().into(), None))
-        }
-        ConstructorTag::Pct_bigint(i) => {
-            constant_expression(loc, Constant::Integer(i.clone().into(), Some('n')))
-        }
+    let expression = match tag.txt {
+        ConstructorTag::Pct_string(s) => constant_expression(loc, Constant::String(s)),
+        ConstructorTag::Pct_int(i) => constant_expression(loc, Constant::Integer(i, None)),
+        ConstructorTag::Pct_float(f) => constant_expression(loc, Constant::Float(f, None)),
+        ConstructorTag::Pct_bigint(i) => constant_expression(loc, Constant::Integer(i, Some('n'))),
         ConstructorTag::Pct_bool(b) => {
-            let lid = arena.runtime_tag_lident(if *b { "true" } else { "false" });
+            let lid = target
+                .arena()
+                .runtime_tag_lident(if b { "true" } else { "false" });
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_construct(
                     Located::new(lid, loc),
@@ -229,11 +224,14 @@ fn constructor_attributes_in(target: PayloadArena<'_>, cd: &ConstructorDeclarati
             }
         }
         ConstructorTag::Pct_null | ConstructorTag::Pct_undefined => {
-            let lid = arena.runtime_tag_lident(if matches!(tag.txt, ConstructorTag::Pct_null) {
-                "null"
-            } else {
-                "undefined"
-            });
+            let lid =
+                target
+                    .arena()
+                    .runtime_tag_lident(if matches!(tag.txt, ConstructorTag::Pct_null) {
+                        "null"
+                    } else {
+                        "undefined"
+                    });
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_ident(Located::new(lid, loc)),
                 pexp_loc: loc,
@@ -260,6 +258,78 @@ fn field_attributes_in(target: PayloadArena<'_>, ld: &LabelDeclaration) -> Attri
         return ld.pld_attributes.clone();
     };
     let loc = name.loc;
-    let expression = constant_expression(loc, Constant::String(name.txt.clone()));
+    let expression = constant_expression(loc, Constant::String(name.txt));
     put_back_as(target, &ld.pld_attributes, loc, expression)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::ast::{StructureItemDesc, TypeKind};
+
+    /// The `@as` string a rebuilt attribute list carries, read from a shared
+    /// arena as printers and mappers do before type checking.
+    fn as_payload_string(arena: &ParseArena, attrs: &Attributes) -> Option<String> {
+        attrs.iter().find_map(|(name, payload)| {
+            if arena.get_string(name.txt) != "as" {
+                return None;
+            }
+            let Payload::PStr(items) = payload else {
+                return None;
+            };
+            let StructureItemDesc::Pstr_eval(eval) = &*items.first()?.pstr_desc else {
+                return None;
+            };
+            match arena.get_expr(eval.0).pexp_desc {
+                ExpressionDesc::Pexp_constant(Constant::String(s)) => {
+                    Some(s.semantic(arena).to_string())
+                }
+                ExpressionDesc::Pexp_constant(Constant::Integer(i, _)) => {
+                    Some(arena.get_string(i).to_string())
+                }
+                _ => None,
+            }
+        })
+    }
+
+    #[test]
+    fn as_attributes_put_back_before_type_checking_keep_their_strings() {
+        let source = "type r = {@as(\"x-real-ip\") ip: string}\n\
+                      type v = | @as(\"seedance-2.0\") A | @as(42) B\n";
+        let mut parser = crate::parser::Parser::new("test.res", source);
+        let structure = crate::parser::module::parse_structure(&mut parser);
+        let arena = parser.into_arena();
+        let mut seen = Vec::new();
+        for item in &structure {
+            let StructureItemDesc::Pstr_type(decls) = &*item.pstr_desc else {
+                continue;
+            };
+            for decl in &decls.1 {
+                match &decl.ptype_kind {
+                    TypeKind::Ptype_record(labels) => {
+                        for label in labels {
+                            seen.push(as_payload_string(&arena, &field_attributes(&arena, label)));
+                        }
+                    }
+                    TypeKind::Ptype_variant(constructors) => {
+                        for cd in constructors {
+                            seen.push(as_payload_string(
+                                &arena,
+                                &constructor_attributes(&arena, cd),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                Some("x-real-ip".to_string()),
+                Some("seedance-2.0".to_string()),
+                Some("42".to_string()),
+            ]
+        );
+    }
 }

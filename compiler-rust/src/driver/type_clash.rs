@@ -341,8 +341,10 @@ fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
         return None;
     };
     match &arena.get_expr(eval.0).pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
-            crate::parser::ast::Constant::String(payload) => Some(payload.semantic().to_string()),
+        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &*c {
+            crate::parser::ast::Constant::String(payload) => {
+                Some(payload.semantic(&arena).to_string())
+            }
             _ => None,
         },
         _ => None,
@@ -1072,10 +1074,10 @@ fn print_extra_type_clash_help_by_types(
                 let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &exp.pexp_desc else {
                     return None;
                 };
-                let crate::parser::ast::Constant::String(payload) = &**c else {
+                let crate::parser::ast::Constant::String(payload) = &*c else {
                     return None;
                 };
-                let s = payload.semantic().to_string();
+                let s = payload.semantic(arena).to_string();
                 Some(crate::parser::ast::Expression {
                     pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_variant(Box::new((
                         std::borrow::Cow::Owned(s),
@@ -1118,7 +1120,7 @@ fn print_extra_type_clash_help_by_types(
             if let Some(constructor_name) = matching {
                 let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
                     if !matches!(&exp.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_constant(c)
-                        if matches!(&**c, crate::parser::ast::Constant::String(..)))
+                        if matches!(&*c, crate::parser::ast::Constant::String(..)))
                     {
                         return None;
                     }

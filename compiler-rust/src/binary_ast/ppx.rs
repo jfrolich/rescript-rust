@@ -1162,9 +1162,14 @@ pub(crate) fn warn_discarded_unused_attributes(
 
 /// OCaml `Bs_ast_invariant.check_constant` (bs_ast_invariant.ml:54-64): an
 /// integer literal without suffix that `Int32.of_string` rejects warns.
-fn check_constant(loc: LocIdx, constant: &Constant, warnings: &mut Vec<PpxWarning>) {
+fn check_constant(
+    loc: LocIdx,
+    constant: &Constant,
+    warnings: &mut Vec<PpxWarning>,
+    arena: &ParseArena,
+) {
     if let Constant::Integer(s, None) = constant {
-        if !crate::types::typecore::int32_literal_fits_ocaml(s) {
+        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(*s)) {
             warnings.push(PpxWarning {
                 loc,
                 warning: Warning::BsIntegerLiteralOverflow,
@@ -1294,7 +1299,7 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         match &expr.pexp_desc {
             ExpressionDesc::Pexp_constant(constant) => {
                 if !self.stopped {
-                    check_constant(expr.pexp_loc, constant, self.warnings);
+                    check_constant(expr.pexp_loc, constant, self.warnings, arena);
                 }
             }
             _ => super::ast_iter::walk_expr(self, arena, idx),
@@ -1306,7 +1311,7 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
         let pat = arena.get_pat(idx);
         if let PatternDesc::Ppat_constant(constant) = &pat.ppat_desc {
             if !self.stopped {
-                check_constant(pat.ppat_loc, constant, self.warnings);
+                check_constant(pat.ppat_loc, constant, self.warnings, arena);
             }
         } else {
             super::ast_iter::walk_pat(self, arena, idx);
@@ -2362,9 +2367,15 @@ fn payload_raw_source_info(payload: &Payload, arena: &ParseArena) -> Option<(Str
             );
             Some((source, expr.pexp_loc, js_offset))
         }
-        ExpressionDesc::Pexp_constant(c) => match &**c {
-            Constant::RawSource(source) => Some((source.to_string(), expr.pexp_loc, js_offset)),
-            Constant::String(payload) => Some((payload.semantic().to_string(), expr.pexp_loc, 0)),
+        ExpressionDesc::Pexp_constant(c) => match &*c {
+            Constant::RawSource(source) => Some((
+                arena.get_string(*source).to_string(),
+                expr.pexp_loc,
+                js_offset,
+            )),
+            Constant::String(payload) => {
+                Some((payload.semantic(arena).to_string(), expr.pexp_loc, 0))
+            }
             _ => None,
         },
         _ => None,
@@ -2482,12 +2493,12 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
                             &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
                                 .pexp_desc
                         {
-                            if let Constant::Integer(s, suffix) = &**c {
+                            if let Constant::Integer(s, suffix) = &*c {
                                 // Reject bigint suffix
                                 if matches!(suffix, Some('n')) {
                                     return None;
                                 }
-                                let v = s.parse::<i64>().ok();
+                                let v = arena.get_string(*s).parse::<i64>().ok();
                                 if v.is_some() {
                                     arena.mark_used_attribute(attr);
                                 }
@@ -3696,12 +3707,13 @@ fn get_payload_int_result(
                 if let ExpressionDesc::Pexp_constant(c) =
                     &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
                 {
-                    if let current::Constant::Integer(name, suffix) = &**c {
+                    if let current::Constant::Integer(name, suffix) = &*c {
                         // OCaml's is_single_int rejects 'n' suffix (bigint)
                         if matches!(suffix, Some('n')) {
                             return Ok(None);
                         }
-                        return name
+                        return arena
+                            .get_string(*name)
                             .parse::<i32>()
                             .map(Some)
                             .map_err(|_| PpxError::int_of_string_failure());
@@ -3743,9 +3755,9 @@ fn get_payload_string_or_json(
     };
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0));
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match &**c {
+        ExpressionDesc::Pexp_constant(c) => match &*c {
             current::Constant::Json(source) => Some(AsStringPayload::Json {
-                source: source.to_string(),
+                source: arena.get_string(*source).to_string(),
                 loc: expr.pexp_loc,
             }),
             _ => None,
@@ -4390,11 +4402,11 @@ fn transform_inline_sig_value(
         });
     }
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match &**c {
+        ExpressionDesc::Pexp_constant(c) => match &*c {
             Constant::String(_) => None,
             // @inline(42) let x: t
             Constant::Integer(s, None) => {
-                let i = s.parse::<i32>().ok()?;
+                let i = arena.get_string(*s).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_name: vd.pval_name,
@@ -4406,7 +4418,7 @@ fn transform_inline_sig_value(
             }
             // @inline(42n) let x: t (bigint)
             Constant::Integer(s, Some('n')) => {
-                let prim = inline_bigint_primitive(s);
+                let prim = inline_bigint_primitive(arena.get_string(*s));
                 Some(ValueDescription {
                     pval_name: vd.pval_name,
                     pval_type: vd.pval_type,
@@ -4417,7 +4429,7 @@ fn transform_inline_sig_value(
             }
             // @inline(3.14) let x: t
             Constant::Float(s, None) => {
-                let prim = inline_float_primitive(s);
+                let prim = inline_float_primitive(arena.get_string(*s));
                 Some(ValueDescription {
                     pval_name: vd.pval_name,
                     pval_type: vd.pval_type,
@@ -4455,7 +4467,7 @@ fn transform_inline_sig_value(
 /// semantic string.
 fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> Option<String> {
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(_)) => {
+        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(_)) => {
             expr_semantic_string(expr, arena)
         }
         ExpressionDesc::Pexp_template(template)
@@ -4520,11 +4532,11 @@ fn transform_inline_binding(
         });
     }
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match &**c {
+        ExpressionDesc::Pexp_constant(c) => match &*c {
             Constant::String(_) => None,
             // @inline let x = 42
             Constant::Integer(s, None) => {
-                let i = s.parse::<i32>().ok()?;
+                let i = arena.get_string(*s).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
@@ -4544,7 +4556,7 @@ fn transform_inline_binding(
             }
             // @inline let x = 3.14
             Constant::Float(s, None) => {
-                let prim = inline_float_primitive(s);
+                let prim = inline_float_primitive(arena.get_string(*s));
                 Some(StructureItem {
                     pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(
                         ValueDescription {
@@ -4658,7 +4670,7 @@ fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expres
         pexp_attributes: Attributes::new(),
     };
     let argument = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(&text))),
+        pexp_desc: ExpressionDesc::Pexp_constant(arena.string_constant(&text)),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -4978,15 +4990,16 @@ fn handle_raw(
             unreachable!("payload_raw_source_info matched an eval item")
         };
         let e = crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0));
+        let (e_loc, e_attributes) = (e.pexp_loc, e.pexp_attributes.clone());
         // Check if the JS string contains a function
         let is_func = is_js_function(&code);
         // `{expression with pexp_desc = Pexp_constant (Pconst_raw_source str)}`
         let exp = Expression {
-            pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(Cow::Owned(
-                code,
-            )))),
-            pexp_loc: e.pexp_loc,
-            pexp_attributes: e.pexp_attributes.clone(),
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::RawSource(
+                arena.intern_string(&code),
+            )),
+            pexp_loc: e_loc,
+            pexp_attributes: e_attributes,
         };
         (exp, payload_loc, is_func)
     };
@@ -5166,16 +5179,17 @@ fn handle_raw_structure(
             unreachable!("payload_raw_source_info matched an eval item")
         };
         let expr = arena.get_expr(eval_inner.0);
+        let (expr_loc, expr_attributes) = (expr.pexp_loc, expr.pexp_attributes.clone());
         (
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                    Cow::Owned(code),
-                ))),
-                pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::RawSource(
+                    arena.intern_string(&code),
+                )),
+                pexp_loc: expr_loc,
+                pexp_attributes: expr_attributes.clone(),
             },
             str_loc,
-            expr.pexp_attributes.clone(),
+            expr_attributes,
         )
     };
 
@@ -6759,7 +6773,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
 
     let desc = match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => match &**c {
+        PatternDesc::Ppat_constant(c) => match &*c {
             // bs_builtin_ppx.ml `pat_mapper`: a `json` literal pattern is a
             // tagged template in pattern position.
             Constant::Json(_) => {
@@ -6771,7 +6785,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
             }
             // Strip 'l' suffix from integer literals
             Constant::Integer(s, Some('l')) => {
-                PatternDesc::Ppat_constant(Box::new(Constant::Integer(s.clone(), None)))
+                PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None))
             }
             // Other constants: no transformation needed
             _ => PatternDesc::Ppat_constant(c.clone()),
@@ -7084,12 +7098,9 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
     // This is an early-return case that preserves attributes without remapping.
     if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-        if let Constant::Integer(s, Some('l')) = &**c {
+        if let Constant::Integer(s, Some('l')) = &*c {
             return Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                    s.clone(),
-                    None,
-                ))),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None)),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             };
@@ -7505,9 +7516,9 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             let loc = expr.pexp_loc;
             let source = format!("/{}/{}", regexp.pattern, regexp.flags);
             let arg = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(
-                    Cow::Owned(source),
-                ))),
+                pexp_desc: ExpressionDesc::Pexp_constant(Constant::RawSource(
+                    arena.intern_string(&source),
+                )),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -9119,9 +9130,9 @@ fn create_map_binding(
     // with `raw_as_string_exp_exn` yields `Pconst_raw_source` of the semantic
     // string.
     let json_const = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::RawSource(Cow::Owned(
-            crate::string_literal::normalize_semantic(json_str).into_owned(),
-        )))),
+        pexp_desc: ExpressionDesc::Pexp_constant(Constant::RawSource(
+            arena.intern_string(&crate::string_literal::normalize_semantic(json_str).into_owned()),
+        )),
         pexp_loc: none_loc,
         pexp_attributes: Attributes::new(),
     };
@@ -11118,7 +11129,8 @@ fn handle_abstract_tdcl(
                 let pld_type = &label.pld_type;
 
                 // ast_derive_abstract.ml: the field's `pld_runtime_name`.
-                let prim_as_attr = crate::types::record_runtime::parsetree_runtime_name(label);
+                let prim_as_attr =
+                    crate::types::record_runtime::parsetree_runtime_name(label, arena);
                 let prim_as_name = prim_as_attr.clone().unwrap_or_else(|| label_name.clone());
                 let _prim_as_idx = match &prim_as_attr {
                     Some(name) if name != &label_name => arena.intern_string(name),
@@ -12129,7 +12141,7 @@ impl super::ast_iter::AstIter for UnconsumedJsonIterator {
         }
         let expr = arena.get_expr(idx);
         if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc
-            && let Constant::Json(_) = &**c
+            && let Constant::Json(_) = &*c
         {
             self.error = Some(PpxError::at_loc(
                 expr.pexp_loc,
@@ -12146,7 +12158,7 @@ impl super::ast_iter::AstIter for UnconsumedJsonIterator {
         }
         let pat = arena.get_pat(idx);
         if let PatternDesc::Ppat_constant(c) = &pat.ppat_desc
-            && let Constant::Json(_) = &**c
+            && let Constant::Json(_) = &*c
         {
             self.error = Some(PpxError::at_loc(
                 pat.ppat_loc,

@@ -21,8 +21,8 @@ use crate::parser::ast::{
     ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag, ObjectField, OpenDescription, OverrideFlag,
     Pattern, PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, PrimitiveRepr,
-    PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem, SignatureItemDesc, StringLoc,
-    StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
+    PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem, SignatureItemDesc, StringConst,
+    StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
     ValueBinding, ValueConstraint, ValueDescription, Variance, WithConstraint,
 };
 use crate::parser::longident::Longident;
@@ -277,7 +277,7 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let eq_arg1_expr = arena.get_expr(eq_args[1].1);
     matches!(
         &eq_arg1_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::String(s) if s.semantic() == "undefined")
+        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(s) if s.semantic(arena) == "undefined")
     )
 }
 
@@ -303,7 +303,7 @@ fn is_external_raw_expansion_body(expr: &Expression, w: &MarshalWriter<'_>) -> b
     let arg_expr = w.get_arena().get_expr(args[0].1);
     matches!(
         &arg_expr.pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::RawSource(_))
+        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::RawSource(_))
     )
 }
 
@@ -455,7 +455,7 @@ fn marshal_attribute_list(
 ///
 /// In OCaml, certain parser attributes (`template_literal_attr`, etc.) are module-level
 /// `let` bindings that create a single physical tuple object. When the PPX preserves
-/// these attributes (early-return cases like `Pexp_constant(Box::new(Pconst_string(_, Some _)))`),
+/// these attributes (early-return cases like `Pexp_constant(Pconst_string(_, Some _))`),
 /// the marshal sees the same physical pointer and writes SHARED references.
 ///
 /// For expressions that go through OCaml's default mapper, `sub.attributes sub attrs`
@@ -816,36 +816,56 @@ fn marshal_string_literal(
     }
 }
 
+/// `String_literal.payload` of an interned literal, written by content.
+fn marshal_string_const(payload: StringConst, w: &mut MarshalWriter<'_>) {
+    let arena = w.get_arena();
+    match payload {
+        StringConst::Valid { source, semantic } => {
+            w.write_block_header(0, 2);
+            w.write_str(arena.get_string(source));
+            w.write_str(arena.get_string(semantic));
+        }
+        StringConst::InvalidSource(source) => {
+            w.write_block_header(1, 1);
+            w.write_str(arena.get_string(source));
+        }
+    }
+}
+
 impl Marshal for Constant {
+    /// Constant strings are written by content, never as shared references:
+    /// each OCaml constant owns its string, and the arena may intern equal
+    /// constant spellings to one `StrIdx`.
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        match self {
+        let arena = w.get_arena();
+        match *self {
             Constant::Integer(s, suffix) => {
                 w.write_block_header(0, 2);
-                w.write_str(s);
+                w.write_str(arena.get_string(s));
                 suffix.marshal(w);
             }
             Constant::Char { source, semantic } => {
                 // Pconst_char {source; semantic}: inline record, tag 1.
                 w.write_block_header(1, 2);
-                w.write_str(source);
-                w.write_int(*semantic as i64);
+                w.write_str(arena.get_string(source));
+                w.write_int(semantic as i64);
             }
             Constant::String(payload) => {
                 // Pconst_string of String_literal.payload, tag 2.
                 w.write_block_header(2, 1);
-                marshal_string_literal(payload, w);
+                marshal_string_const(payload, w);
             }
             Constant::Json(source) => {
                 w.write_block_header(3, 1);
-                w.write_str(source);
+                w.write_str(arena.get_string(source));
             }
             Constant::RawSource(source) => {
                 w.write_block_header(4, 1);
-                w.write_str(source);
+                w.write_str(arena.get_string(source));
             }
             Constant::Float(s, suffix) => {
                 w.write_block_header(5, 2);
-                w.write_str(s);
+                w.write_str(arena.get_string(s));
                 suffix.marshal(w);
             }
         }
@@ -1314,16 +1334,16 @@ impl Marshal for Expression {
         // sharing of singleton `(mknoloc name, PStr [])` module-level constants.
         //
         // Early-return expression types (preserve attribute tuple pointers):
-        // - Pexp_constant(Box::new(Pconst_integer(_, Some _))): int suffix stripping
+        // - Pexp_constant(Pconst_integer(_, Some _)): int suffix stripping
         // - Pexp_extension: unknown extensions return unchanged
         // - Pexp_newtype: preserves attrs in record-with update
         //
-        // Note: Pexp_constant(Box::new(String(_, None))) and Pexp_letmodule are NOT included.
+        // Note: Pexp_constant(String(_, None)) and Pexp_letmodule are NOT included.
         // While PPX-created instances preserve attrs, user code instances go through
         // the default mapper which creates fresh tuples.
         let share_attrs = matches!(
             &self.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(_, Some(_)))
+            ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::Integer(_, Some(_)))
         ) || matches!(
             &self.pexp_desc,
             ExpressionDesc::Pexp_extension(_) | ExpressionDesc::Pexp_newtype(_)
@@ -1980,22 +2000,23 @@ impl Marshal for TypeKind {
 /// constructors 0 and 1.
 impl Marshal for ConstructorTag {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        let arena = w.get_arena();
         match self {
             ConstructorTag::Pct_string(s) => {
                 w.write_block_header(0, 1);
-                marshal_string_literal(s, w);
+                marshal_string_const(*s, w);
             }
             ConstructorTag::Pct_int(i) => {
                 w.write_block_header(1, 1);
-                w.write_str(i);
+                w.write_str(arena.get_string(*i));
             }
             ConstructorTag::Pct_float(f) => {
                 w.write_block_header(2, 1);
-                w.write_str(f);
+                w.write_str(arena.get_string(*f));
             }
             ConstructorTag::Pct_bigint(i) => {
                 w.write_block_header(3, 1);
-                w.write_str(i);
+                w.write_str(arena.get_string(*i));
             }
             ConstructorTag::Pct_bool(b) => {
                 w.write_block_header(4, 1);
@@ -2047,7 +2068,7 @@ impl Marshal for LabelDeclaration {
             Some(name) => {
                 w.write_block_header(0, 1);
                 w.write_block_header(0, 2);
-                marshal_string_literal(&name.txt, w);
+                marshal_string_const(name.txt, w);
                 name.loc.marshal(w);
             }
         }

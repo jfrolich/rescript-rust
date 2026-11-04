@@ -34,10 +34,12 @@ use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
-    ArgLabel, Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
-    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc, ValueConstraint,
+    ArgLabel, Attributes, Constant, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam,
+    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringConst,
+    StringLoc, ValueConstraint,
 };
 use crate::parser::longident::Longident;
+use crate::string_literal::StringLiteral;
 
 // Re-export StrIdx for convenience
 pub use crate::intern::StrIdx;
@@ -2251,6 +2253,10 @@ impl ParseArena {
     /// Append a typechecker-generated string to storage reserved before the
     /// arena became shared.
     pub fn push_typecheck_string(&self, string: String) -> StrIdx {
+        assert!(
+            self.synthetic_string_base != u32::MAX,
+            "typechecker string pushed before reserve_typecheck_synthetic_capacity"
+        );
         let slot = self.synthetic_strings.len();
         self.synthetic_strings.push(Box::new(string));
         StrIdx::from_raw(self.synthetic_string_base + slot as u32)
@@ -2287,6 +2293,78 @@ impl ParseArena {
     }
 
     /// Intern a string (returns existing idx if already interned).
+    /// Intern a string literal's spellings. A literal whose source spelling is
+    /// its semantic value stores one string.
+    pub fn push_string_literal(&mut self, literal: &StringLiteral) -> StringConst {
+        match literal {
+            StringLiteral::Valid { source, semantic } => {
+                let source_idx = self.intern_string(source);
+                let semantic_idx = if source == semantic {
+                    source_idx
+                } else {
+                    self.intern_string(semantic)
+                };
+                StringConst::Valid {
+                    source: source_idx,
+                    semantic: semantic_idx,
+                }
+            }
+            StringLiteral::InvalidSource(source) => {
+                StringConst::InvalidSource(self.intern_string(source))
+            }
+        }
+    }
+
+    /// `push_string_literal` for nodes the type checker synthesizes.
+    pub fn push_typecheck_string_literal(&self, literal: &StringLiteral) -> StringConst {
+        match literal {
+            StringLiteral::Valid { source, semantic } => {
+                let source_idx = self.push_typecheck_string(source.to_string());
+                let semantic_idx = if source == semantic {
+                    source_idx
+                } else {
+                    self.push_typecheck_string(semantic.to_string())
+                };
+                StringConst::Valid {
+                    source: source_idx,
+                    semantic: semantic_idx,
+                }
+            }
+            StringLiteral::InvalidSource(source) => {
+                StringConst::InvalidSource(self.push_typecheck_string(source.to_string()))
+            }
+        }
+    }
+
+    /// OCaml `Ast_helper.Const.string`.
+    pub fn string_constant(&mut self, semantic: &str) -> Constant {
+        Constant::String(
+            self.push_string_literal(&crate::string_literal::string_from_semantic(semantic)),
+        )
+    }
+
+    /// OCaml `Ast_helper.Const.char`.
+    pub fn char_constant(&mut self, semantic: i32) -> Constant {
+        let source = self.intern_string(&crate::string_literal::encode_char_source(semantic));
+        Constant::Char { source, semantic }
+    }
+
+    /// `string_constant` for nodes the type checker synthesizes.
+    pub fn typecheck_string_constant(&self, semantic: &str) -> Constant {
+        Constant::String(
+            self.push_typecheck_string_literal(&crate::string_literal::string_from_semantic(
+                semantic,
+            )),
+        )
+    }
+
+    /// `char_constant` for nodes the type checker synthesizes.
+    pub fn typecheck_char_constant(&self, semantic: i32) -> Constant {
+        let source =
+            self.push_typecheck_string(crate::string_literal::encode_char_source(semantic));
+        Constant::Char { source, semantic }
+    }
+
     pub fn intern_string(&mut self, s: &str) -> StrIdx {
         self.strings.intern(s)
     }

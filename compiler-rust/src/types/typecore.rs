@@ -72,10 +72,10 @@ fn extension_eval_string(
     let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &expr.pexp_desc else {
         return None;
     };
-    let ParsedConstant::String(message) = &**constant else {
+    let ParsedConstant::String(message) = &*constant else {
         return None;
     };
-    Some(message.semantic().to_string())
+    Some(message.semantic(arena).to_string())
 }
 
 fn builtin_extension_sub_errors(
@@ -2212,6 +2212,7 @@ pub(crate) fn int32_literal_fits_ocaml(s: &str) -> bool {
 pub fn convert_constant(
     cst: &crate::parser::ast::Constant,
     loc: LocIdx,
+    arena: &ParseArena,
 ) -> TypeCoreResult<Constant> {
     use crate::parser::ast::Constant as ParsedConstant;
 
@@ -2220,7 +2221,7 @@ pub fn convert_constant(
             // Parse integer literal, handling underscores and 0x/0o/0b prefixes.
             // OCaml's native int is 63-bit on 64-bit systems. We parse as i64
             // and simulate 63-bit wrapping to match OCaml's int_of_string behavior.
-            match parse_int_literal(s) {
+            match parse_int_literal(arena.get_string(*s)) {
                 Some(n) => Ok(Constant::Int(wrap_to_ocaml_int(n))),
                 None => Err(TypeCoreError::LiteralOverflow {
                     loc,
@@ -2229,22 +2230,24 @@ pub fn convert_constant(
             }
         }
         ParsedConstant::Integer(s, Some('n')) => {
-            let (sign, digits) = parse_bigint_literal(s);
+            let (sign, digits) = parse_bigint_literal(arena.get_string(*s));
             Ok(Constant::BigInt(sign, digits))
         }
         ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral {
             loc,
-            literal: i.to_string(),
+            literal: arena.get_string(*i).to_string(),
             modifier: *c,
         }),
         ParsedConstant::Char { semantic, .. } => Ok(Constant::Char(*semantic)),
-        ParsedConstant::String(payload) => Ok(Constant::String(payload.semantic().to_string())),
+        ParsedConstant::String(payload) => {
+            Ok(Constant::String(payload.semantic(arena).to_string()))
+        }
         ParsedConstant::Json(_) => Err(TypeCoreError::JsonLiteralOutsideExternal { loc }),
-        ParsedConstant::RawSource(s) => Ok(Constant::String(s.to_string())),
-        ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
+        ParsedConstant::RawSource(s) => Ok(Constant::String(arena.get_string(*s).to_string())),
+        ParsedConstant::Float(f, None) => Ok(Constant::Float(arena.get_string(*f).to_string())),
         ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral {
             loc,
-            literal: f.to_string(),
+            literal: arena.get_string(*f).to_string(),
             modifier: *c,
         }),
     }
@@ -4471,7 +4474,7 @@ fn type_pattern_inner(
 
         PD::Ppat_constant(cst) => {
             // Constant pattern
-            let constant = convert_constant(cst, loc)?;
+            let constant = convert_constant(cst, loc, tctx.arena)?;
             let ty = type_constant(ctx, env, &constant);
 
             // Unify with expected type
@@ -7244,8 +7247,8 @@ fn type_pattern_interval(
     let ctx = tctx.type_ctx;
 
     // Convert constants
-    let constant1 = convert_constant(c1, loc)?;
-    let constant2 = convert_constant(c2, loc)?;
+    let constant1 = convert_constant(c1, loc, tctx.arena)?;
+    let constant2 = convert_constant(c2, loc, tctx.arena)?;
 
     // OCaml only supports character intervals in patterns, and raises
     // `Invalid_interval` before typing anything (typecore.ml:1335-1347).
@@ -7766,7 +7769,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_constant(cst) => {
             // Constant expression
-            let constant = convert_constant(cst, loc)?;
+            let constant = convert_constant(cst, loc, tctx.arena)?;
             let ty = type_constant(ctx, env, &constant);
 
             // OCaml: rue { ... exp_type = type_constant cst; ... }
@@ -9530,11 +9533,11 @@ fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -
     TypeClashContext::FunctionCall
 }
 
-fn math_operator_constant_text(expr: &ParsedExpression) -> Option<String> {
+fn math_operator_constant_text(expr: &ParsedExpression, arena: &ParseArena) -> Option<String> {
     match &expr.pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
+        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &*c {
             ParsedConstant::Integer(txt, _) | ParsedConstant::Float(txt, _) => {
-                Some(txt.as_ref().to_string())
+                Some(arena.get_string(*txt).to_string())
             }
             _ => None,
         },
@@ -9556,7 +9559,7 @@ fn type_clash_context_for_function_argument(
         } => TypeClashContext::MathOperator {
             for_float: *for_float,
             operator: operator.clone(),
-            is_constant: math_operator_constant_text(arg_expr),
+            is_constant: math_operator_constant_text(arg_expr, arena),
         },
         TypeClashContext::FunctionCall => TypeClashContext::FunctionArgument {
             optional: false,
@@ -17213,131 +17216,133 @@ fn type_letexception(
     // Match OCaml's transl_exception: begin_def before creating arg types,
     // end_def + generalize after, so instance_constructor creates fresh copies.
     ctx.begin_def();
-    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
-        match &ext_constr.pext_kind {
-            crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
-                let mut arg_ty_refs = Vec::new();
-                let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
-                    crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
-                        let mut typed = Vec::new();
-                        for ty in types {
-                            let (typed_ct, ty_ref) =
-                                transl_type(tctx, env, arena.get_core_type(*ty))?;
-                            arg_ty_refs.push(ty_ref);
-                            typed.push(typed_ct);
-                        }
-                        (
-                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
-                            crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
-                            arg_ty_refs.clone(),
-                            None,
-                        )
+    let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) = match &ext_constr
+        .pext_kind
+    {
+        crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
+            let mut arg_ty_refs = Vec::new();
+            let (typed_args, ext_args, cstr_args, cstr_inlined) = match args {
+                crate::parser::ast::ConstructorArguments::Pcstr_tuple(types) => {
+                    let mut typed = Vec::new();
+                    for ty in types {
+                        let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ty))?;
+                        arg_ty_refs.push(ty_ref);
+                        typed.push(typed_ct);
                     }
-                    crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
-                        let mut typed_labels = Vec::new();
-                        let mut decl_labels = Vec::new();
-                        for label in labels {
-                            let label_name = arena.get_string(label.pld_name.txt).to_string();
-                            let (typed_ct, ty_ref) =
-                                transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
-                            let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
-                            let poly_typed_ct = crate::types::typedtree::TypedCoreType {
-                                ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
-                                    vec![],
-                                    Box::new(typed_ct.clone()),
-                                ),
-                                ctyp_type: poly_ty_ref,
-                                ctyp_env: typed_ct.ctyp_env,
-                                ctyp_loc: typed_ct.ctyp_loc,
-                                ctyp_attributes: Attributes::new(),
-                            };
-                            let label_id = ctx.create_ident(&label_name);
-                            typed_labels.push(crate::types::typedtree::LabelDeclaration {
-                                ld_id: label_id,
-                                ld_name: crate::parse_arena::Located {
-                                    txt: label_name.clone(),
-                                    loc: label.pld_name.loc,
-                                },
-                                ld_runtime_name:
-                                    crate::types::record_runtime::parsetree_runtime_name(label),
-                                ld_mutable: label.pld_mutable,
-                                ld_optional: label.pld_optional,
-                                ld_type: poly_typed_ct,
-                                ld_loc: label.pld_loc,
-                                ld_attributes: label.pld_attributes.clone(),
-                            });
-                            decl_labels.push(crate::types::decl::LabelDeclaration {
-                                ld_id: label_id,
-                                ld_runtime_name:
-                                    crate::types::record_runtime::parsetree_runtime_name(label),
-                                ld_mutable: match label.pld_mutable {
-                                    crate::parser::ast::MutableFlag::Immutable => {
-                                        crate::types::MutableFlag::Immutable
-                                    }
-                                    crate::parser::ast::MutableFlag::Mutable => {
-                                        crate::types::MutableFlag::Mutable
-                                    }
-                                },
-                                ld_optional: label.pld_optional,
-                                ld_type: poly_ty_ref,
-                                ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
-                                ld_attributes: vec![],
-                            });
-                        }
-                        let inline_path = Path::pident(id);
-                        // Match OCaml's newgenconstr: create at generic_level
-                        let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
-                        let inline_decl = crate::types::TypeDeclaration {
-                            type_params: vec![],
-                            type_arity: 0,
-                            type_kind: crate::types::TypeKind::TypeRecord(
-                                crate::types::decl::SharedVec::from(decl_labels.clone()),
-                                crate::types::RecordRepresentation::RecordExtension,
+                    (
+                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
+                        crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
+                        arg_ty_refs.clone(),
+                        None,
+                    )
+                }
+                crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                    let mut typed_labels = Vec::new();
+                    let mut decl_labels = Vec::new();
+                    for label in labels {
+                        let label_name = arena.get_string(label.pld_name.txt).to_string();
+                        let (typed_ct, ty_ref) =
+                            transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
+                        let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
+                        let poly_typed_ct = crate::types::typedtree::TypedCoreType {
+                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
+                                vec![],
+                                Box::new(typed_ct.clone()),
                             ),
-                            type_private: crate::types::PrivateFlag::Public,
-                            type_manifest: None,
-                            type_variance: vec![],
-                            type_newtype_level: None,
-                            type_loc: crate::types::DeclLoc::none(),
-                            type_attributes: vec![],
-                            type_immediate: false,
-                            type_representation: crate::types::TypeRepresentation::Boxed,
-                            type_inlined_types: vec![],
-                            type_path: None,
+                            ctyp_type: poly_ty_ref,
+                            ctyp_env: typed_ct.ctyp_env,
+                            ctyp_loc: typed_ct.ctyp_loc,
+                            ctyp_attributes: Attributes::new(),
                         };
-                        (
-                            crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
-                            crate::types::ConstructorArguments::CstrRecord(decl_labels),
-                            vec![inline_ty],
-                            Some(Box::new(inline_decl)),
-                        )
+                        let label_id = ctx.create_ident(&label_name);
+                        typed_labels.push(crate::types::typedtree::LabelDeclaration {
+                            ld_id: label_id,
+                            ld_name: crate::parse_arena::Located {
+                                txt: label_name.clone(),
+                                loc: label.pld_name.loc,
+                            },
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
+                                label, arena,
+                            ),
+                            ld_mutable: label.pld_mutable,
+                            ld_optional: label.pld_optional,
+                            ld_type: poly_typed_ct,
+                            ld_loc: label.pld_loc,
+                            ld_attributes: label.pld_attributes.clone(),
+                        });
+                        decl_labels.push(crate::types::decl::LabelDeclaration {
+                            ld_id: label_id,
+                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
+                                label, arena,
+                            ),
+                            ld_mutable: match label.pld_mutable {
+                                crate::parser::ast::MutableFlag::Immutable => {
+                                    crate::types::MutableFlag::Immutable
+                                }
+                                crate::parser::ast::MutableFlag::Mutable => {
+                                    crate::types::MutableFlag::Mutable
+                                }
+                            },
+                            ld_optional: label.pld_optional,
+                            ld_type: poly_ty_ref,
+                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                            ld_attributes: vec![],
+                        });
                     }
-                };
-                let (typed_ret, ext_ret_ty) = match ret {
-                    Some(ct) => {
-                        let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                        (Some(typed_ct), Some(ty_ref))
-                    }
-                    None => (None, None),
-                };
-                (
-                    typed_args,
-                    typed_ret,
-                    ext_args,
-                    cstr_args,
-                    cstr_inlined,
-                    ext_ret_ty,
-                )
-            }
-            crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-                crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-                None,
-                crate::types::ConstructorArguments::CstrTuple(vec![]),
-                vec![],
-                None,
-                None,
-            ),
-        };
+                    let inline_path = Path::pident(id);
+                    // Match OCaml's newgenconstr: create at generic_level
+                    let inline_ty = ctx.new_generic_constr(inline_path.clone(), vec![]);
+                    let inline_decl = crate::types::TypeDeclaration {
+                        type_params: vec![],
+                        type_arity: 0,
+                        type_kind: crate::types::TypeKind::TypeRecord(
+                            crate::types::decl::SharedVec::from(decl_labels.clone()),
+                            crate::types::RecordRepresentation::RecordExtension,
+                        ),
+                        type_private: crate::types::PrivateFlag::Public,
+                        type_manifest: None,
+                        type_variance: vec![],
+                        type_newtype_level: None,
+                        type_loc: crate::types::DeclLoc::none(),
+                        type_attributes: vec![],
+                        type_immediate: false,
+                        type_representation: crate::types::TypeRepresentation::Boxed,
+                        type_inlined_types: vec![],
+                        type_path: None,
+                    };
+                    (
+                        crate::types::typedtree::ConstructorArgument::Cstr_record(typed_labels),
+                        crate::types::ConstructorArguments::CstrRecord(decl_labels),
+                        vec![inline_ty],
+                        Some(Box::new(inline_decl)),
+                    )
+                }
+            };
+            let (typed_ret, ext_ret_ty) = match ret {
+                Some(ct) => {
+                    let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
+                    (Some(typed_ct), Some(ty_ref))
+                }
+                None => (None, None),
+            };
+            (
+                typed_args,
+                typed_ret,
+                ext_args,
+                cstr_args,
+                cstr_inlined,
+                ext_ret_ty,
+            )
+        }
+        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
+            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
+            None,
+            crate::types::ConstructorArguments::CstrTuple(vec![]),
+            vec![],
+            None,
+            None,
+        ),
+    };
     ctx.end_def();
 
     // Generalize constructor arg types (matching OCaml's iter_type_expr_cstr_args generalize)
@@ -28864,81 +28869,94 @@ mod tests {
 
     #[test]
     fn test_convert_constant_int() {
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("42"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("42"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(42));
     }
 
     #[test]
     fn test_convert_constant_large_fits_63bit() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // Values that fit in 63-bit should be preserved
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("99999999999999999"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(99999999999999999));
     }
 
     #[test]
     fn test_convert_constant_overflow_too_large() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // Values that don't fit in i64 should still error
-        let cst =
-            crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999999999"), None);
-        let result = convert_constant(&cst, LocIdx(0));
+        let cst = crate::parser::ast::Constant::Integer(
+            arena.intern_string("99999999999999999999999"),
+            None,
+        );
+        let result = convert_constant(&cst, LocIdx(0), &arena);
         assert!(matches!(result, Err(TypeCoreError::LiteralOverflow { .. })));
     }
 
     #[test]
     fn test_convert_constant_underscores() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // 949460645006 fits in 63 bits, should be preserved
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("949_460_645_006"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("949_460_645_006"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(949_460_645_006));
     }
 
     #[test]
     fn test_convert_constant_hex() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // 0xFFFFFFFF = 4294967295, fits in 63 bits
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("0xffff_ffff"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("0xffff_ffff"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(4294967295));
     }
 
     #[test]
     fn test_convert_constant_63bit_wrap() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         // 4611686018427387904 = 2^62, wraps to -2^62 in 63-bit
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("4611686018427387904"), None);
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("4611686018427387904"), None);
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(-4611686018427387904));
     }
 
     #[test]
     fn test_convert_constant_string() {
-        let cst = crate::parser::ast::Constant::string("hello");
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = arena.string_constant("hello");
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::String(s) if s == "hello"));
     }
 
     #[test]
     fn test_convert_constant_bigint() {
-        let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("12345"), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst = crate::parser::ast::Constant::Integer(arena.intern_string("12345"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
     }
 
     #[test]
     fn test_convert_constant_bigint_removes_underscores() {
+        let mut arena = crate::parse_arena::ParseArena::new();
         let cst =
-            crate::parser::ast::Constant::Integer(Cow::Owned("01_000_000".to_string()), Some('n'));
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+            crate::parser::ast::Constant::Integer(arena.intern_string("01_000_000"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
     }
 
     #[test]
     fn test_convert_constant_bigint_preserves_non_decimal_heads() {
-        let cst = crate::parser::ast::Constant::Integer(
-            Cow::Owned("00x1_000_000".to_string()),
-            Some('n'),
-        );
-        let result = convert_constant(&cst, LocIdx(0)).unwrap();
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let cst =
+            crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
+        let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
     }
 
@@ -29678,20 +29696,24 @@ fn partial_pred(
     result.ok()
 }
 
-fn untype_constant(constant: &Constant) -> ParsedConstant {
+fn untype_constant(constant: &Constant, arena: &ParseArena) -> ParsedConstant {
     // Untypeast.constant (untypeast.ml:19-27).
     match constant {
-        Constant::Int(value) => ParsedConstant::Integer(value.to_string().into(), None),
-        Constant::Char(value) => ParsedConstant::char(*value),
-        Constant::String(value) => ParsedConstant::string(value),
-        Constant::Float(value) => ParsedConstant::Float(value.clone().into(), None),
+        Constant::Int(value) => {
+            ParsedConstant::Integer(arena.push_typecheck_string(value.to_string()), None)
+        }
+        Constant::Char(value) => arena.typecheck_char_constant(*value),
+        Constant::String(value) => arena.typecheck_string_constant(value),
+        Constant::Float(value) => {
+            ParsedConstant::Float(arena.push_typecheck_string(value.clone()), None)
+        }
         Constant::BigInt(positive, digits) => {
             let value = if *positive {
                 digits.clone()
             } else {
                 format!("-{digits}")
             };
-            ParsedConstant::Integer(value.into(), Some('n'))
+            ParsedConstant::Integer(arena.push_typecheck_string(value), Some('n'))
         }
     }
 }
@@ -29748,7 +29770,7 @@ fn conv_counter_example(
             PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
                 arena,
                 loc,
-                P::Ppat_constant(Box::new(untype_constant(constant))),
+                P::Ppat_constant(untype_constant(constant, arena)),
             ),
             PatternDesc::Tpat_alias(inner, _, _) => lp(tctx, inner, counter, loc),
             PatternDesc::Tpat_tuple(items) => {
@@ -29905,7 +29927,7 @@ fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
             PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
                 arena,
                 none,
-                P::Ppat_constant(Box::new(untype_constant(constant))),
+                P::Ppat_constant(untype_constant(constant, arena)),
             ),
             PatternDesc::Tpat_alias(inner, _, _) => untype(arena, inner),
             PatternDesc::Tpat_tuple(items) => {

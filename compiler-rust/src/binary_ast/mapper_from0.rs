@@ -135,8 +135,8 @@ fn get_arity_from_attributes(arena: &ParseArena, attrs: &[current::Attribute]) -
                         let (ref eval_expr_idx, _) = **inner;
                         let eval_expr = arena.get_expr(*eval_expr_idx);
                         if let current::ExpressionDesc::Pexp_constant(c) = &eval_expr.pexp_desc {
-                            if let current::Constant::Integer(s, _) = c.as_ref() {
-                                return s.parse().ok();
+                            if let current::Constant::Integer(s, _) = c {
+                                return arena.get_string(*s).parse().ok();
                             }
                         }
                     }
@@ -506,27 +506,29 @@ impl<'a> Mapper<'a> {
     fn map_constant(&mut self, c: &pt0::Constant, loc: LocIdx) -> current::Constant {
         match c {
             pt0::Constant::Integer(s, suffix) => {
-                current::Constant::Integer(Cow::Owned(s.clone()), *suffix)
+                current::Constant::Integer(self.arena.intern_string(s), *suffix)
             }
             // Ast0 stores only the code point; reconstruct a canonical spelling.
-            pt0::Constant::Char(semantic) => current::Constant::char(*semantic),
+            pt0::Constant::Char(semantic) => self.arena.char_constant(*semantic),
             pt0::Constant::String(s, Some(delim)) if delim == "js" || delim == "*j" => {
                 match crate::string_literal::string_from_source(s) {
-                    Some(payload) => current::Constant::String(payload),
+                    Some(payload) => {
+                        current::Constant::String(self.arena.push_string_literal(&payload))
+                    }
                     None => {
                         self.raise(loc, "Invalid string escape sequence");
-                        current::Constant::string("")
+                        self.arena.string_constant("")
                     }
                 }
             }
-            pt0::Constant::String(s, None) => current::Constant::string(s),
+            pt0::Constant::String(s, None) => self.arena.string_constant(s),
             pt0::Constant::String(s, Some(delim)) if delim == "json" => {
-                current::Constant::Json(Cow::Owned(s.clone()))
+                current::Constant::Json(self.arena.intern_string(s))
             }
             // Other v0 quotation delimiters are syntax, not part of the value.
-            pt0::Constant::String(semantic, Some(_)) => current::Constant::string(semantic),
+            pt0::Constant::String(semantic, Some(_)) => self.arena.string_constant(semantic),
             pt0::Constant::Float(s, suffix) => {
-                current::Constant::Float(Cow::Owned(s.clone()), *suffix)
+                current::Constant::Float(self.arena.intern_string(s), *suffix)
             }
         }
     }
@@ -730,10 +732,9 @@ impl<'a> Mapper<'a> {
         };
         let expr_loc = self.loc(&expr.pexp_loc);
         let expr_attrs = self.map_attributes(&expr.pexp_attributes);
+        let source = self.arena.intern_string(source);
         let expression = self.arena.push_expr(current::Expression {
-            pexp_desc: current::ExpressionDesc::Pexp_constant(Box::new(
-                current::Constant::RawSource(Cow::Owned(source.clone())),
-            )),
+            pexp_desc: current::ExpressionDesc::Pexp_constant(current::Constant::RawSource(source)),
             pexp_loc: expr_loc,
             pexp_attributes: expr_attrs,
         });
@@ -952,7 +953,7 @@ impl<'a> Mapper<'a> {
                 current::PatternDesc::Ppat_alias(self.push_pat(p), self.map_string_loc(s))
             }
             pt0::PatternDesc::Constant(c) => {
-                current::PatternDesc::Ppat_constant(Box::new(self.map_pattern_constant(c, loc)))
+                current::PatternDesc::Ppat_constant(self.map_pattern_constant(c, loc))
             }
             pt0::PatternDesc::Interval(c1, c2) => {
                 let c1 = self.map_pattern_constant(c1, loc);
@@ -1377,7 +1378,7 @@ impl<'a> Mapper<'a> {
                 if has_template_attr0(&expr.pexp_attributes) {
                     attrs = self.remove_template_attr(attrs);
                 }
-                current::ExpressionDesc::Pexp_constant(Box::new(self.map_constant(c, loc)))
+                current::ExpressionDesc::Pexp_constant(self.map_constant(c, loc))
             }
             pt0::ExpressionDesc::Let(rec_flag, bindings, body) => {
                 let body_idx = self.push_expr(body);
@@ -2323,10 +2324,9 @@ impl<'a> Mapper<'a> {
     fn error_extension(&mut self, msg: &str, loc: &FullLocation) -> current::Extension {
         let loc_idx = self.loc(loc);
         let str_item = |mapper: &mut Self, s: &str| {
+            let constant = mapper.arena.string_constant(s);
             let expr = mapper.arena.push_expr(current::Expression {
-                pexp_desc: current::ExpressionDesc::Pexp_constant(Box::new(
-                    current::Constant::string(s),
-                )),
+                pexp_desc: current::ExpressionDesc::Pexp_constant(constant),
                 pexp_loc: loc_idx,
                 pexp_attributes: Attributes::new(),
             });

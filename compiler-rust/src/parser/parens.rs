@@ -460,12 +460,12 @@ fn assert_or_await_expr_rhs_inner(
 }
 
 /// Check if a constant is negative.
-pub fn is_negative_constant(constant: &Constant) -> bool {
+pub fn is_negative_constant(constant: &Constant, arena: &ParseArena) -> bool {
     fn is_neg(txt: &str) -> bool {
         txt.starts_with('-')
     }
     match constant {
-        Constant::Integer(i, _) | Constant::Float(i, _) => is_neg(i),
+        Constant::Integer(i, _) | Constant::Float(i, _) => is_neg(arena.get_string(*i)),
         _ => false,
     }
 }
@@ -488,7 +488,9 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
 
     match &expr.pexp_desc {
         _ if is_module_pack_constraint(arena, expr) => ParenKind::Nothing,
-        ExpressionDesc::Pexp_constant(c) if is_negative_constant(c) => ParenKind::Parenthesized,
+        ExpressionDesc::Pexp_constant(c) if is_negative_constant(c, arena) => {
+            ParenKind::Parenthesized
+        }
         ExpressionDesc::Pexp_fun(_) if parsetree_viewer::is_underscore_apply_sugar(arena, expr) => {
             ParenKind::Nothing
         }
@@ -565,7 +567,7 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             match &expr.pexp_desc {
                 ExpressionDesc::Pexp_constant(c)
                     if expr.pexp_attributes.is_empty()
-                        && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) =>
+                        && matches!(&*c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(arena.get_string(*x))) =>
                 {
                     ParenKind::Parenthesized
                 }
@@ -620,7 +622,7 @@ pub fn jsx_child_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             match &expr.pexp_desc {
                 ExpressionDesc::Pexp_constant(c)
                     if expr.pexp_attributes.is_empty()
-                        && matches!(&**c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(x)) =>
+                        && matches!(&*c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(arena.get_string(*x))) =>
                 {
                     ParenKind::Parenthesized
                 }

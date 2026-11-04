@@ -972,23 +972,24 @@ fn raw_source_fits_double_quotes(source: &str) -> bool {
 }
 
 /// OCaml `print_constant`.
-pub fn print_constant(c: &Constant) -> Doc {
-    match c {
+pub fn print_constant(c: &Constant, arena: &ParseArena) -> Doc {
+    match *c {
         Constant::Integer(s, suffix) => match suffix {
-            Some(c) => Doc::text(format!("{}{}", s, c)),
-            None => Doc::text(s.clone()),
+            Some(c) => Doc::text(format!("{}{}", arena.get_string(s), c)),
+            None => Doc::text(arena.get_string(s).to_string()),
         },
         Constant::String(payload) => Doc::concat(vec![
             Doc::text("\""),
-            print_string_contents(payload.source()),
+            print_string_contents(payload.source(arena)),
             Doc::text("\""),
         ]),
         Constant::Json(source) => Doc::concat(vec![
             Doc::text("json`"),
-            print_string_contents(source),
+            print_string_contents(arena.get_string(source)),
             Doc::text("`"),
         ]),
         Constant::RawSource(source) => {
+            let source = arena.get_string(source);
             let delimiter = if raw_source_fits_double_quotes(source) {
                 "\""
             } else {
@@ -1002,10 +1003,10 @@ pub fn print_constant(c: &Constant) -> Doc {
         }
         Constant::Char { source, .. } => Doc::concat(vec![
             Doc::text("'"),
-            Doc::text(source.clone()),
+            Doc::text(arena.get_string(source).to_string()),
             Doc::text("'"),
         ]),
-        Constant::Float(s, _) => Doc::text(s.clone()),
+        Constant::Float(s, _) => Doc::text(arena.get_string(s).to_string()),
     }
 }
 
@@ -1108,7 +1109,7 @@ pub fn print_expression(
             print_arrow_expression(state, e, cmt_tbl, arena)
         }
         // Constants
-        ExpressionDesc::Pexp_constant(c) => print_constant(c),
+        ExpressionDesc::Pexp_constant(c) => print_constant(c, arena),
         ExpressionDesc::Pexp_template(template) => print_template_literal(
             state,
             &template.source_segments,
@@ -3107,8 +3108,8 @@ fn print_dict_rows(
                         let value_expr = arena.get_expr(tuple_items[1]);
                         // Key should be a string constant
                         if let ExpressionDesc::Pexp_constant(c) = &key_expr.pexp_desc {
-                            if let Constant::String(payload) = &**c {
-                                let txt = payload.semantic();
+                            if let Constant::String(payload) = &*c {
+                                let txt = payload.semantic(arena);
                                 // Create combined location from key to value (for row comments)
                                 let (cmt_pos_range, cmt_full_loc) = make_combined_pos_range(
                                     key_expr.pexp_loc,
@@ -5248,7 +5249,7 @@ pub fn print_pattern(
         // x
         PatternDesc::Ppat_var(var) => print_ident_like(arena.get_string(var.txt), false, false),
         // 42, "hello", 'a', etc.
-        PatternDesc::Ppat_constant(c) => print_constant(c),
+        PatternDesc::Ppat_constant(c) => print_constant(c, arena),
         // (p1, p2, ...)
         PatternDesc::Ppat_tuple(patterns) => Doc::group(Doc::concat(vec![
             Doc::lparen(),
@@ -5468,9 +5469,9 @@ pub fn print_pattern(
         PatternDesc::Ppat_interval(inner) => {
             let (ref c1, ref c2) = **inner;
             Doc::concat(vec![
-                print_constant(c1),
+                print_constant(c1, arena),
                 Doc::text(" .. "),
-                print_constant(c2),
+                print_constant(c2, arena),
             ])
         }
     };
@@ -7983,10 +7984,10 @@ fn print_attribute(
                     let (ref expr_idx, _) = **eval_inner;
                     let expr = arena.get_expr(*expr_idx);
                     if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-                        if let Constant::String(payload) = &**c {
+                        if let Constant::String(payload) = &*c {
                             return Doc::concat(vec![
                                 Doc::text(if standalone { "/***" } else { "/**" }),
-                                Doc::text(payload.semantic()),
+                                Doc::text(payload.semantic(arena)),
                                 Doc::text("*/"),
                             ]);
                         }

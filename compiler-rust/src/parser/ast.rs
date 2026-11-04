@@ -179,40 +179,62 @@ pub type Label = Cow<'static, str>;
 /// Uses `Cow<'static, str>` for string data to support shared APIs between parser
 /// and PPX-generated nodes. Parser-produced values are normalized to owned strings
 /// when needed to keep this representation fully safe.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Constant {
     /// Integer constant with optional suffix (l, L, n).
-    Integer(Cow<'static, str>, Option<char>),
+    Integer(StrIdx, Option<char>),
     /// An ordinary character literal (OCaml `Pconst_char {source; semantic}`):
     /// `source` is the text between the single quotes as scanned, kept for
     /// printing; `semantic` is the decoded Unicode code point.
-    Char {
-        source: Cow<'static, str>,
-        semantic: i32,
-    },
+    Char { source: StrIdx, semantic: i32 },
     /// An ordinary double-quoted string literal (OCaml `Pconst_string`).
-    String(StringLiteral),
+    String(StringConst),
     /// The JavaScript source inside a non-interpolated ``json`...` `` literal.
-    Json(Cow<'static, str>),
+    Json(StrIdx),
     /// JavaScript source carried by a compiler extension such as `raw`,
     /// `ffi` or `re`.
-    RawSource(Cow<'static, str>),
+    RawSource(StrIdx),
     /// Float constant with optional suffix.
-    Float(Cow<'static, str>, Option<char>),
+    Float(StrIdx, Option<char>),
 }
 
-impl Constant {
-    /// OCaml `Ast_helper.Const.string`: a string constant with canonical
-    /// source spelling for a semantic value.
-    pub fn string(semantic: &str) -> Constant {
-        Constant::String(crate::string_literal::string_from_semantic(semantic))
+/// OCaml `String_literal.payload` with both spellings interned in the owning
+/// `ParseArena` (see `crate::string_literal::StringLiteral`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StringConst {
+    Valid { source: StrIdx, semantic: StrIdx },
+    InvalidSource(StrIdx),
+}
+
+impl StringConst {
+    /// OCaml `string_source`.
+    pub fn source(self, arena: &crate::parse_arena::ParseArena) -> &str {
+        match self {
+            StringConst::Valid { source, .. } | StringConst::InvalidSource(source) => {
+                arena.get_string(source)
+            }
+        }
     }
 
-    /// OCaml `Ast_helper.Const.char`.
-    pub fn char(semantic: i32) -> Constant {
-        Constant::Char {
-            source: Cow::Owned(crate::string_literal::encode_char_source(semantic)),
-            semantic,
+    /// OCaml `string_semantic`. Invalid strings kept for parser recovery
+    /// return the empty placeholder value.
+    pub fn semantic(self, arena: &crate::parse_arena::ParseArena) -> &str {
+        match self {
+            StringConst::Valid { semantic, .. } => arena.get_string(semantic),
+            StringConst::InvalidSource(_) => "",
+        }
+    }
+
+    /// An owned copy, for code that works on `StringLiteral` values.
+    pub fn to_literal(self, arena: &crate::parse_arena::ParseArena) -> StringLiteral {
+        match self {
+            StringConst::Valid { source, semantic } => StringLiteral::Valid {
+                source: Cow::Owned(arena.get_string(source).to_owned()),
+                semantic: Cow::Owned(arena.get_string(semantic).to_owned()),
+            },
+            StringConst::InvalidSource(source) => {
+                StringLiteral::InvalidSource(Cow::Owned(arena.get_string(source).to_owned()))
+            }
         }
     }
 }
@@ -567,7 +589,7 @@ pub enum PatternDesc {
     /// Alias: `P as x`.
     Ppat_alias(PatIdx, StringLoc),
     /// Constant: `1`, `'a'`, `"hello"`.
-    Ppat_constant(Box<Constant>),
+    Ppat_constant(Constant),
     /// Interval: `'a'..'z'`.
     Ppat_interval(Box<(Constant, Constant)>),
     /// Tuple: `(P1, P2, ..., Pn)`.
@@ -712,7 +734,7 @@ pub enum ExpressionDesc {
     /// Identifier: `x` or `M.x`.
     Pexp_ident(Loc<LidentIdx>),
     /// Constant: `1`, `'a'`, `"hello"`.
-    Pexp_constant(Box<Constant>),
+    Pexp_constant(Constant),
     /// Let binding: `let P = E in E'`.
     Pexp_let(Box<(RecFlag, Vec<ValueBinding>, ExprIdx)>),
     /// Function: `(P) => E`.
@@ -1194,12 +1216,12 @@ pub struct ConstructorDeclaration {
 
 /// OCaml `Parsetree.constructor_tag`: the literal a constructor's `@as`
 /// denotes, with its source spelling.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ConstructorTag {
-    Pct_string(StringLiteral),
-    Pct_int(String),
-    Pct_float(String),
-    Pct_bigint(String),
+    Pct_string(StringConst),
+    Pct_int(StrIdx),
+    Pct_float(StrIdx),
+    Pct_bigint(StrIdx),
     Pct_bool(bool),
     Pct_null,
     Pct_undefined,
@@ -1221,7 +1243,7 @@ pub struct LabelDeclaration {
     pub pld_name: StringLoc,
     /// The `@as("...")` rename, taken out of the attributes when the field is
     /// built (OCaml `pld_runtime_name`). The location is the attribute's own.
-    pub pld_runtime_name: Option<Located<StringLiteral>>,
+    pub pld_runtime_name: Option<Located<StringConst>>,
     /// Mutable flag.
     pub pld_mutable: MutableFlag,
     /// Type (arena index).
@@ -1372,10 +1394,11 @@ mod tests {
 
     #[test]
     fn test_constant() {
-        let c = Constant::Integer(Cow::Borrowed("42"), None);
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let c = Constant::Integer(arena.intern_string("42"), None);
         assert!(matches!(c, Constant::Integer(..)));
 
-        let c = Constant::string("hello");
+        let c = arena.string_constant("hello");
         assert!(matches!(c, Constant::String(..)));
     }
 

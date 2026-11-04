@@ -445,21 +445,26 @@ impl<'a> Mapper<'a> {
     // ========== Constant ==========
 
     fn map_constant(&mut self, c: &current::Constant) -> pt0::Constant {
-        match c {
-            current::Constant::Integer(s, opt) => pt0::Constant::Integer(s.to_string(), *opt),
-            current::Constant::Char { semantic, .. } => pt0::Constant::Char(*semantic),
+        let arena = &*self.arena;
+        match *c {
+            current::Constant::Integer(s, opt) => {
+                pt0::Constant::Integer(arena.get_string(s).to_string(), opt)
+            }
+            current::Constant::Char { semantic, .. } => pt0::Constant::Char(semantic),
             // ast_mapper_to0.ml map_constant: strings and JavaScript source keep
             // their spelling under the `js` delimiter, `json` under `json`.
             current::Constant::String(payload) => {
-                pt0::Constant::String(payload.source().to_string(), Some("js".to_string()))
+                pt0::Constant::String(payload.source(arena).to_string(), Some("js".to_string()))
             }
             current::Constant::RawSource(s) => {
-                pt0::Constant::String(s.to_string(), Some("js".to_string()))
+                pt0::Constant::String(arena.get_string(s).to_string(), Some("js".to_string()))
             }
             current::Constant::Json(s) => {
-                pt0::Constant::String(s.to_string(), Some("json".to_string()))
+                pt0::Constant::String(arena.get_string(s).to_string(), Some("json".to_string()))
             }
-            current::Constant::Float(s, opt) => pt0::Constant::Float(s.to_string(), *opt),
+            current::Constant::Float(s, opt) => {
+                pt0::Constant::Float(arena.get_string(s).to_string(), opt)
+            }
         }
     }
 
@@ -2435,23 +2440,25 @@ mod tests {
 
     #[test]
     fn test_map_constant() {
-        use std::borrow::Cow;
         let mut arena = ParseArena::new();
+        let integer = current::Constant::Integer(arena.intern_string("42"), None);
+        let char = arena.char_constant(65);
+        let literal = crate::string_literal::string_from_source("a\\n").expect("valid string");
+        let string = current::Constant::String(arena.push_string_literal(&literal));
+        let json = current::Constant::Json(arena.intern_string("{}"));
         let mut mapper = Mapper::new(&mut arena);
 
-        let c1 = mapper.map_constant(&current::Constant::Integer(Cow::Borrowed("42"), None));
+        let c1 = mapper.map_constant(&integer);
         assert!(matches!(c1, pt0::Constant::Integer(s, None) if s == "42"));
 
-        let c2 = mapper.map_constant(&current::Constant::char(65));
+        let c2 = mapper.map_constant(&char);
         assert!(matches!(c2, pt0::Constant::Char(65)));
 
         // ast_mapper_to0.ml map_constant: strings keep their source spelling
         // under the `js` delimiter, `json` under `json`.
-        let c3 = mapper.map_constant(&current::Constant::String(
-            crate::string_literal::string_from_source("a\\n").expect("valid string"),
-        ));
+        let c3 = mapper.map_constant(&string);
         assert!(matches!(c3, pt0::Constant::String(s, Some(d)) if s == "a\\n" && d == "js"));
-        let c4 = mapper.map_constant(&current::Constant::Json(Cow::Borrowed("{}")));
+        let c4 = mapper.map_constant(&json);
         assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "{}" && d == "json"));
     }
 }

@@ -120,7 +120,7 @@ fn expression_has_string_literal(
     use crate::parser::ast::ExpressionDesc as ED;
 
     match &expr.pexp_desc {
-        ED::Pexp_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+        ED::Pexp_constant(c) => matches!(&*c, Constant::String(s) if s.semantic(arena) == value),
         ED::Pexp_template(template) => template
             .values
             .iter()
@@ -307,7 +307,7 @@ fn pattern_has_string_literal(
     use crate::parser::ast::PatternDesc as PD;
 
     match &pat.ppat_desc {
-        PD::Ppat_constant(c) => matches!(&**c, Constant::String(s) if s.semantic() == value),
+        PD::Ppat_constant(c) => matches!(&*c, Constant::String(s) if s.semantic(arena) == value),
         PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) => {
             pattern_has_string_literal(arena.get_pat(*inner), value, arena)
         }

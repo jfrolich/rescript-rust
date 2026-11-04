@@ -98,41 +98,41 @@ fn opt_char(oc: &Option<char>) -> Sexp {
     }
 }
 
-fn constant_inner(c: &Constant) -> Sexp {
+fn constant_inner(c: &Constant, arena: &ParseArena) -> Sexp {
     match c {
         Constant::Integer(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_integer"),
-            Sexp::atom(&quote_string(txt)),
+            Sexp::atom(&quote_string(arena.get_string(*txt))),
             opt_char(tag),
         ]),
         Constant::Char { source, semantic } => Sexp::list(vec![
             Sexp::atom("Pconst_char"),
-            Sexp::atom(&quote_string_literal(source)),
+            Sexp::atom(&quote_string_literal(arena.get_string(*source))),
             Sexp::atom(&semantic.to_string()),
         ]),
         Constant::String(payload) => Sexp::list(vec![
             Sexp::atom("Pconst_string"),
-            Sexp::atom(&quote_string_literal(payload.source())),
-            Sexp::atom(&quote_string_literal(payload.semantic())),
+            Sexp::atom(&quote_string_literal(payload.source(arena))),
+            Sexp::atom(&quote_string_literal(payload.semantic(arena))),
         ]),
         Constant::Json(source) => Sexp::list(vec![
             Sexp::atom("Pconst_json"),
-            Sexp::atom(&quote_string_literal(source)),
+            Sexp::atom(&quote_string_literal(arena.get_string(*source))),
         ]),
         Constant::RawSource(source) => Sexp::list(vec![
             Sexp::atom("Pconst_raw_source"),
-            Sexp::atom(&quote_string_literal(source)),
+            Sexp::atom(&quote_string_literal(arena.get_string(*source))),
         ]),
         Constant::Float(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_float"),
-            Sexp::atom(&quote_string(txt)),
+            Sexp::atom(&quote_string(arena.get_string(*txt))),
             opt_char(tag),
         ]),
     }
 }
 
-fn constant(c: &Constant) -> Sexp {
-    Sexp::list(vec![Sexp::atom("constant"), constant_inner(c)])
+fn constant(c: &Constant, arena: &ParseArena) -> Sexp {
+    Sexp::list(vec![Sexp::atom("constant"), constant_inner(c, arena)])
 }
 
 // ============================================================================
@@ -401,13 +401,15 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
             Sexp::atom(&quote_string(arena.get_string(alias.txt))),
             location(alias.loc, arena),
         ]),
-        PatternDesc::Ppat_constant(c) => Sexp::list(vec![Sexp::atom("Ppat_constant"), constant(c)]),
+        PatternDesc::Ppat_constant(c) => {
+            Sexp::list(vec![Sexp::atom("Ppat_constant"), constant(c, arena)])
+        }
         PatternDesc::Ppat_interval(inner) => {
             let (ref lo, ref hi) = **inner;
             Sexp::list(vec![
                 Sexp::atom("Ppat_interval"),
-                constant(lo),
-                constant(hi),
+                constant(lo, arena),
+                constant(hi, arena),
             ])
         }
         PatternDesc::Ppat_tuple(pats) => Sexp::list(vec![
@@ -542,7 +544,7 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             location(lid.loc, arena),
         ]),
         ExpressionDesc::Pexp_constant(c) => {
-            Sexp::list(vec![Sexp::atom("Pexp_constant"), constant(c)])
+            Sexp::list(vec![Sexp::atom("Pexp_constant"), constant(c, arena)])
         }
         ExpressionDesc::Pexp_let(inner) => {
             let (ref flag, ref vbs, ref body) = **inner;

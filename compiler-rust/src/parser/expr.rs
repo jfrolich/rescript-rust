@@ -32,7 +32,7 @@ pub fn parse_string_constant(
     source: &str,
 ) -> Constant {
     match crate::string_literal::string_from_source(source) {
-        Some(payload) => Constant::String(payload),
+        Some(payload) => Constant::String(p.arena_mut().push_string_literal(&payload)),
         None => {
             let has_literal_diagnostic = p.diagnostics().iter().any(|diagnostic| {
                 let diagnostic_start = diagnostic.start_pos();
@@ -50,7 +50,8 @@ pub fn parse_string_constant(
                     DiagnosticCategory::Message(message.to_string()),
                 );
             }
-            Constant::String(crate::string_literal::invalid_string_for_recovery(source))
+            let payload = crate::string_literal::invalid_string_for_recovery(source);
+            Constant::String(p.arena_mut().push_string_literal(&payload))
         }
     }
 }
@@ -80,32 +81,36 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
                 ));
             }
             let value = if is_negative {
-                Cow::Owned(format!("-{i}"))
+                p.arena_mut().intern_string(&format!("-{i}"))
             } else {
-                i
+                p.arena_mut().intern_string(&i)
             };
             Constant::Integer(value, s)
         }
         Token::Float { f, suffix } => {
+            let (f, suffix) = (f.clone(), *suffix);
             let value = if is_negative {
-                Cow::Owned(format!("-{f}"))
+                p.arena_mut().intern_string(&format!("-{f}"))
             } else {
-                extend_cow_lifetime(f.clone())
+                p.arena_mut().intern_string(&f)
             };
-            Constant::Float(value, *suffix)
+            Constant::Float(value, suffix)
         }
         Token::String(s) => {
             let source = s.clone();
             let (start_pos, end_pos) = (p.start_pos, p.end_pos);
             parse_string_constant(p, start_pos, end_pos, &source)
         }
-        Token::Codepoint { c, original } => Constant::Char {
-            source: extend_cow_lifetime(original.clone()),
-            semantic: *c,
-        },
+        Token::Codepoint { c, original } => {
+            let (semantic, original) = (*c, original.clone());
+            Constant::Char {
+                source: p.arena_mut().intern_string(&original),
+                semantic,
+            }
+        }
         _ => {
             p.err_unexpected();
-            Constant::string("")
+            p.arena_mut().string_constant("")
         }
     };
     p.next_unsafe();
@@ -2832,9 +2837,9 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                         };
                         let value_end_idx = p.loc_end_idx(value.pexp_loc);
                         let key_expr = Expression {
-                            pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(
-                                &key,
-                            ))),
+                            pexp_desc: ExpressionDesc::Pexp_constant(
+                                p.arena_mut().string_constant(&key),
+                            ),
                             pexp_loc: key_loc,
                             pexp_attributes: Attributes::new(),
                         };
@@ -3126,7 +3131,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                     let field_end = p.loc_end(field.loc);
                     let constant = parse_string_constant(p, field_start, field_end, &s);
                     let constant = Expression {
-                        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(constant)),
+                        pexp_desc: ExpressionDesc::Pexp_constant(constant),
                         pexp_loc: field.loc,
                         pexp_attributes: Attributes::new(),
                     };
@@ -3979,7 +3984,7 @@ fn suppress_fragile_match_warning_attr(p: &mut Parser<'_>) -> Attribute {
     let loc = LocIdx::none();
     let warning_str_idx = p.arena_mut().intern("warning");
     let warning_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string("-4"))),
+        pexp_desc: ExpressionDesc::Pexp_constant(p.arena_mut().string_constant("-4")),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -4945,6 +4950,7 @@ fn parse_template_literal_with_prefix(
             }
             let source = source_texts.into_iter().next().unwrap_or(Cow::Borrowed(""));
             let loc = sources.first().map_or(LocIdx::none(), |s| s.loc);
+            let source = p.arena_mut().intern_string(&source);
             ast_helper::make_constant(Constant::Json(source), loc)
         }
         None => {
@@ -5019,28 +5025,44 @@ mod tests {
     }
 
     /// Parse source code into a constant with a timeout.
-    fn parse_constant_with_timeout(source: &str) -> Constant {
-        crate::parser::test_utils::parse_with_timeout(source, parse_constant)
+    /// The parsed constant with its spellings: `[text]` for numbers,
+    /// `[source, semantic]` for strings.
+    fn parse_constant_with_timeout(source: &str) -> (Constant, Vec<String>) {
+        crate::parser::test_utils::parse_with_timeout(source, |p| {
+            let c = parse_constant(p);
+            let arena = p.arena();
+            let texts = match c {
+                Constant::Integer(n, _) | Constant::Float(n, _) => {
+                    vec![arena.get_string(n).to_string()]
+                }
+                Constant::String(s) => {
+                    vec![s.source(arena).to_string(), s.semantic(arena).to_string()]
+                }
+                _ => Vec::new(),
+            };
+            (c, texts)
+        })
     }
 
     #[test]
     fn test_parse_constant_int() {
-        let c = parse_constant_with_timeout("42");
-        assert!(matches!(c, Constant::Integer(n, None) if n == "42"));
+        let (c, texts) = parse_constant_with_timeout("42");
+        assert!(matches!(c, Constant::Integer(_, None)));
+        assert_eq!(texts, ["42"]);
     }
 
     #[test]
     fn test_parse_constant_float() {
-        let c = parse_constant_with_timeout("3.14");
-        assert!(matches!(c, Constant::Float(n, None) if n == "3.14"));
+        let (c, texts) = parse_constant_with_timeout("3.14");
+        assert!(matches!(c, Constant::Float(_, None)));
+        assert_eq!(texts, ["3.14"]);
     }
 
     #[test]
     fn test_parse_constant_string() {
-        let c = parse_constant_with_timeout("\"hello\"");
-        assert!(
-            matches!(c, Constant::String(ref s) if s.source() == "hello" && s.semantic() == "hello")
-        );
+        let (c, texts) = parse_constant_with_timeout("\"hello\"");
+        assert!(matches!(c, Constant::String(_)));
+        assert_eq!(texts, ["hello", "hello"]);
     }
 
     #[test]
@@ -5048,7 +5070,7 @@ mod tests {
         let expr = parse_expr_with_timeout("42");
         assert!(matches!(
             &expr.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(..))
+            ExpressionDesc::Pexp_constant(Constant::Integer(..))
         ));
     }
 

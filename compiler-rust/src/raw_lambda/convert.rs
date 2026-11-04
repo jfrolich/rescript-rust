@@ -401,7 +401,7 @@ fn config_payload_flags_contains(
                 matches!(
                     &elem.pexp_desc,
                     PExpressionDesc::Pexp_constant(c)
-                        if matches!(&**c, PConstant::String(s) if s.semantic() == value)
+                        if matches!(&*c, PConstant::String(s) if s.semantic(arena) == value)
                 )
             })
         })
@@ -7873,9 +7873,9 @@ mod tests {
         let any_ty = ctx.new_var(None);
 
         let directive_expr = crate::parser::ast::Expression {
-            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(Box::new(
-                crate::parser::ast::Constant::string("'use memo'"),
-            )),
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(
+                arena.string_constant("'use memo'"),
+            ),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         };

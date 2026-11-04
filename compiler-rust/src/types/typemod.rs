@@ -607,23 +607,25 @@ fn parser_attr_to_decl_attr(
                     let (expr_idx, _attrs) = eval_box.as_ref();
                     let expr = arena.get_expr(*expr_idx);
                     if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-                        match c.as_ref() {
+                        match c {
                             crate::parser::ast::Constant::String(value) => {
                                 crate::types::decl::AttributePayload::Str(
-                                    value.semantic().to_string(),
+                                    value.semantic(arena).to_string(),
                                 )
                             }
                             crate::parser::ast::Constant::Integer(value, suffix) => match suffix {
-                                Some('n') => {
-                                    crate::types::decl::AttributePayload::BigInt(value.to_string())
-                                }
+                                Some('n') => crate::types::decl::AttributePayload::BigInt(
+                                    arena.get_string(*value).to_string(),
+                                ),
                                 Some(_) => crate::types::decl::AttributePayload::Structure(vec![]),
                                 None => crate::types::decl::AttributePayload::IntLiteral(
-                                    value.to_string(),
+                                    arena.get_string(*value).to_string(),
                                 ),
                             },
                             crate::parser::ast::Constant::Float(value, _) => {
-                                crate::types::decl::AttributePayload::Float(value.to_string())
+                                crate::types::decl::AttributePayload::Float(
+                                    arena.get_string(*value).to_string(),
+                                )
                             }
                             _ => crate::types::decl::AttributePayload::Structure(vec![]),
                         }
@@ -642,14 +644,12 @@ fn parser_attr_to_decl_attr(
                         && let Some(strings) = elements
                             .iter()
                             .map(|element| match &arena.get_expr(*element).pexp_desc {
-                                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
-                                    match c.as_ref() {
-                                        crate::parser::ast::Constant::String(value) => {
-                                            Some(value.semantic().to_string())
-                                        }
-                                        _ => None,
+                                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
+                                    crate::parser::ast::Constant::String(value) => {
+                                        Some(value.semantic(arena).to_string())
                                     }
-                                }
+                                    _ => None,
+                                },
                                 _ => None,
                             })
                             .collect::<Option<Vec<_>>>()
@@ -857,9 +857,9 @@ fn parser_deprecated_of_attr(arena: &ParseArena, attr: &ParsedAttribute) -> Opti
             [item] => match item.pstr_desc.as_ref() {
                 ParsedStructureItemDesc::Pstr_eval(eval_box) => {
                     match &arena.get_expr(eval_box.0).pexp_desc {
-                        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
+                        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c {
                             crate::parser::ast::Constant::String(value) => {
-                                Some(value.semantic().to_string())
+                                Some(value.semantic(arena).to_string())
                             }
                             _ => None,
                         },
@@ -5767,22 +5767,26 @@ fn ast_untagged_variant_error(loc: Location, error: AstUntaggedVariantError) -> 
 /// OCaml `Ast_untagged_variants.runtime_tag_of_parsetree`.
 pub(crate) fn runtime_tag_of_parsetree(
     tag: &crate::parser::ast::ConstructorTag,
+    arena: &ParseArena,
 ) -> Result<crate::types::VariantLiteralTag, AstUntaggedVariantError> {
     use crate::parser::ast::ConstructorTag as P;
     use crate::types::VariantLiteralTag as T;
-    Ok(match tag {
-        P::Pct_string(s) => T::String(s.semantic().to_string()),
-        P::Pct_int(source) => match crate::types::decl::parse_ocaml_int_literal(source) {
-            Some(i) => T::Int(i),
-            None => {
-                return Err(AstUntaggedVariantError::VariantAsIntegerOutOfRange(
-                    source.clone(),
-                ));
+    Ok(match *tag {
+        P::Pct_string(s) => T::String(s.semantic(arena).to_string()),
+        P::Pct_int(source) => {
+            let source = arena.get_string(source);
+            match crate::types::decl::parse_ocaml_int_literal(source) {
+                Some(i) => T::Int(i),
+                None => {
+                    return Err(AstUntaggedVariantError::VariantAsIntegerOutOfRange(
+                        source.to_string(),
+                    ));
+                }
             }
-        },
-        P::Pct_float(f) => T::Float(f.clone()),
-        P::Pct_bigint(i) => T::BigInt(i.clone()),
-        P::Pct_bool(b) => T::Bool(*b),
+        }
+        P::Pct_float(f) => T::Float(arena.get_string(f).to_string()),
+        P::Pct_bigint(i) => T::BigInt(arena.get_string(i).to_string()),
+        P::Pct_bool(b) => T::Bool(b),
         P::Pct_null => T::Null,
         P::Pct_undefined => T::Undefined,
     })
@@ -5808,7 +5812,7 @@ pub(crate) fn process_constructor_tag(
             if let Some(loc) = leftover_as {
                 return Err((loc, AstUntaggedVariantError::DuplicatedBsAs));
             }
-            runtime_tag_of_parsetree(&tag.txt)
+            runtime_tag_of_parsetree(&tag.txt, arena)
                 .map(Some)
                 .map_err(|error| (tag.loc, error))
         }
@@ -12123,7 +12127,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                     let label_id = tctx.type_ctx.create_ident(lbl_name);
                                                     record_labels.push(crate::types::LabelDeclaration {
                                                         ld_id: label_id,
-                                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
+                                                        ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label, arena),
                                                         ld_mutable: mutable_flag,
                                                         ld_optional: label.pld_optional,
                                                         ld_type: lbl_type,
@@ -12184,7 +12188,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         let label_id = tctx.type_ctx.create_ident(lbl_name);
                                         record_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id,
-                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label),
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(label, arena),
                                             ld_mutable: mutable_flag,
                                             ld_optional: label.pld_optional,
                                             ld_type: lbl_type,
@@ -17328,7 +17332,7 @@ fn type_structure_item<'a>(
                                         let label_id = ctx.create_ident(lbl_name_str);
                                         internal_labels.push(crate::types::LabelDeclaration {
                                             ld_id: label_id,
-                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl, arena),
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
@@ -17344,7 +17348,7 @@ fn type_structure_item<'a>(
                                                 txt: lbl_name_str.to_string(),
                                                 loc: lbl.pld_name.loc,
                                             },
-                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl),
+                                            ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(lbl, arena),
                                             ld_mutable: lbl.pld_mutable,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: poly_typed_core_type,
@@ -17707,7 +17711,7 @@ fn type_structure_item<'a>(
                             internal_labels.push(crate::types::LabelDeclaration {
                                 ld_id: label_id,
                                 ld_runtime_name:
-                                    crate::types::record_runtime::parsetree_runtime_name(lbl),
+                                    crate::types::record_runtime::parsetree_runtime_name(lbl, arena),
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
@@ -17725,7 +17729,7 @@ fn type_structure_item<'a>(
                                     loc: lbl.pld_name.loc,
                                 },
                                 ld_runtime_name:
-                                    crate::types::record_runtime::parsetree_runtime_name(lbl),
+                                    crate::types::record_runtime::parsetree_runtime_name(lbl, arena),
                                 ld_mutable: lbl.pld_mutable,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: poly_typed_core_type,
@@ -18530,7 +18534,7 @@ fn type_structure_item<'a>(
                                         },
                                         ld_runtime_name:
                                             crate::types::record_runtime::parsetree_runtime_name(
-                                                label,
+                                                label, arena,
                                             ),
                                         ld_mutable: label.pld_mutable,
                                         ld_optional: label.pld_optional,
@@ -18542,7 +18546,7 @@ fn type_structure_item<'a>(
                                         ld_id: label_id,
                                         ld_runtime_name:
                                             crate::types::record_runtime::parsetree_runtime_name(
-                                                label,
+                                                label, arena,
                                             ),
                                         ld_mutable: match label.pld_mutable {
                                             crate::parser::ast::MutableFlag::Immutable => {
@@ -18909,7 +18913,9 @@ fn type_structure_item<'a>(
                                         loc: label.pld_name.loc,
                                     },
                                     ld_runtime_name:
-                                        crate::types::record_runtime::parsetree_runtime_name(label),
+                                        crate::types::record_runtime::parsetree_runtime_name(
+                                            label, arena,
+                                        ),
                                     ld_mutable: label.pld_mutable,
                                     ld_optional: label.pld_optional,
                                     ld_type: poly_typed_ct,
@@ -18919,7 +18925,9 @@ fn type_structure_item<'a>(
                                 decl_labels.push(crate::types::LabelDeclaration {
                                     ld_id: label_id,
                                     ld_runtime_name:
-                                        crate::types::record_runtime::parsetree_runtime_name(label),
+                                        crate::types::record_runtime::parsetree_runtime_name(
+                                            label, arena,
+                                        ),
                                     ld_mutable: match label.pld_mutable {
                                         crate::parser::ast::MutableFlag::Immutable => {
                                             crate::types::MutableFlag::Immutable
@@ -20283,7 +20291,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         internal_labels.push(crate::types::LabelDeclaration {
                             ld_id: label_id,
                             ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
-                                label,
+                                label, arena,
                             ),
                             ld_mutable: mutable_flag,
                             ld_optional: label.pld_optional,
@@ -20303,7 +20311,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                 loc: label.pld_name.loc,
                             },
                             ld_runtime_name: crate::types::record_runtime::parsetree_runtime_name(
-                                label,
+                                label, arena,
                             ),
                             ld_mutable: label.pld_mutable,
                             ld_optional: label.pld_optional,
@@ -20514,7 +20522,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                         ld_id: label_id,
                                         ld_runtime_name:
                                             crate::types::record_runtime::parsetree_runtime_name(
-                                                label,
+                                                label, arena,
                                             ),
                                         ld_mutable: mutable_flag,
                                         ld_optional: label.pld_optional,
@@ -20534,7 +20542,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                         },
                                         ld_runtime_name:
                                             crate::types::record_runtime::parsetree_runtime_name(
-                                                label,
+                                                label, arena,
                                             ),
                                         ld_mutable: label.pld_mutable,
                                         ld_optional: label.pld_optional,

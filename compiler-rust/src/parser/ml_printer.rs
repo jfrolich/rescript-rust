@@ -137,9 +137,9 @@ fn payload_is_empty(payload: &Payload) -> bool {
 }
 
 /// Check if a constant is negative (starts with -)
-fn constant_is_negative(c: &Constant) -> bool {
+fn constant_is_negative(c: &Constant, arena: &ParseArena) -> bool {
     match c {
-        Constant::Integer(s, _) | Constant::Float(s, _) => s.starts_with('-'),
+        Constant::Integer(s, _) | Constant::Float(s, _) => arena.get_string(*s).starts_with('-'),
         _ => false,
     }
 }
@@ -1425,14 +1425,16 @@ fn print_expression_inner<W: Write>(
             print_longident_idx(f, arena, lid.txt);
         }
         ExpressionDesc::Pexp_constant(c) => {
-            let is_negative = match &**c {
-                Constant::Integer(s, _) | Constant::Float(s, _) => s.starts_with('-'),
+            let is_negative = match &*c {
+                Constant::Integer(s, _) | Constant::Float(s, _) => {
+                    arena.get_string(*s).starts_with('-')
+                }
                 _ => false,
             };
             if is_negative {
                 f.string("(");
             }
-            print_constant(f, c);
+            print_constant(f, c, arena);
             if is_negative {
                 f.string(")");
             }
@@ -2502,23 +2504,23 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         }
         PatternDesc::Ppat_constant(c) => {
             // Negative numbers need parentheses in patterns
-            if constant_is_negative(c) {
+            if constant_is_negative(c, arena) {
                 f.string("(");
-                print_constant(f, c);
+                print_constant(f, c, arena);
                 f.string(")");
             } else {
-                print_constant(f, c);
+                print_constant(f, c, arena);
             }
         }
         PatternDesc::Ppat_interval(inner) => {
             let (ref c1, ref c2) = **inner;
             // Negative numbers in intervals need parentheses
-            let c1_needs_parens = constant_is_negative(c1);
-            let c2_needs_parens = constant_is_negative(c2);
+            let c1_needs_parens = constant_is_negative(c1, arena);
+            let c2_needs_parens = constant_is_negative(c2, arena);
             if c1_needs_parens {
                 f.string("(");
             }
-            print_constant(f, c1);
+            print_constant(f, c1, arena);
             if c1_needs_parens {
                 f.string(")");
             }
@@ -2526,7 +2528,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             if c2_needs_parens {
                 f.string("(");
             }
-            print_constant(f, c2);
+            print_constant(f, c2, arena);
             if c2_needs_parens {
                 f.string(")");
             }
@@ -3218,36 +3220,36 @@ fn print_template_parts<W: Write>(
     }
 }
 
-fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant) {
+fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant, arena: &ParseArena) {
     match c {
         Constant::Integer(s, suffix) => {
-            f.string(s);
+            f.string(arena.get_string(*s));
             if let Some(c) = suffix {
                 f.string(&c.to_string());
             }
         }
         Constant::Char { source, .. } => {
             f.string("'");
-            f.string(source);
+            f.string(arena.get_string(*source));
             f.string("'");
         }
         Constant::String(payload) => {
             f.string("{js|");
-            f.string(payload.source());
+            f.string(payload.source(arena));
             f.string("|js}");
         }
         Constant::Json(source) => {
             f.string("{json|");
-            f.string(source);
+            f.string(arena.get_string(*source));
             f.string("|json}");
         }
         Constant::RawSource(source) => {
             f.string("{js|");
-            f.string(source);
+            f.string(arena.get_string(*source));
             f.string("|js}");
         }
         Constant::Float(s, suffix) => {
-            f.string(s);
+            f.string(arena.get_string(*s));
             if let Some(c) = suffix {
                 f.string(&c.to_string());
             }

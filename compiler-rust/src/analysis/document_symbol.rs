@@ -117,7 +117,7 @@ fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
     match &arena.get_expr(idx).pexp_desc {
         ExpressionDesc::Pexp_fun(_) => SymbolKind::Function,
         ExpressionDesc::Pexp_constraint(inner) => expr_kind(arena, inner.0),
-        ExpressionDesc::Pexp_constant(constant) => match **constant {
+        ExpressionDesc::Pexp_constant(constant) => match *constant {
             Constant::String(_) | Constant::Json(_) | Constant::RawSource(_) => SymbolKind::String,
             Constant::Float(..) | Constant::Integer(..) => SymbolKind::Number,
             Constant::Char { .. } => SymbolKind::Constant,

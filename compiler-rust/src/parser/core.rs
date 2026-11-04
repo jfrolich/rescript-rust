@@ -7,8 +7,6 @@ use crate::location::Position;
 use crate::parse_arena::{CoreTypeIdx, LocIdx, ParseArena, PosIdx, StrIdx};
 use crate::parser::DiagnosticCategory;
 
-use std::borrow::Cow;
-
 use super::ast::*;
 use super::grammar;
 use super::longident::Longident;
@@ -737,7 +735,7 @@ pub fn doc_comment_to_attribute(
     let str_idx = arena.intern("res.doc");
     let name = with_loc(str_idx, loc);
     let expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::string(&content.into()))),
+        pexp_desc: ExpressionDesc::Pexp_constant(arena.string_constant(&content.into())),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -849,7 +847,7 @@ pub mod ast_helper {
 
     /// Create a constant expression.
     pub fn make_constant(constant: Constant, loc: Location) -> Expression {
-        make_expr(ExpressionDesc::Pexp_constant(Box::new(constant)), loc)
+        make_expr(ExpressionDesc::Pexp_constant(constant), loc)
     }
 
     /// Create a unit expression: () (requires parser for arena allocation)
@@ -1045,34 +1043,34 @@ pub fn make_unary_expr(
     // Handle numeric literal negation specially
     match (&token, &operand.pexp_desc) {
         (Token::Plus | Token::PlusDot, ExpressionDesc::Pexp_constant(c))
-            if matches!(**c, Constant::Integer(..) | Constant::Float(..)) =>
+            if matches!(*c, Constant::Integer(..) | Constant::Float(..)) =>
         {
             // +n is just n
             return operand;
         }
-        (Token::Minus, ExpressionDesc::Pexp_constant(c))
-            if matches!(**c, Constant::Integer(..)) =>
-        {
-            if let Constant::Integer(ref n, ref suffix) = **c {
+        (Token::Minus, ExpressionDesc::Pexp_constant(c)) if matches!(*c, Constant::Integer(..)) => {
+            if let Constant::Integer(n, suffix) = *c {
+                let negated = negate_string(p.arena().get_string(n));
                 return Expression {
-                    pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                        Cow::Owned(negate_string(n)),
-                        *suffix,
-                    ))),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(
+                        p.arena_mut().intern_string(&negated),
+                        suffix,
+                    )),
                     ..operand
                 };
             }
             unreachable!()
         }
         (Token::Minus | Token::MinusDot, ExpressionDesc::Pexp_constant(c))
-            if matches!(**c, Constant::Float(..)) =>
+            if matches!(*c, Constant::Float(..)) =>
         {
-            if let Constant::Float(ref n, ref suffix) = **c {
+            if let Constant::Float(n, suffix) = *c {
+                let negated = negate_string(p.arena().get_string(n));
                 return Expression {
-                    pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Float(
-                        Cow::Owned(negate_string(n)),
-                        *suffix,
-                    ))),
+                    pexp_desc: ExpressionDesc::Pexp_constant(Constant::Float(
+                        p.arena_mut().intern_string(&negated),
+                        suffix,
+                    )),
                     ..operand
                 };
             }
@@ -1477,13 +1475,14 @@ mod tests {
     #[test]
     fn test_ast_helper_make_expr() {
         let loc = LocIdx::none();
+        let mut arena = ParseArena::new();
         let expr = ast_helper::make_expr(
-            ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(Cow::Borrowed("42"), None))),
+            ExpressionDesc::Pexp_constant(Constant::Integer(arena.intern_string("42"), None)),
             loc,
         );
         assert!(matches!(
             &expr.pexp_desc,
-            ExpressionDesc::Pexp_constant(c) if matches!(&**c, Constant::Integer(..))
+            ExpressionDesc::Pexp_constant(Constant::Integer(..))
         ));
     }
 

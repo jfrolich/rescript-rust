@@ -253,7 +253,7 @@ fn expr_ident_dynamic(arena: &mut ParseArena, name: String) -> Expression {
 
 fn expr_constant(constant: Constant, arena: &mut ParseArena) -> Expression {
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_constant(Box::new(constant)),
+        pexp_desc: ExpressionDesc::Pexp_constant(constant),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -261,7 +261,7 @@ fn expr_constant(constant: Constant, arena: &mut ParseArena) -> Expression {
 
 fn expr_constant_literal(arena: &mut ParseArena, value: &str) -> Expression {
     arena.register_shareable_literal(value);
-    expr_constant(Constant::string(value), arena)
+    expr_constant(arena.string_constant(value), arena)
 }
 
 fn expr_apply(
@@ -840,14 +840,32 @@ fn get_param_names(
 /// `Pconst_string (source, Some "js")` constant (ast_mapper_to0.ml
 /// `Pexp_template`), which `ast_mapper_from0.ml` `map_constant` reads back as
 /// a string constant.
-fn alias_constant(expr: &Expression, arena: &ParseArena) -> Option<Constant> {
+fn alias_constant(expr: &Expression, arena: &mut ParseArena) -> Option<Constant> {
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => Some((**constant).clone()),
+        ExpressionDesc::Pexp_constant(constant) => Some(*constant),
         ExpressionDesc::Pexp_template(template)
             if template.values.is_empty() && template.source_segments.len() == 1 =>
         {
             let source = arena.get_string(template.source_segments[0].txt);
-            crate::string_literal::string_from_source(source).map(Constant::String)
+            let literal = crate::string_literal::string_from_source(source)?;
+            Some(Constant::String(arena.push_string_literal(&literal)))
+        }
+        _ => None,
+    }
+}
+
+/// The semantic value of `alias_constant expr` when it is a string.
+pub(super) fn alias_string_semantic(expr: &Expression, arena: &ParseArena) -> Option<String> {
+    match &expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(Constant::String(literal)) => {
+            Some(literal.semantic(arena).to_string())
+        }
+        ExpressionDesc::Pexp_template(template)
+            if template.values.is_empty() && template.source_segments.len() == 1 =>
+        {
+            let source = arena.get_string(template.source_segments[0].txt);
+            crate::string_literal::string_from_source(source)
+                .map(|literal| literal.semantic().to_string())
         }
         _ => None,
     }
@@ -855,7 +873,7 @@ fn alias_constant(expr: &Expression, arena: &ParseArena) -> Option<Constant> {
 
 fn get_string_from_expression(
     expr: &Expression,
-    arena: &ParseArena,
+    arena: &mut ParseArena,
 ) -> Result<Option<Constant>, String> {
     match alias_constant(expr, arena) {
         Some(constant @ Constant::String(_)) => Ok(Some(constant)),
@@ -866,7 +884,7 @@ fn get_string_from_expression(
 
 fn get_float_from_expression(
     expr: &Expression,
-    arena: &ParseArena,
+    arena: &mut ParseArena,
 ) -> Result<Option<Constant>, String> {
     match alias_constant(expr, arena) {
         Some(Constant::String(_)) => Ok(None),
@@ -877,7 +895,7 @@ fn get_float_from_expression(
 
 fn index_const(i: usize, arena: &mut ParseArena) -> Expression {
     let value = format!("[{}]", i);
-    expr_constant(Constant::string(&value), arena)
+    expr_constant(arena.string_constant(&value), arena)
 }
 
 fn check_option_type(typ_idx: &CoreTypeIdx, arena: &ParseArena) -> bool {
@@ -1833,7 +1851,7 @@ fn records_parse_decl(
             let name_idx = decl.pld_name.txt;
             let name = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_idx)));
             arena.register_shareable_literal(name.as_ref());
-            expr_constant(Constant::string(&name), arena)
+            expr_constant(arena.string_constant(&name), arena)
         }
         Err(e) => return Err(e),
     };
@@ -2114,7 +2132,7 @@ fn records_generate_flat_decoder_expr(
                         arena,
                     )
                 } else {
-                    let missing = expr_constant(Constant::string(" missing"), arena);
+                    let missing = expr_constant(arena.string_constant(" missing"), arena);
                     let key = field.key.clone();
                     let msg = expr_concat(arena, key, missing);
                     let v_loc = arena.dummy_loc();
@@ -2133,7 +2151,7 @@ fn records_generate_flat_decoder_expr(
                 }
             }
             None => {
-                let missing = expr_constant(Constant::string(" missing"), arena);
+                let missing = expr_constant(arena.string_constant(" missing"), arena);
                 let key = field.key.clone();
                 let msg = expr_concat(arena, key, missing);
                 let v_loc = arena.dummy_loc();
@@ -2449,7 +2467,7 @@ fn records_generate_inline_decoder_expr(
 
 fn variants_prefix_inline_payload_error(decoded: Expression, arena: &mut ParseArena) -> Expression {
     arena.register_shareable_literal("[1]");
-    let index = expr_constant(Constant::string("[1]"), arena);
+    let index = expr_constant(arena.string_constant("[1]"), arena);
     prefix_decode_error_path(decoded, index, arena)
 }
 
@@ -2553,7 +2571,10 @@ fn variants_parse_decl(
         Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, true),
         Ok(None) => {
             let name_str = extend_cow_lifetime(Cow::Borrowed(arena.get_string(name_literal)));
-            (expr_constant(Constant::string(&name_str), arena), false)
+            (
+                expr_constant(arena.string_constant(&name_str), arena),
+                false,
+            )
         }
         Err(e) => return Err(e),
     };
@@ -2772,7 +2793,7 @@ fn variants_generate_arg_decoder(
         let (_, dec) = codecs_generate_value_codecs(settings, arg, arena)?;
         let decoder = require_decoder(dec)?;
         let idx_expr = expr_constant(
-            Constant::Integer(Cow::Owned((i + 1).to_string()), None),
+            Constant::Integer(arena.intern_string(&(i + 1).to_string()), None),
             arena,
         );
         let arg_expr = expr_apply(
@@ -2820,7 +2841,7 @@ fn variants_generate_decoder_case(
     match &decl.constr_decl.pcd_args {
         crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
             let arg_len = expr_constant(
-                Constant::Integer(Cow::Owned((args.len() + 1).to_string()), None),
+                Constant::Integer(arena.intern_string(&(args.len() + 1).to_string()), None),
                 arena,
             );
             let decoded = if args.is_empty() {
@@ -2848,7 +2869,7 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: PatternDesc::Ppat_constant(Box::new(Constant::string(&name_const))),
+                    ppat_desc: PatternDesc::Ppat_constant(arena.string_constant(&name_const)),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -2875,14 +2896,14 @@ fn variants_generate_decoder_case(
             Ok(case(json_str_pat, rhs, arena))
         }
         crate::parser::ast::ConstructorArguments::Pcstr_record(fields) => {
-            let arg_len = expr_constant(Constant::Integer(Cow::Borrowed("2"), None), arena);
+            let arg_len = expr_constant(Constant::Integer(arena.intern_string(&"2"), None), arena);
             let payload_value = expr_apply(
                 expr_ident_path(arena, &["Array", "getUnsafe"]),
                 vec![
                     (ArgLabel::Nolabel, expr_ident_path(arena, &["json_arr"])),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer(Cow::Borrowed("1"), None), arena),
+                        expr_constant(Constant::Integer(arena.intern_string(&"1"), None), arena),
                     ),
                 ],
                 false,
@@ -2927,7 +2948,7 @@ fn variants_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: PatternDesc::Ppat_constant(Box::new(Constant::string(&name_const))),
+                    ppat_desc: PatternDesc::Ppat_constant(arena.string_constant(&name_const)),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -3158,7 +3179,7 @@ fn variants_generate_codecs(
                 .map(|decl| {
                     let name = arena.get_string(decl.name).to_string();
                     ParsedVariantDecl {
-                        alias: expr_constant(Constant::string(&name), arena),
+                        alias: expr_constant(arena.string_constant(&name), arena),
                         has_attr_as: false,
                         ..decl.clone()
                     }
@@ -3279,7 +3300,7 @@ fn variants_generate_codecs(
                     (ArgLabel::Nolabel, json_arr_expr.clone()),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer(Cow::Borrowed("0"), None), arena),
+                        expr_constant(Constant::Integer(arena.intern_string(&"0"), None), arena),
                     ),
                 ],
                 false,
@@ -3408,7 +3429,7 @@ fn polyvars_parse_decl(
     let (alias, has_attr_as) = match row_field {
         RowField::Rtag(_, attrs, _, _) => match get_attribute_by_name(attrs, "spice.as", arena) {
             Ok(Some(attr)) => (get_expression_from_payload(attr, arena)?, true),
-            Ok(None) => (expr_constant(Constant::string(&name), arena), false),
+            Ok(None) => (expr_constant(arena.string_constant(&name), arena), false),
             Err(e) => return Err(e),
         },
         RowField::Rinherit(_) => {
@@ -3574,7 +3595,7 @@ fn polyvars_generate_arg_decoder(
         let (_, dec) = codecs_generate_value_codecs(settings, arg, arena)?;
         let decoder = require_decoder(dec)?;
         let idx_expr = expr_constant(
-            Constant::Integer(Cow::Owned((i + 1).to_string()), None),
+            Constant::Integer(arena.intern_string(&(i + 1).to_string()), None),
             arena,
         );
         let arg_expr = expr_apply(
@@ -3621,7 +3642,7 @@ fn polyvars_generate_decoder_case(
         RowField::Rtag(tag, _, _, core_types) => {
             let args = polyvars_get_args(arena.dummy_loc(), core_types, arena)?;
             let arg_len = expr_constant(
-                Constant::Integer(Cow::Owned((args.len() + 1).to_string()), None),
+                Constant::Integer(arena.intern_string(&(args.len() + 1).to_string()), None),
                 arena,
             );
             let decoded = if args.is_empty() {
@@ -3643,7 +3664,7 @@ fn polyvars_generate_decoder_case(
             let json_str_pat = pat_construct_with_loc(
                 lident_path_static(arena, &["JSON", "String"]),
                 Some(Pattern {
-                    ppat_desc: PatternDesc::Ppat_constant(Box::new(Constant::string(&tag_name))),
+                    ppat_desc: PatternDesc::Ppat_constant(arena.string_constant(&tag_name)),
                     ppat_loc: arena.dummy_loc(),
                     ppat_attributes: Attributes::new(),
                 }),
@@ -3843,7 +3864,7 @@ fn polyvars_generate_codecs(
             let legacy: Vec<ParsedPolyvariantField> = parsed
                 .iter()
                 .map(|field| ParsedPolyvariantField {
-                    alias: expr_constant(Constant::string(&field.name), arena),
+                    alias: expr_constant(arena.string_constant(&field.name), arena),
                     has_attr_as: false,
                     ..field.clone()
                 })
@@ -3964,7 +3985,7 @@ fn polyvars_generate_codecs(
                     (ArgLabel::Nolabel, json_arr_expr.clone()),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer(Cow::Borrowed("0"), None), arena),
+                        expr_constant(Constant::Integer(arena.intern_string(&"0"), None), arena),
                     ),
                 ],
                 false,

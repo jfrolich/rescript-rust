@@ -589,7 +589,7 @@ impl<'a> Checker<'a> {
     fn pat(&mut self, idx: PatIdx) -> PpxResult<()> {
         let pat = self.arena.get_pat(idx).clone();
         if let PatternDesc::Ppat_constant(constant) = &pat.ppat_desc {
-            match &**constant {
+            match &*constant {
                 Constant::Json(_) => {
                     return Err(PpxError::at_loc(
                         pat.ppat_loc,
@@ -733,7 +733,7 @@ impl<'a> Checker<'a> {
             ExpressionDesc::Pexp_extension(extension) => {
                 self.expression_extension(expr.pexp_loc, extension)
             }
-            ExpressionDesc::Pexp_constant(constant) => match &**constant {
+            ExpressionDesc::Pexp_constant(constant) => match &*constant {
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
             },

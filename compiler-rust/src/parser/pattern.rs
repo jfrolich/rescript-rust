@@ -66,14 +66,14 @@ fn parse_template_constant(
         p.next();
         return match prefix {
             None => match crate::string_literal::decode_js_template_escapes(&text) {
-                Some(semantic) => Constant::string(&semantic),
+                Some(semantic) => p.arena_mut().string_constant(&semantic),
                 None => {
                     p.err_at(
                         start_pos,
                         p.prev_end_pos,
                         DiagnosticCategory::Message("Invalid string escape sequence".to_string()),
                     );
-                    Constant::string("")
+                    p.arena_mut().string_constant("")
                 }
             },
             Some(_) => {
@@ -84,7 +84,7 @@ fn parse_template_constant(
                         super::core::error_messages::TAGGED_TEMPLATE_IN_PATTERN.to_string(),
                     ),
                 );
-                Constant::string(&text)
+                p.arena_mut().string_constant(&text)
             }
         };
     }
@@ -106,7 +106,7 @@ fn parse_template_constant(
             super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
         ),
     );
-    Constant::string("")
+    p.arena_mut().string_constant("")
 }
 
 /// OCaml `parse_pattern` with the default `~alias:true ~or_:true`.
@@ -149,22 +149,14 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 )
             } else {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                pat(
-                    PatternDesc::Ppat_constant(Box::new(c)),
-                    loc,
-                    Attributes::new(),
-                )
+                pat(PatternDesc::Ppat_constant(c), loc, Attributes::new())
             }
         }
         Token::Backtick => {
             let start_pos = *p.arena().get_position(start_pos_idx);
             let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            pat(
-                PatternDesc::Ppat_constant(Box::new(constant)),
-                loc,
-                Attributes::new(),
-            )
+            pat(PatternDesc::Ppat_constant(constant), loc, Attributes::new())
         }
         Token::Lparen => {
             p.next();
@@ -210,11 +202,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 let start_pos = *p.arena().get_position(start_pos_idx);
                 let constant = parse_template_constant(p, start_pos, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                pat(
-                    PatternDesc::Ppat_constant(Box::new(constant)),
-                    loc,
-                    Attributes::new(),
-                )
+                pat(PatternDesc::Ppat_constant(constant), loc, Attributes::new())
             } else {
                 let name_idx = p.arena_mut().push_interned_string(&ident);
                 pat(

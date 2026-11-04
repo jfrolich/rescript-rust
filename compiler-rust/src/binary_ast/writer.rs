@@ -455,11 +455,9 @@ mod tests {
             ppat_loc: LocIdx::none(),
             ppat_attributes: Attributes::new(),
         });
+        let value_idx = arena.intern_string(&value.to_string());
         let expr_idx = arena.push_expr(Expression {
-            pexp_desc: ExpressionDesc::Pexp_constant(Box::new(Constant::Integer(
-                std::borrow::Cow::Owned(value.to_string()),
-                None,
-            ))),
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(value_idx, None)),
             pexp_loc: LocIdx::none(),
             pexp_attributes: Attributes::new(),
         });

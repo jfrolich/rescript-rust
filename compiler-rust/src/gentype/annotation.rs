@@ -97,9 +97,13 @@ fn from_expr(arena: &ParseArena, expr: &Expression) -> Option<AttributePayload> 
         return Some(AttributePayload::StringPayload(s));
     }
     match &crate::ast_payload::unwrap_braces(arena, expr).pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match constant.as_ref() {
-            Constant::Integer(n, _) => Some(AttributePayload::IntPayload(n.to_string())),
-            Constant::Float(s, _) => Some(AttributePayload::FloatPayload(s.to_string())),
+        ExpressionDesc::Pexp_constant(constant) => match constant {
+            Constant::Integer(n, _) => Some(AttributePayload::IntPayload(
+                arena.get_string(*n).to_string(),
+            )),
+            Constant::Float(s, _) => Some(AttributePayload::FloatPayload(
+                arena.get_string(*s).to_string(),
+            )),
             _ => None,
         },
         ExpressionDesc::Pexp_construct(lid, _) => match arena.get_longident(lid.txt) {
