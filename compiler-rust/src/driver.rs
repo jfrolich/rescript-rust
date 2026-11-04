@@ -10764,6 +10764,7 @@ fn compile_source_to_js_with_options_inner(
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
     let raw_warnings = raw_converter.take_warnings();
     let hoisted_functions = raw_converter.take_hoisted_functions();
+    let lam_locs = raw_converter.take_lam_locs();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         // A Translmod error escapes before `Warnings.check_fatal`.
         emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
@@ -10876,6 +10877,7 @@ fn compile_source_to_js_with_options_inner(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
     compiler.set_hoisted_functions(hoisted_functions);
+    compiler.set_lam_locs(lam_locs);
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
@@ -10885,11 +10887,16 @@ fn compile_source_to_js_with_options_inner(
         trace.js_program = format!("{program:#?}");
     }
     if let Some(diagnostic) = compiler.take_diagnostic() {
+        // A location-free compilation has no range to report: recompile
+        // with locations instead of printing a zero range.
+        let Some(diagnostic_loc) = diagnostic.loc else {
+            return Err(LocationRetry::Diagnostic.into());
+        };
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
                 filename,
-                &diagnostic.loc,
+                &diagnostic_loc,
                 &diagnostic.message,
             ),
             2,
@@ -10916,7 +10923,7 @@ fn compile_source_to_js_with_options_inner(
         jsx_preserve,
         options,
         options.output_path.as_deref(),
-        std::sync::Arc::new(parser.arena().source_file_names()),
+        std::sync::Arc::new(compiler.take_lam_locs()),
     );
     if let Some(output_path) = options.output_path.as_deref() {
         let map_path = PathBuf::from(format!("{}.map", output_path.display()));
@@ -13019,7 +13026,7 @@ pub struct InProcessCompileResult {
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
     /// `.cmj` `persistent_closed_lambda` exports for cross-module inlining
     /// (lam_stats_export.ml:53-89).
-    pub cmj_export_lambdas: ahash::AHashMap<String, crate::lambda::Lambda>,
+    pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
@@ -13046,7 +13053,9 @@ pub struct InProcessPreJsCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
-    pub source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
+    /// Resolves the location handles of `lowered_lambda` and
+    /// `hoisted_functions`; outlives the parse arena and typed tree.
+    pub lam_locs: crate::lambda::LamLocTable,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -13067,7 +13076,7 @@ pub struct InProcessJsMetadataReady {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
-    pub cmj_export_lambdas: ahash::AHashMap<String, crate::lambda::Lambda>,
+    pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
@@ -13276,7 +13285,7 @@ fn render_js_program(
     jsx_preserve: bool,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
-    source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
+    lam_locs: std::sync::Arc<crate::lambda::LamLocTable>,
 ) -> (String, Option<String>) {
     let source_path = options.source_filename.as_deref().map(FsPath::new);
     let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
@@ -13298,7 +13307,7 @@ fn render_js_program(
             options.source_map,
             options.source_map_sources_content,
             &options.source_map_root,
-            source_file_names,
+            lam_locs,
         )
     } else {
         (
@@ -13320,7 +13329,10 @@ type JsBackendOutput = (
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
-    ahash::AHashMap<String, crate::lambda::Lambda>,
+    crate::lambda::CmjExportLambdas,
+    // Resolves the program's location handles (source maps) after the
+    // backend imported inlined `.cmj` lambdas into it.
+    crate::lambda::LamLocTable,
 );
 
 /// Build the `LambdaCompiler` for one JS output target: resolve local module
@@ -13335,6 +13347,7 @@ fn js_backend_compiler(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    lam_locs: crate::lambda::LamLocTable,
 ) -> LambdaCompiler {
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
@@ -13365,6 +13378,7 @@ fn js_backend_compiler(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
     compiler.set_hoisted_functions(hoisted_functions);
+    compiler.set_lam_locs(lam_locs);
     compiler
 }
 
@@ -13376,12 +13390,15 @@ fn finish_js_backend(
     // lam_compile_main.ml reports a primitive's Location error before the
     // fatal-warnings check, as the file compile does.
     if let Some(diagnostic) = compiler.take_diagnostic() {
+        let Some(diagnostic_loc) = diagnostic.loc else {
+            return Err(LocationRetry::Diagnostic.into());
+        };
         let filename = options.source_filename.as_deref().unwrap_or("_none_");
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 &read_in_process_source(filename),
                 filename,
-                &diagnostic.loc,
+                &diagnostic_loc,
                 &diagnostic.message,
             ),
             2,
@@ -13394,12 +13411,14 @@ fn finish_js_backend(
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
     let cmj_export_lambdas = compiler.take_cmj_export_lambdas();
+    let lam_locs = compiler.take_lam_locs();
     Ok((
         program,
         module_path_resolver,
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
+        lam_locs,
     ))
 }
 
@@ -13413,6 +13432,7 @@ fn compile_js_program_for_output(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    lam_locs: &crate::lambda::LamLocTable,
 ) -> Result<JsBackendOutput> {
     let _span = info_span!(
         "compiler.js_backend",
@@ -13429,6 +13449,7 @@ fn compile_js_program_for_output(
         output_module_format,
         persistent_env,
         jsx_preserve,
+        lam_locs.clone(),
     );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         lowered_lambda,
@@ -13451,6 +13472,7 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    lam_locs: crate::lambda::LamLocTable,
 ) -> Result<JsBackendOutput> {
     let _span = info_span!(
         "compiler.js_backend",
@@ -13468,6 +13490,7 @@ fn compile_js_program_for_output_owned(
         output_module_format,
         persistent_env,
         jsx_preserve,
+        lam_locs,
     );
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
@@ -14078,6 +14101,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_lambda_current_stamp,
         hoisted_functions,
         hoisted_exports,
+        lam_locs,
     ) = match crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
         // The interface check above already computed the coercion; report
@@ -14131,6 +14155,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let raw_lambda_current_stamp = raw_converter.current_stamp();
         let hoisted_functions = raw_converter.take_hoisted_functions();
         let hoisted_exports = raw_converter.take_hoisted_exports();
+        let lam_locs = raw_converter.take_lam_locs();
         Ok((
             raw_lambda,
             raw_warnings,
@@ -14139,6 +14164,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
             hoisted_functions,
             hoisted_exports,
+            lam_locs,
         ))
     }) {
         Ok(converted) => converted,
@@ -14294,7 +14320,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
-        source_file_names: std::sync::Arc::new(arena.source_file_names()),
+        lam_locs,
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
@@ -14361,6 +14387,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         mut cmj_export_constants,
         mut cmj_export_arities,
         mut cmj_export_lambdas,
+        lam_locs,
     ) = {
         let _phase = info_span!(
             "compiler.js_compile",
@@ -14379,6 +14406,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                &pre_js.lam_locs,
             )?
         } else {
             compile_js_program_for_output_owned(
@@ -14392,9 +14420,11 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                std::mem::take(&mut pre_js.lam_locs),
             )?
         }
     };
+    let lam_locs = std::sync::Arc::new(lam_locs);
     if !options.skip_js_render {
         check_module_path_resolution_errors(
             &program,
@@ -14422,9 +14452,11 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             primary_target.map(|target| target.path.clone()),
             program,
             module_path_resolver,
+            lam_locs,
         )];
         for target in js_targets.iter().skip(1) {
-            let (program, module_path_resolver, _, _, _) = compile_js_program_for_output(
+            let (program, module_path_resolver, _, _, _, target_lam_locs) =
+                compile_js_program_for_output(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
@@ -14435,13 +14467,19 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 Some(target.module_format),
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                &pre_js.lam_locs,
             )?;
             check_module_path_resolution_errors(
                 &program,
                 &module_path_resolver,
                 options.source_filename.as_deref().unwrap_or("_none_"),
             )?;
-            rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
+            rendered_programs.push((
+                Some(target.path.clone()),
+                program,
+                module_path_resolver,
+                std::sync::Arc::new(target_lam_locs),
+            ));
         }
         rendered_programs
     };
@@ -14456,7 +14494,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         if options.skip_js_render {
             (String::new(), Vec::new())
         } else {
-            let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
+            let (primary_path, primary_program, primary_resolver, primary_lam_locs) =
+                rendered_programs.remove(0);
             let (mut primary_js, primary_source_map) = render_js_program(
                 &primary_program,
                 &primary_resolver,
@@ -14465,7 +14504,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 pre_js.jsx_preserve,
                 options,
                 primary_path.as_deref(),
-                pre_js.source_file_names.clone(),
+                primary_lam_locs,
             );
             let mut js_outputs = Vec::new();
             let js = if let Some(path) = primary_path {
@@ -14480,7 +14519,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
                 primary_js
             };
-            for (path, program, module_path_resolver) in rendered_programs {
+            for (path, program, module_path_resolver, lam_locs) in rendered_programs {
                 let Some(path) = path else {
                     crate::js_ir::dispose_deps_program_nonrecursive(program);
                     continue;
@@ -14493,7 +14532,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     pre_js.jsx_preserve,
                     options,
                     Some(&path),
-                    pre_js.source_file_names.clone(),
+                    lam_locs,
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
                 js_outputs.push(JsOutput {

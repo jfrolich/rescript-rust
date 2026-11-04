@@ -970,7 +970,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::compile_matching(
             self.type_ctx,
-            self.arena,
+            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             handler_fun,
             arg,
             pat_act_list,
@@ -996,8 +996,8 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_let(
             self.type_ctx,
-            self.arena,
-            loc,
+            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
+            self.loc(loc),
             param,
             pat,
             body,
@@ -1017,8 +1017,8 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_function(
             self.type_ctx,
-            self.arena,
-            loc,
+            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
+            self.loc(loc),
             param,
             pat_act_list,
             partial,
@@ -1036,7 +1036,7 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_trywith(
             self.type_ctx,
-            self.arena,
+            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
             param,
             pat_act_list,
             &mut self.next_static_raise,
@@ -1055,8 +1055,8 @@ impl<'a> RawLambdaConverter<'a> {
         self.sync_matching_stamps();
         let lambda = full_matching::for_multiple_match(
             self.type_ctx,
-            self.arena,
-            loc,
+            &crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs),
+            self.loc(loc),
             paraml,
             pat_act_list,
             partial,
@@ -2787,6 +2787,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         use crate::types::external_ffi_types::{DeclKind, ExternalDecl, Param};
         let returns_unit = self.external_returns_unit(env, prim, val_type);
+        let node_loc = self.lam_loc(loc);
         let send_call = |receiver: RawLambda, args: Vec<RawLambda>, kind: DeclKind| {
             let mut send_arg_types = vec![Param::dummy()];
             send_arg_types.extend(arg_types.iter().cloned());
@@ -2806,7 +2807,7 @@ impl<'a> RawLambdaConverter<'a> {
                     transformed_jsx: false,
                 },
                 send_args,
-                self.lam_loc(loc),
+                node_loc,
             )
         };
         let m = self.fresh_ident("m");
@@ -2954,8 +2955,9 @@ impl<'a> RawLambdaConverter<'a> {
         _tag: i32,
         tag_info: TagInfo,
         elems: Vec<RawLambda>,
-        loc: LocIdx,
+        loc: impl Into<SrcLoc>,
     ) -> RawLambda {
+        let loc: SrcLoc = loc.into();
         if let Some(constants) = elems
             .iter()
             .map(Self::extract_constant_raw)
@@ -3763,7 +3765,7 @@ impl<'a> RawLambdaConverter<'a> {
             true,
             &self.global_path(),
             cc,
-            LamLoc::NONE,
+            SrcLoc::Decl(Location::none()),
         );
         self.type_ctx.set_typeopt_cache(false);
         self.materialize_hoisted_exports(result)
@@ -4532,7 +4534,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn wrap_id_pos_list_raw<F>(
         &mut self,
-        loc: LocIdx,
+        loc: SrcLoc,
         id_pos_list: &[(Ident, usize, ModuleCoercion)],
         mut get_field: F,
         lam: RawLambda,
@@ -4574,13 +4576,14 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn apply_coercion_result_raw(
         &mut self,
-        loc: LocIdx,
+        loc: impl Into<SrcLoc>,
         strict: LetKind,
         funct: RawLambda,
         param: Ident,
         arg: RawLambda,
         cc_res: &ModuleCoercion,
     ) -> RawLambda {
+        let loc: SrcLoc = loc.into();
         self.name_lambda_raw(strict, funct, |this, id| {
             let body = this.apply_coercion_raw(
                 loc,
@@ -4590,7 +4593,7 @@ impl<'a> RawLambdaConverter<'a> {
                     ap_func: Box::new(RawLambda::var(id)),
                     ap_args: vec![arg],
                     ap_info: ApInfo {
-                        loc: self.lam_loc(loc),
+                        loc: this.lam_loc(loc),
                         inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
@@ -4605,19 +4608,21 @@ impl<'a> RawLambdaConverter<'a> {
                     is_a_functor: true,
                     ..FunctionAttribute::default()
                 },
-                self.lam_loc(loc),
+                this.lam_loc(loc),
             )
         })
     }
 
     fn apply_coercion_raw(
         &mut self,
-        loc: LocIdx,
+        loc: impl Into<SrcLoc>,
         strict: LetKind,
         coercion: &ModuleCoercion,
         arg: RawLambda,
     ) -> RawLambda {
+        let loc: SrcLoc = loc.into();
         self.note_possible_required_modules_in_raw_lambda(&arg);
+        let node_loc = self.lam_loc(loc);
         match coercion {
             ModuleCoercion::Tcoerce_none => arg,
             ModuleCoercion::Tcoerce_structure(positions, id_pos_list, runtime_fields) => {
@@ -4639,12 +4644,12 @@ impl<'a> RawLambdaConverter<'a> {
                                         FieldDbgInfo::Module { name: name.clone() },
                                     ),
                                     vec![named.clone()],
-                                    self.lam_loc(loc),
+                                    node_loc,
                                 );
                                 this.apply_coercion_raw(loc, LetKind::Alias, cc, field)
                             })
                             .collect(),
-                        self.lam_loc(loc),
+                        node_loc,
                     );
                     this.wrap_id_pos_list_raw(
                         loc,
@@ -4658,7 +4663,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     },
                                 ),
                                 vec![named.clone()],
-                                self.lam_loc(loc),
+                                node_loc,
                             )
                         },
                         lam,
@@ -4703,8 +4708,9 @@ impl<'a> RawLambdaConverter<'a> {
         fields: &[Ident],
         is_top_level: bool,
         cc: &ModuleCoercion,
-        loc: LocIdx,
+        loc: impl Into<SrcLoc>,
     ) -> RawLambda {
+        let loc: SrcLoc = loc.into();
         match cc {
             ModuleCoercion::Tcoerce_none => {
                 // OCaml translmod `make_module_block` exports every field; a
@@ -5558,8 +5564,9 @@ impl<'a> RawLambdaConverter<'a> {
         is_top_level: bool,
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
-        loc: LocIdx,
+        loc: impl Into<SrcLoc>,
     ) -> RawLambda {
+        let loc: SrcLoc = loc.into();
         let Some((item, rem)) = items.split_first() else {
             return self.make_module_block_raw(fields, is_top_level, cc, loc);
         };
