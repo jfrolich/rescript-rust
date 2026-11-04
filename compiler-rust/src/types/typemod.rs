@@ -230,7 +230,7 @@ fn translate_type_declaration_params<'a>(
                 )
             }
             crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                let name = name.as_ref().as_ref();
+                let name = arena.get_string(*name);
                 check_type_variable_name(core_type.ptyp_loc, name)?;
                 if tctx.type_variables.contains_key(name) {
                     return Err(TypeModError::RepeatedParameter {
@@ -254,7 +254,8 @@ fn translate_type_declaration_params<'a>(
 
         internal_params.push(type_ref);
         if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &core_type.ptyp_desc {
-            tctx.type_variables.insert(name.to_string(), type_ref);
+            tctx.type_variables
+                .insert(arena.get_string(*name).to_string(), type_ref);
         }
         typed_params.push((typed_core_type, parser_variance_to_types(*parser_var)));
     }
@@ -12005,7 +12006,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         tctx.type_ctx.new_var(Some("_".to_string()))
                                     }
                                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                                        let name = name.as_ref().as_ref();
+                                        let name = arena.get_string(*name);
                                         check_type_variable_name(param_ty.ptyp_loc, name)?;
                                         if tctx.type_variables.contains_key(name) {
                                             return Err(TypeModError::RepeatedParameter {
@@ -12024,7 +12025,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) =
                                     &param_ty.ptyp_desc
                                 {
-                                    tctx.type_variables.insert(name.to_string(), param_ref);
+                                    tctx.type_variables
+                                        .insert(arena.get_string(*name).to_string(), param_ref);
                                 }
                                 type_variance.push(match variance {
                                     crate::parser::ast::Variance::Covariant => {
@@ -16970,7 +16972,7 @@ fn type_structure_item<'a>(
                             )
                         }
                         crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                            let name = name.as_ref().as_ref();
+                            let name = arena.get_string(*name);
                             check_type_variable_name(core_type.ptyp_loc, name)?;
                             if tctx.type_variables.contains_key(name) {
                                 return Err(TypeModError::RepeatedParameter {
@@ -16993,7 +16995,8 @@ fn type_structure_item<'a>(
                     };
                     internal_type_params.push(type_ref);
                     if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &core_type.ptyp_desc {
-                        tctx.type_variables.insert(name.to_string(), type_ref);
+                        tctx.type_variables
+                            .insert(arena.get_string(*name).to_string(), type_ref);
                     }
                     let types_var = match parser_var {
                         ParserVariance::Covariant => TypesVariance::covariant(),
@@ -20181,7 +20184,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         )
                     }
                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
-                        let name = name.as_ref().as_ref();
+                        let name = arena.get_string(*name);
                         check_type_variable_name(core_type.ptyp_loc, name)?;
                         if tctx.type_variables.contains_key(name) {
                             return Err(TypeModError::RepeatedParameter {
@@ -20207,7 +20210,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 // translation can find them and share the same Tvar node.
                 // Matches OCaml's transl_type_param which inserts into type_variables.
                 if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &core_type.ptyp_desc {
-                    tctx.type_variables.insert(name.to_string(), type_ref);
+                    tctx.type_variables
+                        .insert(arena.get_string(*name).to_string(), type_ref);
                 }
                 let types_var = match parser_var {
                     ParserVariance::Covariant => TypesVariance::covariant(),

@@ -961,6 +961,7 @@ impl Marshal for CoreType {
         // shared between Otag fields and Labelled args. The first write creates the
         // object, subsequent writes with the same (name, loc) emit shared references.
         if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+            let name = w.get_arena().get_string(*name);
             // Most located tyvars are rebuilt as fresh nodes in OCaml and should not
             // be globally shared by value. Keep sharing narrow, but allow it in
             // letmodule/module_typeof scopes where OCaml reuses tyvar core_types in
@@ -986,6 +987,7 @@ impl Marshal for CoreType {
         }
 
         if let CoreTypeDesc::Ptyp_var(name) = &self.ptyp_desc {
+            let name = w.get_arena().get_string(*name);
             w.write_block_header(0, 3);
             marshal_ptyp_var_desc(name, self.ptyp_loc, w);
             self.ptyp_loc.marshal(w);
@@ -1019,6 +1021,7 @@ impl Marshal for CoreTypeDesc {
             CoreTypeDesc::Ptyp_any => w.write_int(0),
             CoreTypeDesc::Ptyp_var(s) => {
                 w.write_block_header(0, 1);
+                let s = w.get_arena().get_string(*s);
                 w.write_str(s);
             }
             CoreTypeDesc::Ptyp_arrow(inner) => {

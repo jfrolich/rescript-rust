@@ -459,9 +459,10 @@ fn attributes(arena: &ParseArena, attrs: &[Attribute]) -> Sexp {
 fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
     let desc = match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => Sexp::atom("Ptyp_any"),
-        CoreTypeDesc::Ptyp_var(var) => {
-            Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))])
-        }
+        CoreTypeDesc::Ptyp_var(var) => Sexp::list(vec![
+            Sexp::atom("Ptyp_var"),
+            Sexp::atom(&quote_string(arena.get_string(*var))),
+        ]),
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (arg, ret, arity) = &**inner;
             let params = arena

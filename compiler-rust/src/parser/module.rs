@@ -1724,7 +1724,7 @@ fn parse_type_constraint(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, CoreTypeIdx
             let var_end_idx = p.end_pos_idx();
             p.next();
             let var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(name)),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                 ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
                 ptyp_attributes: Attributes::new(),
             };
@@ -2476,7 +2476,7 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
             } else {
                 super::core::parse_ident(p, TYPE_PARAM, start_pos_idx)
             };
-            (CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(ident))), loc)
+            (CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&ident)), loc)
         }
         Token::Underscore => {
             let loc = p.mk_loc_current();
@@ -2490,7 +2490,7 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
             )));
             let start_pos_idx = p.start_pos_idx();
             let (ident, loc) = super::core::parse_ident(p, TYPE_PARAM, start_pos_idx);
-            (CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(ident))), loc)
+            (CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&ident)), loc)
         }
         _ => return None,
     };

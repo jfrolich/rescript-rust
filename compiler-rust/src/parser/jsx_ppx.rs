@@ -706,7 +706,7 @@ fn transform_react_component_binding(
             }
             // `ref_type Location.none`.
             let ref_type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref"))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern("ref")),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -2131,9 +2131,7 @@ fn make_props_record_type_with_live(
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
-                    &nt.label,
-                )))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(&safe_type_from_value(&nt.label))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -2169,9 +2167,7 @@ fn make_props_record_type_with_live(
         .filter(|nt| nt.label != "key")
         .map(|nt| {
             let var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
-                    &nt.label,
-                )))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(&safe_type_from_value(&nt.label))),
                 ptyp_loc: nt.loc,
                 ptyp_attributes: Attributes::new(),
             };
@@ -2674,7 +2670,7 @@ fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
 
 /// jsx_v4.ml:138-158 `make_props_type_params`, for one prop.
 fn make_props_type_param(
-    arena: &ParseArena,
+    arena: &mut ParseArena,
     nt: &NamedType,
     strip_explicit_option: bool,
     strip_explicit_nullable_of_ref: bool,
@@ -2686,7 +2682,7 @@ fn make_props_type_param(
         // prop's location).
         match &nt.interior_type.ptyp_desc {
             CoreTypeDesc::Ptyp_any => Some(CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref"))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern("ref")),
                 ptyp_loc: nt.loc,
                 ptyp_attributes: Attributes::new(),
             }),
@@ -3274,9 +3270,7 @@ fn make_props_record_type(
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
-                    &nt.label,
-                )))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(&safe_type_from_value(&nt.label))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -3311,11 +3305,10 @@ fn make_props_record_type(
         .iter()
         .filter(|nt| nt.label != "key")
         .map(|nt| {
+            let tyvar = arena.intern(&safe_type_from_value(&nt.label));
             (
                 arena.push_core_type(CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
-                        &nt.label,
-                    )))),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(tyvar),
                     ptyp_loc: nt.loc,
                     ptyp_attributes: Attributes::new(),
                 }),
@@ -3369,9 +3362,7 @@ fn make_props_record_type_sig(
         .map(|nt| {
             // OCaml uses ghost location for the Ptyp_var inside label declarations
             let type_var = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
-                    &nt.label,
-                )))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(&safe_type_from_value(&nt.label))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -3405,11 +3396,10 @@ fn make_props_record_type_sig(
         .iter()
         .filter(|nt| nt.label != "key")
         .map(|nt| {
+            let tyvar = arena.intern(&safe_type_from_value(&nt.label));
             (
                 arena.push_core_type(CoreType {
-                    ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(safe_type_from_value(
-                        &nt.label,
-                    )))),
+                    ptyp_desc: CoreTypeDesc::Ptyp_var(tyvar),
                     ptyp_loc: nt.loc,
                     ptyp_attributes: Attributes::new(),
                 }),

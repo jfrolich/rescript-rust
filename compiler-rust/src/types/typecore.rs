@@ -2836,7 +2836,7 @@ fn transl_type_inner(
             // Locally abstract types (type a) are handled by Ptyp_constr,
             // not Ptyp_var. OCaml's typetexp only looks up type variables
             // (used_variables/TyVarEnv), not the type environment, for Ptyp_var.
-            let name_str = name.to_string();
+            let name_str = tctx.arena.get_string(*name).to_string();
             if name_str.starts_with('_') {
                 return Err(TypeCoreError::InvalidVariableName {
                     loc,

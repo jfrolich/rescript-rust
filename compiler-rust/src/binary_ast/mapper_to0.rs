@@ -613,7 +613,9 @@ impl<'a> Mapper<'a> {
     fn map_core_type_desc(&mut self, desc: &current::CoreTypeDesc) -> pt0::CoreTypeDesc {
         match desc {
             current::CoreTypeDesc::Ptyp_any => pt0::CoreTypeDesc::Any,
-            current::CoreTypeDesc::Ptyp_var(s) => pt0::CoreTypeDesc::Var(s.to_string()),
+            current::CoreTypeDesc::Ptyp_var(s) => {
+                pt0::CoreTypeDesc::Var(self.arena.get_string(*s).to_string())
+            }
             current::CoreTypeDesc::Ptyp_arrow(inner) => {
                 let (ref arg, ref ret_idx, _arity) = **inner;
                 // This branch should not normally be reached since map_core_type handles arrows

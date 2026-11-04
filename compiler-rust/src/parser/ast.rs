@@ -511,7 +511,7 @@ pub enum CoreTypeDesc {
     /// Any type: `_`.
     Ptyp_any,
     /// Type variable: `'a`.
-    Ptyp_var(Box<Cow<'static, str>>),
+    Ptyp_var(StrIdx),
     /// Arrow type: `T1 -> T2`.
     Ptyp_arrow(Box<(Box<TypeArg>, CoreTypeIdx, Arity)>),
     /// Tuple type: `(T1, T2, ..., Tn)`.

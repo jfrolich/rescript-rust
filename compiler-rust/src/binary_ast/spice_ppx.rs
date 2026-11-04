@@ -704,7 +704,7 @@ fn mk_type_constr(lid_idx: LidentIdx, args: Vec<CoreType>, arena: &mut ParseAren
 
 fn mk_type_var(name: &str, arena: &mut ParseArena) -> CoreType {
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name.to_string()))),
+        ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(name)),
         ptyp_loc: arena.dummy_loc(),
         ptyp_attributes: Attributes::new(),
     }
@@ -837,7 +837,7 @@ fn get_param_names(
     for (typ_idx, _) in params {
         let typ = arena.get_core_type(*typ_idx);
         match &typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_var(name) => names.push(name.to_string()),
+            CoreTypeDesc::Ptyp_var(name) => names.push(arena.get_string(*name).to_string()),
             _ => return Err("Unhandled param type".to_string()),
         }
     }
@@ -1730,7 +1730,7 @@ fn codecs_generate_codecs_for(
             if settings.do_encode {
                 Some(expr_ident_dynamic(
                     arena,
-                    format!("{}{}", ENCODER_VAR_PREFIX, name),
+                    format!("{}{}", ENCODER_VAR_PREFIX, arena.get_string(*name)),
                 ))
             } else {
                 None
@@ -1738,7 +1738,7 @@ fn codecs_generate_codecs_for(
             if settings.do_decode {
                 Some(expr_ident_dynamic(
                     arena,
-                    format!("{}{}", DECODER_VAR_PREFIX, name),
+                    format!("{}{}", DECODER_VAR_PREFIX, arena.get_string(*name)),
                 ))
             } else {
                 None

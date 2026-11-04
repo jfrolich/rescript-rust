@@ -36,7 +36,7 @@ fn inline_type_name_exists(p: &Parser<'_>, name: &str) -> bool {
 fn inline_type_param_exists(p: &Parser<'_>, name: &str) -> bool {
     p.inline_types_params.iter().any(|(typ_idx, _)| {
         let typ = p.arena().get_core_type(*typ_idx);
-        matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_var(existing) if existing.as_ref() == name)
+        matches!(&typ.ptyp_desc, CoreTypeDesc::Ptyp_var(existing) if p.arena().get_string(*existing) == name)
     })
 }
 
@@ -45,7 +45,7 @@ fn maybe_track_inline_type_param(p: &mut Parser<'_>, name: &str, loc: LocIdx) {
         // OCaml compiler/syntax/src/res_core.ml:49-56 appends free type
         // variables to the inline record context while parsing externals.
         let typ = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name.to_string()))),
+            ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(name)),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         };
@@ -110,7 +110,7 @@ pub fn substitute_type_vars(
 ) -> Result<CoreType, LocIdx> {
     let new_desc = match typ.ptyp_desc {
         CoreTypeDesc::Ptyp_var(name) => {
-            if vars.contains(name.as_ref().as_ref()) {
+            if vars.contains(arena.get_string(name)) {
                 return Err(typ.ptyp_loc);
             }
             CoreTypeDesc::Ptyp_var(name)
@@ -127,7 +127,7 @@ pub fn substitute_type_vars(
                         arena.record_tyvar_source(typ.ptyp_loc, source_idx);
                         // Convert to Ptyp_var
                         return Ok(CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(name)),
+                            ptyp_desc: CoreTypeDesc::Ptyp_var(arena.intern(&name)),
                             ptyp_loc: typ.ptyp_loc,
                             ptyp_attributes: typ.ptyp_attributes,
                         });
@@ -341,7 +341,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     p.next();
                     let name = p.arena().get_string(var.txt).to_string();
                     let typ = CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name))),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
@@ -370,7 +370,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                 _ => {
                     let name = p.arena().get_string(var.txt).to_string();
                     return CoreType {
-                        ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name))),
+                        ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                         ptyp_loc: var.loc,
                         ptyp_attributes: Attributes::new(),
                     };
@@ -720,7 +720,7 @@ fn parse_atomic_typ_expr_with_start(
             };
             maybe_track_inline_type_param(p, &name, var_loc);
             CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name))),
+                ptyp_desc: CoreTypeDesc::Ptyp_var(p.arena_mut().intern(&name)),
                 ptyp_loc: var_loc,
                 ptyp_attributes: Attributes::new(),
             }

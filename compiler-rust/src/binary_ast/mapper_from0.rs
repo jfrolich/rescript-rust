@@ -771,7 +771,7 @@ impl<'a> Mapper<'a> {
         let desc = match &typ.ptyp_desc {
             pt0::CoreTypeDesc::Any => current::CoreTypeDesc::Ptyp_any,
             pt0::CoreTypeDesc::Var(s) => {
-                current::CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(s.clone())))
+                current::CoreTypeDesc::Ptyp_var(self.arena.intern(&s.clone()))
             }
             pt0::CoreTypeDesc::Arrow(lbl, t1, t2) => {
                 // ast_mapper_from0.ml T.map Ptyp_arrow: a one-parameter arrow;

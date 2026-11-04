@@ -5822,9 +5822,10 @@ pub fn print_typ_expr(
     let rendered_type = match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any => Doc::text("_"),
 
-        CoreTypeDesc::Ptyp_var(name) => {
-            Doc::concat(vec![Doc::text("'"), print_ident_like(name, true, false)])
-        }
+        CoreTypeDesc::Ptyp_var(name) => Doc::concat(vec![
+            Doc::text("'"),
+            print_ident_like(arena.get_string(*name), true, false),
+        ]),
 
         CoreTypeDesc::Ptyp_extension(ext) => print_extension(state, ext, false, cmt_tbl, arena),
 

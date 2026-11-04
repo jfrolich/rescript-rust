@@ -2829,7 +2829,7 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
         }
         CoreTypeDesc::Ptyp_var(name) => {
             f.string("'");
-            f.string(name);
+            f.string(arena.get_string(*name));
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (ref arg, ref ret, ref arity) = **inner;
