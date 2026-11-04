@@ -4663,12 +4663,15 @@ fn handle_todo(payload: &Payload, arena: &mut ParseArena, loc: LocIdx) -> Expres
         pexp_attributes: Attributes::new(),
     };
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(funct),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(argument))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(argument))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -4815,12 +4818,15 @@ fn handle_debugger(
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(func_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(unit_expr))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(unit_expr))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -4918,12 +4924,15 @@ fn raw_local_external_apply(
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(func_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(str_exp))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(str_exp))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -5241,12 +5250,15 @@ fn handle_raw_structure(
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(func_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(str_exp))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(str_exp))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -5483,12 +5495,15 @@ fn transform_await(inner: Expression, loc: LocIdx, arena: &mut ParseArena) -> Ex
     };
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(func_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(inner))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(inner))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: ghost_loc,
         pexp_attributes: Attributes::new(),
     }
@@ -5517,12 +5532,15 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
     };
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(func_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(inner))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(inner))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -5663,12 +5681,15 @@ fn create_await_module_expression(
     };
 
     let import_apply = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(import_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_pack))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(constrained_pack))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: pmod_loc,
         pexp_attributes: Attributes::new(),
     };
@@ -5995,12 +6016,15 @@ fn transform_module_await(
     };
 
     let import_apply = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(import_ident),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_pack))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(constrained_pack))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: pmod_loc,
         pexp_attributes: Attributes::new(),
     };
@@ -6040,11 +6064,8 @@ fn transform_module_await(
 /// Check if an expression is a pipe operator application (a -> b)
 fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
     if let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc {
-        let PexpApply {
-            ref funct,
-            ref args,
-            ..
-        } = **inner;
+        let PexpApply { ref funct, .. } = *inner;
+        let args = arena.apply_args(inner.args);
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
             && matches!(&args[1].0, ArgLabel::Nolabel)
@@ -7036,7 +7057,7 @@ fn rewrite_method_callback_expression(
     };
 
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(Expression {
                 pexp_desc: ExpressionDesc::Pexp_ident(Located {
                     txt: unsafe_to_method,
@@ -7045,10 +7066,13 @@ fn rewrite_method_callback_expression(
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_method))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(constrained_method))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: filtered_attrs.into(),
     }
@@ -7074,11 +7098,8 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
 
     // First check if this is a pipe or #= application
     if let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc {
-        let PexpApply {
-            ref funct,
-            ref args,
-            ..
-        } = **inner;
+        let PexpApply { ref funct, .. } = *inner;
+        let args = arena.apply_args(inner.args);
         // Check if this is a binary op: -> or #= with two args
         if args.len() == 2
             && matches!(&args[0].0, ArgLabel::Nolabel)
@@ -7246,22 +7267,22 @@ fn pipe_tuple_map(
                 ExpressionDesc::Pexp_apply(inner) => {
                     let PexpApply {
                         ref funct,
-                        ref args,
+
                         transformed_jsx,
                         ..
-                    } = **inner;
-                    let mut new_args = Vec::with_capacity(args.len() + 1);
+                    } = *inner;
+                    let mut new_args = Vec::with_capacity(inner.args.len() + 1);
                     let a_idx = arena.push_expr(a.clone());
                     new_args.push((ArgLabel::Nolabel, a_idx));
-                    new_args.extend(args.iter().map(|(lbl, e)| (*lbl, *e)));
+                    new_args.extend_from_slice(arena.apply_args(inner.args));
                     let funct_loc = arena.get_expr(*funct).pexp_loc;
                     Expression {
-                        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                             funct: *funct,
-                            args: new_args,
+                            args: arena.push_apply_args(&new_args),
                             partial: false,
                             transformed_jsx,
-                        })),
+                        }),
                         pexp_loc: funct_loc,
                         pexp_attributes: Attributes::new(),
                     }
@@ -7270,12 +7291,12 @@ fn pipe_tuple_map(
                     let fn_expr_idx_for_funct = arena.push_expr(fn_expr.clone());
                     let a_idx = arena.push_expr(a.clone());
                     Expression {
-                        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                             funct: fn_expr_idx_for_funct,
-                            args: vec![(ArgLabel::Nolabel, a_idx)],
+                            args: arena.push_apply_args(&[(ArgLabel::Nolabel, a_idx)]),
                             partial: false,
                             transformed_jsx: false,
-                        })),
+                        }),
                         pexp_loc: fn_expr.pexp_loc,
                         pexp_attributes: Attributes::new(),
                     }
@@ -7392,20 +7413,20 @@ fn rewrite_pipe_rhs(
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
                 ref partial,
                 ref transformed_jsx,
-            } = **inner;
-            let mut new_args = Vec::with_capacity(args.len() + 1);
+                ..
+            } = *inner;
+            let mut new_args = Vec::with_capacity(inner.args.len() + 1);
             new_args.push((ArgLabel::Nolabel, arena.push_expr(a)));
-            new_args.extend(args.iter().map(|(lbl, e)| (*lbl, *e)));
+            new_args.extend_from_slice(arena.apply_args(inner.args));
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                     funct: *funct,
-                    args: new_args,
+                    args: arena.push_apply_args(&new_args),
                     partial: *partial,
                     transformed_jsx: *transformed_jsx,
-                })),
+                }),
                 pexp_loc: loc,
                 pexp_attributes: {
                     let mut all = attrs.clone();
@@ -7424,12 +7445,15 @@ fn rewrite_pipe_rhs(
         }
         // Default: a -> f becomes f(a)
         _ => Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: arena.push_expr(f),
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(a))],
+                args: {
+                    let items = [(ArgLabel::Nolabel, arena.push_expr(a))];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: loc,
             pexp_attributes: attrs.clone(),
         },
@@ -7817,25 +7841,28 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
                 ref partial,
                 ref transformed_jsx,
-            } = **inner;
+                ..
+            } = *inner;
+            let args = arena.apply_args(inner.args).to_vec();
             let funct_expr = arena.get_expr(*funct).clone();
             let rw_funct = rewrite_expression(&funct_expr, arena);
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: arena.push_expr(rw_funct),
-                args: args
-                    .iter()
-                    .map(|(lbl, e)| {
-                        let arg_expr = arena.get_expr(*e).clone();
-                        let rw = rewrite_expression(&arg_expr, arena);
-                        (*lbl, arena.push_expr(rw))
-                    })
-                    .collect(),
+            let funct = arena.push_expr(rw_funct);
+            let args: Vec<_> = args
+                .iter()
+                .map(|(lbl, e)| {
+                    let arg_expr = arena.get_expr(*e).clone();
+                    let rw = rewrite_expression(&arg_expr, arena);
+                    (*lbl, arena.push_expr(rw))
+                })
+                .collect();
+            ExpressionDesc::Pexp_apply(PexpApply {
+                funct,
+                args: arena.push_apply_args(&args),
                 partial: *partial,
                 transformed_jsx: *transformed_jsx,
-            }))
+            })
         }
 
         ExpressionDesc::Pexp_match(inner) => {
@@ -9100,12 +9127,15 @@ fn create_map_binding(
     };
 
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(j_unsafe_expr),
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(json_const))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(json_const))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -9231,15 +9261,18 @@ fn create_to_js_function(
             pexp_attributes: Attributes::new(),
         };
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: arena.push_expr(index_ident),
-                args: vec![
-                    (ArgLabel::Nolabel, arena.push_expr(map_ident)),
-                    (ArgLabel::Nolabel, arena.push_expr(param_ident)),
-                ],
+                args: {
+                    let items = [
+                        (ArgLabel::Nolabel, arena.push_expr(map_ident)),
+                        (ArgLabel::Nolabel, arena.push_expr(param_ident)),
+                    ];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: none_loc,
             pexp_attributes: Attributes::new(),
         }
@@ -9262,12 +9295,15 @@ fn create_to_js_function(
             pexp_attributes: Attributes::new(),
         };
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: arena.push_expr(erase_ident),
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(param_ident))],
+                args: {
+                    let items = [(ArgLabel::Nolabel, arena.push_expr(param_ident))];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: none_loc,
             pexp_attributes: Attributes::new(),
         }
@@ -9367,15 +9403,18 @@ fn create_from_js_function(
     };
 
     let result_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: arena.push_expr(index_ident),
-            args: vec![
-                (ArgLabel::Nolabel, arena.push_expr(rev_map_ident)),
-                (ArgLabel::Nolabel, arena.push_expr(param_ident)),
-            ],
+            args: {
+                let items = [
+                    (ArgLabel::Nolabel, arena.push_expr(rev_map_ident)),
+                    (ArgLabel::Nolabel, arena.push_expr(param_ident)),
+                ];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: none_loc,
         pexp_attributes: Attributes::new(),
     };
@@ -9397,12 +9436,15 @@ fn create_from_js_function(
             pexp_attributes: Attributes::new(),
         };
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: arena.push_expr(raise_when_not_found_ident),
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(result_expr))],
+                args: {
+                    let items = [(ArgLabel::Nolabel, arena.push_expr(result_expr))];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: none_loc,
             pexp_attributes: Attributes::new(),
         }
@@ -9935,12 +9977,15 @@ fn create_record_to_js_function(
         };
         let erase_funct_idx = arena.push_expr(erase_ident);
         let erase_app = Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: erase_funct_idx,
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(obj_extension))],
+                args: {
+                    let items = [(ArgLabel::Nolabel, arena.push_expr(obj_extension))];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: none_loc,
             pexp_attributes: Attributes::new(),
         };
@@ -10116,12 +10161,15 @@ fn create_record_from_js_function(
         };
         let erase_funct_idx2 = arena.push_expr(erase_ident2);
         let erase_app = Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: erase_funct_idx2,
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(constrained_param))],
+                args: {
+                    let items = [(ArgLabel::Nolabel, arena.push_expr(constrained_param))];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: none_loc,
             pexp_attributes: Attributes::new(),
         };
@@ -10880,7 +10928,8 @@ fn app_exp_mapper_error(expr: &Expression, arena: &ParseArena) -> Option<PpxErro
     let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc else {
         return None;
     };
-    let PexpApply { funct, args, .. } = &**inner;
+    let PexpApply { funct, .. } = &*inner;
+    let args = arena.apply_args(inner.args);
     if !expression_is_lident(*funct, "->", arena) {
         return None;
     }

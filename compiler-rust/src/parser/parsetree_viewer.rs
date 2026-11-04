@@ -180,11 +180,8 @@ pub fn collect_if_expressions<'a>(
 pub fn is_binary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2
                 || args
                     .iter()
@@ -217,11 +214,8 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
     fn is_pipe(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
         match &expr.pexp_desc {
             ExpressionDesc::Pexp_apply(inner) => {
-                let PexpApply {
-                    ref funct,
-                    ref args,
-                    ..
-                } = **inner;
+                let PexpApply { ref funct, .. } = *inner;
+                let args = arena.apply_args(inner.args);
                 if args.len() != 2 {
                     return false;
                 }
@@ -240,11 +234,8 @@ pub fn is_single_pipe_expr(arena: &crate::parse_arena::ParseArena, expr: &Expres
     // Check if this is a pipe where the LHS is NOT also a pipe
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
@@ -441,11 +432,8 @@ pub fn is_huggable_rhs(expr: &Expression) -> bool {
 pub fn is_unary_expression(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 1
                 || args
                     .iter()
@@ -548,11 +536,11 @@ pub fn collect_spread_dict_expr_parts<'a>(
         if arena.get_string(*module_name) != "Primitive_dict"
             || arena.get_string(*field) != "make"
             || apply.args.len() != 1
-            || !matches!(apply.args[0].0, ArgLabel::Nolabel)
+            || !matches!(arena.apply_args(apply.args)[0].0, ArgLabel::Nolabel)
         {
             return None;
         }
-        let rows = arena.get_expr(apply.args[0].1);
+        let rows = arena.get_expr(arena.apply_args(apply.args)[0].1);
         is_tuple_array(arena, rows).then_some(rows)
     }
 
@@ -576,16 +564,16 @@ pub fn collect_spread_dict_expr_parts<'a>(
             .iter()
             .any(|attribute| arena.get_string(attribute.0.txt) == "res.dictSpread")
         || apply.args.len() != 2
-        || !apply
-            .args
+        || !arena
+            .apply_args(apply.args)
             .iter()
             .all(|(label, _)| matches!(label, ArgLabel::Nolabel))
     {
         return None;
     }
 
-    let target = arena.get_expr(apply.args[0].1);
-    let sources = arena.get_expr(apply.args[1].1);
+    let target = arena.get_expr(arena.apply_args(apply.args)[0].1);
+    let sources = arena.get_expr(arena.apply_args(apply.args)[1].1);
     let ExpressionDesc::Pexp_array(source_indices) = &sources.pexp_desc else {
         return None;
     };
@@ -1113,11 +1101,8 @@ pub fn should_indent_binary_expr(
 
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2 => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             let funct_expr = arena.get_expr(*funct);
             if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
@@ -1152,9 +1137,8 @@ fn same_precedence_sub_expression(
 
     match &sub_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) if apply_inner.args.len() == 2 => {
-            let PexpApply {
-                ref funct, args: _, ..
-            } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
+            let _ = arena.apply_args(apply_inner.args);
             let funct_expr = arena.get_expr(*funct);
             if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {
@@ -1361,11 +1345,8 @@ pub fn has_await_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
 pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2
                 || args
                     .iter()
@@ -1393,11 +1374,8 @@ pub fn is_array_access(arena: &crate::parse_arena::ParseArena, expr: &Expression
 pub fn is_array_set(arena: &crate::parse_arena::ParseArena, expr: &Expression) -> bool {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 3
                 || args
                     .iter()

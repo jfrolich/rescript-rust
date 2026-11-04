@@ -1538,10 +1538,11 @@ fn print_expression_inner<W: Write>(
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
+
                 ref partial,
                 ..
-            } = **inner;
+            } = *inner;
+            let args = arena.apply_args(inner.args);
             // Array access: Array.get(arr, idx) -> arr.(idx)
             // Also handles @res.array.access attribute for backwards compatibility
             // OCaml uses simple_expr for the array expression and expression for the index

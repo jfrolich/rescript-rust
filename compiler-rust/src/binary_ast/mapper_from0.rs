@@ -1629,16 +1629,17 @@ impl<'a> Mapper<'a> {
                             lid.txt = Longident::Lident(self.arena.intern("++"));
                         }
                         let funct = self.push_expr(&func);
-                        let args = args
+                        let args: Vec<_> = args
                             .iter()
                             .map(|(label, arg)| (self.map_arg_label(label), self.push_expr(arg)))
                             .collect();
-                        current::ExpressionDesc::Pexp_apply(Box::new(current::PexpApply {
+                        let args = self.arena.push_apply_args(&args);
+                        current::ExpressionDesc::Pexp_apply(current::PexpApply {
                             funct,
                             args,
                             partial: false,
                             transformed_jsx: false,
-                        }))
+                        })
                     }
                 }
             }
@@ -1741,15 +1742,18 @@ impl<'a> Mapper<'a> {
                     self.arena.push_expr(mapped)
                 };
                 return current::Expression {
-                    pexp_desc: current::ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                    pexp_desc: current::ExpressionDesc::Pexp_apply(PexpApply {
                         funct: funct_idx,
-                        args: args
-                            .iter()
-                            .map(|(lbl, e)| (self.map_arg_label(lbl), self.push_expr(e)))
-                            .collect(),
+                        args: {
+                            let args: Vec<_> = args
+                                .iter()
+                                .map(|(lbl, e)| (self.map_arg_label(lbl), self.push_expr(e)))
+                                .collect();
+                            self.arena.push_apply_args(&args)
+                        },
                         partial,
                         transformed_jsx: false,
-                    })),
+                    }),
                     pexp_loc: loc,
                     pexp_attributes: attrs,
                 };

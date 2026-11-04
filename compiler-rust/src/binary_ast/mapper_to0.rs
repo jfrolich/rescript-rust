@@ -1407,7 +1407,8 @@ impl<'a> Mapper<'a> {
                     args,
                     partial,
                     transformed_jsx,
-                } = &**inner;
+                } = inner;
+                let args = self.arena.apply_args(*args).to_vec();
                 // Look up the function expression from arena
                 let funct = self.arena.get_expr(*funct_idx).clone();
                 // Convert operators for parsetree0 compatibility
@@ -1464,7 +1465,7 @@ impl<'a> Mapper<'a> {
                 };
 
                 let mut mapped_args = Vec::with_capacity(args.len());
-                for (label, e_idx) in args {
+                for (label, e_idx) in &args {
                     mapped_args.push((self.map_arg_label(label), self.map_expr_idx(*e_idx)));
                 }
 

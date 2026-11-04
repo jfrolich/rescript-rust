@@ -869,17 +869,18 @@ pub mod ast_helper {
         loc: Location,
     ) -> Expression {
         let funct = arena.push_expr(func);
-        let args_idx = args
+        let args_idx: Vec<_> = args
             .into_iter()
             .map(|(lbl, e)| (lbl, arena.push_expr(e)))
             .collect();
+        let args_idx = arena.push_apply_args(&args_idx);
         make_expr(
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            ExpressionDesc::Pexp_apply(PexpApply {
                 funct,
                 args: args_idx,
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             loc,
         )
     }
@@ -893,17 +894,18 @@ pub mod ast_helper {
         partial: bool,
     ) -> Expression {
         let funct = arena.push_expr(func);
-        let args_idx = args
+        let args_idx: Vec<_> = args
             .into_iter()
             .map(|(lbl, e)| (lbl, arena.push_expr(e)))
             .collect();
+        let args_idx = arena.push_apply_args(&args_idx);
         make_expr(
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            ExpressionDesc::Pexp_apply(PexpApply {
                 funct,
                 args: args_idx,
                 partial,
                 transformed_jsx: false,
-            })),
+            }),
             loc,
         )
     }

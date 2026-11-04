@@ -1269,9 +1269,11 @@ pub fn print_expression(
         // Spread array: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
         ExpressionDesc::Pexp_apply(apply_inner)
             if apply_inner.args.len() == 1
-                && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
+                && matches!(&arena.apply_args(apply_inner.args)[0].0, ArgLabel::Nolabel)
                 && matches!(
-                    &arena.get_expr(apply_inner.args[0].1).pexp_desc,
+                    &arena
+                        .get_expr(arena.apply_args(apply_inner.args)[0].1)
+                        .pexp_desc,
                     ExpressionDesc::Pexp_array(_)
                 )
                 && parsetree_viewer::is_spread_belt_array_concat(
@@ -1279,7 +1281,8 @@ pub fn print_expression(
                     arena.get_expr(apply_inner.funct),
                 ) =>
         {
-            let PexpApply { ref args, .. } = **apply_inner;
+            let PexpApply { .. } = *apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
                 print_belt_array_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -1289,9 +1292,11 @@ pub fn print_expression(
         // Spread list: Primitive_list.spread([xs, [a, b]]) -> list{...xs, a, b}
         ExpressionDesc::Pexp_apply(apply_inner)
             if apply_inner.args.len() == 1
-                && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
+                && matches!(&arena.apply_args(apply_inner.args)[0].0, ArgLabel::Nolabel)
                 && matches!(
-                    &arena.get_expr(apply_inner.args[0].1).pexp_desc,
+                    &arena
+                        .get_expr(arena.apply_args(apply_inner.args)[0].1)
+                        .pexp_desc,
                     ExpressionDesc::Pexp_array(_)
                 )
                 && parsetree_viewer::is_spread_belt_list_concat(
@@ -1299,7 +1304,8 @@ pub fn print_expression(
                     arena.get_expr(apply_inner.funct),
                 ) =>
         {
-            let PexpApply { ref args, .. } = **apply_inner;
+            let PexpApply { .. } = *apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             if let ExpressionDesc::Pexp_array(sub_lists) = &arena.get_expr(args[0].1).pexp_desc {
                 print_belt_list_concat_apply(state, sub_lists, cmt_tbl, arena)
             } else {
@@ -1310,10 +1316,11 @@ pub fn print_expression(
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
+
                 ref partial,
                 ..
-            } = **inner;
+            } = *inner;
+            let args = arena.apply_args(inner.args);
             print_pexp_apply(
                 state,
                 e,
@@ -3484,11 +3491,8 @@ fn print_underscore_apply_in_pipe(
 
     match &body_expr.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             let funct = arena.get_expr(*funct);
             // res_parsetree_viewer.ml:145-175: a sole `__x` in first position
             // is dropped; otherwise fall back to the regular rewrite.
@@ -3562,11 +3566,8 @@ fn print_underscore_apply(
 ) -> Doc {
     match &inner.pexp_desc {
         ExpressionDesc::Pexp_apply(apply_inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             let funct = arena.get_expr(*funct);
             print_underscore_apply_call(state, funct, args, cmt_tbl, arena)
         }
@@ -4246,7 +4247,7 @@ fn binary_expression_parts<'a>(
     let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc else {
         return None;
     };
-    let [(_, left), (_, right)] = apply.args.as_slice() else {
+    let [(_, left), (_, right)] = arena.apply_args(apply.args) else {
         return None;
     };
     let ExpressionDesc::Pexp_ident(ident) = &arena.get_expr(apply.funct).pexp_desc else {
@@ -4447,11 +4448,11 @@ fn print_binary_operand_flatten(
     }
 }
 
-fn is_nolabel_pair_apply(expr: &Expression) -> bool {
+fn is_nolabel_pair_apply(expr: &Expression, arena: &ParseArena) -> bool {
     matches!(
         &expr.pexp_desc,
         ExpressionDesc::Pexp_apply(apply)
-            if matches!(apply.args.as_slice(), [(ArgLabel::Nolabel, _), (ArgLabel::Nolabel, _)])
+            if matches!(arena.apply_args(apply.args), [(ArgLabel::Nolabel, _), (ArgLabel::Nolabel, _)])
     )
 }
 
@@ -4508,7 +4509,7 @@ fn print_binary_expression(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    if !is_nolabel_pair_apply(expr) {
+    if !is_nolabel_pair_apply(expr, arena) {
         return Doc::nil();
     }
     let Some((operator, _, lhs, rhs)) = binary_expression_parts(arena, expr) else {
@@ -9756,7 +9757,7 @@ fn print_jsx_prop(
                         if !apply_inner.args.is_empty() =>
                     {
                         let funct = arena.get_expr(apply_inner.funct);
-                        let head_arg = arena.get_expr(apply_inner.args[0].1);
+                        let head_arg = arena.get_expr(arena.apply_args(apply_inner.args)[0].1);
                         has_leading_line_comment(cmt_tbl, funct.pexp_loc, arena)
                             || has_leading_line_comment(cmt_tbl, head_arg.pexp_loc, arena)
                     }

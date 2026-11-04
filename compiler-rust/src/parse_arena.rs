@@ -34,7 +34,7 @@ use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
-    Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
+    ArgLabel, Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
     ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc, ValueConstraint,
 };
 use crate::parser::longident::Longident;
@@ -506,6 +506,8 @@ pub struct ParseArena {
     /// Arena of expressions (returns ExprIdx).
     /// Replaces `Box<Expression>` for recursive AST references.
     expressions: Arena<Expression, ExprIdx>,
+    /// Pool behind every `Pexp_apply` argument list.
+    apply_args: ListPool<(ArgLabel, ExprIdx)>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -968,6 +970,7 @@ impl Default for ParseArena {
             arities,
             expr_overrides: crate::fast_hash::AHashMap::default(),
             expressions: Arena::default(),
+            apply_args: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
@@ -2452,6 +2455,16 @@ impl ParseArena {
 
     /// Get an expression by index.
     #[inline]
+    /// Store an application's argument list.
+    pub fn push_apply_args(&mut self, args: &[(ArgLabel, ExprIdx)]) -> ApplyArgs {
+        self.apply_args.push(args)
+    }
+
+    /// The arguments of a `Pexp_apply`, in source order.
+    pub fn apply_args(&self, args: ApplyArgs) -> &[(ArgLabel, ExprIdx)] {
+        self.apply_args.get(args)
+    }
+
     pub fn get_expr(&self, idx: ExprIdx) -> &Expression {
         let raw = idx.0;
         if raw < SHARED_EXPRESSION_BASE {
@@ -3042,6 +3055,120 @@ impl ParseArena {
 /// Note: There is also `crate::location::Located<T>` which stores a full
 /// `Location` instead of `LocIdx`. Use that when you don't have access to
 /// a ParseArena or need the full location data inline.
+/// A list stored back to back in one of `ParseArena`'s list pools.
+///
+/// Parse-tree nodes hold these 8-byte handles instead of owning a `Vec`, so
+/// dropping a module's tree frees one buffer per pool instead of one
+/// allocation per list. Read the items with the matching `ParseArena`
+/// accessor; a handle is only meaningful for the arena that issued it.
+pub struct ArenaList<T> {
+    start: u32,
+    len: u32,
+    _items: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> ArenaList<T> {
+    /// The empty list, valid for every arena.
+    pub const EMPTY: Self = Self {
+        start: 0,
+        len: 0,
+        _items: std::marker::PhantomData,
+    };
+
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<T> Clone for ArenaList<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ArenaList<T> {}
+
+impl<T> PartialEq for ArenaList<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.start, self.len) == (other.start, other.len)
+    }
+}
+
+impl<T> Eq for ArenaList<T> {}
+
+impl<T> std::hash::Hash for ArenaList<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.start, self.len).hash(state);
+    }
+}
+
+impl<T> Default for ArenaList<T> {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl<T> std::fmt::Debug for ArenaList<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ArenaList({}..+{})", self.start, self.len)
+    }
+}
+
+impl<T> Serialize for ArenaList<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (self.start, self.len).serialize(serializer)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for ArenaList<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (start, len) = <(u32, u32)>::deserialize(deserializer)?;
+        Ok(Self {
+            start,
+            len,
+            _items: std::marker::PhantomData,
+        })
+    }
+}
+
+/// Arguments of a `Pexp_apply`.
+pub type ApplyArgs = ArenaList<(ArgLabel, ExprIdx)>;
+
+/// Backing storage for one kind of `ArenaList`.
+#[derive(Debug)]
+struct ListPool<T> {
+    items: Vec<T>,
+}
+
+impl<T> Default for ListPool<T> {
+    fn default() -> Self {
+        Self { items: Vec::new() }
+    }
+}
+
+impl<T: Clone> ListPool<T> {
+    fn push(&mut self, items: &[T]) -> ArenaList<T> {
+        if items.is_empty() {
+            return ArenaList::EMPTY;
+        }
+        let start = u32::try_from(self.items.len()).expect("list pool exceeds u32 items");
+        self.items.extend_from_slice(items);
+        ArenaList {
+            start,
+            len: items.len() as u32,
+            _items: std::marker::PhantomData,
+        }
+    }
+
+    fn get(&self, list: ArenaList<T>) -> &[T] {
+        &self.items[list.start as usize..][..list.len as usize]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Located<T> {
     /// The value.
@@ -3511,5 +3638,23 @@ mod tests {
             &*arena.get_mod_type(mt_slot).pmty_desc,
             ModuleTypeDesc::Pmty_ident(_)
         ));
+    }
+
+    #[test]
+    fn apply_args_lists_are_independent_ranges() {
+        use crate::parser::ast::ArgLabel;
+        let mut arena = ParseArena::new();
+        let (a, b, c) = (ExprIdx(1), ExprIdx(2), ExprIdx(3));
+        let first = arena.push_apply_args(&[(ArgLabel::Nolabel, a), (ArgLabel::Nolabel, b)]);
+        let empty = arena.push_apply_args(&[]);
+        let second = arena.push_apply_args(&[(ArgLabel::Nolabel, c)]);
+        assert_eq!(first.len(), 2);
+        assert!(empty.is_empty());
+        assert_eq!(empty, ApplyArgs::EMPTY);
+        assert!(arena.apply_args(empty).is_empty());
+        let firsts: Vec<_> = arena.apply_args(first).iter().map(|(_, e)| *e).collect();
+        assert_eq!(firsts, vec![a, b]);
+        let seconds: Vec<_> = arena.apply_args(second).iter().map(|(_, e)| *e).collect();
+        assert_eq!(seconds, vec![c]);
     }
 }

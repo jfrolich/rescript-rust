@@ -277,12 +277,12 @@ fn expr_apply(
         .map(|(lbl, e)| (lbl, arena.push_expr(e)))
         .collect();
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: funct_idx,
-            args: args_idx,
+            args: arena.push_apply_args(&args_idx),
             partial,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -4999,16 +4999,15 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                let PexpApply {
-                    ref mut funct,
-                    ref mut args,
-                    ..
-                } = **inner;
+                let PexpApply { funct, args, .. } = inner;
                 self.expression_idx(funct);
-                for (label, arg) in args.iter_mut() {
+                // The copy gets its own argument list; the original keeps its own.
+                let mut new_args = self.arena.apply_args(*args).to_vec();
+                for (label, arg) in new_args.iter_mut() {
                     self.arg_label(label);
                     self.expression_idx(arg);
                 }
+                *args = self.arena.push_apply_args(&new_args);
             }
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
                 let (ref mut expr, ref mut cases) = **inner;

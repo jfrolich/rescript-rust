@@ -235,11 +235,8 @@ pub fn rhs_binary_expr_operand(
 ) -> bool {
     match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
@@ -275,11 +272,8 @@ pub fn flatten_operand_rhs(
 ) -> bool {
     match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
@@ -343,11 +337,8 @@ pub fn flatten_operand_rhs_without_attrs(
 ) -> bool {
     match &rhs.pexp_desc {
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args);
             if args.len() != 2 {
                 return false;
             }
@@ -433,7 +424,7 @@ fn assert_or_await_expr_rhs_inner(
         ExpressionDesc::Pexp_apply(apply_inner)
             if parsetree_viewer::is_binary_expression(arena, expr) =>
         {
-            let PexpApply { ref funct, .. } = **apply_inner;
+            let PexpApply { ref funct, .. } = *apply_inner;
             let funct_expr = arena.get_expr(*funct);
             if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                 if let Longident::Lident(op_idx) = arena.get_longident(ident.txt) {

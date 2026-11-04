@@ -8189,10 +8189,11 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
                 ref partial,
                 ref transformed_jsx,
-            } = **inner;
+                ..
+            } = *inner;
+            let args = tctx.arena.apply_args(inner.args);
             // Function application
             let funct_expr = tctx.arena.get_expr(*funct);
 
@@ -11770,7 +11771,7 @@ fn collect_lident_idents_in_expression(
         }
         ED::Pexp_apply(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.funct), out);
-            for (_label, arg) in &inner.args {
+            for (_label, arg) in arena.apply_args(inner.args) {
                 collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
             }
         }

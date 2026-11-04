@@ -457,7 +457,7 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         }
         ExpressionDesc::Pexp_apply(apply) => {
             v.expr(arena, apply.funct);
-            for (_, arg) in &apply.args {
+            for (_, arg) in arena.apply_args(apply.args) {
                 v.expr(arena, *arg);
             }
         }

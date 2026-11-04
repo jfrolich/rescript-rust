@@ -147,9 +147,9 @@ fn expression_has_string_literal(
                 || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
         }
         ED::Pexp_apply(inner) => {
-            let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
+            let crate::parser::ast::PexpApply { funct, args, .. } = inner;
             expression_has_string_literal(arena.get_expr(*funct), value, arena)
-                || args.iter().any(|(_, arg)| {
+                || arena.apply_args(*args).iter().any(|(_, arg)| {
                     expression_has_string_literal(arena.get_expr(*arg), value, arena)
                 })
         }
@@ -1915,8 +1915,8 @@ fn invalid_enabled_let_unwrap_in_expr(
             .or_else(|| invalid_enabled_let_unwrap_in_expr(fun.rhs, arena)),
         ExpressionDesc::Pexp_apply(apply) => invalid_enabled_let_unwrap_in_expr(apply.funct, arena)
             .or_else(|| {
-                apply
-                    .args
+                arena
+                    .apply_args(apply.args)
                     .iter()
                     .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
             }),
@@ -2094,8 +2094,8 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
             .or_else(|| disabled_let_unwrap_loc_in_expr(fun.rhs, arena)),
         ExpressionDesc::Pexp_apply(apply) => disabled_let_unwrap_loc_in_expr(apply.funct, arena)
             .or_else(|| {
-                apply
-                    .args
+                arena
+                    .apply_args(apply.args)
                     .iter()
                     .find_map(|(_, arg)| disabled_let_unwrap_loc_in_expr(*arg, arena))
             }),

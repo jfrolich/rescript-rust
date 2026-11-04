@@ -12,8 +12,8 @@
 use std::borrow::Cow;
 
 use crate::parse_arena::{
-    ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, PatIdx,
-    PosIdx, StrIdx,
+    ApplyArgs, ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx,
+    PatIdx, PosIdx, StrIdx,
 };
 use serde::{Deserialize, Serialize};
 
@@ -662,11 +662,12 @@ pub struct PexpFun {
     pub is_async: bool,
 }
 
-/// Named struct for Pexp_apply variant (boxed for enum size optimization).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Payload of `Pexp_apply`, stored inline; the arguments live in the arena.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PexpApply {
     pub funct: ExprIdx,
-    pub args: Vec<(ArgLabel, ExprIdx)>,
+    /// Read with `ParseArena::apply_args`.
+    pub args: ApplyArgs,
     pub partial: bool,
     pub transformed_jsx: bool,
 }
@@ -717,7 +718,7 @@ pub enum ExpressionDesc {
     /// Function: `(P) => E`.
     Pexp_fun(Box<PexpFun>),
     /// Application: `E(E1, E2, ...)`.
-    Pexp_apply(Box<PexpApply>),
+    Pexp_apply(PexpApply),
     /// Match: `switch E { | P1 => E1 | ... }`.
     Pexp_match(Box<(ExprIdx, Vec<Case>)>),
     /// Try: `try E { | P1 => E1 | ... }`.

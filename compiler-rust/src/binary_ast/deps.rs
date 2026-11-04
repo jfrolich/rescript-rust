@@ -534,15 +534,9 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_apply(inner) => {
-                let PexpApply {
-                    ref funct,
-                    ref args,
-                    ..
-                } = **inner;
-                // funct is ExprIdx
-                let funct = *funct;
+                let PexpApply { funct, args, .. } = *inner;
                 self.add_expr_idx(funct);
-                for (_label, arg) in args {
+                for (_label, arg) in self.arena.apply_args(args) {
                     self.add_expr_idx(*arg);
                 }
             }

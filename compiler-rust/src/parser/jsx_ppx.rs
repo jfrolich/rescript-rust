@@ -507,9 +507,10 @@ fn spelunk_for_fun_expression(
         // let make = React.memo((~prop) => ...) / React.forwardRef((~prop) => ...)
         ExpressionDesc::Pexp_apply(apply_inner)
             if apply_inner.args.len() == 1
-                && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel) =>
+                && matches!(&arena.apply_args(apply_inner.args)[0].0, ArgLabel::Nolabel) =>
         {
-            let PexpApply { funct, args, .. } = &**apply_inner;
+            let PexpApply { funct, .. } = &*apply_inner;
+            let args = arena.apply_args(apply_inner.args);
             let (_, _, inner_expr) = spelunk_for_fun_expression(arena, args[0].1);
             let funct_expr = arena.get_expr(*funct).clone();
             let has_forward_ref = is_forward_ref(arena, &funct_expr);
@@ -878,12 +879,12 @@ fn transform_react_component_binding(
         let wrapper_idx = arena.push_expr(wrapper_expr);
         let full_expression_idx = arena.push_expr(full_expression);
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: wrapper_idx,
-                args: vec![(ArgLabel::Nolabel, full_expression_idx)],
+                args: arena.push_apply_args(&[(ArgLabel::Nolabel, full_expression_idx)]),
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             // OCaml uses ghost location for the outer Pexp_apply wrapper.
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
@@ -990,22 +991,25 @@ fn transform_react_component_with_props_binding(
         pexp_attributes: Attributes::new(),
     });
     let applied_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: funct_idx,
-            args: vec![(
-                ArgLabel::Nolabel,
-                arena.push_expr(Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ident(Loc {
-                        txt: props_lid,
-                        loc: config.empty_loc,
+            args: {
+                let items = [(
+                    ArgLabel::Nolabel,
+                    arena.push_expr(Expression {
+                        pexp_desc: ExpressionDesc::Pexp_ident(Loc {
+                            txt: props_lid,
+                            loc: config.empty_loc,
+                        }),
+                        pexp_loc: empty_loc(),
+                        pexp_attributes: Attributes::new(),
                     }),
-                    pexp_loc: empty_loc(),
-                    pexp_attributes: Attributes::new(),
-                }),
-            )],
+                )];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -1278,12 +1282,15 @@ fn wrap_with_jsx_promise(arena: &mut ParseArena, expr: Expression) -> Expression
         pexp_attributes: Attributes::new(),
     });
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: funct_idx,
-            args: vec![(ArgLabel::Nolabel, arena.push_expr(expr))],
+            args: {
+                let items = [(ArgLabel::Nolabel, arena.push_expr(expr))];
+                arena.push_apply_args(&items)
+            },
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -1405,12 +1412,12 @@ fn make_props_wrapper_expr_with_ref(
         pexp_attributes: Attributes::new(),
     });
     let apply_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: funct_idx,
-            args: apply_args,
+            args: arena.push_apply_args(&apply_args),
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -2381,7 +2388,7 @@ fn component_with_props_forward_ref_error_loc(
     let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc else {
         return None;
     };
-    match apply.args.as_slice() {
+    match arena.apply_args(apply.args) {
         [(ArgLabel::Nolabel, func_expr)] if is_forward_ref(arena, arena.get_expr(apply.funct)) => {
             component_with_props_forward_ref_fun_error_loc(arena, *func_expr)
         }
@@ -2446,9 +2453,10 @@ fn component_props_need_labelled_error_loc(
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
         }
         ExpressionDesc::Pexp_apply(apply)
-            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+            if apply.args.len() == 1
+                && matches!(arena.apply_args(apply.args)[0].0, ArgLabel::Nolabel) =>
         {
-            component_props_need_labelled_error_loc(arena, apply.args[0].1, true)
+            component_props_need_labelled_error_loc(arena, arena.apply_args(apply.args)[0].1, true)
         }
         ExpressionDesc::Pexp_sequence(_, inner_idx) => {
             component_props_need_labelled_error_loc(arena, *inner_idx, has_application)
@@ -2483,9 +2491,13 @@ fn find_function_expression(
         ExpressionDesc::Pexp_apply(apply)
             if through_application
                 && apply.args.len() == 1
-                && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+                && matches!(arena.apply_args(apply.args)[0].0, ArgLabel::Nolabel) =>
         {
-            find_function_expression(arena, apply.args[0].1, through_application)
+            find_function_expression(
+                arena,
+                arena.apply_args(apply.args)[0].1,
+                through_application,
+            )
         }
         _ => Err(expr),
     }
@@ -2905,12 +2917,12 @@ fn jsx_component_expr(
     });
     let argument = arena.push_expr(expr);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: component_expr,
-            args: vec![(ArgLabel::Nolabel, argument)],
+            args: arena.push_apply_args(&[(ArgLabel::Nolabel, argument)]),
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -3990,22 +4002,26 @@ fn transform_expression(
                 args,
                 partial,
                 transformed_jsx,
-            } = *inner;
+            } = inner;
             let funct_expr = arena.get_expr(funct).clone();
             let transformed_funct = transform_expression(funct_expr, config, arena);
-            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
-                funct: arena.push_expr(transformed_funct),
-                args: args
-                    .into_iter()
-                    .map(|(lbl, e)| {
-                        let e_expr = arena.get_expr(e).clone();
-                        let transformed = transform_expression(e_expr, config, arena);
-                        (lbl, arena.push_expr(transformed))
-                    })
-                    .collect(),
+            let funct = arena.push_expr(transformed_funct);
+            let args: Vec<_> = arena
+                .apply_args(args)
+                .to_vec()
+                .into_iter()
+                .map(|(lbl, e)| {
+                    let e_expr = arena.get_expr(e).clone();
+                    let transformed = transform_expression(e_expr, config, arena);
+                    (lbl, arena.push_expr(transformed))
+                })
+                .collect();
+            ExpressionDesc::Pexp_apply(PexpApply {
+                funct,
+                args: arena.push_apply_args(&args),
                 partial,
                 transformed_jsx,
-            }))
+            })
         }
         ExpressionDesc::Pexp_match(inner) => {
             let (scrutinee, cases) = *inner;
@@ -4478,12 +4494,12 @@ fn mk_react_jsx(
     // Note: jsx_expr uses empty_loc() for ghost locations - don't overwrite it
     // The attributes go on the outer Pexp_apply, not on the jsx function ident
     let jsx_expr_idx = arena.push_expr(jsx_expr);
-    ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+    ExpressionDesc::Pexp_apply(PexpApply {
         funct: jsx_expr_idx,
-        args,
+        args: arena.push_apply_args(&args),
         partial: false,
         transformed_jsx: true,
-    }))
+    })
 }
 
 /// Append children prop to props list - matches OCaml's append_children_prop
@@ -4531,12 +4547,15 @@ fn append_children_prop(
                     pexp_attributes: Attributes::new(),
                 });
                 Expression {
-                    pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                    pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                         funct: funct_idx,
-                        args: vec![(ArgLabel::Nolabel, arena.push_expr(transformed_child))],
+                        args: {
+                            let items = [(ArgLabel::Nolabel, arena.push_expr(transformed_child))];
+                            arena.push_apply_args(&items)
+                        },
                         partial: false,
                         transformed_jsx: false,
-                    })),
+                    }),
                     pexp_loc: empty_loc(), // OCaml: Exp.apply without ~loc defaults to Location.none
                     pexp_attributes: Attributes::new(),
                 }
@@ -4598,12 +4617,15 @@ fn append_children_prop(
 
         let array_fn_idx = arena.push_expr(array_fn);
         let children_expr = Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: array_fn_idx,
-                args: vec![(ArgLabel::Nolabel, arena.push_expr(children_array))],
+                args: {
+                    let items = [(ArgLabel::Nolabel, arena.push_expr(children_array))];
+                    arena.push_apply_args(&items)
+                },
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         };
@@ -4983,7 +5005,11 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
             inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
         }
         ExpressionDesc::Pexp_apply(inner) => {
-            child(inner.funct, memo) || inner.args.iter().any(|(_, arg)| child(*arg, memo))
+            child(inner.funct, memo)
+                || arena
+                    .apply_args(inner.args)
+                    .iter()
+                    .any(|(_, arg)| child(*arg, memo))
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
             child(inner.0, memo)

@@ -575,7 +575,7 @@ fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
         | ExpressionDesc::Pexp_sequence(..) => true,
         ExpressionDesc::Pexp_apply(apply_inner)
             if {
-                let PexpApply { ref funct, .. } = **apply_inner;
+                let PexpApply { ref funct, .. } = *apply_inner;
                 is_block_expr_idx(arena, *funct)
             } =>
         {
@@ -2158,11 +2158,8 @@ fn walk_expression(
             walk_list(&nodes, t, rest, arena);
         }
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args).to_vec();
             // Safety: arena is append-only, expression won't be invalidated
             let funct_expr = arena.get_expr(*funct).clone();
             // Check for unary expressions
@@ -2384,7 +2381,7 @@ fn walk_expression(
             }
 
             // Regular apply
-            walk_apply_expr(&funct_expr, args, t, comments, arena);
+            walk_apply_expr(&funct_expr, &args, t, comments, arena);
         }
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
             // Walk through function parameters and body, matching OCaml's handling

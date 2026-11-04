@@ -224,12 +224,12 @@ fn transform_placeholder_application(
                 .map(|(l, e)| (l, arena.push_expr(e)))
                 .collect();
             return Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                     funct,
-                    args,
+                    args: arena.push_apply_args(&args),
                     partial,
                     transformed_jsx: false,
-                })),
+                }),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -252,12 +252,12 @@ fn transform_placeholder_application(
 
     // Create the inner Pexp_apply
     let inner_apply = Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct,
-            args: transformed_args,
+            args: arena.push_apply_args(&transformed_args),
             partial,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     };
@@ -2485,12 +2485,14 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let funct_idx = p.arena_mut().push_expr(concat_many);
     let outer_array_idx = p.arena_mut().push_expr(outer_array);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
             funct: funct_idx,
-            args: vec![(ArgLabel::Nolabel, outer_array_idx)],
+            args: p
+                .arena_mut()
+                .push_apply_args(&[(ArgLabel::Nolabel, outer_array_idx)]),
             partial: false,
             transformed_jsx: false,
-        })),
+        }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -2592,12 +2594,14 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             let funct_idx = p.arena_mut().push_expr(concat_many_ident);
             let array_expr_idx = p.arena_mut().push_expr(array_expr);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                     funct: funct_idx,
-                    args: vec![(ArgLabel::Nolabel, array_expr_idx)],
+                    args: p
+                        .arena_mut()
+                        .push_apply_args(&[(ArgLabel::Nolabel, array_expr_idx)]),
                     partial: false,
                     transformed_jsx: false,
-                })),
+                }),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -2915,12 +2919,14 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             let funct_idx = p.arena_mut().push_expr(make_ident);
             let array_expr_idx = p.arena_mut().push_expr(array_expr);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                     funct: funct_idx,
-                    args: vec![(ArgLabel::Nolabel, array_expr_idx)],
+                    args: p
+                        .arena_mut()
+                        .push_apply_args(&[(ArgLabel::Nolabel, array_expr_idx)]),
                     partial: false,
                     transformed_jsx: false,
-                })),
+                }),
                 pexp_loc: chunk_loc,
                 pexp_attributes: Attributes::new(),
             }
@@ -2967,15 +2973,15 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
         let target_idx = p.arena_mut().push_expr(target_expr);
         let source_array_idx = p.arena_mut().push_expr(source_array);
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
                 funct: funct_idx,
-                args: vec![
+                args: p.arena_mut().push_apply_args(&[
                     (ArgLabel::Nolabel, target_idx),
                     (ArgLabel::Nolabel, source_array_idx),
-                ],
+                ]),
                 partial: false,
                 transformed_jsx: false,
-            })),
+            }),
             pexp_loc: spread_loc,
             pexp_attributes: Attributes::new(),
         }

@@ -40,11 +40,8 @@ fn is_pipe_application(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc else {
         return false;
     };
-    let PexpApply {
-        ref funct,
-        ref args,
-        ..
-    } = **inner;
+    let PexpApply { ref funct, .. } = *inner;
+    let args = arena.apply_args(inner.args);
     if args.is_empty() || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
@@ -166,11 +163,8 @@ fn is_raw_expansion_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     let ExpressionDesc::Pexp_apply(inner) = &body_expr.pexp_desc else {
         return false;
     };
-    let PexpApply {
-        ref funct,
-        ref args,
-        ..
-    } = **inner;
+    let PexpApply { ref funct, .. } = *inner;
+    let args = arena.apply_args(inner.args);
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
@@ -198,9 +192,9 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     };
     let PexpApply {
         funct: ref outer_funct,
-        args: ref outer_args,
         ..
-    } = **inner;
+    } = *inner;
+    let outer_args = arena.apply_args(inner.args);
     if outer_args.len() != 1 || !matches!(outer_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
@@ -238,9 +232,9 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     };
     let PexpApply {
         funct: ref eq_funct,
-        args: ref eq_args,
         ..
-    } = **eq_inner;
+    } = *eq_inner;
+    let eq_args = arena.apply_args(eq_inner.args);
     if eq_args.len() != 2
         || !matches!(eq_args[0].0, ArgLabel::Nolabel)
         || !matches!(eq_args[1].0, ArgLabel::Nolabel)
@@ -262,9 +256,9 @@ fn is_external_ext_expr(expr: &Expression, w: &MarshalWriter<'_>) -> bool {
     };
     let PexpApply {
         funct: ref typeof_funct,
-        args: ref typeof_args,
         ..
-    } = **typeof_inner;
+    } = *typeof_inner;
+    let typeof_args = arena.apply_args(typeof_inner.args);
     if typeof_args.len() != 1 || !matches!(typeof_args[0].0, ArgLabel::Nolabel) {
         return false;
     }
@@ -302,7 +296,7 @@ fn is_external_raw_expansion_body(expr: &Expression, w: &MarshalWriter<'_>) -> b
     let ExpressionDesc::Pexp_apply(apply_inner) = &body_expr.pexp_desc else {
         return false;
     };
-    let PexpApply { ref args, .. } = **apply_inner;
+    let args = w.get_arena().apply_args(apply_inner.args);
     if args.len() != 1 || !matches!(args[0].0, ArgLabel::Nolabel) {
         return false;
     }
@@ -1492,10 +1486,11 @@ impl Marshal for ExpressionDesc {
             ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply {
                     ref funct,
-                    ref args,
                     ref partial,
                     ref transformed_jsx,
-                } = **inner;
+                    ..
+                } = *inner;
+                let args = w.get_arena().apply_args(inner.args).to_vec();
                 // Pexp_apply of { funct; args; partial; transformed_jsx }
                 // Inline record with 4 fields
                 w.write_block_header(5, 4);

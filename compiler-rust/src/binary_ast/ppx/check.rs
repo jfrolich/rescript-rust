@@ -840,13 +840,15 @@ impl<'a> Checker<'a> {
         }
         if expression_is_lident(apply.funct, "->", self.arena) {
             // `a |. f`: `let a = self.expr self a_ in let f = self.expr self f_`.
-            self.expr(apply.args[0].1)?;
-            self.expr(apply.args[1].1)
+            let args = self.arena.apply_args(apply.args);
+            let (lhs, rhs) = (args[0].1, args[1].1);
+            self.expr(lhs)?;
+            self.expr(rhs)
         } else {
             // `default_expr_mapper`: attributes, arguments, function.
             self.attributes(&expr.pexp_attributes)?;
-            for (_label, arg) in &apply.args {
-                self.expr(*arg)?;
+            for (_, arg) in self.arena.apply_args(apply.args).to_vec() {
+                self.expr(arg)?;
             }
             self.expr(apply.funct)
         }

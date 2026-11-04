@@ -595,10 +595,11 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply {
                 ref funct,
-                ref args,
                 partial: ref is_partial,
                 ref transformed_jsx,
-            } = **inner;
+                ..
+            } = *inner;
+            let args = arena.apply_args(inner.args);
             Sexp::list(vec![
                 Sexp::atom("Pexp_apply"),
                 expression(arena.get_expr(*funct), arena),
