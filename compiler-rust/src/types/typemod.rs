@@ -16605,9 +16605,10 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_value(inner) => {
-            let (ref rec_flag, ref bindings) = **inner;
+            let (ref rec_flag, ref bindings) = *inner;
 
-            let (typed_bindings, new_env) = type_binding(tctx, env, *rec_flag, bindings)?;
+            let (typed_bindings, new_env) =
+                type_binding(tctx, env, *rec_flag, arena.vb_list(*bindings))?;
 
             let mut sig_items = Vec::new();
             for vb in &typed_bindings {

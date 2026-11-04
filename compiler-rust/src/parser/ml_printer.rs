@@ -425,12 +425,12 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_item_attributes(f, arena, attrs);
         }
         StructureItemDesc::Pstr_value(inner) => {
-            let (ref rec_flag, ref bindings) = **inner;
+            let (ref rec_flag, ref bindings) = *inner;
             let rec_str = match rec_flag {
                 RecFlag::Recursive => "let rec ",
                 RecFlag::Nonrecursive => "let ",
             };
-            for (i, binding) in bindings.iter().enumerate() {
+            for (i, binding) in arena.vb_list(*bindings).iter().enumerate() {
                 if i > 0 {
                     f.newline();
                 }
@@ -1446,7 +1446,7 @@ fn print_expression_inner<W: Write>(
             f.string("continue");
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body) = **inner;
+            let (ref rec_flag, ref bindings, ref body) = *inner;
             // OCaml: @[<2>%a in@;<1 -2>%a@]
             // where %a is (bindings reset_ctxt) (rf, l) and (expression ctxt) e
             if use_parens {
@@ -1460,7 +1460,7 @@ fn print_expression_inner<W: Write>(
                 RecFlag::Recursive => "let rec ",
                 RecFlag::Nonrecursive => "let ",
             };
-            for (i, binding) in bindings.iter().enumerate() {
+            for (i, binding) in arena.vb_list(*bindings).iter().enumerate() {
                 // OCaml bindings: pp f "@[<2>%s %a%a@]%a"
                 f.open_box(BoxKind::Box, 2);
                 if i > 0 {

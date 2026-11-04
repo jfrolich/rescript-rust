@@ -742,11 +742,13 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             Sexp::list(vec![Sexp::atom("Pexp_constant"), constant(c, arena)])
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (ref flag, ref vbs, ref body) = **inner;
+            let (ref flag, ref vbs, ref body) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_let"),
                 rec_flag(flag),
-                Sexp::list(map_empty(vbs, |vb| value_binding(arena, vb))),
+                Sexp::list(map_empty(arena.vb_list(*vbs), |vb| {
+                    value_binding(arena, vb)
+                })),
                 expression(arena, arena.get_expr(*body)),
             ])
         }
@@ -1587,11 +1589,13 @@ fn structure_item(arena: &ParseArena, si: &StructureItem) -> Sexp {
             ])
         }
         StructureItemDesc::Pstr_value(inner) => {
-            let (ref flag, ref vbs) = **inner;
+            let (ref flag, ref vbs) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pstr_value"),
                 rec_flag(flag),
-                Sexp::list(map_empty(vbs, |vb| value_binding(arena, vb))),
+                Sexp::list(map_empty(arena.vb_list(*vbs), |vb| {
+                    value_binding(arena, vb)
+                })),
             ])
         }
         StructureItemDesc::Pstr_primitive(vd) => Sexp::list(vec![

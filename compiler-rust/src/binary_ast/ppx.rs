@@ -5794,9 +5794,12 @@ fn spelunk_expression_for_await_module_types(
             results
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, ref bindings, ref body) = **inner;
-            let binding_results =
-                spelunk_value_bindings_for_await_module_types(bindings, context, arena);
+            let (_, ref bindings, ref body) = *inner;
+            let binding_results = spelunk_value_bindings_for_await_module_types(
+                &arena.vb_list(*bindings).to_vec(),
+                context,
+                arena,
+            );
             let body_expr = arena.get_expr(*body).clone();
             let mut results = spelunk_expression_for_await_module_types(&body_expr, context, arena);
             results.extend(binding_results);
@@ -7255,16 +7258,16 @@ fn pipe_bound(
     let body = cb(ident, arena);
     let body_idx = arena.push_expr(body);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+        pexp_desc: ExpressionDesc::Pexp_let((
             RecFlag::Nonrecursive,
-            vec![ValueBinding {
+            arena.push_vb_list(&[ValueBinding {
                 pvb_pat: pat,
                 pvb_expr: e_idx,
                 pvb_attributes: Attributes::new(),
                 pvb_loc: loc,
-            }],
+            }]),
             body_idx,
-        ))),
+        )),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
@@ -7410,10 +7413,7 @@ fn rewrite_pipe_rhs(
             let body = arena.get_expr(body).clone();
             let rewritten = rewrite_pipe_rhs(loc, attrs, a, body, arena);
             let body = arena.push_expr(rewritten);
-            rewrap(
-                &f,
-                ExpressionDesc::Pexp_let(Box::new((flag, bindings, body))),
-            )
+            rewrap(&f, ExpressionDesc::Pexp_let((flag, bindings, body)))
         }
         ExpressionDesc::Pexp_sequence(first, second) => {
             let first = *first;
@@ -7635,14 +7635,14 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body) = **inner;
+            let (ref rec_flag, ref bindings, ref body) = *inner;
             // Check for record pattern destructuring: convert to match expression
             // OCaml's bs_builtin_ppx.ml (lines 295-319) converts:
             //   let {field1, field2} = expr in body
             // to:
             //   match expr with {field1, field2} -> body
             if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
-                let vb = &bindings[0];
+                let vb = &arena.vb_list(*bindings).to_vec()[0];
                 if has_unwrap_attr(&vb.pvb_attributes, arena) {
                     // OCaml bs_builtin_ppx: rewrite supported let? forms into a match with
                     // an early-return case and a continuation case.
@@ -7784,17 +7784,17 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             }
 
             let new_bindings = if *rec_flag == RecFlag::Recursive {
-                rewrite_value_bindings_without_flattening(bindings, arena)
+                rewrite_value_bindings_without_flattening(&arena.vb_list(*bindings).to_vec(), arena)
             } else {
-                flatten_value_bindings(bindings, arena)
+                flatten_value_bindings(&arena.vb_list(*bindings).to_vec(), arena)
             };
             let body_expr = arena.get_expr(*body).clone();
             let rw_body = rewrite_expression(&body_expr, arena);
-            ExpressionDesc::Pexp_let(Box::new((
+            ExpressionDesc::Pexp_let((
                 *rec_flag,
-                new_bindings,
+                arena.push_vb_list(&new_bindings),
                 arena.push_expr(rw_body),
-            )))
+            ))
         }
 
         ExpressionDesc::Pexp_fun(inner) => {
@@ -9222,10 +9222,10 @@ fn create_map_binding(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
+            arena.push_vb_list(&[binding]),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -9260,10 +9260,10 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
+            arena.push_vb_list(&[binding]),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -9403,10 +9403,10 @@ fn create_to_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
+            arena.push_vb_list(&[binding]),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -9538,10 +9538,10 @@ fn create_from_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
+            arena.push_vb_list(&[binding]),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -10081,10 +10081,10 @@ fn create_record_to_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
+            arena.push_vb_list(&[binding]),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -10224,23 +10224,26 @@ fn create_record_from_js_function(
 
         // let param = erase_type(...) in constrained_record
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+            pexp_desc: ExpressionDesc::Pexp_let((
                 RecFlag::Nonrecursive,
-                vec![ValueBinding {
-                    pvb_pat: arena.push_pat(Pattern {
-                        ppat_desc: PatternDesc::Ppat_var(Located {
-                            txt: param_str,
-                            loc,
+                {
+                    let items = [ValueBinding {
+                        pvb_pat: arena.push_pat(Pattern {
+                            ppat_desc: PatternDesc::Ppat_var(Located {
+                                txt: param_str,
+                                loc,
+                            }),
+                            ppat_loc: none_loc,
+                            ppat_attributes: Attributes::new(),
                         }),
-                        ppat_loc: none_loc,
-                        ppat_attributes: Attributes::new(),
-                    }),
-                    pvb_expr: arena.push_expr(erase_app),
-                    pvb_attributes: Attributes::new(),
-                    pvb_loc: none_loc,
-                }],
+                        pvb_expr: arena.push_expr(erase_app),
+                        pvb_attributes: Attributes::new(),
+                        pvb_loc: none_loc,
+                    }];
+                    arena.push_vb_list(&items)
+                },
                 arena.push_expr(constrained_record),
-            ))),
+            )),
             pexp_loc: none_loc,
             pexp_attributes: Attributes::new(),
         }
@@ -10278,10 +10281,10 @@ fn create_record_from_js_function(
     };
 
     StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             RecFlag::Nonrecursive,
-            vec![binding],
-        )))),
+            arena.push_vb_list(&[binding]),
+        ))),
         pstr_loc: none_loc,
     }
 }
@@ -11790,10 +11793,10 @@ fn generate_record_accessors_and_sigs(
         };
 
         structure_items.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+            pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                 RecFlag::Nonrecursive,
-                vec![binding],
-            )))),
+                arena.push_vb_list(&[binding]),
+            ))),
             pstr_loc: none_loc,
         });
 
@@ -11913,10 +11916,10 @@ fn generate_variant_accessors_and_sigs(
             };
 
             structure_items.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                     RecFlag::Nonrecursive,
-                    vec![binding],
-                )))),
+                    arena.push_vb_list(&[binding]),
+                ))),
                 pstr_loc: none_loc,
             });
 
@@ -12029,10 +12032,10 @@ fn generate_variant_accessors_and_sigs(
             };
 
             structure_items.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                     RecFlag::Nonrecursive,
-                    vec![binding],
-                )))),
+                    arena.push_vb_list(&[binding]),
+                ))),
                 pstr_loc: none_loc,
             });
 
@@ -12451,11 +12454,14 @@ fn rewrite_structure_unit(
             }
         }
         StructureItemDesc::Pstr_value(inner) => {
-            let (ref _rec_flag, ref bindings) = **inner;
+            let (ref _rec_flag, ref bindings) = *inner;
             // Spelunk through the ORIGINAL bindings to find await module types
             // (before expression rewriting transforms them)
-            let module_type_decls =
-                spelunk_value_bindings_for_await_module_types(bindings, await_context, arena);
+            let module_type_decls = spelunk_value_bindings_for_await_module_types(
+                &arena.vb_list(*bindings).to_vec(),
+                await_context,
+                arena,
+            );
 
             // Add hoisted module type declarations first
             result.extend(module_type_decls);
@@ -12601,8 +12607,10 @@ fn expand_extensions_item(
             }])
         }
         StructureItemDesc::Pstr_value(inner) => {
-            let (ref rec, ref bindings) = **inner;
-            let new_bindings: Vec<_> = bindings
+            let (ref rec, ref bindings) = *inner;
+            let new_bindings: Vec<_> = arena
+                .vb_list(*bindings)
+                .to_vec()
                 .iter()
                 .map(|vb| {
                     let vb_expr = arena.get_expr(vb.pvb_expr).clone();
@@ -12617,10 +12625,10 @@ fn expand_extensions_item(
                 })
                 .collect();
             Ok(vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                     *rec,
-                    new_bindings,
-                )))),
+                    arena.push_vb_list(&new_bindings),
+                ))),
                 pstr_loc: item.pstr_loc,
             }])
         }
@@ -12660,8 +12668,10 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
             }
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body) = **inner;
-            let new_bindings: Vec<_> = bindings
+            let (ref rec_flag, ref bindings, ref body) = *inner;
+            let new_bindings: Vec<_> = arena
+                .vb_list(*bindings)
+                .to_vec()
                 .iter()
                 .map(|vb| {
                     let vb_expr = arena.get_expr(vb.pvb_expr).clone();
@@ -12679,11 +12689,11 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
             let new_body = expand_extensions_expr(&body_expr, arena);
             let new_body_idx = arena.push_expr(new_body);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let((
                     *rec_flag,
-                    new_bindings,
+                    arena.push_vb_list(&new_bindings),
                     new_body_idx,
-                ))),
+                )),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -13200,15 +13210,17 @@ fn rewrite_structure_item_no_spice(
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation
         StructureItemDesc::Pstr_value(inner) => {
-            let (ref rec_flag, ref bindings) = **inner;
+            let (ref rec_flag, ref bindings) = *inner;
             // Check for @inline on a single non-recursive let binding.
             // Value constraints must go through the mapper that preserves their
             // current-Parsetree side-table payload.
             if *rec_flag == RecFlag::Nonrecursive
                 && bindings.len() == 1
-                && arena.value_constraint(bindings[0].pvb_pat).is_none()
+                && arena
+                    .value_constraint(arena.vb_list(*bindings)[0].pvb_pat)
+                    .is_none()
             {
-                let vb = &bindings[0];
+                let vb = &arena.vb_list(*bindings)[0].clone();
                 let maybe_pval_name = match &arena.get_pat(vb.pvb_pat).ppat_desc {
                     PatternDesc::Ppat_var(pval_name) => Some(*pval_name),
                     _ => None,
@@ -13246,16 +13258,16 @@ fn rewrite_structure_item_no_spice(
                     let original_pat = arena.get_pat(vb.pvb_pat).clone();
                     let rewritten_pat = rewrite_pattern(&original_pat, arena);
                     return vec![StructureItem {
-                        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-                            *rec_flag,
-                            vec![ValueBinding {
+                        pstr_desc: Box::new(StructureItemDesc::Pstr_value((*rec_flag, {
+                            let items = [ValueBinding {
                                 pvb_expr: arena.push_expr(pvb_expr),
                                 pvb_pat: arena.push_pat(rewritten_pat),
                                 pvb_attributes: rewrite_attributes(&vb.pvb_attributes, arena)
                                     .into(),
                                 pvb_loc: vb.pvb_loc,
-                            }],
-                        )))),
+                            }];
+                            arena.push_vb_list(&items)
+                        }))),
                         pstr_loc: item.pstr_loc,
                     }];
                 }
@@ -13265,15 +13277,15 @@ fn rewrite_structure_item_no_spice(
             // their original patterns so Typecore can raise Illegal_letrec_pat,
             // matching OCaml.
             let new_bindings = if *rec_flag == RecFlag::Recursive {
-                rewrite_value_bindings_without_flattening(bindings, arena)
+                rewrite_value_bindings_without_flattening(&arena.vb_list(*bindings).to_vec(), arena)
             } else {
-                flatten_value_bindings(bindings, arena)
+                flatten_value_bindings(&arena.vb_list(*bindings).to_vec(), arena)
             };
             vec![StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+                pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                     *rec_flag,
-                    new_bindings,
-                )))),
+                    arena.push_vb_list(&new_bindings),
+                ))),
                 pstr_loc: item.pstr_loc,
             }]
         }
@@ -13863,8 +13875,11 @@ let f = value => {
         let StructureItemDesc::Pstr_value(value) = &*rewritten[0].pstr_desc else {
             panic!("expected value binding");
         };
-        let (_, bindings) = &**value;
-        let ExpressionDesc::Pexp_fun(fun) = &arena.get_expr(bindings[0].pvb_expr).pexp_desc else {
+        let (_, bindings) = &*value;
+        let ExpressionDesc::Pexp_fun(fun) = &arena
+            .get_expr(arena.vb_list(*bindings)[0].pvb_expr)
+            .pexp_desc
+        else {
             panic!("expected function");
         };
 
@@ -13999,7 +14014,7 @@ type envelope = Story(Story.event)
         let codec_names = items
             .iter()
             .filter_map(|item| match &*item.pstr_desc {
-                StructureItemDesc::Pstr_value(value) => Some(&value.1),
+                StructureItemDesc::Pstr_value(value) => Some(arena.vb_list(value.1)),
                 _ => None,
             })
             .flatten()

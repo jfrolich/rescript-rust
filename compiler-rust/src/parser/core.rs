@@ -921,7 +921,7 @@ pub mod ast_helper {
     ) -> Expression {
         let body_idx = arena.push_expr(body);
         make_expr(
-            ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, body_idx))),
+            ExpressionDesc::Pexp_let((rec_flag, arena.push_vb_list(&bindings), body_idx)),
             loc,
         )
     }

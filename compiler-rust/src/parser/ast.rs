@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 use crate::parse_arena::{
     ApplyArgs, ArityIdx, CoreTypeIdx, ExprIdx, ExprList, LidentIdx, LocIdx, Located, ModExprIdx,
-    ModTypeIdx, PatIdx, PatList, PosIdx, StrIdx, TypeList,
+    ModTypeIdx, PatIdx, PatList, PosIdx, StrIdx, TypeList, VbList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -736,7 +736,7 @@ pub enum ExpressionDesc {
     /// Constant: `1`, `'a'`, `"hello"`.
     Pexp_constant(Constant),
     /// Let binding: `let P = E in E'`.
-    Pexp_let(Box<(RecFlag, Vec<ValueBinding>, ExprIdx)>),
+    Pexp_let((RecFlag, VbList, ExprIdx)),
     /// Function: `(P) => E`.
     Pexp_fun(Box<PexpFun>),
     /// Application: `E(E1, E2, ...)`.
@@ -1051,7 +1051,7 @@ pub enum StructureItemDesc {
     /// Expression: `E`.
     Pstr_eval(Box<(ExprIdx, Attributes)>),
     /// Value: `let P = E`.
-    Pstr_value(Box<(RecFlag, Vec<ValueBinding>)>),
+    Pstr_value((RecFlag, VbList)),
     /// Primitive declaration: `external`.
     Pstr_primitive(Box<ValueDescription>),
     /// Type declaration: `type t = ...`.

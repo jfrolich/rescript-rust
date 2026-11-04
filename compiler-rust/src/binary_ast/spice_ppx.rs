@@ -490,7 +490,7 @@ fn expr_let(
 ) -> Expression {
     let body_idx = arena.push_expr(body);
     Expression {
-        pexp_desc: ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, body_idx))),
+        pexp_desc: ExpressionDesc::Pexp_let((rec_flag, arena.push_vb_list(&bindings), body_idx)),
         pexp_loc: arena.dummy_loc(),
         pexp_attributes: Attributes::new(),
     }
@@ -5012,10 +5012,12 @@ impl<'a> LocCloner<'a> {
                 }
             }
             ExpressionDesc::Pexp_let(inner) => {
-                let (_, ref mut bindings, ref mut body) = **inner;
-                for binding in bindings.iter_mut() {
+                let (_, ref mut bindings, ref mut body) = *inner;
+                let mut new_bindings = self.arena.vb_list(*bindings).to_vec();
+                for binding in new_bindings.iter_mut() {
                     self.value_binding(binding);
                 }
+                *bindings = self.arena.push_vb_list(&new_bindings);
                 self.expression_idx(body);
             }
             ExpressionDesc::Pexp_fun(inner) => {
@@ -5454,10 +5456,12 @@ impl<'a> LocCloner<'a> {
                 self.attributes(attrs);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (_, ref mut bindings) = **inner;
-                for binding in bindings.iter_mut() {
+                let (_, ref mut bindings) = *inner;
+                let mut new_bindings = self.arena.vb_list(*bindings).to_vec();
+                for binding in new_bindings.iter_mut() {
                     self.value_binding(binding);
                 }
+                *bindings = self.arena.push_vb_list(&new_bindings);
             }
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {
@@ -5566,7 +5570,10 @@ fn map_structure_item_spice(
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
 
                 let value_item = StructureItem {
-                    pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((*rec_flag, vbs)))),
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_value((
+                        *rec_flag,
+                        arena.push_vb_list(&vbs),
+                    ))),
                     pstr_loc: arena.dummy_loc(),
                 };
                 Ok(vec![mapped_item, value_item])

@@ -85,7 +85,8 @@ impl<'a> Checker<'a> {
                 self.external(vd)
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (rec_flag, bindings) = &**inner;
+                let (rec_flag, bindings) = &*inner;
+                let bindings = self.arena.vb_list(*bindings).to_vec();
                 match (rec_flag, bindings.as_slice()) {
                     (RecFlag::Nonrecursive, [vb])
                         if matches!(
@@ -98,9 +99,9 @@ impl<'a> Checker<'a> {
                         self.expr(vb.pvb_expr)?;
                         self.attributes(&vb.pvb_attributes)
                     }
-                    (RecFlag::Nonrecursive, _) => self.value_bindings_flattened(bindings),
+                    (RecFlag::Nonrecursive, _) => self.value_bindings_flattened(&bindings),
                     (RecFlag::Recursive, _) => {
-                        for vb in bindings {
+                        for vb in &bindings {
                             self.value_binding(vb)?;
                         }
                         Ok(())
@@ -124,7 +125,7 @@ impl<'a> Checker<'a> {
                 self.attributes(attrs)
             }
             StructureItemDesc::Pstr_value(inner) => {
-                for vb in &inner.1 {
+                for vb in &self.arena.vb_list(inner.1).to_vec() {
                     self.value_binding(vb)?;
                 }
                 Ok(())
@@ -859,9 +860,10 @@ impl<'a> Checker<'a> {
     fn let_expr(
         &mut self,
         expr: &Expression,
-        inner: &(RecFlag, Vec<ValueBinding>, ExprIdx),
+        inner: &(RecFlag, crate::parse_arena::VbList, ExprIdx),
     ) -> PpxResult<()> {
         let (rec_flag, bindings, body) = inner;
+        let bindings = &self.arena.vb_list(*bindings).to_vec();
         if *rec_flag == RecFlag::Nonrecursive
             && let [vb] = bindings.as_slice()
             && self.arena.value_constraint(vb.pvb_pat).is_none()

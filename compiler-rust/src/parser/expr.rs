@@ -3678,7 +3678,11 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             let next = p.arena_mut().push_expr(next);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_let(Box::new((rec_flag, bindings, next))),
+                pexp_desc: ExpressionDesc::Pexp_let((
+                    rec_flag,
+                    p.arena_mut().push_vb_list(&bindings),
+                    next,
+                )),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }

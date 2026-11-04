@@ -1462,7 +1462,7 @@ impl Marshal for ExpressionDesc {
                 c.marshal(w);
             }
             ExpressionDesc::Pexp_let(inner) => {
-                let (ref flag, ref bindings, ref body) = **inner;
+                let (ref flag, ref bindings, ref body) = *inner;
                 w.write_block_header(3, 3);
                 flag.marshal(w);
                 bindings.marshal(w);
@@ -2300,7 +2300,7 @@ impl Marshal for StructureItemDesc {
                 marshal_attributes(attrs, w, false, false, share_empty_pstr);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (ref flag, ref bindings) = **inner;
+                let (ref flag, ref bindings) = *inner;
                 w.write_block_header(1, 2);
                 flag.marshal(w);
                 bindings.marshal(w);

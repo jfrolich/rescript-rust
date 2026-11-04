@@ -36,7 +36,7 @@ use crate::location::{Location, Position};
 use crate::parser::ast::{
     ArgLabel, Attributes, Constant, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringConst,
-    StringLoc, ValueConstraint,
+    StringLoc, ValueBinding, ValueConstraint,
 };
 use crate::parser::longident::Longident;
 use crate::string_literal::StringLiteral;
@@ -514,6 +514,8 @@ pub struct ParseArena {
     expr_lists: ListPool<ExprIdx>,
     pat_lists: ListPool<PatIdx>,
     type_lists: ListPool<CoreTypeIdx>,
+    /// Pool behind `let` value binding lists (`Pexp_let`, `Pstr_value`).
+    vb_lists: ListPool<ValueBinding>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -980,6 +982,7 @@ impl Default for ParseArena {
             expr_lists: ListPool::default(),
             pat_lists: ListPool::default(),
             type_lists: ListPool::default(),
+            vb_lists: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
@@ -2603,6 +2606,20 @@ impl ParseArena {
         self.type_lists.get(list)
     }
 
+    /// Store the value bindings of a `let`.
+    pub fn push_vb_list(&mut self, items: &[ValueBinding]) -> VbList {
+        self.vb_lists.push(items)
+    }
+
+    /// `push_vb_list` for nodes the type checker synthesizes.
+    pub fn push_shared_vb_list(&self, items: &[ValueBinding]) -> VbList {
+        self.vb_lists.push_shared(items)
+    }
+
+    pub fn vb_list(&self, list: VbList) -> &[ValueBinding] {
+        self.vb_lists.get(list)
+    }
+
     /// The arguments of a `Pexp_apply`, in source order.
     pub fn apply_args(&self, args: ApplyArgs) -> &[(ArgLabel, ExprIdx)] {
         self.apply_args.get(args)
@@ -3287,6 +3304,8 @@ pub type ExprList = ArenaList<ExprIdx>;
 pub type PatList = ArenaList<PatIdx>;
 /// A core type index list.
 pub type TypeList = ArenaList<CoreTypeIdx>;
+/// The value bindings of a `let`.
+pub type VbList = ArenaList<ValueBinding>;
 
 /// Lists pushed through a shared arena reference (by the type checker) set
 /// this bit in `ArenaList::start`; the rest is the slot in `ListPool::shared`.

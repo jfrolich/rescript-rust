@@ -229,9 +229,10 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             parse_newline_or_semicolon_structure(p);
             // Don't share LocIdx - OCaml creates separate Location objects for pstr_loc and pvb_loc.
             // The internal positions (PosIdx) are shared, but the Location records themselves are separate.
-            Some(StructureItemDesc::Pstr_value(Box::new((
-                rec_flag, bindings,
-            ))))
+            Some(StructureItemDesc::Pstr_value((
+                rec_flag,
+                p.arena_mut().push_vb_list(&bindings),
+            )))
         }
         Token::Typ => {
             // OCaml uses begin_region/end_region around type parsing

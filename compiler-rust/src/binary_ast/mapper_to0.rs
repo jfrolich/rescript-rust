@@ -1412,10 +1412,12 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Constant(self.map_constant(c))
             }
             current::ExpressionDesc::Pexp_let(inner) => {
-                let (ref flag, ref bindings, ref body_idx) = **inner;
+                let (ref flag, ref bindings, ref body_idx) = *inner;
                 pt0::ExpressionDesc::Let(
                     self.map_rec_flag(*flag),
-                    bindings
+                    self.arena
+                        .vb_list(*bindings)
+                        .to_vec()
                         .iter()
                         .map(|vb| self.map_value_binding(vb))
                         .collect(),
@@ -2286,10 +2288,12 @@ impl<'a> Mapper<'a> {
                 pt0::StructureItemDesc::Eval(self.map_expr_idx(*e_idx), self.map_attributes(attrs))
             }
             current::StructureItemDesc::Pstr_value(inner) => {
-                let (ref flag, ref bindings) = **inner;
+                let (ref flag, ref bindings) = *inner;
                 pt0::StructureItemDesc::Value(
                     self.map_rec_flag(*flag),
-                    bindings
+                    self.arena
+                        .vb_list(*bindings)
+                        .to_vec()
                         .iter()
                         .map(|vb| self.map_value_binding(vb))
                         .collect(),

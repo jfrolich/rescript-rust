@@ -1385,14 +1385,15 @@ impl<'a> Mapper<'a> {
             }
             pt0::ExpressionDesc::Let(rec_flag, bindings, body) => {
                 let body_idx = self.push_expr(body);
-                current::ExpressionDesc::Pexp_let(Box::new((
+                let bindings: Vec<_> = bindings
+                    .iter()
+                    .map(|vb| self.map_value_binding(vb))
+                    .collect();
+                current::ExpressionDesc::Pexp_let((
                     map_rec_flag(*rec_flag),
-                    bindings
-                        .iter()
-                        .map(|vb| self.map_value_binding(vb))
-                        .collect(),
+                    self.arena.push_vb_list(&bindings),
                     body_idx,
-                )))
+                ))
             }
             pt0::ExpressionDesc::Fun(lbl, default, pat, body) => {
                 // ast_mapper_from0.ml Pexp_fun: a bare v0 fun is a
@@ -2588,13 +2589,14 @@ impl<'a> Mapper<'a> {
                 Box::new((self.push_expr(e), self.map_attributes(attrs))),
             ),
             pt0::StructureItemDesc::Value(rec_flag, bindings) => {
-                current::StructureItemDesc::Pstr_value(Box::new((
+                let bindings: Vec<_> = bindings
+                    .iter()
+                    .map(|vb| self.map_value_binding(vb))
+                    .collect();
+                current::StructureItemDesc::Pstr_value((
                     map_rec_flag(*rec_flag),
-                    bindings
-                        .iter()
-                        .map(|vb| self.map_value_binding(vb))
-                        .collect(),
-                )))
+                    self.arena.push_vb_list(&bindings),
+                ))
             }
             pt0::StructureItemDesc::Primitive(vd) => {
                 current::StructureItemDesc::Pstr_primitive(Box::new(self.map_value_description(vd)))

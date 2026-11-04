@@ -7861,17 +7861,23 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body_idx) = **inner;
+            let (ref rec_flag, ref bindings, ref body_idx) = *inner;
             // Let expression
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
-            let let_check = if is_fake_optional_arg_let(tctx.arena, bindings) {
+            let let_check = if is_fake_optional_arg_let(tctx.arena, tctx.arena.vb_list(*bindings)) {
                 LetCheck::FakeOptional
             } else {
                 LetCheck::Local
             };
-            let (typed_bindings, new_env, unpacks) =
-                type_let_bindings(tctx, env, *rec_flag, bindings, true, let_check)?;
+            let (typed_bindings, new_env, unpacks) = type_let_bindings(
+                tctx,
+                env,
+                *rec_flag,
+                tctx.arena.vb_list(*bindings),
+                true,
+                let_check,
+            )?;
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
@@ -11700,7 +11706,7 @@ fn collect_lident_idents_in_module_expr(
                         collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
                     }
                     SID::Pstr_value(inner) => {
-                        for binding in inner.1.iter() {
+                        for binding in arena.vb_list(inner.1).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
                                 arena.get_expr(binding.pvb_expr),
@@ -11775,7 +11781,7 @@ fn collect_lident_idents_in_expression(
         }
         ED::Pexp_constant(_) | ED::Pexp_extension(_) | ED::Pexp_break | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
-            for binding in inner.1.iter() {
+            for binding in arena.vb_list(inner.1).iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);
             }
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
@@ -19260,7 +19266,7 @@ fn type_approx_for_rec_let(
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr))
         }
         ED::Pexp_let(inner) => {
-            let (_, _, body) = &**inner;
+            let (_, _, body) = &*inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*body))
         }
         ED::Pexp_fun(inner) => {

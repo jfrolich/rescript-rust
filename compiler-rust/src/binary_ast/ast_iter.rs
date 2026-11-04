@@ -377,7 +377,7 @@ pub fn walk_structure_item<V: AstIter + ?Sized>(
             v.attributes(arena, attrs.as_slice());
         }
         StructureItemDesc::Pstr_value(inner) => {
-            for vb in &inner.1 {
+            for vb in arena.vb_list(inner.1) {
                 v.value_binding(arena, vb);
             }
         }
@@ -436,8 +436,8 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => {}
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, vbs, body) = &**inner;
-            for vb in vbs {
+            let (_, vbs, body) = &*inner;
+            for vb in arena.vb_list(*vbs) {
                 v.value_binding(arena, vb);
             }
             v.expr(arena, *body);

@@ -133,8 +133,9 @@ fn expression_has_string_literal(
                     .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena))
         }
         ED::Pexp_let(inner) => {
-            let (_, bindings, body) = &**inner;
-            bindings
+            let (_, bindings, body) = &*inner;
+            arena
+                .vb_list(*bindings)
                 .iter()
                 .any(|vb| expression_has_string_literal(arena.get_expr(vb.pvb_expr), value, arena))
                 || expression_has_string_literal(arena.get_expr(*body), value, arena)
@@ -1836,10 +1837,12 @@ fn invalid_enabled_let_unwrap_in_structure(
                 }
             }
             StructureItemDesc::Pstr_value(value) => {
-                if let Some(loc) = let_unwrap_binding_loc(&value.1, arena) {
+                if let Some(loc) = let_unwrap_binding_loc(arena.vb_list(value.1), arena) {
                     return Some(LetUnwrapPositionError::Toplevel(loc));
                 }
-                if let Some(error) = invalid_enabled_let_unwrap_in_bindings(&value.1, arena) {
+                if let Some(error) =
+                    invalid_enabled_let_unwrap_in_bindings(arena.vb_list(value.1), arena)
+                {
                     return Some(error);
                 }
             }
@@ -1901,8 +1904,8 @@ fn invalid_enabled_let_unwrap_in_expr(
     let expr = arena.get_expr(expr);
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => {
-            let (_rec_flag, bindings, body) = &**inner;
-            if let [binding] = bindings.as_slice()
+            let (_rec_flag, bindings, body) = &*inner;
+            if let [binding] = arena.vb_list(*bindings)
                 && attrs_have_let_unwrap(&binding.pvb_attributes, arena)
                 && !is_supported_let_unwrap_pattern(arena.get_pat(binding.pvb_pat), arena)
             {
@@ -1910,7 +1913,7 @@ fn invalid_enabled_let_unwrap_in_expr(
                     arena.get_pat(binding.pvb_pat).ppat_loc,
                 ));
             }
-            invalid_enabled_let_unwrap_in_bindings(bindings, arena)
+            invalid_enabled_let_unwrap_in_bindings(arena.vb_list(*bindings), arena)
                 .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena))
         }
         ExpressionDesc::Pexp_fun(fun) => fun
@@ -2037,7 +2040,9 @@ fn disabled_let_unwrap_loc_in_structure(
                 }
             }
             StructureItemDesc::Pstr_value(value) => {
-                if let Some(loc) = disabled_let_unwrap_loc_in_bindings(&value.1, arena) {
+                if let Some(loc) =
+                    disabled_let_unwrap_loc_in_bindings(arena.vb_list(value.1), arena)
+                {
                     return Some(loc);
                 }
             }
@@ -2090,8 +2095,10 @@ fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena)
 fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<LocIdx> {
     let expr = arena.get_expr(expr);
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_let(inner) => disabled_let_unwrap_loc_in_bindings(&inner.1, arena)
-            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_let(inner) => {
+            disabled_let_unwrap_loc_in_bindings(arena.vb_list(inner.1), arena)
+                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
+        }
         ExpressionDesc::Pexp_fun(fun) => fun
             .default
             .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))

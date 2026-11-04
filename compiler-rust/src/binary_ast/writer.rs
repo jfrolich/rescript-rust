@@ -462,15 +462,15 @@ mod tests {
             pexp_attributes: Attributes::new(),
         });
         StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+            pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                 RecFlag::Nonrecursive,
-                vec![ValueBinding {
+                arena.push_vb_list(&[ValueBinding {
                     pvb_pat: pat_idx,
                     pvb_expr: expr_idx,
                     pvb_attributes: Attributes::new(),
                     pvb_loc: LocIdx::none(),
-                }],
-            )))),
+                }]),
+            ))),
             pstr_loc: LocIdx::none(),
         }
     }

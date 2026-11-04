@@ -318,7 +318,8 @@ fn transform_structure_item_multi(
 
     // Handle Pstr_value with potential @react.component
     if let StructureItemDesc::Pstr_value(val_inner) = *item.pstr_desc {
-        let (rec_flag, bindings) = *val_inner;
+        let (rec_flag, bindings) = val_inner;
+        let bindings = arena.vb_list(bindings).to_vec();
         return transform_value_bindings(
             rec_flag,
             bindings,
@@ -445,20 +446,20 @@ fn transform_value_bindings(
 
     let mut result = props_types;
     result.push(StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+        pstr_desc: Box::new(StructureItemDesc::Pstr_value((
             rec_flag,
-            transformed_bindings,
-        )))),
+            arena.push_vb_list(&transformed_bindings),
+        ))),
         pstr_loc: *loc,
     });
 
     if !new_bindings.is_empty() {
         // jsx_v4.ml:1045-1052: `{pstr_loc = empty_loc; ...}`.
         result.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
+            pstr_desc: Box::new(StructureItemDesc::Pstr_value((
                 RecFlag::Nonrecursive,
-                new_bindings,
-            )))),
+                arena.push_vb_list(&new_bindings),
+            ))),
             pstr_loc: config.empty_loc,
         });
     }
@@ -486,7 +487,7 @@ fn spelunk_for_fun_expression(
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => (None, false, expr),
         // let make = {let foo = bar in (~prop) => ...}
         ExpressionDesc::Pexp_let(inner) => {
-            let (rec_flag, bindings, body_idx) = &**inner;
+            let (rec_flag, bindings, body_idx) = &*inner;
             let (binding_wrapper, has_forward_ref, inner_expr) =
                 spelunk_for_fun_expression(arena, *body_idx);
             let inner_expr_idx = arena.push_expr(inner_expr);
@@ -494,11 +495,11 @@ fn spelunk_for_fun_expression(
                 binding_wrapper,
                 has_forward_ref,
                 Expression {
-                    pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+                    pexp_desc: ExpressionDesc::Pexp_let((
                         *rec_flag,
                         bindings.clone(),
                         inner_expr_idx,
-                    ))),
+                    )),
                     pexp_loc: expr.pexp_loc,
                     pexp_attributes: expr.pexp_attributes.clone(),
                 },
@@ -856,11 +857,11 @@ fn transform_react_component_binding(
             pexp_attributes: Attributes::new(),
         });
         Expression {
-            pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+            pexp_desc: ExpressionDesc::Pexp_let((
                 RecFlag::Nonrecursive,
-                vec![inner_binding],
+                arena.push_vb_list(&[inner_binding]),
                 ident_expr_idx,
-            ))),
+            )),
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
         }
@@ -1043,21 +1044,24 @@ fn transform_react_component_with_props_binding(
     let full_module_name_idx = arena.push_interned_string(&full_module_name);
     let full_module_name_idx2 = arena.push_interned_string(&full_module_name);
     let internal_expr = Expression {
-        pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+        pexp_desc: ExpressionDesc::Pexp_let((
             RecFlag::Nonrecursive,
-            vec![ValueBinding {
-                pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: PatternDesc::Ppat_var(Loc {
-                        txt: full_module_name_idx,
-                        loc: config.empty_loc,
+            {
+                let items = [ValueBinding {
+                    pvb_pat: arena.push_pat(Pattern {
+                        ppat_desc: PatternDesc::Ppat_var(Loc {
+                            txt: full_module_name_idx,
+                            loc: config.empty_loc,
+                        }),
+                        ppat_loc: empty_loc(),
+                        ppat_attributes: Attributes::new(),
                     }),
-                    ppat_loc: empty_loc(),
-                    ppat_attributes: Attributes::new(),
-                }),
-                pvb_expr: arena.push_expr(wrapper_expr),
-                pvb_attributes: Attributes::new(),
-                pvb_loc: empty_loc(),
-            }],
+                    pvb_expr: arena.push_expr(wrapper_expr),
+                    pvb_attributes: Attributes::new(),
+                    pvb_loc: empty_loc(),
+                }];
+                arena.push_vb_list(&items)
+            },
             {
                 let lid = arena.push_longident(Longident::Lident(full_module_name_idx2));
                 arena.push_expr(Expression {
@@ -1069,7 +1073,7 @@ fn transform_react_component_with_props_binding(
                     pexp_attributes: Attributes::new(),
                 })
             },
-        ))),
+        )),
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
@@ -1770,21 +1774,21 @@ fn add_default_value_matches(
 
             let expr_idx = arena.push_expr(expr);
             let inner_let = Expression {
-                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let((
                     RecFlag::Nonrecursive,
-                    vec![inner_binding],
+                    arena.push_vb_list(&[inner_binding]),
                     expr_idx,
-                ))),
+                )),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             };
             let inner_let_idx = arena.push_expr(inner_let);
             expr = Expression {
-                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let((
                     RecFlag::Nonrecursive,
-                    vec![value_binding],
+                    arena.push_vb_list(&[value_binding]),
                     inner_let_idx,
-                ))),
+                )),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),
             };
@@ -2455,7 +2459,7 @@ fn component_props_need_labelled_error_loc(
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, _, body_idx) = &**inner;
+            let (_, _, body_idx) = &*inner;
             component_props_need_labelled_error_loc(arena, *body_idx, has_application)
         }
         ExpressionDesc::Pexp_apply(apply)
@@ -2827,16 +2831,16 @@ fn constrain_jsx_return(
             }
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body_idx) = **inner;
+            let (ref rec_flag, ref bindings, ref body_idx) = *inner;
             let body_expr = arena.get_expr(*body_idx).clone();
             let constrained_body = constrain_jsx_return(arena, body_expr, config);
             let constrained_body_idx = arena.push_expr(constrained_body);
             Expression {
-                pexp_desc: ExpressionDesc::Pexp_let(Box::new((
+                pexp_desc: ExpressionDesc::Pexp_let((
                     *rec_flag,
                     bindings.clone(),
                     constrained_body_idx,
-                ))),
+                )),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
@@ -3969,18 +3973,21 @@ fn transform_expression(
             transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (rec_flag, bindings, body) = *inner;
-            let transformed_bindings = bindings
+            let (rec_flag, bindings, body) = inner;
+            let transformed_bindings: Vec<_> = arena
+                .vb_list(bindings)
+                .to_vec()
                 .into_iter()
                 .map(|binding| transform_value_binding(binding, config, arena))
                 .collect();
+            let transformed_bindings = arena.push_vb_list(&transformed_bindings);
             let body_expr = arena.get_expr(body).clone();
             let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_let(Box::new((
+            ExpressionDesc::Pexp_let((
                 rec_flag,
                 transformed_bindings,
                 arena.push_expr(transformed_body),
-            )))
+            ))
         }
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
@@ -5023,7 +5030,11 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
         | ExpressionDesc::Pexp_break
         | ExpressionDesc::Pexp_continue => false,
         ExpressionDesc::Pexp_let(inner) => {
-            inner.1.iter().any(|binding| child(binding.pvb_expr, memo)) || child(inner.2, memo)
+            arena
+                .vb_list(inner.1)
+                .iter()
+                .any(|binding| child(binding.pvb_expr, memo))
+                || child(inner.2, memo)
         }
         ExpressionDesc::Pexp_fun(inner) => {
             inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
@@ -5166,9 +5177,11 @@ let make = (~value: string) => React.null
         else {
             panic!("expected generated value binding");
         };
-        let (_, bindings) = &**value;
-        let ExpressionDesc::Pexp_apply(apply) =
-            &parser.arena().get_expr(bindings[0].pvb_expr).pexp_desc
+        let (_, bindings) = &*value;
+        let ExpressionDesc::Pexp_apply(apply) = &parser
+            .arena()
+            .get_expr(parser.arena().vb_list(*bindings)[0].pvb_expr)
+            .pexp_desc
         else {
             panic!("expected generated binding to apply React.component");
         };

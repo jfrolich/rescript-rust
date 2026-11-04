@@ -148,6 +148,12 @@ impl PooledListItem for crate::parse_arena::CoreTypeIdx {
     }
 }
 
+impl PooledListItem for crate::parser::ast::ValueBinding {
+    fn items(arena: &crate::parse_arena::ParseArena, list: ArenaList<Self>) -> &[Self] {
+        arena.vb_list(list)
+    }
+}
+
 impl<T: PooledListItem> Marshal for ArenaList<T> {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let arena = w.get_arena();

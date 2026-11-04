@@ -861,8 +861,8 @@ fn walk_structure_item(
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {
-            let (_, ref bindings) = **inner;
-            walk_value_bindings(bindings, t, comments, arena)
+            let (_, ref bindings) = *inner;
+            walk_value_bindings(&arena.vb_list(*bindings).to_vec(), t, comments, arena)
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (_, ref declarations) = **inner;
@@ -1581,16 +1581,16 @@ fn walk_expression(
             t.attach_trailing(longident.loc, trailing, arena);
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, ref bindings, ref body_idx) = **inner;
+            let (_, ref bindings, ref body_idx) = *inner;
             // Safety: arena is append-only, expression won't be invalidated
             let body = arena.get_expr(*body_idx).clone();
             // Check if body is unit
             let body_is_unit = matches!(&body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
             if body_is_unit {
-                walk_value_bindings(bindings, t, comments, arena);
+                walk_value_bindings(&arena.vb_list(*bindings).to_vec(), t, comments, arena);
             } else {
                 let comments = visit_list_but_continue_with_remaining_comments(
-                    bindings,
+                    &arena.vb_list(*bindings).to_vec(),
                     |vb, arena| {
                         let pvb_pat = arena.get_pat(vb.pvb_pat);
                         if arena.loc_ghost(pvb_pat.ppat_loc) {

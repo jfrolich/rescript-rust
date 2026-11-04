@@ -1266,7 +1266,7 @@ pub fn print_expression(
         }
         // Let expression
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, _, _) = **inner;
+            let (_, _, _) = *inner;
             print_expression_block(state, true, e, cmt_tbl, arena)
         }
         // Spread array: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
@@ -2949,35 +2949,37 @@ fn collect_block_rows_inner(
         }
 
         ExpressionDesc::Pexp_let(inner) => {
-            let (ref rec_flag, ref bindings, ref body_idx) = **inner;
+            let (ref rec_flag, ref bindings, ref body_idx) = *inner;
             // Use first binding's location for comment lookup, matching OCaml's logic
-            let (pos_range, base_start_line, end_line) =
-                if let (Some(first), Some(last)) = (bindings.first(), bindings.last()) {
-                    // Get the binding location matching what the walker uses
-                    let first_pat = arena.get_pat(first.pvb_pat);
-                    let first_expr = arena.get_expr(first.pvb_expr);
-                    let binding_loc = if arena.loc_ghost(first_pat.ppat_loc) {
-                        first_expr.pexp_loc
-                    } else {
-                        first.pvb_loc
-                    };
-                    let base_start = arena.loc_start(binding_loc);
-                    let end = arena.loc_end(last.pvb_loc);
-                    let pos_range = PosRange {
-                        start: base_start.cnum,
-                        end: end.cnum,
-                    };
-
-                    (pos_range, base_start.line as usize, end.line as usize)
+            let (pos_range, base_start_line, end_line) = if let (Some(first), Some(last)) = (
+                arena.vb_list(*bindings).first(),
+                arena.vb_list(*bindings).last(),
+            ) {
+                // Get the binding location matching what the walker uses
+                let first_pat = arena.get_pat(first.pvb_pat);
+                let first_expr = arena.get_expr(first.pvb_expr);
+                let binding_loc = if arena.loc_ghost(first_pat.ppat_loc) {
+                    first_expr.pexp_loc
                 } else {
-                    let start = arena.loc_start(expr.pexp_loc);
-                    let end = arena.loc_end(expr.pexp_loc);
-                    let pos_range = PosRange {
-                        start: start.cnum,
-                        end: end.cnum,
-                    };
-                    (pos_range, start.line as usize, end.line as usize)
+                    first.pvb_loc
                 };
+                let base_start = arena.loc_start(binding_loc);
+                let end = arena.loc_end(last.pvb_loc);
+                let pos_range = PosRange {
+                    start: base_start.cnum,
+                    end: end.cnum,
+                };
+
+                (pos_range, base_start.line as usize, end.line as usize)
+            } else {
+                let start = arena.loc_start(expr.pexp_loc);
+                let end = arena.loc_end(expr.pexp_loc);
+                let pos_range = PosRange {
+                    start: start.cnum,
+                    end: end.cnum,
+                };
+                (pos_range, start.line as usize, end.line as usize)
+            };
 
             // Extend start_line to leading comment if present (matching OCaml's location extension)
             let start_line = match cmt_tbl.get_first_leading_comment_by_pos(pos_range) {
@@ -2990,7 +2992,13 @@ fn collect_block_rows_inner(
                 RecFlag::Recursive => Doc::text("rec "),
             };
 
-            let let_doc = print_value_bindings_with_rec(state, bindings, &rec_doc, cmt_tbl, arena);
+            let let_doc = print_value_bindings_with_rec(
+                state,
+                arena.vb_list(*bindings),
+                &rec_doc,
+                cmt_tbl,
+                arena,
+            );
 
             rows.push(BlockRow {
                 pos_range,
@@ -8094,7 +8102,7 @@ fn print_payload(
                         }
                     }
                     StructureItemDesc::Pstr_value(inner) => {
-                        let (_, _) = **inner;
+                        let (_, _) = *inner;
                         // Single value binding - wrap in parens
                         add_parens(print_structure_item(state, single, cmt_tbl, arena))
                     }
@@ -8442,8 +8450,8 @@ fn print_structure_item_sequential(
 
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_value(inner) => {
-            let (ref rec_flag, ref bindings) = **inner;
-            print_value_bindings(state, bindings, rec_flag, cmt_tbl, arena)
+            let (ref rec_flag, ref bindings) = *inner;
+            print_value_bindings(state, arena.vb_list(*bindings), rec_flag, cmt_tbl, arena)
         }
 
         StructureItemDesc::Pstr_type(inner) => {

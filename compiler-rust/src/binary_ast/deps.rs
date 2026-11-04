@@ -295,12 +295,12 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(*expr);
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (ref _rec_flag, ref bindings) = **inner;
+                let (ref _rec_flag, ref bindings) = *inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // and adds them to bound_modules so later references don't add dependencies.
                 // First collect all unpack names from patterns
                 let mut unpack_names = HashSet::new();
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     let names = self.add_pat_idx_collecting_unpack(binding.pvb_pat);
                     unpack_names.extend(names);
                 }
@@ -309,7 +309,7 @@ impl<'a> DependencyCollector<'a> {
                 // to these modules in the same or later bindings don't add dependencies
                 self.bound_modules.extend(unpack_names);
                 // Now process expressions
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     self.add_expr_idx(binding.pvb_expr);
                 }
             }
@@ -452,11 +452,11 @@ impl<'a> DependencyCollector<'a> {
             }
             ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
-                let (ref _rec_flag, ref bindings, ref body) = **inner;
+                let (ref _rec_flag, ref bindings, ref body) = *inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)
                 // First collect all unpack names from patterns
                 let mut unpack_names = HashSet::new();
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     let names = self.add_pat_idx_collecting_unpack(binding.pvb_pat);
                     unpack_names.extend(names);
                 }
@@ -469,7 +469,7 @@ impl<'a> DependencyCollector<'a> {
                     .filter(|name| self.bound_modules.insert(name.clone()))
                     .collect();
                 // Process expressions
-                for binding in bindings {
+                for binding in self.arena.vb_list(*bindings) {
                     self.add_expr_idx(binding.pvb_expr);
                 }
                 // body is ExprIdx
