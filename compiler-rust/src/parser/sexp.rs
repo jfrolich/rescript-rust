@@ -482,16 +482,16 @@ fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
         }
         CoreTypeDesc::Ptyp_tuple(types) => Sexp::list(vec![
             Sexp::atom("Ptyp_tuple"),
-            Sexp::list(map_empty(types, |t| {
+            Sexp::list(map_empty(arena.type_list(*types), |t| {
                 core_type(arena, arena.get_core_type(*t))
             })),
         ]),
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref types) = **inner;
+            let (ref lid, ref types) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Ptyp_constr"),
                 longident_idx(arena, lid.txt),
-                Sexp::list(map_empty(types, |t| {
+                Sexp::list(map_empty(arena.type_list(*types), |t| {
                     core_type(arena, arena.get_core_type(*t))
                 })),
             ])

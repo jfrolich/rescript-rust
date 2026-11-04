@@ -543,13 +543,13 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
-                for typ in types.iter() {
+                for typ in self.arena.type_list(*types).to_vec().iter() {
                     self.typ(*typ)?;
                 }
                 Ok(())
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                for typ in &inner.1 {
+                for typ in self.arena.type_list(inner.1).to_vec().iter() {
                     self.typ(*typ)?;
                 }
                 Ok(())

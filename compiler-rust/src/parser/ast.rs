@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 use crate::parse_arena::{
     ApplyArgs, ArityIdx, CoreTypeIdx, ExprIdx, ExprList, LidentIdx, LocIdx, Located, ModExprIdx,
-    ModTypeIdx, PatIdx, PatList, PosIdx, StrIdx,
+    ModTypeIdx, PatIdx, PatList, PosIdx, StrIdx, TypeList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -514,9 +514,9 @@ pub enum CoreTypeDesc {
     /// Arrow type: `T1 -> T2`.
     Ptyp_arrow(Box<(Box<TypeArg>, CoreTypeIdx, Arity)>),
     /// Tuple type: `(T1, T2, ..., Tn)`.
-    Ptyp_tuple(Box<Vec<CoreTypeIdx>>),
+    Ptyp_tuple(TypeList),
     /// Type constructor: `tconstr` or `T tconstr` or `(T1, ..., Tn) tconstr`.
-    Ptyp_constr(Box<(Loc<LidentIdx>, Vec<CoreTypeIdx>)>),
+    Ptyp_constr((Loc<LidentIdx>, TypeList)),
     /// Object type: `{. field: T, ... }`.
     Ptyp_object(Box<(Vec<ObjectField>, ClosedFlag)>),
     /// Type alias: `T as 'a`.

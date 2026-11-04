@@ -677,13 +677,13 @@ fn transform_react_component_binding(
         .map(|ct| arena.push_core_type(ct.clone()))
         .collect();
     let props_constr = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Loc {
                 txt: props_lid_idx,
                 loc: config.empty_loc,
             },
-            props_type_params_idx,
-        ))),
+            arena.push_type_list(&props_type_params_idx),
+        )),
         ptyp_loc: config.empty_loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -726,13 +726,13 @@ fn transform_react_component_binding(
             ));
             let ref_type_var_idx = arena.push_core_type(ref_type_var);
             let js_nullable_t = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                     Loc {
                         txt: js_nullable_t_lid,
                         loc: empty_loc(),
                     },
-                    vec![ref_type_var_idx],
-                ))),
+                    arena.push_type_list(&[ref_type_var_idx]),
+                )),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -1219,18 +1219,18 @@ fn make_with_props_pattern(arena: &mut ParseArena, expr: &Expression, loc: Locat
                                     ptyp_loc: empty_loc(),
                                     ptyp_attributes: Attributes::new(),
                                 });
-                                vec![any_type_idx]
+                                arena.push_type_list(&[any_type_idx])
                             } else {
-                                vec![]
+                                crate::parse_arena::TypeList::EMPTY
                             };
                             let props_type_idx = arena.push_core_type(CoreType {
-                                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                                     Loc {
                                         txt: props_lid,
                                         loc,
                                     },
                                     props_type_args,
-                                ))),
+                                )),
                                 ptyp_loc: empty_loc(),
                                 ptyp_attributes: Attributes::new(),
                             });
@@ -1345,13 +1345,13 @@ fn make_props_wrapper_expr_with_ref(
             ptyp_attributes: Attributes::new(),
         });
         let props_type = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                 Loc {
                     txt: arena.push_longident(Longident::Lident(props_str_idx)),
                     loc: empty_loc(),
                 },
-                vec![any_type_idx],
-            ))),
+                arena.push_type_list(&[any_type_idx]),
+            )),
             ptyp_loc: empty_loc(),
             ptyp_attributes: Attributes::new(),
         };
@@ -1938,13 +1938,13 @@ fn transform_react_component_sig(
     // Typ.constr without ~loc uses Location.none for ptyp_loc
     let props_str_idx = arena.intern_string("props");
     let props_type_ref = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Loc {
                 txt: arena.push_longident(Longident::Lident(props_str_idx)),
                 loc: *loc,
             }, // longident uses psig_loc
-            props_type_params,
-        ))),
+            arena.push_type_list(&props_type_params),
+        )),
         ptyp_loc: empty_loc(), // OCaml: Typ.constr without ~loc defaults to Location.none
         ptyp_attributes: Attributes::new(),
     };
@@ -1955,7 +1955,7 @@ fn transform_react_component_sig(
     let component_str_idx = arena.intern_string("component");
     let props_type_ref_idx = arena.push_core_type(props_type_ref);
     let component_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Loc {
                 txt: arena.push_longident(Longident::Ldot(
                     Box::new(Longident::Lident(react_str_idx)),
@@ -1963,8 +1963,8 @@ fn transform_react_component_sig(
                 )),
                 loc: *loc, // OCaml: {loc = psig_loc; txt = ...}
             },
-            vec![props_type_ref_idx],
-        ))),
+            arena.push_type_list(&[props_type_ref_idx]),
+        )),
         ptyp_loc: arena.get_core_type(vd.pval_type).ptyp_loc, // OCaml: {pval_type with ...} preserves ptyp_loc
         ptyp_attributes: Attributes::new(),
     };
@@ -2078,13 +2078,13 @@ fn transform_react_component_external(
     // OCaml uses the external's full location for the props type and its longident
     let props_str_idx = arena.intern_string("props");
     let props_type_ref = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Loc {
                 txt: arena.push_longident(Longident::Lident(props_str_idx)),
                 loc: *loc,
             },
-            props_type_params,
-        ))),
+            arena.push_type_list(&props_type_params),
+        )),
         ptyp_loc: *loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -2094,13 +2094,13 @@ fn transform_react_component_external(
     let component_str_idx = arena.intern_string("component");
     let props_type_ref_idx = arena.push_core_type(props_type_ref);
     let component_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Loc {
                 txt: module_access_name_with_idx(arena, config, component_str_idx),
                 loc: *loc,
             },
-            vec![props_type_ref_idx],
-        ))),
+            arena.push_type_list(&[props_type_ref_idx]),
+        )),
         ptyp_loc: arena.get_core_type(vd.pval_type).ptyp_loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -2357,8 +2357,10 @@ fn core_type_of_attrs(arena: &ParseArena, attrs: &Attributes) -> Option<CoreType
 fn typ_vars_of_core_type(arena: &ParseArena, typ: &CoreType) -> Vec<CoreType> {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (_, ref args) = **inner;
-            args.iter()
+            let (_, ref args) = *inner;
+            arena
+                .type_list(*args)
+                .iter()
                 .map(|t| arena.get_core_type(*t))
                 .filter(|t| matches!(t.ptyp_desc, CoreTypeDesc::Ptyp_var(_)))
                 .cloned()
@@ -2573,11 +2575,12 @@ fn string_int_attribute_loc_in_core_type(
                 .or_else(|| string_int_attribute_loc_in_core_type(arena, &arg.typ))
                 .or_else(|| string_int_attribute_loc_in_core_type(arena, ret))
         }
-        CoreTypeDesc::Ptyp_tuple(items) => items
+        CoreTypeDesc::Ptyp_tuple(items) => arena
+            .type_list(*items)
             .iter()
             .find_map(|item| string_int_attribute_loc_in_core_type(arena, item)),
-        CoreTypeDesc::Ptyp_constr(inner) => inner
-            .1
+        CoreTypeDesc::Ptyp_constr(inner) => arena
+            .type_list(inner.1)
             .iter()
             .find_map(|item| string_int_attribute_loc_in_core_type(arena, item)),
         CoreTypeDesc::Ptyp_object(inner) => inner.0.iter().find_map(|field| match field {
@@ -2662,11 +2665,12 @@ fn make_module_name(config: &JsxConfig, fn_name: &str) -> String {
 fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     match &core_type.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             match arena.get_longident(lid.txt) {
-                Longident::Lident(name) if arena.get_string(*name) == "option" => {
-                    args.first().map(|t| arena.get_core_type(*t).clone())
-                }
+                Longident::Lident(name) if arena.get_string(*name) == "option" => arena
+                    .type_list(*args)
+                    .first()
+                    .map(|t| arena.get_core_type(*t).clone()),
                 _ => Some(core_type.clone()),
             }
         }
@@ -2708,7 +2712,7 @@ fn make_props_type_param(
 /// no arguments); any other type is kept.
 fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     if let CoreTypeDesc::Ptyp_constr(inner) = &core_type.ptyp_desc {
-        let (ref lid, ref args) = **inner;
+        let (ref lid, ref args) = *inner;
         let is_nullable = match arena.get_longident(lid.txt) {
             Longident::Lident(name) => arena.get_string(*name) == "nullable",
             Longident::Ldot(outer, t) if arena.get_string(*t) == "t" => match outer.as_ref() {
@@ -2722,7 +2726,10 @@ fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreTyp
             _ => false,
         };
         if is_nullable {
-            return args.first().map(|t| arena.get_core_type(*t).clone());
+            return arena
+                .type_list(*args)
+                .first()
+                .map(|t| arena.get_core_type(*t).clone());
         }
     }
     Some(core_type.clone())
@@ -2732,13 +2739,13 @@ fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreTyp
 fn jsx_element_type(arena: &mut ParseArena, config: &JsxConfig, loc: &Location) -> CoreType {
     let element_str_idx = arena.intern_string("element");
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Loc {
                 txt: module_access_name_with_idx(arena, config, element_str_idx),
                 loc: *loc,
             },
-            vec![],
-        ))),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: *loc,
         ptyp_attributes: Attributes::new(),
     }

@@ -5834,7 +5834,7 @@ pub fn print_typ_expr(
         }
 
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             // Check if this is a reference to an inline record definition
             // OCaml: | Ptyp_constr ({txt = Lident inline_record_name}, _)
             //          when inline_record_definitions |> find_inline_record_definition inline_record_name |> Option.is_some
@@ -5857,7 +5857,7 @@ pub fn print_typ_expr(
             }
 
             // Handle special case: object type inside type constructor
-            if let [single_arg] = args.as_slice() {
+            if let [single_arg] = arena.type_list(*args) {
                 let single_arg = arena.get_core_type(*single_arg);
                 if let CoreTypeDesc::Ptyp_object(obj_inner) = &single_arg.ptyp_desc {
                     let (ref fields, ref open_flag) = **obj_inner;
@@ -5875,7 +5875,7 @@ pub fn print_typ_expr(
                     Doc::group(Doc::concat(vec![
                         constr_name,
                         Doc::less_than(),
-                        print_tuple_type(state, types, true, cmt_tbl, arena),
+                        print_tuple_type(state, arena.type_list(*types), true, cmt_tbl, arena),
                         Doc::greater_than(),
                     ]))
                 } else {
@@ -5905,7 +5905,9 @@ pub fn print_typ_expr(
                             Doc::soft_line(),
                             Doc::join(
                                 Doc::concat(vec![Doc::text(","), Doc::line()]),
-                                args.iter()
+                                arena
+                                    .type_list(*args)
+                                    .iter()
                                     .map(|arg| {
                                         print_typ_expr(
                                             state,
@@ -5925,7 +5927,9 @@ pub fn print_typ_expr(
             }
         }
 
-        CoreTypeDesc::Ptyp_tuple(types) => print_tuple_type(state, types, false, cmt_tbl, arena),
+        CoreTypeDesc::Ptyp_tuple(types) => {
+            print_tuple_type(state, arena.type_list(*types), false, cmt_tbl, arena)
+        }
 
         CoreTypeDesc::Ptyp_poly(inner) => {
             let (ref vars, ref inner_typ_idx) = **inner;

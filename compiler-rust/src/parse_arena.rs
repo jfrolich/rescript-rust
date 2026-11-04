@@ -944,10 +944,10 @@ impl Default for ParseArena {
         // inserts the none location.
         let none_loc = LocIdx::none();
         let mk_ast_literal_type = |txt: LidentIdx| CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                 Located { txt, loc: none_loc },
-                vec![],
-            ))),
+                crate::parse_arena::ArenaList::EMPTY,
+            )),
             ptyp_loc: none_loc,
             ptyp_attributes: Attributes::new(),
         };

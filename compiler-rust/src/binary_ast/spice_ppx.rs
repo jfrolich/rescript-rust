@@ -689,7 +689,10 @@ fn mk_type_constr_with_lid_loc(
         .map(|ct| arena.push_core_type(ct))
         .collect();
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((Located::new(lid_idx, lid_loc), args_idx))),
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
+            Located::new(lid_idx, lid_loc),
+            arena.push_type_list(&args_idx),
+        )),
         ptyp_loc: arena.dummy_loc(),
         ptyp_attributes: Attributes::new(),
     }
@@ -908,7 +911,7 @@ fn check_option_type(typ_idx: &CoreTypeIdx, arena: &ParseArena) -> bool {
     let typ = arena.get_core_type(*typ_idx);
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             longident_matches(arena, lid.txt, &["option"]) && args.len() == 1
         }
         _ => false,
@@ -1694,7 +1697,8 @@ fn codecs_generate_codecs_for(
         }
         CoreTypeDesc::Ptyp_package(_) => Err("Can't generate codecs for module type".to_string()),
         CoreTypeDesc::Ptyp_tuple(types) => {
-            let types_vec: Vec<CoreType> = types
+            let types_vec: Vec<CoreType> = arena
+                .type_list(*types)
                 .iter()
                 .map(|t| arena.get_core_type(*t).clone())
                 .collect();
@@ -1741,13 +1745,13 @@ fn codecs_generate_codecs_for(
             },
         )),
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref constr, ref type_args) = **inner;
+            let (ref constr, ref type_args) = *inner;
             let custom_codec = get_attribute_by_name(&typ.ptyp_attributes, "spice.codec", arena);
             if matches!(custom_codec, Ok(None))
                 && type_args.len() == 1
                 && is_dict_identifier(constr.txt, arena)
             {
-                let value_type = arena.get_core_type(type_args[0]).clone();
+                let value_type = arena.get_core_type(arena.type_list(*type_args)[0]).clone();
                 return codecs_generate_dict_codecs(settings, &value_type, arena);
             }
             let (encode, decode) = match custom_codec {
@@ -1792,7 +1796,13 @@ fn codecs_generate_codecs_for(
             if type_args.is_empty() {
                 Ok((encode, decode))
             } else {
-                codecs_parameterize_codecs(type_args, encode, decode, settings, arena)
+                codecs_parameterize_codecs(
+                    &arena.type_list(*type_args).to_vec(),
+                    encode,
+                    decode,
+                    settings,
+                    arena,
+                )
             }
         }
         _ => Err("This syntax is not yet handled by spice".to_string()),
@@ -1882,8 +1892,8 @@ fn records_parse_decl(
     } else if is_option {
         match &pld_type.ptyp_desc {
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (_, args) = &**inner;
-                let inner_type = arena.get_core_type(args[0]).clone();
+                let (_, args) = &*inner;
+                let inner_type = arena.get_core_type(arena.type_list(*args)[0]).clone();
                 let codecs = codecs_generate_value_codecs(settings, &inner_type, arena)?;
                 records_make_omittable_codecs(codecs, arena)
             }
@@ -3390,7 +3400,7 @@ fn bridge_rtag_types(
         .map(|group| match group.txt.as_slice() {
             [typ] => arena.get_core_type(*typ).clone(),
             types => CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_tuple(Box::new(types.to_vec())),
+                ptyp_desc: CoreTypeDesc::Ptyp_tuple(arena.push_shared_type_list(types)),
                 ptyp_loc: group.loc,
                 ptyp_attributes: Attributes::new(),
             },
@@ -3409,7 +3419,8 @@ fn polyvars_get_args(
         1 => {
             let ct = &core_types[0];
             match &ct.ptyp_desc {
-                CoreTypeDesc::Ptyp_tuple(types) => Ok(types
+                CoreTypeDesc::Ptyp_tuple(types) => Ok(arena
+                    .type_list(*types)
                     .iter()
                     .map(|idx| arena.get_core_type(*idx).clone())
                     .collect()),
@@ -4191,8 +4202,9 @@ fn default_option_inner_type(manifest: &CoreType, arena: &ParseArena) -> Option<
     let CoreTypeDesc::Ptyp_constr(inner) = &manifest.ptyp_desc else {
         return None;
     };
-    let (constructor, args) = &**inner;
-    (args.len() == 1 && longident_matches(arena, constructor.txt, &["option"])).then(|| args[0])
+    let (constructor, args) = &*inner;
+    (args.len() == 1 && longident_matches(arena, constructor.txt, &["option"]))
+        .then(|| arena.type_list(*args)[0])
 }
 
 fn manifest_value_encoder(
@@ -4206,7 +4218,7 @@ fn manifest_value_encoder(
     let CoreTypeDesc::Ptyp_constr(inner) = &manifest.ptyp_desc else {
         return Ok(None);
     };
-    let (constructor, args) = &**inner;
+    let (constructor, args) = &*inner;
     if !longident_matches(arena, constructor.txt, &["option"]) || args.len() != 1 {
         return Ok(None);
     }
@@ -4736,16 +4748,21 @@ impl<'a> LocCloner<'a> {
                 **arg = args.remove(0);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
-                for typ in types.iter_mut() {
+                let mut new_types = self.arena.type_list(*types).to_vec();
+                for typ in new_types.iter_mut() {
                     self.core_type_idx(typ);
                 }
+                *types = self.arena.push_type_list(&new_types);
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (ref mut lid, ref mut args) = **inner;
+                let (ref mut lid, ref mut args) = *inner;
                 self.located(lid);
-                for typ in args.iter_mut() {
+                // The copy gets its own list; the original keeps its own.
+                let mut new_args = self.arena.type_list(*args).to_vec();
+                for typ in new_args.iter_mut() {
                     self.core_type_idx(typ);
                 }
+                *args = self.arena.push_type_list(&new_args);
             }
             CoreTypeDesc::Ptyp_object(inner) => {
                 let (ref mut fields, _) = **inner;

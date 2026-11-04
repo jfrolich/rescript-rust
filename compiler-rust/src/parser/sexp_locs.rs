@@ -228,14 +228,15 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
             Sexp::list(if types.is_empty() {
                 vec![Sexp::list(vec![])]
             } else {
-                types
+                arena
+                    .type_list(*types)
                     .iter()
                     .map(|t| core_type(arena.get_core_type(*t), arena))
                     .collect()
             }),
         ]),
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref types) = **inner;
+            let (ref lid, ref types) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Ptyp_constr"),
                 longident_idx(arena, lid.txt),
@@ -243,7 +244,8 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
                 Sexp::list(if types.is_empty() {
                     vec![Sexp::list(vec![])]
                 } else {
-                    types
+                    arena
+                        .type_list(*types)
                         .iter()
                         .map(|t| core_type(arena.get_core_type(*t), arena))
                         .collect()

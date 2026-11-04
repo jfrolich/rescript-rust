@@ -793,9 +793,10 @@ impl<'a> Mapper<'a> {
                 };
                 return self.mk_arrow(vec![arg], ret_idx, loc, node_attrs);
             }
-            pt0::CoreTypeDesc::Tuple(tl) => current::CoreTypeDesc::Ptyp_tuple(Box::new(
-                tl.iter().map(|t| self.push_core_type(t)).collect(),
-            )),
+            pt0::CoreTypeDesc::Tuple(tl) => {
+                let items: Vec<_> = tl.iter().map(|t| self.push_core_type(t)).collect();
+                current::CoreTypeDesc::Ptyp_tuple(self.arena.push_type_list(&items))
+            }
             pt0::CoreTypeDesc::Constr(lid, tl) => {
                 // First map to CoreType for inspection (function$ detection), then push to arena
                 let mapped_types: Vec<current::CoreType> =
@@ -826,10 +827,10 @@ impl<'a> Mapper<'a> {
                     .into_iter()
                     .map(|t| self.arena.push_core_type(t))
                     .collect();
-                current::CoreTypeDesc::Ptyp_constr(Box::new((
+                current::CoreTypeDesc::Ptyp_constr((
                     self.map_longident_loc(lid),
-                    type_indices,
-                )))
+                    self.arena.push_type_list(&type_indices),
+                ))
             }
             pt0::CoreTypeDesc::Object(fields, closed) => {
                 let fields = fields.iter().map(|f| self.map_object_field(f)).collect();
@@ -901,7 +902,7 @@ impl<'a> Mapper<'a> {
                             current::CoreTypeDesc::Ptyp_tuple(args)
                                 if has_constructor_args && rest.is_empty() =>
                             {
-                                args.to_vec()
+                                self.arena.type_list(*args).to_vec()
                             }
                             _ => {
                                 typ.ptyp_attributes = rest;

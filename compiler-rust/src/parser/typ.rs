@@ -116,7 +116,7 @@ pub fn substitute_type_vars(
             CoreTypeDesc::Ptyp_var(name)
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (lid, args) = *inner;
+            let (lid, args) = inner;
             // Check if this is a simple Lident that matches a type variable
             if args.is_empty() {
                 if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
@@ -135,7 +135,9 @@ pub fn substitute_type_vars(
                 }
             }
             // Recursively process type arguments
-            let new_args: Vec<CoreTypeIdx> = args
+            let new_args: Vec<CoreTypeIdx> = arena
+                .type_list(args)
+                .to_vec()
                 .into_iter()
                 .map(|arg_idx| {
                     let arg_type = arena.get_core_type(arg_idx).clone();
@@ -143,7 +145,7 @@ pub fn substitute_type_vars(
                         .map(|substituted| arena.push_core_type(substituted))
                 })
                 .collect::<Result<_, _>>()?;
-            CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
+            CoreTypeDesc::Ptyp_constr((lid, arena.push_type_list(&new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
             // `Ptyp_arrow {params; ret}`: the record's `ret` is evaluated
@@ -166,16 +168,19 @@ pub fn substitute_type_vars(
             arena.set_nary_arrow_args(arity, new_params);
             CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), new_ret, arity)))
         }
-        CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(Box::new(
-            (*elements)
+        CoreTypeDesc::Ptyp_tuple(elements) => {
+            let new_elements: Vec<CoreTypeIdx> = arena
+                .type_list(elements)
+                .to_vec()
                 .into_iter()
                 .map(|e_idx| {
                     let e_type = arena.get_core_type(e_idx).clone();
                     substitute_type_vars(arena, e_type, vars)
                         .map(|substituted| arena.push_core_type(substituted))
                 })
-                .collect::<Result<_, _>>()?,
-        )),
+                .collect::<Result<_, _>>()?;
+            CoreTypeDesc::Ptyp_tuple(arena.push_type_list(&new_elements))
+        }
         CoreTypeDesc::Ptyp_poly(inner) => {
             let (poly_vars, body_idx) = *inner;
             if poly_vars
@@ -747,7 +752,12 @@ fn parse_atomic_typ_expr_with_start(
                 p.next();
                 let lid_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
                 let lid_idx = p.push_lident_static("unit");
-                ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none())
+                ast_helper::make_type_constr(
+                    lid_idx,
+                    crate::parse_arena::TypeList::EMPTY,
+                    lid_loc,
+                    LocIdx::none(),
+                )
             } else {
                 // Parenthesized type or tuple. res_core.ml:4618-4622 calls
                 // `parse_typ_expr p` and `parse_tuple_type` without the
@@ -903,7 +913,7 @@ fn parse_type_constr_with_start(
             .iter()
             .filter(|arg| {
                 if let CoreTypeDesc::Ptyp_constr(constr_inner) = &arg.ptyp_desc {
-                    let (ref lid, _) = **constr_inner;
+                    let (ref lid, _) = *constr_inner;
                     inline_names
                         .iter()
                         .any(|iname| p.arena().is_lident(lid.txt, p.arena().get_string(*iname)))
@@ -934,6 +944,7 @@ fn parse_type_constr_with_start(
         .into_iter()
         .map(|a| p.arena_mut().push_core_type(a))
         .collect();
+    let args_idx = p.arena_mut().push_type_list(&args_idx);
     ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
 }
 
@@ -973,10 +984,10 @@ pub(super) fn parse_type_constructor_args(
                 .map(|arg| p.arena_mut().push_core_type(arg.clone()))
                 .collect();
             let typ = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                     with_loc(lid_idx, lid_loc),
-                    arg_idxs,
-                ))),
+                    p.arena_mut().push_type_list(&arg_idxs),
+                )),
                 ptyp_loc: LocIdx::none(),
                 ptyp_attributes: Attributes::new(),
             };
@@ -1051,6 +1062,7 @@ pub(super) fn parse_type_equation_constr(
             .into_iter()
             .map(|a| p.arena_mut().push_core_type(a))
             .collect();
+        let args_idx = p.arena_mut().push_type_list(&args_idx);
         let typ = ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, loc);
         parse_type_alias(p, typ)
     })
@@ -1495,7 +1507,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         // Use stored PosIdx for sharing instead of pushing fresh position
         let lid_loc = p.mk_loc_idx(start_pos_idx, rparen_end_idx);
         let lid_idx = p.push_lident_static("unit");
-        let unit_type = ast_helper::make_type_constr(lid_idx, vec![], lid_loc, LocIdx::none());
+        let unit_type = ast_helper::make_type_constr(
+            lid_idx,
+            crate::parse_arena::TypeList::EMPTY,
+            lid_loc,
+            LocIdx::none(),
+        );
         let unit_type_idx = p.arena_mut().push_core_type(unit_type);
         params.push((
             TypeArg {
@@ -1593,7 +1610,7 @@ fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) 
         .map(|t| p.arena_mut().push_core_type(t))
         .collect();
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_tuple(Box::new(types_idx)),
+        ptyp_desc: CoreTypeDesc::Ptyp_tuple(p.arena_mut().push_type_list(&types_idx)),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -1658,7 +1675,10 @@ fn parse_record_or_object_type_inner(p: &mut Parser<'_>) -> (CoreType, bool) {
         let lid_idx = p.push_lident_from_idx(inline_type_idx);
         (
             CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, loc), type_args))),
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
+                    with_loc(lid_idx, loc),
+                    p.arena_mut().push_type_list(&type_args),
+                )),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             },

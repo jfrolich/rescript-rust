@@ -2747,7 +2747,10 @@ fn label_declaration(
 fn punned_field_type(p: &mut Parser<'_>, name: &Located<StrIdx>, attrs: Attributes) -> CoreType {
     let lid_idx = p.push_lident_from_idx(name.txt);
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, name.loc), vec![]))),
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
+            with_loc(lid_idx, name.loc),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: name.loc,
         ptyp_attributes: attrs,
     }

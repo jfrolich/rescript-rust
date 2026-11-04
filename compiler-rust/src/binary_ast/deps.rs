@@ -951,15 +951,15 @@ impl<'a> DependencyCollector<'a> {
                 self.add_core_type_idx(ret);
             }
             CoreTypeDesc::Ptyp_tuple(tys) => {
-                for ty in &**tys {
+                for ty in self.arena.type_list(*tys) {
                     // ty is CoreTypeIdx
                     self.add_core_type_idx(*ty);
                 }
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (ref lid, ref args) = **inner;
+                let (ref lid, ref args) = *inner;
                 self.add_lident_idx(lid.txt);
-                for arg in args {
+                for arg in self.arena.type_list(*args) {
                     // arg is CoreTypeIdx
                     self.add_core_type_idx(*arg);
                 }

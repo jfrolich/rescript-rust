@@ -2907,7 +2907,7 @@ fn transl_type_inner(
             let mut typed_types = Vec::new();
             let mut type_refs = Vec::new();
 
-            for t in types.iter() {
+            for t in tctx.arena.type_list(*types).iter() {
                 let (ctyp, ty) = transl_type_inner(tctx, env, tctx.arena.get_core_type(*t))?;
                 typed_types.push(ctyp);
                 type_refs.push(ty);
@@ -2926,7 +2926,7 @@ fn transl_type_inner(
         }
 
         CTD::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             // Type constructor: int, string, list<'a>, etc.
             let longident = tctx.arena.get_longident(lid.txt);
 
@@ -2942,7 +2942,9 @@ fn transl_type_inner(
                 tctx.report_warning(lid.loc, warning);
             }
 
-            let mut parsed_args: Vec<_> = args
+            let mut parsed_args: Vec<_> = tctx
+                .arena
+                .type_list(*args)
                 .iter()
                 .map(|arg| tctx.arena.get_core_type(*arg).clone())
                 .collect();
@@ -3545,7 +3547,7 @@ fn transl_type_inner(
                                     tctx.arena
                                         .push_shared_core_type(crate::parser::ast::CoreType {
                                             ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_tuple(
-                                                Box::new(types.to_vec()),
+                                                tctx.arena.push_shared_type_list(types),
                                             ),
                                             ptyp_loc: group.loc,
                                             ptyp_attributes: Attributes::new(),
@@ -6790,8 +6792,8 @@ fn type_record_pat_rest(
         Vec<crate::parse_arena::CoreTypeIdx>,
     ) = match &core_type.ptyp_desc {
         crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
-            let (lid, args) = inner.as_ref();
-            (*lid, args.clone())
+            let (lid, args) = inner;
+            (*lid, tctx.arena.type_list(*args).to_vec())
         }
         _ => return rest_err(rest_loc, RecordRestError::InvalidType),
     };
@@ -19206,20 +19208,24 @@ fn approx_type_for_rec_let(
             ctx.new_type(TypeDesc::Tarrow { args, ret })
         }
         CTD::Ptyp_tuple(args) => {
-            let tys = args
+            let tys = tctx
+                .arena
+                .type_list(*args)
                 .iter()
                 .map(|arg| approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*arg)))
                 .collect();
             ctx.new_tuple(tys)
         }
         CTD::Ptyp_constr(inner) => {
-            let (lid, args) = &**inner;
+            let (lid, args) = &*inner;
             let longident = tctx.resolve_lid(lid.txt).clone();
             // typecore.ml:1988: `Env.lookup_type lid.txt env`, without `?loc`.
             let (path, decl) = resolve_type_constructor_path(tctx, env, &longident, None);
             if let Some(decl) = decl {
                 if args.len() == decl.type_arity as usize {
-                    let tys = args
+                    let tys = tctx
+                        .arena
+                        .type_list(*args)
                         .iter()
                         .map(|arg| {
                             approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*arg))

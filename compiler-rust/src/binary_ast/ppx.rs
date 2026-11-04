@@ -2023,7 +2023,7 @@ fn validate_variadic_arg_type(
     }
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             if args.len() == 1
                 && let Longident::Lident(name) = arena.get_longident(lid.txt)
                 && arena.get_string(*name) == "array"
@@ -2897,7 +2897,7 @@ fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
 fn is_unit_type(typ: &CoreType, arena: &ParseArena) -> bool {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             args.is_empty() && {
                 let longident = arena.get_longident(lid.txt);
                 matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit")
@@ -2910,7 +2910,7 @@ fn is_unit_type(typ: &CoreType, arena: &ParseArena) -> bool {
 fn is_user_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             if args.len() != 1 {
                 return false;
             }
@@ -3000,10 +3000,10 @@ fn reconstruct_arrow_type_with_loc(
     if filtered_args.is_empty() && had_args {
         let unit_lid = arena.push_lident_static("unit");
         let unit_type = CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                 Located { txt: unit_lid, loc },
-                vec![],
-            ))),
+                crate::parse_arena::ArenaList::EMPTY,
+            )),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
         };
@@ -3111,10 +3111,10 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let int_lid = arena.push_lident_static("int");
                         let int_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                                 Located { txt: int_lid, loc },
-                                vec![],
-                            ))),
+                                crate::parse_arena::ArenaList::EMPTY,
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: Attributes::new(),
                         };
@@ -3132,13 +3132,13 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let string_lid = arena.push_lident_static("string");
                         let string_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                                 Located {
                                     txt: string_lid,
                                     loc,
                                 },
-                                vec![],
-                            ))),
+                                crate::parse_arena::ArenaList::EMPTY,
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: Attributes::new(),
                         };
@@ -3202,10 +3202,10 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let int_lid = arena.push_lident_static("int");
                         let int_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                                 Located { txt: int_lid, loc },
-                                vec![],
-                            ))),
+                                crate::parse_arena::ArenaList::EMPTY,
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: Attributes::new(),
                         };
@@ -3224,13 +3224,13 @@ fn process_obj_type(
                         filtered_args.push(arg);
                         let string_lid = arena.push_lident_static("string");
                         let string_type = CoreType {
-                            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                                 Located {
                                     txt: string_lid,
                                     loc,
                                 },
-                                vec![],
-                            ))),
+                                crate::parse_arena::ArenaList::EMPTY,
+                            )),
                             ptyp_loc: loc,
                             ptyp_attributes: Attributes::new(),
                         };
@@ -3368,13 +3368,16 @@ fn to_undefined_type(typ: &CoreType, loc: LocIdx, arena: &mut ParseArena) -> Cor
     let longident = arena.push_longident(Longident::Lident(undefined_str));
 
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: longident,
                 loc,
             },
-            vec![arena.push_core_type(typ.clone())],
-        ))),
+            {
+                let items = [arena.push_core_type(typ.clone())];
+                arena.push_type_list(&items)
+            },
+        )),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -4490,13 +4493,13 @@ fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType
         _ => arena.push_lident_static(type_name),
     };
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: lid_idx,
                 loc: none_loc,
             },
-            vec![],
-        ))),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -4746,13 +4749,13 @@ fn handle_debugger(
     // Create "unit" type
     let unit_ident = arena.push_lident_static("unit");
     let unit_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: unit_ident,
                 loc: none_loc,
             },
-            vec![],
-        ))),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -6229,22 +6232,22 @@ fn rewrite_core_type_default(typ: &CoreType, arena: &mut ParseArena) -> CoreType
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
             let mut rewritten_types = Vec::with_capacity(types.len());
-            for t in types.iter() {
+            for t in arena.type_list(*types).to_vec().iter() {
                 let ct = arena.get_core_type(*t).clone();
                 let rw = rewrite_core_type(&ct, arena);
                 rewritten_types.push(arena.push_core_type(rw));
             }
-            CoreTypeDesc::Ptyp_tuple(Box::new(rewritten_types))
+            CoreTypeDesc::Ptyp_tuple(arena.push_type_list(&rewritten_types))
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             let mut rewritten_args = Vec::with_capacity(args.len());
-            for t in args.iter() {
+            for t in arena.type_list(*args).to_vec().iter() {
                 let ct = arena.get_core_type(*t).clone();
                 let rw = rewrite_core_type(&ct, arena);
                 rewritten_args.push(arena.push_core_type(rw));
             }
-            CoreTypeDesc::Ptyp_constr(Box::new((*lid, rewritten_args)))
+            CoreTypeDesc::Ptyp_constr((*lid, arena.push_type_list(&rewritten_args)))
         }
         CoreTypeDesc::Ptyp_alias(alias_inner) => {
             let (ref ct_idx, ref name) = **alias_inner;
@@ -6344,13 +6347,16 @@ fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
             let callback_arity =
                 arena.push_ldot_tracked(callback, format!("arity{arity_num}").as_str());
             return CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                     Located {
                         txt: callback_arity,
                         loc: typ.ptyp_loc,
                     },
-                    vec![arena.push_core_type(meth_type)],
-                ))),
+                    {
+                        let items = [arena.push_core_type(meth_type)];
+                        arena.push_type_list(&items)
+                    },
+                )),
                 // OCaml's Ast_helper.Typ.constr default location is Location.none (ghost).
                 ptyp_loc: arena.none_loc(),
                 ptyp_attributes: Attributes::new(),
@@ -7061,17 +7067,20 @@ fn rewrite_method_callback_expression(
     };
 
     let callback_any_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: callback_arity,
                 loc,
             },
-            vec![arena.push_core_type(CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_any,
-                ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
-            })],
-        ))),
+            {
+                let items = [arena.push_core_type(CoreType {
+                    ptyp_desc: CoreTypeDesc::Ptyp_any,
+                    ptyp_loc: loc,
+                    ptyp_attributes: Attributes::new(),
+                })];
+                arena.push_type_list(&items)
+            },
+        )),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -7547,10 +7556,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             };
             let regexp_t = arena.regexp_t_lident();
             let regexp_type = CoreType {
-                ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+                ptyp_desc: CoreTypeDesc::Ptyp_constr((
                     Located { txt: regexp_t, loc },
-                    vec![],
-                ))),
+                    crate::parse_arena::ArenaList::EMPTY,
+                )),
                 ptyp_loc: loc,
                 ptyp_attributes: Attributes::new(),
             };
@@ -8836,13 +8845,13 @@ fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena)
 
     if tdcl.ptype_params.is_empty() {
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                 Located {
                     txt: name_lid,
                     loc: name_loc,
                 },
-                vec![],
-            ))),
+                crate::parse_arena::ArenaList::EMPTY,
+            )),
             ptyp_loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -8854,13 +8863,13 @@ fn core_type_of_type_declaration(tdcl: &TypeDeclaration, arena: &mut ParseArena)
             .map(|(core_type, _)| *core_type)
             .collect();
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                 Located {
                     txt: name_lid,
                     loc: name_loc,
                 },
-                type_args,
-            ))),
+                arena.push_type_list(&type_args),
+            )),
             ptyp_loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -9714,13 +9723,13 @@ fn generate_js_converter_polyvar(
     let none_loc = arena.none_loc();
     let string_name = arena.push_string("string".to_string());
     let string_type = CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: arena.push_longident(Longident::Lident(string_name)),
                 loc: none_loc,
             },
-            vec![],
-        ))),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: Attributes::new(),
     };
@@ -9740,13 +9749,13 @@ fn generate_js_converter_polyvar(
     } else {
         let core_type_sig_idx = arena.push_core_type(core_type_signature.clone());
         CoreType {
-            ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+            ptyp_desc: CoreTypeDesc::Ptyp_constr((
                 Located {
                     txt: arena.predef_option_lident(),
                     loc: none_loc,
                 },
-                vec![core_type_sig_idx],
-            ))),
+                arena.push_type_list(&[core_type_sig_idx]),
+            )),
             ptyp_loc: none_loc,
             ptyp_attributes: Attributes::new(),
         }
@@ -10291,13 +10300,13 @@ fn create_new_type_ref(
     let type_args: Vec<CoreTypeIdx> = tdcl.ptype_params.iter().map(|(ct, _)| *ct).collect();
 
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: arena.push_longident(Longident::Lident(new_name_idx)),
                 loc: tdcl.ptype_name.loc,
             },
-            type_args,
-        ))),
+            arena.push_type_list(&type_args),
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -11393,13 +11402,16 @@ fn lift_option_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     // predef_option = Ldot(Lident "*predef*", "option")
     let ptyp_loc = typ.ptyp_loc;
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: arena.predef_option_lident(),
                 loc: ptyp_loc,
             },
-            vec![arena.push_core_type(typ.clone())],
-        ))),
+            {
+                let items = [arena.push_core_type(typ.clone())];
+                arena.push_type_list(&items)
+            },
+        )),
         ptyp_loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -11475,13 +11487,13 @@ fn make_unit_type(arena: &mut ParseArena) -> CoreType {
     let none_loc = arena.none_loc();
     let unit_ident = arena.push_lident_static("unit");
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: unit_ident,
                 loc: none_loc,
             },
-            vec![],
-        ))),
+            crate::parse_arena::ArenaList::EMPTY,
+        )),
         ptyp_loc: none_loc,
         ptyp_attributes: Attributes::new(),
     }
@@ -12102,13 +12114,13 @@ fn core_type_of_type_declaration_with_attrs(
         .collect();
 
     CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: CoreTypeDesc::Ptyp_constr((
             Located {
                 txt: name_lid,
                 loc: name_loc,
             },
-            type_args,
-        ))),
+            arena.push_type_list(&type_args),
+        )),
         ptyp_loc: none_loc,
         // Include the type declaration's attributes (which has @deriving)
         ptyp_attributes: tdcl.ptype_attributes.clone(),

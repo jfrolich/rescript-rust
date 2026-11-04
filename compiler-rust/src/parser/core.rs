@@ -1027,12 +1027,12 @@ pub mod ast_helper {
     /// This matches OCaml's behavior.
     pub fn make_type_constr(
         lid_idx: crate::parse_arena::LidentIdx,
-        args: Vec<CoreTypeIdx>,
+        args: crate::parse_arena::TypeList,
         lid_loc: Location,
         ptyp_loc: Location,
     ) -> CoreType {
         make_typ(
-            CoreTypeDesc::Ptyp_constr(Box::new((with_loc(lid_idx, lid_loc), args))),
+            CoreTypeDesc::Ptyp_constr((with_loc(lid_idx, lid_loc), args)),
             ptyp_loc,
         )
     }

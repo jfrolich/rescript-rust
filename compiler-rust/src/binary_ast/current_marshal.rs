@@ -932,7 +932,7 @@ impl Marshal for CoreType {
         // OCaml's Ast_literal.No_loc simple core_types are module-level constants.
         // Share only those dedicated lidents to avoid value-based over-sharing.
         if let CoreTypeDesc::Ptyp_constr(inner) = &self.ptyp_desc {
-            let (ref lid, ref types) = **inner;
+            let (ref lid, ref types) = *inner;
             let should_share_simple_type = self.ptyp_attributes.is_empty()
                 && types.is_empty()
                 && is_none_loc_idx(self.ptyp_loc, w)
@@ -1035,7 +1035,7 @@ impl Marshal for CoreTypeDesc {
                 types.marshal(w);
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (ref lid, ref types) = **inner;
+                let (ref lid, ref types) = *inner;
                 w.write_block_header(3, 2);
                 lid.marshal(w);
                 types.marshal(w);

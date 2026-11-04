@@ -2855,20 +2855,20 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             f.close_box();
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
-            print_type_tuple(f, arena, types);
+            print_type_tuple(f, arena, arena.type_list(*types));
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref lid, ref args) = **inner;
+            let (ref lid, ref args) = *inner;
             // OCaml: | [x] -> pp f "%a@;" (core_type1 ctxt) x
             //        | _ -> list ~first:"(" ~last:")@;" (core_type ctxt) ~sep:",@;" f l
             if !args.is_empty() {
                 if args.len() == 1 {
                     // Single arg uses core_type1 (no extra Box wrapping)
-                    print_core_type_inner(f, arena, arena.get_core_type(args[0]));
+                    print_core_type_inner(f, arena, arena.get_core_type(arena.type_list(*args)[0]));
                     f.space(); // @;
                 } else {
                     f.string("(");
-                    for (i, t) in args.iter().enumerate() {
+                    for (i, t) in arena.type_list(*args).iter().enumerate() {
                         if i > 0 {
                             f.string(",");
                             f.space(); // ,@;
@@ -3017,9 +3017,9 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
                                         [t] => print_core_type(f, arena, arena.get_core_type(*t)),
                                         types => {
                                             let tuple = arena.push_shared_core_type(CoreType {
-                                                ptyp_desc: CoreTypeDesc::Ptyp_tuple(Box::new(
-                                                    types.to_vec(),
-                                                )),
+                                                ptyp_desc: CoreTypeDesc::Ptyp_tuple(
+                                                    arena.push_shared_type_list(types),
+                                                ),
                                                 ptyp_loc: group.loc,
                                                 ptyp_attributes: Attributes::new(),
                                             });

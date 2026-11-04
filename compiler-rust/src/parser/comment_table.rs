@@ -3235,7 +3235,7 @@ fn walk_core_type(
             t.attach_trailing(ct.ptyp_loc, trailing, arena);
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref name, ref args) = **inner;
+            let (ref name, ref args) = *inner;
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
@@ -3246,7 +3246,7 @@ fn walk_core_type(
                 t.attach_trailing(name.loc, after_name, arena);
 
                 visit_list_but_continue_with_remaining_comments(
-                    args,
+                    &arena.type_list(*args).to_vec(),
                     |arg, arena| arena.get_core_type(*arg).ptyp_loc,
                     |arg, t, comments, arena| {
                         // Safety: arena is append-only, core type won't be invalidated
@@ -3288,7 +3288,11 @@ fn walk_core_type(
             t.attach_trailing(return_type.ptyp_loc, after_ret, arena);
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
-            let nodes: Vec<Node<'_>> = types.iter().map(|ty| Node::CoreTypeIdx(*ty)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .type_list(*types)
+                .iter()
+                .map(|ty| Node::CoreTypeIdx(*ty))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_object(inner) => {

@@ -67,13 +67,13 @@ fn transl_label_type(
         return transl_decl_arg_type(tctx, env, typ, closed);
     }
     let option_typ = crate::parser::ast::CoreType {
-        ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_constr(Box::new((
+        ptyp_desc: crate::parser::ast::CoreTypeDesc::Ptyp_constr((
             crate::parse_arena::Located {
                 txt: arena.option_lid(),
                 loc: typ.ptyp_loc,
             },
-            vec![label.pld_type],
-        ))),
+            arena.push_shared_type_list(&[label.pld_type]),
+        )),
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: typ.ptyp_attributes.clone(),
     };
@@ -8558,12 +8558,14 @@ fn with_type_subst_replacement_is_same_arg_alias(
     let CoreTypeDesc::Ptyp_constr(inner) = &manifest.ptyp_desc else {
         return false;
     };
-    let (_, args) = &**inner;
+    let (_, args) = &*inner;
     if args.len() != decl.ptype_params.len() {
         return false;
     }
 
-    args.iter()
+    arena
+        .type_list(*args)
+        .iter()
         .zip(decl.ptype_params.iter())
         .all(|(arg_idx, (param_idx, _))| {
             let arg = arena.get_core_type(*arg_idx);

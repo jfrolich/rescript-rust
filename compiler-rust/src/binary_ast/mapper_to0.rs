@@ -624,14 +624,24 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_core_type_idx(*ret_idx)),
                 )
             }
-            current::CoreTypeDesc::Ptyp_tuple(types) => {
-                pt0::CoreTypeDesc::Tuple(types.iter().map(|t| self.map_core_type_idx(*t)).collect())
-            }
+            current::CoreTypeDesc::Ptyp_tuple(types) => pt0::CoreTypeDesc::Tuple(
+                self.arena
+                    .type_list(*types)
+                    .to_vec()
+                    .iter()
+                    .map(|t| self.map_core_type_idx(*t))
+                    .collect(),
+            ),
             current::CoreTypeDesc::Ptyp_constr(inner) => {
-                let (ref lid, ref types) = **inner;
+                let (ref lid, ref types) = *inner;
                 pt0::CoreTypeDesc::Constr(
                     self.map_longident_loc(lid),
-                    types.iter().map(|t| self.map_core_type_idx(*t)).collect(),
+                    self.arena
+                        .type_list(*types)
+                        .to_vec()
+                        .iter()
+                        .map(|t| self.map_core_type_idx(*t))
+                        .collect(),
                 )
             }
             current::CoreTypeDesc::Ptyp_object(inner) => {

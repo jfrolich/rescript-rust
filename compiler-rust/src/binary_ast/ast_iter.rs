@@ -132,12 +132,12 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
             v.typ(arena, *ret);
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
-            for t in types.iter() {
+            for t in arena.type_list(*types).iter() {
                 v.typ(arena, *t);
             }
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            for t in inner.1.iter() {
+            for t in arena.type_list(inner.1).iter() {
                 v.typ(arena, *t);
             }
         }
