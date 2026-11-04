@@ -425,7 +425,14 @@ fn generate_ast(
     let mut result = parse_saved_source(&source, locations);
     // The first pass reports nothing with invented positions. Parse failures
     // and frontend warnings are regenerated against the exact same bytes.
-    if !locations && (result.as_ref().map_or(true, |(stderr, _, _)| stderr.is_some())) {
+    // A unit whose generated code embeds source coordinates (`__LOC__`,
+    // `assert`, `module rec`) is parsed with locations now, rather than type
+    // checked location-free and then compiled again.
+    if !locations
+        && result.as_ref().map_or(true, |(stderr, ast, _)| {
+            stderr.is_some() || ast.arena().locations_required()
+        })
+    {
         result = parse_saved_source(&source, true);
     }
     let (stderr, mut stored_ast, deps) =

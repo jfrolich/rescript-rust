@@ -586,6 +586,14 @@ impl<'src> Parser<'src> {
                     // Continue to next token
                 }
                 _ => {
+                    // Source constructs whose generated code embeds source
+                    // coordinates (`__LOC__` and friends, `assert`): a
+                    // location-free arena records that this unit needs a
+                    // located parse, so the driver can reparse it before
+                    // type checking instead of type checking it twice.
+                    if !self.arena.stores_locations() && needs_semantic_coordinates(&result.token) {
+                        self.arena.require_locations();
+                    }
                     self.token = result.token;
                     self.prev_end_pos = prev_end;
                     self.start_pos = result.start_pos;
@@ -932,6 +940,21 @@ impl<'src> Parser<'src> {
     }
 }
 
+/// Tokens whose translation reads source coordinates (`Translcore`'s
+/// `__LOC__`/`__LINE__`/`__POS__` constants and `Assert_failure` payloads).
+/// Qualified forms (`Pervasives.__LOC__`) are still caught by the converter's
+/// `require_locations` fallback.
+fn needs_semantic_coordinates(token: &Token<'_>) -> bool {
+    match token {
+        Token::Assert => true,
+        Token::Lident(name) => matches!(
+            name.as_ref(),
+            "__LOC__" | "__LINE__" | "__POS__" | "__LOC_OF__" | "__LINE_OF__" | "__POS_OF__"
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,6 +1028,31 @@ mod tests {
             syntax
         };
         assert_eq!(parse(false), parse(true));
+    }
+
+    #[test]
+    fn location_free_parser_flags_units_whose_output_embeds_coordinates() {
+        let flagged = |source: &str| {
+            let source = source.to_string();
+            std::thread::spawn(move || {
+                let mut parser = Parser::with_locations("flags.res", &source, false);
+                let _ = crate::parser::module::parse_structure(&mut parser);
+                assert!(parser.diagnostics.is_empty(), "{source}");
+                parser.arena().locations_required()
+            })
+            .join()
+            .unwrap()
+        };
+        assert!(!flagged("let x = 1\nlet f = y => y + x\nlet loc = \"__LOC__\""));
+        assert!(flagged("let here = __LOC__"));
+        assert!(flagged("let line = __LINE__"));
+        assert!(flagged("let pos = __POS__"));
+        assert!(flagged("let check = x => assert(x > 0)"));
+        assert!(flagged("module rec A: {let v: int} = {let v = 1}"));
+        // A located parse never needs a retry.
+        let mut located = Parser::with_locations("flags.res", "let here = __LOC__", true);
+        let _ = crate::parser::module::parse_structure(&mut located);
+        assert!(!located.arena().locations_required());
     }
 
     #[test]

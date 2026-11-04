@@ -3655,6 +3655,11 @@ fn parse_module_definition(
 
     // Check for rec
     let rec_flag = if p.token == Token::Rec {
+        // Recursive-module initialization embeds the module's source
+        // position (`Transl_recmodule.init_shape`); see `Parser::next`.
+        if !p.arena().stores_locations() {
+            p.arena().require_locations();
+        }
         p.next();
         RecFlag::Recursive
     } else {
