@@ -141,7 +141,7 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
     );
     compiler.cmj_lambda_cache.insert(
         module.name().to_string(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".to_string(),
             external,
         )]))),
@@ -192,7 +192,7 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
     attr.async_ = true;
     compiler.cmj_lambda_cache.insert(
         module.name().to_string(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".to_string(),
             Lambda::function_(
                 1,

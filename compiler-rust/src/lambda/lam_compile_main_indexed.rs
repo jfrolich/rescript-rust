@@ -1680,13 +1680,13 @@ mod tests {
                 superseded_nodes: 20,
                 hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1760,
-                side_payload_shallow_capacity_bytes: 3040,
+                side_payload_shallow_occupied_bytes: 1440,
+                side_payload_shallow_capacity_bytes: 2528,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 56,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 1704,
+                superseded_unreachable_side_payload_shallow_bytes: 1384,
             }
         );
     }
@@ -2370,13 +2370,13 @@ mod tests {
                 superseded_nodes: 11,
                 hot_node_occupied_bytes: 88,
                 hot_node_capacity_bytes: 128,
-                side_payload_shallow_occupied_bytes: 1416,
-                side_payload_shallow_capacity_bytes: 2304,
+                side_payload_shallow_occupied_bytes: 1096,
+                side_payload_shallow_capacity_bytes: 1792,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 1416,
+                superseded_unreachable_side_payload_shallow_bytes: 1096,
             }
         );
     }

@@ -748,13 +748,13 @@ mod tests {
                 superseded_nodes: 12,
                 hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1420,
-                side_payload_shallow_capacity_bytes: 1920,
+                side_payload_shallow_occupied_bytes: 1036,
+                side_payload_shallow_capacity_bytes: 1408,
                 nested_heap_bytes_included: false,
-                current_live_side_payload_shallow_bytes: 464,
+                current_live_side_payload_shallow_bytes: 368,
                 backend_retained_only_side_payload_shallow_bytes: 0,
-                metadata_retained_only_side_payload_shallow_bytes: 120,
-                superseded_unreachable_side_payload_shallow_bytes: 836,
+                metadata_retained_only_side_payload_shallow_bytes: 88,
+                superseded_unreachable_side_payload_shallow_bytes: 580,
             }
         );
     }
