@@ -526,7 +526,9 @@ pub struct ParseArena {
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
     /// conversion. Parser-created current parsetrees use this table as the
     /// authoritative `Pexp_fun.params` representation.
-    nary_fun_params_by_first_pattern: HashMap<PatIdx, Box<[FunParam]>>,
+    nary_fun_params_by_first_pattern: HashMap<PatIdx, ArenaList<FunParam>>,
+    /// Pool behind `nary_fun_params_by_first_pattern`.
+    nary_fun_param_lists: ListPool<FunParam>,
     nary_fun_unknown_arity_by_first_pattern: HashMap<PatIdx, ArityIdx>,
     /// Optional-default lowering prepared before type checking.
     ///
@@ -545,7 +547,9 @@ pub struct ParseArena {
     /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
     /// the type-parameter group's attributes on the group's first newtype.
     nary_fun_newtypes_by_first_pattern: HashMap<PatIdx, Box<[(StringLoc, Attributes)]>>,
-    nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
+    nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, ArenaList<crate::parser::ast::TypeArg>>,
+    /// Pool behind `nary_arrow_args_by_first_type`.
+    nary_arrow_arg_lists: ListPool<crate::parser::ast::TypeArg>,
     /// Sparse current-Parsetree value constraints keyed by the binding pattern.
     value_constraints_by_pattern: HashMap<PatIdx, ValueConstraint>,
     /// Bindings whose `Ast_helper.Typ.varify_constructors` raises
@@ -992,11 +996,13 @@ impl Default for ParseArena {
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
+            nary_fun_param_lists: ListPool::default(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
             interval_ghost_locs: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
+            nary_arrow_arg_lists: ListPool::default(),
             value_constraints_by_pattern: HashMap::new(),
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
@@ -2729,8 +2735,8 @@ impl ParseArena {
         args: Vec<crate::parser::ast::TypeArg>,
     ) {
         let first_type = args.first().expect("Ptyp_arrow has arguments").typ;
-        self.nary_arrow_args_by_first_type
-            .insert(first_type, args.into_boxed_slice());
+        let list = self.nary_arrow_arg_lists.push(&args);
+        self.nary_arrow_args_by_first_type.insert(first_type, list);
     }
 
     /// The n-ary parameters recorded for an arrow whose first parameter is
@@ -2741,7 +2747,7 @@ impl ParseArena {
     ) -> Option<&[crate::parser::ast::TypeArg]> {
         self.nary_arrow_args_by_first_type
             .get(&arg.typ)
-            .map(|args| &args[..])
+            .map(|args| self.nary_arrow_arg_lists.get(*args))
     }
 
     pub fn nary_arrow_args<'a>(
@@ -2751,7 +2757,7 @@ impl ParseArena {
     ) -> std::borrow::Cow<'a, [crate::parser::ast::TypeArg]> {
         let _ = arity;
         if let Some(args) = self.nary_arrow_args_by_first_type.get(&arg.typ) {
-            std::borrow::Cow::Borrowed(&args[..])
+            std::borrow::Cow::Borrowed(self.nary_arrow_arg_lists.get(*args))
         } else {
             std::borrow::Cow::Owned(vec![arg.clone()])
         }
@@ -2824,8 +2830,9 @@ impl ParseArena {
     ) {
         debug_assert!(!params.is_empty());
         let first_pattern = params[0].p_pat;
+        let list = self.nary_fun_param_lists.push(&params);
         self.nary_fun_params_by_first_pattern
-            .insert(first_pattern, params.into_boxed_slice());
+            .insert(first_pattern, list);
         self.nary_fun_unknown_arity_by_first_pattern
             .insert(first_pattern, unknown_arity);
         let _ = arity;
@@ -2938,7 +2945,7 @@ impl ParseArena {
     pub fn stored_nary_fun_params(&self, fun: &crate::parser::ast::PexpFun) -> Option<&[FunParam]> {
         self.nary_fun_params_by_first_pattern
             .get(&fun.lhs)
-            .map(|params| &params[..])
+            .map(|params| self.nary_fun_param_lists.get(*params))
     }
 
     /// Store the authoritative `Pexp_fun.newtypes` list for a parser-created function.
@@ -2969,7 +2976,7 @@ impl ParseArena {
         if self.get_arity(fun.arity).is_some()
             && let Some(params) = self.nary_fun_params_by_first_pattern.get(&fun.lhs)
         {
-            std::borrow::Cow::Borrowed(params)
+            std::borrow::Cow::Borrowed(self.nary_fun_param_lists.get(*params))
         } else {
             let mut params = vec![FunParam {
                 p_attrs: self.get_pat(fun.lhs).ppat_attributes.clone(),
