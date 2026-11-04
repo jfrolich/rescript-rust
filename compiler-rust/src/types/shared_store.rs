@@ -57,6 +57,9 @@ pub(crate) struct SharedGraph {
     base: u32,
     nodes: Box<[SharedTypeNode]>,
     layouts: Box<[Layout]>,
+    /// Locations of the graph's declarations and type labels
+    /// (`DeclLocKind::Shared` handles naming this graph by `base`).
+    locations: Box<[crate::location::Location]>,
 }
 
 /// Internalization slot of one portable dependency signature.
@@ -72,6 +75,19 @@ struct PersSlot {
 /// go through the pool.
 pub(crate) type SharedPages = Arc<[OnceLock<Arc<SharedGraph>>]>;
 
+/// Location `index` of the graph published at `base`.
+pub(crate) fn page_location(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    base: u32,
+    index: usize,
+) -> crate::location::Location {
+    let graph = pages[(base >> PAGE_BITS) as usize]
+        .get()
+        .expect("shared declaration location refers to an unpublished graph");
+    assert_eq!(graph.base, base, "shared declaration location names no graph");
+    graph.locations[index]
+}
+
 /// Resolve shared node `idx` through a page table.
 #[inline]
 pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &SharedTypeNode {
@@ -80,6 +96,14 @@ pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &Shar
         .expect("shared type index refers to an unpublished page");
     &graph.nodes[(idx - graph.base) as usize]
 }
+
+/// Node descriptors with levels, variant layouts and locations of a graph
+/// being published.
+pub(crate) type SharedGraphParts = (
+    Vec<(TypeDesc, i32)>,
+    Vec<Layout>,
+    Vec<crate::location::Location>,
+);
 
 pub(crate) struct SharedTypePool {
     generation: u64,
@@ -141,15 +165,15 @@ impl SharedTypePool {
 
     /// Build and publish one graph. `build` receives the base index and
     /// returns the node descriptors (with levels) and layouts, which must
-    /// match the reserved sizes.
+    /// match the reserved sizes, and the graph's location table.
     pub(crate) fn publish(
         &self,
         nodes: usize,
         layouts: usize,
-        build: impl FnOnce(u32) -> (Vec<(TypeDesc, i32)>, Vec<Layout>),
+        build: impl FnOnce(u32) -> SharedGraphParts,
     ) -> Option<u32> {
         let (base, end) = self.reserve(nodes, layouts)?;
-        let (descs, built_layouts) = build(base);
+        let (descs, built_layouts, locations) = build(base);
         assert_eq!(descs.len(), nodes, "shared graph node count changed");
         assert_eq!(
             built_layouts.len(),
@@ -168,6 +192,7 @@ impl SharedTypePool {
                 })
                 .collect(),
             layouts: built_layouts.into_boxed_slice(),
+            locations: locations.into_boxed_slice(),
         });
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {
             let published = self.pages[page as usize].set(graph.clone());
@@ -258,11 +283,12 @@ mod tests {
                         (TypeDesc::Tnil, 9),
                     ],
                     Vec::new(),
+                    vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
                 )
             })
             .unwrap();
         let second = pool
-            .publish(1, 0, |_| (vec![(TypeDesc::Tnil, 1)], Vec::new()))
+            .publish(1, 0, |_| (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new()))
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);
         assert_ne!(base, second);
@@ -274,6 +300,10 @@ mod tests {
                 TypeDesc::Tvar(Some(_))
             ));
             assert!(reader.contains(base + 2));
+            assert_eq!(
+                page_location(&reader.pages(), base, 0),
+                crate::location::Location::in_file(StrIdx::from_raw(4))
+            );
             assert!(!reader.contains(base + 3));
             let r = shared_ref(base, 2);
             assert!(r.is_store() && r.is_shared());

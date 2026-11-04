@@ -1304,6 +1304,9 @@ mod tests {
                 format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ)
             );
         }
+        let ctx = crate::types::TypeContext::new(std::sync::Arc::new(
+            crate::context::IdGenerator::new(),
+        ));
         for ghost in [false, true] {
             let loc = Location {
                 loc_start: Position::new(StrIdx(17), 3, 21, 24),
@@ -1314,9 +1317,9 @@ mod tests {
             for optional in [false, true] {
                 let name = "long_owned_label_with_unicode_λ";
                 let label = if optional {
-                    ArgLabel::optional(name, loc)
+                    ArgLabel::optional(name, ctx.intern_loc(loc))
                 } else {
-                    ArgLabel::labelled(name, loc)
+                    ArgLabel::labelled(name, ctx.intern_loc(loc))
                 };
                 let expected_debug = format!("TypeArg {{ lbl: {:?}, typ: {:?} }}", label, typ);
                 let arg = TypeArg::new(label, typ);
@@ -1333,20 +1336,21 @@ mod tests {
                     _ => panic!("label kind changed"),
                 };
                 assert_eq!(payload.txt, name);
-                assert_eq!(payload.loc.loc_start.file_name, StrIdx(17));
-                assert_eq!(payload.loc.loc_start.line, 3);
-                assert_eq!(payload.loc.loc_start.bol, 21);
-                assert_eq!(payload.loc.loc_start.cnum, 24);
-                assert_eq!(payload.loc.loc_end.file_name, StrIdx(29));
-                assert_eq!(payload.loc.loc_end.line, 5);
-                assert_eq!(payload.loc.loc_end.bol, 44);
-                assert_eq!(payload.loc.loc_end.cnum, 49);
-                assert_eq!(payload.loc.loc_ghost, ghost);
+                let resolved = ctx.resolve_loc(payload.loc);
+                assert_eq!(resolved.loc_start.file_name, StrIdx(17));
+                assert_eq!(resolved.loc_start.line, 3);
+                assert_eq!(resolved.loc_start.bol, 21);
+                assert_eq!(resolved.loc_start.cnum, 24);
+                assert_eq!(resolved.loc_end.file_name, StrIdx(29));
+                assert_eq!(resolved.loc_end.line, 5);
+                assert_eq!(resolved.loc_end.bol, 44);
+                assert_eq!(resolved.loc_end.cnum, 49);
+                assert_eq!(resolved.loc_ghost, ghost);
                 match moved.label.as_deref_mut().unwrap() {
                     ArgLabel::Labelled(l) | ArgLabel::Optional(l) => {
                         assert_ne!(l.txt.as_ptr(), payload.txt.as_ptr());
                         l.txt.push_str("_changed");
-                        l.loc.loc_ghost = !ghost;
+                        l.loc = crate::types::DeclLoc::none();
                     }
                     _ => unreachable!(),
                 }
@@ -1523,7 +1527,7 @@ mod tests {
         let value = ValueDescription {
             val_type: cycle,
             val_kind: ValueKind::ValReg,
-            val_loc: crate::location::Location::none(),
+            val_loc: crate::types::DeclLoc::none(),
             val_attributes: vec![],
             val_path: None,
         };

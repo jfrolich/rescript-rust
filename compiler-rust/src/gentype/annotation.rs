@@ -609,7 +609,10 @@ fn warn_gentype_as_renaming_decl(loc: &Location) {
     );
 }
 
-pub fn check_unsupported_decl_gentype_as_renaming(attributes: &[crate::types::decl::Attribute]) {
+pub fn check_unsupported_decl_gentype_as_renaming(
+    locs: &dyn crate::types::DeclLocs,
+    attributes: &[crate::types::decl::Attribute],
+) {
     if let Some(attribute) = attributes
         .iter()
         .find(|attribute| tag_is_gentype_as(&attribute.attr_name.txt))
@@ -619,7 +622,7 @@ pub fn check_unsupported_decl_gentype_as_renaming(attributes: &[crate::types::de
                 .find(|attribute| tag_is_gentype(&attribute.attr_name.txt))
         })
     {
-        warn_gentype_as_renaming_decl(&attribute.attr_loc);
+        warn_gentype_as_renaming_decl(&locs.resolve_loc(attribute.attr_loc));
     }
 }
 

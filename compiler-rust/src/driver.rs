@@ -637,8 +637,8 @@ fn strip_saved_signature_locations(sig: &mut [crate::types::decl::SignatureItem]
     // `Subst.loc` and `Subst.attrs` (compiler/ml/subst.ml:57-67).
     struct Strip;
     impl SignatureLocationVisitor for Strip {
-        fn location(&mut self, loc: &mut crate::location::Location) {
-            *loc = crate::location::Location::none();
+        fn location(&mut self, loc: &mut crate::types::DeclLoc) {
+            *loc = crate::types::DeclLoc::none();
         }
         fn attribute(&mut self, attr: &mut Attribute) {
             self.location(&mut attr.attr_loc);
@@ -670,7 +670,7 @@ fn strip_saved_extension_locations(sig: &mut [crate::types::decl::SignatureItem]
     }
     for item in sig {
         match item {
-            SignatureItem::SigTypext(_, ext, _) => ext.ext_loc = crate::location::Location::none(),
+            SignatureItem::SigTypext(_, ext, _) => ext.ext_loc = crate::types::DeclLoc::none(),
             SignatureItem::SigModule(_, md, _) => module_type(&mut md.md_type),
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(mty) = &mut mtd.mtd_type {
@@ -11142,13 +11142,13 @@ fn report_compunit_inclusion_warnings(
 
 fn direct_compunit_error_location(
     error: &crate::types::includemod::IncludeModError,
-) -> Option<&Location> {
+) -> Option<crate::types::DeclLoc> {
     use crate::types::includemod::IncludeModError;
 
     match error {
-        IncludeModError::ValueTypeMismatch { actual, .. } => Some(&actual.val_loc),
-        IncludeModError::TypeDeclarationMismatch { actual, .. } => Some(&actual.type_loc),
-        IncludeModError::MissingField { loc, .. } => Some(loc),
+        IncludeModError::ValueTypeMismatch { actual, .. } => Some(actual.val_loc),
+        IncludeModError::TypeDeclarationMismatch { actual, .. } => Some(actual.type_loc),
+        IncludeModError::MissingField { loc, .. } => Some(*loc),
         IncludeModError::SignatureMismatch(errors) if errors.len() == 1 => {
             direct_compunit_error_location(&errors[0])
         }
@@ -11182,7 +11182,8 @@ fn format_compunit_mismatch_report(
     error: &crate::types::includemod::IncludeModError,
 ) -> String {
     let file_loc = Location::in_file(StrIdx::default());
-    let loc = direct_compunit_error_location(error).unwrap_or(&file_loc);
+    let loc = &direct_compunit_error_location(error)
+        .map_or(file_loc, |loc| type_ctx.resolve_loc(loc));
     let mut message = String::new();
     message.push_str("  The implementation ");
     message.push_str(impl_name);
@@ -11622,6 +11623,7 @@ pub fn typecheck_interface_source(
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
         &typed_signature,
         parser.arena(),
+        &type_ctx,
     );
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
@@ -14607,7 +14609,11 @@ pub fn typecheck_preprocessed_signature_in_process(
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type =
-        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
+        crate::types::typemod::decl_signature_from_typed_signature(
+            &typed_signature,
+            arena,
+            &type_ctx,
+        );
     let _ = crate::types::includemod::compunit(
         &type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
@@ -14657,7 +14663,11 @@ pub fn typecheck_preprocessed_signature_in_process(
         )?;
     }
     let decl_signature =
-        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
+        crate::types::typemod::decl_signature_from_typed_signature(
+            &typed_signature,
+            arena,
+            &type_ctx,
+        );
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
@@ -14800,7 +14810,7 @@ mod tests {
         let md = ModuleDeclaration {
             md_type: ModuleType::MtyAlias(AliasPresence::MtaAbsent, TypePath::pident(target_id)),
             md_attributes: vec![],
-            md_loc: Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         };
         let sig = vec![SignatureItem::SigModule(module_id, md, RecStatus::TrecNot)];

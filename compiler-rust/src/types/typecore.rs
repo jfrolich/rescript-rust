@@ -1353,6 +1353,18 @@ pub(crate) enum LetCheck {
 }
 
 impl<'a> TypeCheckContext<'a> {
+    /// `TypeContext::intern_loc`.
+    #[inline]
+    pub fn intern_loc(&self, loc: Location) -> crate::types::DeclLoc {
+        self.type_ctx.intern_loc(loc)
+    }
+
+    /// `TypeContext::resolve_loc`.
+    #[inline]
+    pub fn resolve_loc(&self, loc: crate::types::DeclLoc) -> Location {
+        self.type_ctx.resolve_loc(loc)
+    }
+
     /// Create a new type check context.
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
         type_ctx.register_arena_longident_names(arena);
@@ -2246,16 +2258,17 @@ pub fn convert_constant(
 fn convert_arg_label_for_ctx(
     lbl: &crate::parser::ast::ArgLabel,
     arena: &ParseArena,
+    ctx: &TypeContext,
 ) -> crate::types::ArgLabel {
     match lbl {
         crate::parser::ast::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
         crate::parser::ast::ArgLabel::Labelled(s) => crate::types::ArgLabel::labelled(
             arena.get_string(s.txt).to_string(),
-            arena.to_location(s.loc),
+            ctx.intern_loc(arena.to_location(s.loc)),
         ),
         crate::parser::ast::ArgLabel::Optional(s) => crate::types::ArgLabel::optional(
             arena.get_string(s.txt).to_string(),
-            arena.to_location(s.loc),
+            ctx.intern_loc(arena.to_location(s.loc)),
         ),
     }
 }
@@ -2860,7 +2873,7 @@ fn transl_type_inner(
                 if source_arg.lbl.is_optional() {
                     typ = ctx.new_constr(crate::types::predef::path_option(), vec![typ]);
                 }
-                let label = convert_arg_label_for_ctx(&source_arg.lbl, tctx.arena);
+                let label = convert_arg_label_for_ctx(&source_arg.lbl, tctx.arena, tctx.type_ctx);
                 type_args.push(TypeArg::new(label.clone(), typ));
                 typed_args.push(ArrowArg {
                     attrs: source_arg.attrs,
@@ -6305,7 +6318,7 @@ fn type_pattern_record(
                     lbl_all: crate::types::LabelArrayRef(0),
                     lbl_repres: crate::types::RecordRepresentation::RecordRegular,
                     lbl_private: crate::types::PrivateFlag::Public,
-                    lbl_loc: tctx.arena.to_location(field.lid.loc),
+                    lbl_loc: tctx.intern_loc(tctx.arena.to_location(field.lid.loc)),
                     lbl_attributes: vec![],
                 };
                 (label_desc, field_ty, Vec::new(), false)
@@ -7727,7 +7740,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             };
             // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
             let used_name = tctx.arena.get_string(longident.last_idx());
-            tctx.mark_value_used(env, used_name, desc.val_loc);
+            tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
             // typetexp.ml:117-123 via typecore.ml:2381-2388.
             let deprecated_context = if std::mem::take(&mut tctx.deprecated_function_call) {
                 crate::types::context::DeprecatedContext::FunctionCall
@@ -9182,11 +9195,11 @@ fn translate_unified_ops(
 
             let typed_args = vec![
                 ApplyArg {
-                    label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
+                    label: convert_arg_label_for_ctx(&args[0].0, tctx.arena, tctx.type_ctx),
                     expression: Some(lhs),
                 },
                 ApplyArg {
-                    label: convert_arg_label_for_ctx(&args[1].0, tctx.arena),
+                    label: convert_arg_label_for_ctx(&args[1].0, tctx.arena, tctx.type_ctx),
                     expression: Some(rhs),
                 },
             ];
@@ -9234,7 +9247,7 @@ fn translate_unified_ops(
             }
 
             let typed_args = vec![ApplyArg {
-                label: convert_arg_label_for_ctx(&args[0].0, tctx.arena),
+                label: convert_arg_label_for_ctx(&args[0].0, tctx.arena, tctx.type_ctx),
                 expression: Some(arg),
             }];
 
@@ -9668,6 +9681,7 @@ fn type_application(
         param_label: &crate::types::ArgLabel,
         call_label: &ArgLabel,
         arena: &ParseArena,
+        ctx: &TypeContext,
     ) -> crate::types::ArgLabel {
         match param_label {
             crate::types::ArgLabel::Nolabel => crate::types::ArgLabel::Nolabel,
@@ -9676,7 +9690,7 @@ fn type_application(
                 ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
                     crate::types::ArgLabel::labelled(
                         arena.get_string(loc.txt).to_string(),
-                        arena.to_location(loc.loc),
+                        ctx.intern_loc(arena.to_location(loc.loc)),
                     )
                 }
             },
@@ -9685,7 +9699,7 @@ fn type_application(
                 ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
                     crate::types::ArgLabel::optional(
                         arena.get_string(loc.txt).to_string(),
-                        arena.to_location(loc.loc),
+                        ctx.intern_loc(arena.to_location(loc.loc)),
                     )
                 }
             },
@@ -9773,7 +9787,7 @@ fn type_application(
             .iter()
             .map(|(label, _)| {
                 crate::types::TypeArg::new(
-                    convert_arg_label_for_ctx(label, tctx.arena),
+                    convert_arg_label_for_ctx(label, tctx.arena, tctx.type_ctx),
                     ctx.new_var(None),
                 )
             })
@@ -9910,7 +9924,7 @@ fn type_application(
                 )
             };
             argument_thunks.push(ApplyArgThunk::Provided {
-                label: apply_arg_label_for_param(param.label(), call_label, tctx.arena),
+                label: apply_arg_label_for_param(param.label(), call_label, tctx.arena, tctx.type_ctx),
                 expr: arg_expr,
                 expected_ty: expected_arg_ty,
                 unify_ty: unify_arg_ty,
@@ -10866,7 +10880,7 @@ fn add_pattern_variable_value(
     let desc = ValueDescription {
         val_type: pv.ty,
         val_kind: crate::types::ValueKind::ValReg,
-        val_loc: pv.loc,
+        val_loc: tctx.intern_loc(pv.loc),
         val_attributes: vec![],
         val_path: None,
     };
@@ -12550,7 +12564,7 @@ fn type_function_nary_with_newtypes(
                         type_manifest: None,
                         type_variance: vec![],
                         type_newtype_level: Some((level, level)),
-                        type_loc: convert_loc(loc, tctx.arena),
+                        type_loc: tctx.intern_loc(convert_loc(loc, tctx.arena)),
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::decl::TypeRepresentation::Boxed,
@@ -12667,7 +12681,7 @@ fn type_function_nary(
     let ctx = tctx.type_ctx;
     let labels = params
         .iter()
-        .map(|param| convert_arg_label_for_ctx(&param.p_lbl, tctx.arena))
+        .map(|param| convert_arg_label_for_ctx(&param.p_lbl, tctx.arena, tctx.type_ctx))
         .collect::<Vec<_>>();
 
     // compiler/ml/typecore.ml:3594-3613 checks labels against an existing
@@ -13062,7 +13076,7 @@ fn type_for(
             val_kind: crate::types::ValueKind::ValReg,
             // Match OCaml `type_for`: for-index value descriptions use the
             // enclosing `for` expression location.
-            val_loc,
+            val_loc: tctx.intern_loc(val_loc),
             val_attributes: vec![],
             val_path: None,
         };
@@ -13225,7 +13239,7 @@ fn type_for_of(
         let desc = ValueDescription {
             val_type: pv.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc,
+            val_loc: tctx.intern_loc(val_loc),
             val_attributes: vec![],
             val_path: None,
         };
@@ -15700,7 +15714,7 @@ fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
         }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        cstr_loc: crate::types::DeclLoc::none(),
         cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     }
@@ -15721,7 +15735,7 @@ fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
         }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        cstr_loc: crate::types::DeclLoc::none(),
         cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     }
@@ -16778,7 +16792,7 @@ fn type_newtype(
                 type_manifest: None,
                 type_variance: vec![],
                 type_newtype_level: Some((level, level)),
-                type_loc: convert_loc(loc, tctx.arena),
+                type_loc: tctx.intern_loc(convert_loc(loc, tctx.arena)),
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::decl::TypeRepresentation::Boxed,
@@ -17266,7 +17280,7 @@ fn type_letexception(
                                 },
                                 ld_optional: label.pld_optional,
                                 ld_type: poly_ty_ref,
-                                ld_loc: arena.to_location(label.pld_loc),
+                                ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
                                 ld_attributes: vec![],
                             });
                         }
@@ -17284,7 +17298,7 @@ fn type_letexception(
                             type_manifest: None,
                             type_variance: vec![],
                             type_newtype_level: None,
-                            type_loc: crate::location::Location::none(),
+                            type_loc: crate::types::DeclLoc::none(),
                             type_attributes: vec![],
                             type_immediate: false,
                             type_representation: crate::types::TypeRepresentation::Boxed,
@@ -17355,7 +17369,7 @@ fn type_letexception(
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc = pext_loc`.
-        cstr_loc: arena.to_location(ext_constr.pext_loc),
+        cstr_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
         cstr_attributes: vec![],
         cstr_inlined: cstr_inlined.clone(),
     };
@@ -17390,7 +17404,7 @@ fn type_letexception(
             ext_args,
             ext_ret_type: ext_ret_ty,
             ext_private: crate::types::PrivateFlag::Public,
-            ext_loc: arena.to_location(ext_constr.pext_loc),
+            ext_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
             ext_attributes: vec![],
             ext_is_exception: true,
         },
@@ -17725,7 +17739,7 @@ pub(crate) fn find_type_for_lid(
             tctx.type_ctx,
             env,
             tctx.longident_last_name_str(longident),
-            decl.type_loc,
+            tctx.resolve_loc(decl.type_loc),
         );
     }
     let Some(decl) = type_decl else {
@@ -18192,7 +18206,7 @@ fn type_letmodule(
         let md_decl = crate::types::decl::ModuleDeclaration {
             md_type: mod_sig,
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         };
         body_env.add_module(mod_id, md_decl);
@@ -18516,7 +18530,7 @@ fn type_pack(
                 crate::types::decl::ModuleDeclaration {
                     md_type: typed_module.mod_type.clone(),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
             );
@@ -18775,7 +18789,7 @@ fn type_expect_with_module_unpacks(
     // `Env.lookup_value` marks the pattern variable used (env.ml:1169-1172).
     if let Ok(desc) = env.find_value(unpack.id.name()) {
         let val_loc = desc.val_loc;
-        tctx.mark_value_used(env, unpack.id.name(), val_loc);
+        tctx.mark_value_used(env, unpack.id.name(), tctx.resolve_loc(val_loc));
     }
     // Note: OCaml applies prefix_idents/Subst.signature here via lazy
     // components_of_module_maker, rewriting Pident paths to Pdot(Reducer, ...).
@@ -18790,7 +18804,7 @@ fn type_expect_with_module_unpacks(
         crate::types::decl::ModuleDeclaration {
             md_type: decl_mty.clone(),
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         },
     );
@@ -18819,7 +18833,7 @@ fn type_expect_with_module_unpacks(
         .unwrap_or(ValueDescription {
             val_type: unpack.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc: unpack.loc,
+            val_loc: tctx.intern_loc(unpack.loc),
             val_attributes: vec![],
             val_path: None,
         });
@@ -19161,7 +19175,7 @@ fn approx_type_for_rec_let(
                     } else {
                         ctx.new_var(None)
                     };
-                    TypeArg::new(convert_arg_label_for_ctx(&arg.lbl, tctx.arena), typ)
+                    TypeArg::new(convert_arg_label_for_ctx(&arg.lbl, tctx.arena, tctx.type_ctx), typ)
                 })
                 .collect();
             let ret = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*ret));
@@ -19231,7 +19245,7 @@ fn type_approx_for_rec_let(
                     } else {
                         ctx.new_var(None)
                     };
-                    TypeArg::new(convert_arg_label_for_ctx(&param.p_lbl, tctx.arena), typ)
+                    TypeArg::new(convert_arg_label_for_ctx(&param.p_lbl, tctx.arena, tctx.type_ctx), typ)
                 })
                 .collect();
             let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(body))?;
@@ -20427,7 +20441,7 @@ fn type_let_bindings(
                     let desc = ValueDescription {
                         val_type: pv.ty,
                         val_kind: crate::types::ValueKind::ValReg,
-                        val_loc: pv.loc,
+                        val_loc: tctx.intern_loc(pv.loc),
                         val_attributes: vec![],
                         val_path: None,
                     };
@@ -20699,7 +20713,7 @@ fn type_let_bindings(
                 let desc = ValueDescription {
                     val_type: pv.ty,
                     val_kind: crate::types::ValueKind::ValReg,
-                    val_loc: pv.loc,
+                    val_loc: tctx.intern_loc(pv.loc),
                     val_attributes: vec![],
                     val_path: None,
                 };
@@ -22725,7 +22739,7 @@ fn lookup_predef_option_constructor(
         }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
-        cstr_loc: crate::location::Location::none(),
+        cstr_loc: crate::types::DeclLoc::none(),
         cstr_attributes: vec![crate::types::decl::internal_optional_attr()],
         cstr_inlined: None,
     };
@@ -23769,7 +23783,7 @@ pub(crate) fn mark_constructor(
     };
     if let Some(loc) = loc {
         ctx.usage()
-            .mark_constructor_used(usage, path.last(), loc, name);
+            .mark_constructor_used(usage, path.last(), ctx.resolve_loc(loc), name);
     }
 }
 
@@ -23778,7 +23792,7 @@ pub(crate) fn mark_type_path(ctx: &crate::types::context::TypeContext, env: &Env
     let type_loc =
         crate::types::ctype::lookup_type_decl_for_path(ctx, env, path).map(|decl| decl.type_loc);
     if let Some(type_loc) = type_loc {
-        mark_type_used(ctx, env, path.last(), type_loc);
+        mark_type_used(ctx, env, path.last(), ctx.resolve_loc(type_loc));
     }
 }
 
@@ -24746,7 +24760,7 @@ fn lookup_label_by_expected_type(
     let (concrete_path, _actual_args, type_decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     // `lookup_from_type` marks the type used (typecore.ml:852-854).
-    mark_type_used(ctx, env, concrete_path.last(), type_decl.type_loc);
+    mark_type_used(ctx, env, concrete_path.last(), ctx.resolve_loc(type_decl.type_loc));
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
@@ -26498,7 +26512,7 @@ fn mark_module_lid_used(
         Longident::Lapply(_, _) => return None,
     };
     if !env.is_implicit_coercion() {
-        ctx.usage().mark_module_used(name, md.md_loc);
+        ctx.usage().mark_module_used(name, ctx.resolve_loc(md.md_loc));
     }
     if let Some((loc, deprecations)) = report.as_mut()
         && let Some(deprecated) = deprecated_of_decl_attrs(&md.md_attributes)

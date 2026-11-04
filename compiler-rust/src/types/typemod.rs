@@ -109,7 +109,7 @@ fn register_type_declaration_usage_checks(
 ) {
     for decl in decls.iter().rev() {
         let name = decl.typ_id.name();
-        tctx.check_type_usage(name, decl.typ_type.type_loc, decl.typ_loc);
+        tctx.check_type_usage(name, tctx.resolve_loc(decl.typ_type.type_loc), decl.typ_loc);
         if let crate::types::TypeKind::TypeVariant(constructors, _) = &decl.typ_type.type_kind {
             let names: Vec<String> = constructors
                 .iter()
@@ -117,7 +117,7 @@ fn register_type_declaration_usage_checks(
                 .collect();
             tctx.check_constructor_usages(
                 name,
-                decl.typ_type.type_loc,
+                tctx.resolve_loc(decl.typ_type.type_loc),
                 decl.typ_loc,
                 &names,
                 env.is_in_signature(),
@@ -277,8 +277,8 @@ fn fixed_row_placeholder_decl(
         type_manifest: None,
         type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
         type_newtype_level: None,
-        type_loc: arena.to_location(decl.ptype_loc),
-        type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
+        type_loc: ctx.intern_loc(arena.to_location(decl.ptype_loc)),
+        type_attributes: parser_attrs_to_decl_attrs(arena, ctx, &decl.ptype_attributes),
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
         type_inlined_types: vec![],
@@ -300,7 +300,7 @@ fn translate_fixed_row_type_declaration<'a>(
     tctx.type_variables = saved_type_variables;
     let (typ_params, internal_type_params) = result?;
 
-    let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+    let type_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
     let internal_decl = crate::types::TypeDeclaration {
         type_params: internal_type_params,
         type_arity: decl.ptype_params.len() as i32,
@@ -309,7 +309,7 @@ fn translate_fixed_row_type_declaration<'a>(
         type_manifest: None,
         type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
         type_newtype_level: None,
-        type_loc: arena.to_location(decl.ptype_loc),
+        type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
         type_attributes,
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
@@ -557,7 +557,7 @@ fn rebound_constructor_args(
         type_private: crate::types::PrivateFlag::Public,
         type_manifest: None,
         type_newtype_level: None,
-        type_loc: Location::none(),
+        type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
@@ -578,6 +578,7 @@ fn parser_private_to_type_private(
 
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext,
     attr: &ParsedAttribute,
 ) -> crate::types::decl::Attribute {
     let (name, payload) = attr;
@@ -587,13 +588,14 @@ fn parser_attr_to_decl_attr(
             if attr_name == "deprecated"
                 && let Some(payload) = parser_deprecated_payload_to_decl_payload(arena, items)
             {
+                let loc = ctx.intern_loc(arena.to_location(name.loc));
                 return crate::types::decl::Attribute {
                     attr_name: crate::types::asttypes::Located {
                         txt: attr_name.to_string(),
-                        loc: arena.to_location(name.loc),
+                        loc,
                     },
                     attr_payload: payload,
-                    attr_loc: arena.to_location(name.loc),
+                    attr_loc: loc,
                 };
             }
             // OCaml's Lambda.find_name: extract string from @as("name") payloads.
@@ -680,23 +682,25 @@ fn parser_attr_to_decl_attr(
         ParsedPayload::PTyp(_) => crate::types::decl::AttributePayload::Ident("<core_type>".into()),
         ParsedPayload::PPat(_) => crate::types::decl::AttributePayload::Ident("<pattern>".into()),
     };
+    let loc = ctx.intern_loc(arena.to_location(name.loc));
     crate::types::decl::Attribute {
         attr_name: crate::types::asttypes::Located {
             txt: arena.get_string(name.txt).to_string(),
-            loc: arena.to_location(name.loc),
+            loc,
         },
         attr_payload,
-        attr_loc: arena.to_location(name.loc),
+        attr_loc: loc,
     }
 }
 
 fn parser_attrs_to_decl_attrs(
     arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext,
     attrs: &Attributes,
 ) -> Vec<crate::types::decl::Attribute> {
     attrs
         .iter()
-        .map(|attr| parser_attr_to_decl_attr(arena, attr))
+        .map(|attr| parser_attr_to_decl_attr(arena, ctx, attr))
         .collect()
 }
 
@@ -2405,7 +2409,7 @@ fn nondep_mty(
                     crate::types::decl::ModuleDeclaration {
                         md_type: default_mty,
                         md_attributes: vec![],
-                        md_loc: Location::none(),
+                        md_loc: crate::types::DeclLoc::none(),
                         md_path: None,
                     },
                 );
@@ -3300,8 +3304,8 @@ fn make_typed_spread_label(
     // for both ld_name.loc and ld_loc (not the spread marker location).
     // `mk_lbl` (compiler/ml/record_type_spread.ml:110-121): `ld_loc = l.ld_loc`,
     // which for a label read from a `.cmi` may lie outside this file.
-    let source_loc = find_loc_idx_by_location(arena, &field.ld_loc).unwrap_or_else(|| {
-        arena.push_typecheck_location(&field.ld_loc, &|idx| {
+    let source_loc = find_loc_idx_by_location(arena, &ctx.resolve_loc(field.ld_loc)).unwrap_or_else(|| {
+        arena.push_typecheck_location(&ctx.resolve_loc(field.ld_loc), &|idx| {
             ctx.resolve_cmi_longident_component(idx)
         })
     });
@@ -3742,10 +3746,11 @@ impl From<TypeCoreError> for TypeModError {
 }
 
 fn check_value_name_for_env(
+    ctx: &crate::types::context::TypeContext,
     id: &Ident,
     desc: &crate::types::decl::ValueDescription,
 ) -> TypeModResult<()> {
-    crate::types::env::check_value_name(id.name(), desc.val_loc).map_err(|err| match err {
+    crate::types::env::check_value_name(id.name(), ctx.resolve_loc(desc.val_loc)).map_err(|err| match err {
         crate::types::env::EnvError::IllegalValueName(loc, name) => {
             TypeModError::IllegalValueName { loc, name }
         }
@@ -4868,7 +4873,7 @@ fn check_type_declaration_coherence(
             usage_tables.mark_constructor_used(
                 usage,
                 manifest_path.last(),
-                expected_decl.type_loc,
+                ctx.resolve_loc(expected_decl.type_loc),
                 cstr.cd_id.name(),
             );
         }
@@ -4876,7 +4881,7 @@ fn check_type_declaration_coherence(
             usage_tables.mark_constructor_used(
                 crate::types::usage::ConstructorUsage::Positive,
                 id.name(),
-                substituted_decl.type_loc,
+                ctx.resolve_loc(substituted_decl.type_loc),
                 cstr.cd_id.name(),
             );
         }
@@ -5117,7 +5122,7 @@ fn resolve_variant_spread_sources(
     cstrs: &[crate::parser::ast::ConstructorDeclaration],
 ) -> TypeModResult<Vec<Option<(Vec<crate::types::ConstructorDeclaration>, bool)>>> {
     let mut sources = Vec::new();
-    let target_type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+    let target_type_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
     let target_unboxed = has_decl_attr(&target_type_attributes, "unboxed");
     let mut all_constructor_names = HashSet::new();
     for cstr in cstrs.iter() {
@@ -5172,8 +5177,8 @@ fn resolve_variant_spread_sources(
                     // (variant_coercion.ml:237-240) reads the tag
                     // names only for a spread; the tuple is
                     // evaluated right to left (target first).
-                    let target_tag_name = process_variant_tag_name(&target_type_attributes)?;
-                    let source_tag_name = process_variant_tag_name(&source_decl.type_attributes)?;
+                    let target_tag_name = process_variant_tag_name(tctx.type_ctx, &target_type_attributes)?;
+                    let source_tag_name = process_variant_tag_name(tctx.type_ctx, &source_decl.type_attributes)?;
                     if source_tag_name != target_tag_name {
                         return Err(TypeModError::VariantSpreadTagMismatch { loc: spread_loc });
                     }
@@ -5257,7 +5262,7 @@ fn build_spread_constructor(
         Located::mknoloc(arena.constructor_from_spread_attr_str()),
         crate::parser::ast::Payload::PStr(Box::default()),
     );
-    let source_cd_loc = find_existing_loc_idx(arena, &source_cstr.cd_loc).unwrap_or(cstr.pcd_loc);
+    let source_cd_loc = find_existing_loc_idx(arena, &ctx.resolve_loc(source_cstr.cd_loc)).unwrap_or(cstr.pcd_loc);
     // Use actual types from the source constructor (like OCaml's typedecl.ml lines 523-530)
     // ctyp_desc = Ttyp_var(None) acts as Ttyp_any placeholder, ctyp_type = real type from source
     let (sc_args, sc_internal_cd_args, sc_typed_tree_cd_args, sc_inlined_labels) =
@@ -5320,7 +5325,7 @@ fn build_spread_constructor(
                     .iter()
                     .map(|l| {
                         let label_loc =
-                            find_existing_loc_idx(arena, &l.ld_loc).unwrap_or(source_cd_loc);
+                            find_existing_loc_idx(arena, &ctx.resolve_loc(l.ld_loc)).unwrap_or(source_cd_loc);
                         TypedLabelDeclaration {
                             ld_id: l.ld_id,
                             ld_name: crate::parse_arena::Located {
@@ -5808,6 +5813,7 @@ pub(crate) fn process_constructor_tag(
 }
 
 fn process_variant_tag_name(
+    ctx: &crate::types::context::TypeContext,
     attrs: &[crate::types::decl::Attribute],
 ) -> TypeModResult<Option<String>> {
     let mut tag_name = None;
@@ -5817,7 +5823,7 @@ fn process_variant_tag_name(
         }
         if tag_name.is_some() {
             return Err(ast_untagged_variant_error(
-                attr.attr_name.loc,
+                ctx.resolve_loc(attr.attr_name.loc),
                 AstUntaggedVariantError::DuplicatedBsAs,
             ));
         }
@@ -5826,7 +5832,7 @@ fn process_variant_tag_name(
         }
         if tag_name.is_none() {
             return Err(ast_untagged_variant_error(
-                attr.attr_name.loc,
+                ctx.resolve_loc(attr.attr_name.loc),
                 AstUntaggedVariantError::InvalidVariantTagAnnotation,
             ));
         }
@@ -5835,11 +5841,12 @@ fn process_variant_tag_name(
 }
 
 fn check_variant_tag_field_conflicts(
+    ctx: &crate::types::context::TypeContext,
     constructors: &[crate::types::decl::ConstructorDeclaration],
 ) -> TypeModResult<()> {
     for constructor in constructors {
         let constructor_name = constructor.cd_id.name().to_string();
-        let effective_tag_name = process_variant_tag_name(&constructor.cd_attributes)?
+        let effective_tag_name = process_variant_tag_name(ctx, &constructor.cd_attributes)?
             .unwrap_or_else(|| constructor_name.clone());
         let crate::types::decl::ConstructorArguments::CstrRecord(fields) = &constructor.cd_args
         else {
@@ -5851,7 +5858,7 @@ fn check_variant_tag_field_conflicts(
             let effective_field_name = field.declaration_name();
             if effective_field_name == effective_tag_name {
                 return Err(ast_untagged_variant_error(
-                    constructor.cd_loc,
+                    ctx.resolve_loc(constructor.cd_loc),
                     AstUntaggedVariantError::TagFieldNameConflict {
                         constructor_name,
                         field_name,
@@ -5960,7 +5967,7 @@ fn get_untagged_constructor_block_type(
         && args.len() > 1
     {
         return Err(TypeModError::InvalidUntaggedVariantDefinition {
-            loc: constructor.cd_loc,
+            loc: ctx.resolve_loc(constructor.cd_loc),
             reason: format!(
                 "Constructor {} has more than one argument.",
                 constructor.cd_id.name()
@@ -6043,7 +6050,7 @@ fn check_variant_well_formed(
     constructors: &[crate::types::decl::ConstructorDeclaration],
     is_untagged_def: bool,
 ) -> TypeModResult<()> {
-    check_variant_tag_field_conflicts(constructors)?;
+    check_variant_tag_field_conflicts(ctx, constructors)?;
 
     let mut consts = Vec::new();
     let mut blocks = Vec::new();
@@ -6066,7 +6073,7 @@ fn check_variant_well_formed(
     let mut nonstring_literals_consts = HashSet::default();
     for (loc, name, tag) in &consts {
         add_variant_literal(
-            loc,
+            &ctx.resolve_loc(*loc),
             tag,
             name,
             &mut string_literals_consts,
@@ -6079,7 +6086,7 @@ fn check_variant_well_formed(
         let mut nonstring_literals_blocks = HashSet::default();
         for (loc, name, tag, _) in &blocks {
             add_variant_literal(
-                loc,
+                &ctx.resolve_loc(*loc),
                 tag,
                 name,
                 &mut string_literals_blocks,
@@ -6117,7 +6124,7 @@ fn check_variant_well_formed(
 
         if unknown_types != 0 && blocks.len() != 1 {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 format!(
                     "Case {name} has a payload that is not of one of the recognized shapes (object, array, etc). Then it must be the only case with payloads."
                 ),
@@ -6125,7 +6132,7 @@ fn check_variant_well_formed(
         }
         if object_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 "At most one case can be an object type.",
             ));
         }
@@ -6137,32 +6144,32 @@ fn check_variant_well_formed(
                     format!("a {instance}")
                 };
                 return Err(invalid_untagged_variant_definition(
-                    *loc,
+                    ctx.resolve_loc(*loc),
                     format!("At most one case can be {instance_description} type."),
                 ));
             }
         }
         if function_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 "At most one case can be a function type.",
             ));
         }
         if string_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 "At most one case can be a string type.",
             ));
         }
         if number_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 "At most one case can be a number type (int or float).",
             ));
         }
         if bigint_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 "At most one case can be a bigint type.",
             ));
         }
@@ -6172,7 +6179,7 @@ fn check_variant_well_formed(
                     || nonstring_literals_consts.contains("false")))
         {
             return Err(invalid_untagged_variant_definition(
-                *loc,
+                ctx.resolve_loc(*loc),
                 "At most one case can be a boolean type.",
             ));
         }
@@ -6241,7 +6248,7 @@ fn derive_variant_layout(
             cases.push(crate::types::VariantConstructorCase::Constant(tag));
         } else {
             // variant_layout.ml `get_block`.
-            let tag_name = process_variant_tag_name(&constructor.cd_attributes)?;
+            let tag_name = process_variant_tag_name(ctx, &constructor.cd_attributes)?;
             let block = match get_untagged_constructor_block_type(ctx, env, constructor)? {
                 Some(block_type) => crate::types::VariantBlock::Untagged {
                     tag,
@@ -6257,7 +6264,7 @@ fn derive_variant_layout(
     Ok(crate::types::VariantLayout::new(
         crate::types::VariantConfiguration {
             unboxed: has_decl_attr(&decl.type_attributes, "unboxed"),
-            tag_name: process_variant_tag_name(&decl.type_attributes)?,
+            tag_name: process_variant_tag_name(ctx, &decl.type_attributes)?,
         },
         cases,
     ))
@@ -7539,7 +7546,7 @@ fn extract_sig_values_from_pattern(
             ValueDescription {
                 val_type: ty,
                 val_kind: crate::types::decl::ValueKind::ValReg,
-                val_loc: crate::location::Location::none(),
+                val_loc: crate::types::DeclLoc::none(),
                 val_attributes: vec![],
                 val_path: None,
             },
@@ -8256,6 +8263,7 @@ fn freshened_signature_from_module_type<'a>(
 }
 
 fn add_signature_items_to_env(
+    ctx: &crate::types::context::TypeContext,
     sig_items: &[crate::types::decl::SignatureItem],
     env: &mut Env,
 ) -> TypeModResult<()> {
@@ -8264,7 +8272,7 @@ fn add_signature_items_to_env(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(id, desc) => {
-                check_value_name_for_env(id, desc)?;
+                check_value_name_for_env(ctx, id, desc)?;
                 env.add_value(*id, desc.clone());
             }
             SignatureItem::SigType(id, decl, _) => env.add_type(*id, decl.clone()),
@@ -9060,7 +9068,7 @@ fn apply_with_type_constraints_to_module_type(
                                 td.type_manifest = Some(constraint.manifest);
                             }
                             if let Some((loc, attrs)) = &constraint.decl_loc {
-                                td.type_loc = *loc;
+                                td.type_loc = ctx.intern_loc(*loc);
                                 td.type_attributes = attrs.clone();
                             }
                             rewritten_sig.push(SignatureItem::SigType(
@@ -9388,7 +9396,7 @@ fn collect_pmty_with_type_constraints<'a>(
                         kind: WithTypeConstraintKind::Manifest,
                         decl_loc: Some((
                             arena.to_location(decl.ptype_loc),
-                            parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
+                            parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes),
                         )),
                     });
                 }
@@ -11865,7 +11873,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 // avoids rewalking the parsed signature and recreating constructor
                 // identifiers after `transl_modtype`.
                 return Ok(DeclMty::MtySignature(std::sync::Arc::new(
-                    decl_signature_from_typed_signature(sig, arena),
+                    decl_signature_from_typed_signature(sig, arena, tctx.type_ctx),
                 )));
             }
             for (sig_index, sig_item) in sig_items.iter().enumerate() {
@@ -11908,7 +11916,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         ),
                                     ),
                                 },
-                                val_loc: arena.to_location(sig_item.psig_loc),
+                                val_loc: tctx.intern_loc(arena.to_location(sig_item.psig_loc)),
                                 val_attributes: vec![],
                                 val_path: None,
                             },
@@ -11947,7 +11955,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     decl.ptype_params.len()
                                 ],
                                 type_newtype_level: None,
-                                type_loc: crate::location::Location::none(),
+                                type_loc: crate::types::DeclLoc::none(),
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_representation: crate::types::TypeRepresentation::Boxed,
@@ -12112,7 +12120,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                         ld_mutable: mutable_flag,
                                                         ld_optional: label.pld_optional,
                                                         ld_type: lbl_type,
-                                                        ld_loc: arena.to_location(label.pld_loc),
+                                                        ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
                                                         ld_attributes: vec![],
                                                     });
                                                 }
@@ -12135,7 +12143,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 }
                                                 None => None,
                                             },
-                                            cd_loc: arena.to_location(cstr.pcd_loc),
+                                            cd_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
                                             cd_attributes: vec![],
                                         });
                                     }
@@ -12172,7 +12180,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                             ld_mutable: mutable_flag,
                                             ld_optional: label.pld_optional,
                                             ld_type: lbl_type,
-                                            ld_loc: arena.to_location(label.pld_loc),
+                                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
                                             ld_attributes: vec![],
                                         });
                                     }
@@ -12183,7 +12191,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 }
                             };
                             let type_attributes =
-                                parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+                                parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
                             let decl_has_unboxed_attr =
                                 parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
                             check_untagged_variant_constructor_arities(arena, decl)?;
@@ -12250,7 +12258,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     .map(|typed_decl| typed_decl.typ_type.type_variance.clone())
                                     .unwrap_or(type_variance),
                                 type_newtype_level: None,
-                                type_loc: arena.to_location(decl.ptype_loc),
+                                type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
                                 type_attributes,
                                 type_immediate,
                                 type_representation,
@@ -12308,7 +12316,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             crate::types::decl::ModuleDeclaration {
                                 md_type: inner_mty.clone(),
                                 md_attributes: vec![],
-                                md_loc: crate::location::Location::none(),
+                                md_loc: crate::types::DeclLoc::none(),
                                 md_path: None,
                             },
                         );
@@ -12317,7 +12325,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             crate::types::decl::ModuleDeclaration {
                                 md_type: inner_mty,
                                 md_attributes: vec![],
-                                md_loc: crate::location::Location::none(),
+                                md_loc: crate::types::DeclLoc::none(),
                                 md_path: None,
                             },
                             crate::types::decl::RecStatus::TrecNot,
@@ -12355,7 +12363,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         let mtd = crate::types::decl::ModtypeDeclaration {
                             mtd_type,
                             mtd_attributes: vec![],
-                            mtd_loc: crate::location::Location::none(),
+                            mtd_loc: crate::types::DeclLoc::none(),
                         };
                         sig_env.add_modtype(modtype_id, mtd.clone());
                         items.push(SigItem::SigModtype(modtype_id, mtd));
@@ -12422,7 +12430,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 )?
                             }
                         };
-                        add_signature_items_to_env(&include_sig, &mut sig_env)?;
+                        add_signature_items_to_env(tctx.type_ctx, &include_sig, &mut sig_env)?;
                         items.extend(include_sig);
                     }
                     _ => {}
@@ -12488,7 +12496,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                     ),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
             );
@@ -12638,7 +12646,7 @@ fn empty_module_decl(
     crate::types::decl::ModuleDeclaration {
         md_type,
         md_attributes: vec![],
-        md_loc: crate::location::Location::none(),
+        md_loc: crate::types::DeclLoc::none(),
         md_path: None,
     }
 }
@@ -12667,7 +12675,7 @@ fn approx_abstract_type_decl(
         type_manifest: None,
         type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
         type_newtype_level: None,
-        type_loc: crate::location::Location::none(),
+        type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: false,
         type_representation: crate::types::TypeRepresentation::Boxed,
@@ -12802,7 +12810,7 @@ fn approx_modtype_rec<'a>(
                     let mtd = ModtypeDeclaration {
                         mtd_type,
                         mtd_attributes: vec![],
-                        mtd_loc: crate::location::Location::none(),
+                        mtd_loc: crate::types::DeclLoc::none(),
                     };
                     sig_env.add_modtype(id, mtd.clone());
                     items.push(SigItem::SigModtype(id, mtd));
@@ -13074,6 +13082,7 @@ fn anchor_local_module_aliases_to_owner(
 pub(crate) fn decl_signature_from_typed_signature(
     sig: &crate::types::typedtree::TypedSignature,
     arena: &ParseArena,
+    ctx: &crate::types::context::TypeContext,
 ) -> crate::types::decl::Signature {
     use crate::types::decl::{
         ModtypeDeclaration, ModuleDeclaration, SignatureItem as SigItem, ValueDescription,
@@ -13093,8 +13102,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                         val_kind,
                         // typedecl.ml:1883-1889: `Types.val_loc` is the
                         // signature item loc (typemod.ml:755-757).
-                        val_loc: arena.to_location(item.sig_loc),
-                        val_attributes: parser_attrs_to_decl_attrs(arena, &vd.val_attributes),
+                        val_loc: ctx.intern_loc(arena.to_location(item.sig_loc)),
+                        val_attributes: parser_attrs_to_decl_attrs(arena, ctx, &vd.val_attributes),
                         val_path: None,
                     },
                 ));
@@ -13134,8 +13143,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                                 vec![],
                             )),
                         ),
-                        md_attributes: parser_attrs_to_decl_attrs(arena, &md.md_attributes),
-                        md_loc: arena.to_location(md.md_loc),
+                        md_attributes: parser_attrs_to_decl_attrs(arena, ctx, &md.md_attributes),
+                        md_loc: ctx.intern_loc(arena.to_location(md.md_loc)),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
@@ -13151,8 +13160,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                                     vec![],
                                 )),
                             ),
-                            md_attributes: parser_attrs_to_decl_attrs(arena, &md.md_attributes),
-                            md_loc: arena.to_location(md.md_loc),
+                            md_attributes: parser_attrs_to_decl_attrs(arena, ctx, &md.md_attributes),
+                            md_loc: ctx.intern_loc(arena.to_location(md.md_loc)),
                             md_path: None,
                         },
                         if i == 0 {
@@ -13168,8 +13177,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                     mtd.mtd_id,
                     ModtypeDeclaration {
                         mtd_type: mtd.mtd_type.as_ref().and_then(decl_module_type_from_typed),
-                        mtd_attributes: parser_attrs_to_decl_attrs(arena, &mtd.mtd_attributes),
-                        mtd_loc: arena.to_location(mtd.mtd_loc),
+                        mtd_attributes: parser_attrs_to_decl_attrs(arena, ctx, &mtd.mtd_attributes),
+                        mtd_loc: ctx.intern_loc(arena.to_location(mtd.mtd_loc)),
                     },
                 ));
             }
@@ -14010,7 +14019,7 @@ fn extract_module_type_from_mod_expr_inner(
                             val_type: vd.val_desc.ctyp_type,
                             // typedecl.ml:1878-1915: the kind as typed.
                             val_kind: vd.val_kind.clone(),
-                            val_loc: crate::location::Location::none(),
+                            val_loc: crate::types::DeclLoc::none(),
                             val_attributes: vec![],
                             val_path: None,
                         };
@@ -14042,7 +14051,7 @@ fn extract_module_type_from_mod_expr_inner(
                         let module_decl = crate::types::decl::ModuleDeclaration {
                             md_type: inner_mty,
                             md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
+                            md_loc: crate::types::DeclLoc::none(),
                             md_path: None,
                         };
                         sig_items.push(SigItem::SigModule(
@@ -14078,7 +14087,7 @@ fn extract_module_type_from_mod_expr_inner(
                             let module_decl = crate::types::decl::ModuleDeclaration {
                                 md_type: inner_mty,
                                 md_attributes: vec![],
-                                md_loc: crate::location::Location::none(),
+                                md_loc: crate::types::DeclLoc::none(),
                                 md_path: None,
                             };
                             sig_items.push(SigItem::SigModule(
@@ -14134,7 +14143,7 @@ fn extract_module_type_from_mod_expr_inner(
                                 .as_ref()
                                 .and_then(decl_module_type_from_typed_module_type),
                             mtd_attributes: vec![],
-                            mtd_loc: crate::location::Location::none(),
+                            mtd_loc: crate::types::DeclLoc::none(),
                         };
                         sig_items.push(SigItem::SigModtype(mtd.mtd_id, modtype_decl.clone()));
                         if let Some(env_mut) = local_env.as_mut() {
@@ -14271,7 +14280,7 @@ fn extract_module_type_from_mod_expr_inner(
                         crate::types::decl::ModuleDeclaration {
                             md_type: param_decl.clone(),
                             md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
+                            md_loc: crate::types::DeclLoc::none(),
                             md_path: None,
                         },
                     );
@@ -15227,7 +15236,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     crate::types::decl::ModuleDeclaration {
                         md_type: param_decl_type,
                         md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
+                        md_loc: crate::types::DeclLoc::none(),
                         md_path: None,
                     },
                 );
@@ -15389,7 +15398,7 @@ fn type_module_expr_with_alias_inner<'a>(
                                     crate::types::decl::ModuleDeclaration {
                                         md_type: arg_mty.clone(),
                                         md_attributes: vec![],
-                                        md_loc: Location::none(),
+                                        md_loc: crate::types::DeclLoc::none(),
                                         md_path: None,
                                     },
                                 );
@@ -15909,7 +15918,7 @@ fn transl_modtype<'a>(
                         std::sync::Arc::new(vec![]),
                     )),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
             );
@@ -16162,7 +16171,7 @@ pub fn transl_signature<'a>(
                     crate::types::decl::ModuleDeclaration {
                         md_type: decl_mty,
                         md_attributes: vec![],
-                        md_loc: arena.to_location(md.pmd_loc),
+                        md_loc: tctx.intern_loc(arena.to_location(md.pmd_loc)),
                         md_path: None,
                     },
                 );
@@ -16217,7 +16226,7 @@ pub fn transl_signature<'a>(
                 let decl_mtd = crate::types::ModtypeDeclaration {
                     mtd_type: typed_mty.as_ref().map(|tmty| tmty.mty_type.clone()),
                     mtd_attributes: vec![],
-                    mtd_loc: crate::location::Location::none(),
+                    mtd_loc: crate::types::DeclLoc::none(),
                 };
                 // OCaml compiler/ml/typemod.ml:895-913 translates the module
                 // type first, then allocates exactly one id via
@@ -16246,7 +16255,7 @@ pub fn transl_signature<'a>(
                 )?;
                 // OCaml compiler/ml/typemod.ml:859.
                 check_included_signature_names(&mut names, item.psig_loc, &include_sig)?;
-                add_signature_items_to_env(&include_sig, &mut sig_env)?;
+                add_signature_items_to_env(tctx.type_ctx, &include_sig, &mut sig_env)?;
                 TSigDesc::Tsig_include(IncludeDescription {
                     incl_mod: typed_mty,
                     incl_type: include_sig,
@@ -16475,7 +16484,7 @@ fn closed_modtype(
                 crate::types::decl::ModuleDeclaration {
                     md_type: default_module_type(param_type.as_deref().cloned()),
                     md_attributes: vec![],
-                    md_loc: Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
             );
@@ -16510,7 +16519,7 @@ fn check_nongen_scheme(
             if !crate::types::ctype::closed_schema(ctx, env, desc.val_type) =>
         {
             Err(TypeModError::NonGeneralizable {
-                loc: desc.val_loc,
+                loc: ctx.resolve_loc(desc.val_loc),
                 typ: desc.val_type,
             })
         }
@@ -16518,7 +16527,7 @@ fn check_nongen_scheme(
             if !closed_modtype(ctx, env, &md.md_type) =>
         {
             Err(TypeModError::NonGeneralizableModule {
-                loc: md.md_loc,
+                loc: ctx.resolve_loc(md.md_loc),
                 mty: md.md_type.clone(),
             })
         }
@@ -16648,23 +16657,23 @@ fn type_structure_item<'a>(
 
             // Add the external value to the environment
             let mut new_env = env.clone();
-            let val_attributes = parser_attrs_to_decl_attrs(arena, &vd.pval_attributes);
+            let val_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &vd.pval_attributes);
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
                 val_kind: crate::types::ValueKind::ValPrim(prim_desc),
-                val_loc: arena.to_location(loc),
+                val_loc: tctx.intern_loc(arena.to_location(loc)),
                 val_attributes,
                 val_path: None,
             };
             let sig_item =
                 crate::types::decl::SignatureItem::SigValue(id, val_desc_for_env.clone());
             // `Env.enter_value` runs `check_value_name` (env.ml:1574-1591).
-            check_value_name_for_env(&id, &val_desc_for_env)?;
+            check_value_name_for_env(tctx.type_ctx, &id, &val_desc_for_env)?;
             // typedecl.ml:1918-1919: `Env.enter_value ~check:(fun s ->
             // Unused_value_declaration s)`.
             tctx.add_value_usage_check(
                 &name_str,
-                val_desc_for_env.val_loc,
+                tctx.resolve_loc(val_desc_for_env.val_loc),
                 loc,
                 Warning::UnusedValueDeclaration {
                     name: name_str.clone(),
@@ -16790,8 +16799,8 @@ fn type_structure_item<'a>(
                         type_manifest: decl.ptype_manifest.map(|_| ctx.new_var(None)),
                         type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
                         type_newtype_level: None,
-                        type_loc: arena.to_location(decl.ptype_loc),
-                        type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
+                        type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                        type_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes),
                         type_immediate: false,
                         type_representation: crate::types::TypeRepresentation::Boxed,
                         type_inlined_types: vec![],
@@ -17158,7 +17167,7 @@ fn type_structure_item<'a>(
                                                     .map(|_| TypesVariance::full())
                                                     .collect(),
                                                 type_newtype_level: None,
-                                                type_loc: Location::none(),
+                                                type_loc: crate::types::DeclLoc::none(),
                                                 type_attributes: vec![],
                                                 type_immediate: false,
                                                 type_representation: crate::types::TypeRepresentation::Boxed,
@@ -17304,9 +17313,9 @@ fn type_structure_item<'a>(
                                             ld_mutable: mutable_flag,
                                             ld_optional: lbl.pld_optional,
                                             ld_type: internal_type_ref,
-                                            ld_loc: arena.to_location(lbl.pld_loc),
+                                            ld_loc: tctx.intern_loc(arena.to_location(lbl.pld_loc)),
                                             ld_attributes: parser_attrs_to_decl_attrs(
-                                                arena,
+                                                arena, tctx.type_ctx,
                                                 &lbl.pld_attributes,
                                             ),
                                         });
@@ -17475,7 +17484,7 @@ fn type_structure_item<'a>(
                             let combined_typed_attrs =
                                 Attributes::from_vec(combined_parser_attrs.clone());
                             let combined_decl_attrs =
-                                parser_attrs_to_decl_attrs(arena, &combined_typed_attrs);
+                                parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &combined_typed_attrs);
 
                             // For inline records, create a synthetic type declaration and
                             // set cstr_args to [Tconstr(path, type_params)] matching OCaml's datarepr.ml
@@ -17516,7 +17525,7 @@ fn type_structure_item<'a>(
                                             .map(|_| TypesVariance::full())
                                             .collect(),
                                         type_newtype_level: None,
-                                        type_loc: Location::none(),
+                                        type_loc: crate::types::DeclLoc::none(),
                                         type_attributes: vec![],
                                         type_immediate: false,
                                         type_representation:
@@ -17540,7 +17549,7 @@ fn type_structure_item<'a>(
                                 cd_runtime_tag: runtime_tag.clone(),
                                 cd_args: internal_cd_args,
                                 cd_res: internal_cd_res,
-                                cd_loc: arena.to_location(cstr.pcd_loc),
+                                cd_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
                                 cd_attributes: combined_decl_attrs.clone(),
                             });
 
@@ -17595,7 +17604,7 @@ fn type_structure_item<'a>(
                                     cstr_private: parser_private_to_type_private(
                                         decl.ptype_private,
                                     ),
-                                    cstr_loc: arena.to_location(cstr.pcd_loc),
+                                    cstr_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
                                     cstr_attributes:
                                         crate::types::decl::constructor_description_attrs_for_variant(
                                             &internal_cstrs,
@@ -17681,9 +17690,9 @@ fn type_structure_item<'a>(
                                 ld_mutable: mutable_flag,
                                 ld_optional: lbl.pld_optional,
                                 ld_type: internal_type_ref,
-                                ld_loc: arena.to_location(lbl.pld_loc),
+                                ld_loc: tctx.intern_loc(arena.to_location(lbl.pld_loc)),
                                 ld_attributes: parser_attrs_to_decl_attrs(
-                                    arena,
+                                    arena, tctx.type_ctx,
                                     &lbl.pld_attributes,
                                 ),
                             });
@@ -17899,7 +17908,7 @@ fn type_structure_item<'a>(
                     });
                 }
 
-                let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+                let type_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
                 let type_representation = if decl_has_unboxed_attr && constructors.len() <= 1 {
                     crate::types::TypeRepresentation::Unboxed
                 } else {
@@ -17938,7 +17947,7 @@ fn type_structure_item<'a>(
                     type_manifest: manifest_type_ref,
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
-                    type_loc: arena.to_location(decl.ptype_loc),
+                    type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
                     type_attributes,
                     type_immediate,
                     type_representation,
@@ -18523,7 +18532,7 @@ fn type_structure_item<'a>(
                                         },
                                         ld_optional: label.pld_optional,
                                         ld_type: internal_ty_ref,
-                                        ld_loc: arena.to_location(label.pld_loc),
+                                        ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
                                         ld_attributes: vec![],
                                     });
                                 }
@@ -18540,7 +18549,7 @@ fn type_structure_item<'a>(
                                     type_manifest: None,
                                     type_variance: vec![],
                                     type_newtype_level: None,
-                                    type_loc: Location::none(),
+                                    type_loc: crate::types::DeclLoc::none(),
                                     type_attributes: vec![],
                                     type_immediate: false,
                                     type_representation: crate::types::TypeRepresentation::Boxed,
@@ -18670,8 +18679,8 @@ fn type_structure_item<'a>(
                     cstr_generalized: ext_ret_ty.is_some(),
                     cstr_private: ext_private,
                     // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
-                    cstr_loc: arena.to_location(ec.pext_loc),
-                    cstr_attributes: parser_attrs_to_decl_attrs(arena, &ec.pext_attributes),
+                    cstr_loc: tctx.intern_loc(arena.to_location(ec.pext_loc)),
+                    cstr_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &ec.pext_attributes),
                     cstr_inlined: cstr_inlined.clone(),
                 };
                 constructor_descriptions.push((id, cstr_desc));
@@ -18688,8 +18697,8 @@ fn type_structure_item<'a>(
                         ext_args,
                         ext_ret_type: ext_ret_ty,
                         ext_private,
-                        ext_loc: arena.to_location(ec.pext_loc),
-                        ext_attributes: parser_attrs_to_decl_attrs(arena, &ec.pext_attributes),
+                        ext_loc: tctx.intern_loc(arena.to_location(ec.pext_loc)),
+                        ext_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &ec.pext_attributes),
                         ext_is_exception: false,
                     },
                     ext_kind,
@@ -18767,7 +18776,7 @@ fn type_structure_item<'a>(
                     ext_cstr.ext_type.ext_type_path.last(),
                     id.name(),
                     false,
-                    ext_cstr.ext_type.ext_loc,
+                    tctx.resolve_loc(ext_cstr.ext_type.ext_loc),
                     ext_cstr.ext_loc,
                     env.is_in_signature(),
                 );
@@ -18891,7 +18900,7 @@ fn type_structure_item<'a>(
                                     },
                                     ld_optional: label.pld_optional,
                                     ld_type: internal_ty_ref,
-                                    ld_loc: arena.to_location(label.pld_loc),
+                                    ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
                                     ld_attributes: vec![],
                                 });
                             }
@@ -18908,7 +18917,7 @@ fn type_structure_item<'a>(
                                 type_manifest: None,
                                 type_variance: vec![],
                                 type_newtype_level: None,
-                                type_loc: Location::none(),
+                                type_loc: crate::types::DeclLoc::none(),
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_representation: crate::types::TypeRepresentation::Boxed,
@@ -19068,10 +19077,10 @@ fn type_structure_item<'a>(
                 cstr_generalized: ext_ret_ty.is_some(),
                 cstr_private: crate::types::PrivateFlag::Public,
                 // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
-                cstr_loc: arena.to_location(ext_constr.pext_loc),
+                cstr_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
                 // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`
                 // (typedecl.ml `ext_attributes = sext.pext_attributes`).
-                cstr_attributes: parser_attrs_to_decl_attrs(arena, &ext_constr.pext_attributes),
+                cstr_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &ext_constr.pext_attributes),
                 cstr_inlined: cstr_inlined.clone(),
             };
             let mut new_env = env.clone();
@@ -19096,8 +19105,8 @@ fn type_structure_item<'a>(
                 ext_args,
                 ext_ret_type: ext_ret_ty,
                 ext_private: crate::types::PrivateFlag::Public,
-                ext_loc: arena.to_location(ext_constr.pext_loc),
-                ext_attributes: parser_attrs_to_decl_attrs(arena, &ext_constr.pext_attributes),
+                ext_loc: tctx.intern_loc(arena.to_location(ext_constr.pext_loc)),
+                ext_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &ext_constr.pext_attributes),
                 ext_is_exception: true,
             };
             let desc =
@@ -19192,13 +19201,13 @@ fn type_structure_item<'a>(
                 _ => decl_mod_type.clone(),
             };
             let item_sig_mod_type = localized_decl_mod_type.clone();
-            let module_attributes = parser_attrs_to_decl_attrs(arena, &mb.pmb_attributes);
+            let module_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &mb.pmb_attributes);
             new_env.add_module(
                 mod_id,
                 crate::types::decl::ModuleDeclaration {
                     md_type: localized_decl_mod_type,
                     md_attributes: module_attributes.clone(),
-                    md_loc: arena.to_location(mb.pmb_loc),
+                    md_loc: tctx.intern_loc(arena.to_location(mb.pmb_loc)),
                     md_path: None,
                 },
             );
@@ -19210,7 +19219,7 @@ fn type_structure_item<'a>(
                 crate::types::decl::ModuleDeclaration {
                     md_type: item_sig_mod_type,
                     md_attributes: module_attributes,
-                    md_loc: arena.to_location(mb.pmb_loc),
+                    md_loc: tctx.intern_loc(arena.to_location(mb.pmb_loc)),
                     md_path: None,
                 },
                 crate::types::decl::RecStatus::TrecNot,
@@ -19301,8 +19310,8 @@ fn type_structure_item<'a>(
                     decl.md_id,
                     crate::types::decl::ModuleDeclaration {
                         md_type: decl.md_type.mty_type.clone(),
-                        md_attributes: parser_attrs_to_decl_attrs(arena, attrs),
-                        md_loc: arena.to_location(*mb_loc),
+                        md_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, attrs),
+                        md_loc: tctx.intern_loc(arena.to_location(*mb_loc)),
                         md_path: None,
                     },
                 );
@@ -19393,8 +19402,8 @@ fn type_structure_item<'a>(
                         mb.mb_id,
                         crate::types::decl::ModuleDeclaration {
                             md_type: mb.mb_expr.mod_type.clone(),
-                            md_attributes: parser_attrs_to_decl_attrs(arena, &mb.mb_attributes),
-                            md_loc: arena.to_location(mb.mb_loc),
+                            md_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &mb.mb_attributes),
+                            md_loc: tctx.intern_loc(arena.to_location(mb.mb_loc)),
                             md_path: None,
                         },
                         sig_rec_status(RecFlag::Recursive, index),
@@ -19445,11 +19454,11 @@ fn type_structure_item<'a>(
 
             // Add the module type to the environment
             let mut new_env = env.clone();
-            let mtd_attributes = parser_attrs_to_decl_attrs(arena, &mtd.pmtd_attributes);
+            let mtd_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &mtd.pmtd_attributes);
             let decl_mtd = crate::types::decl::ModtypeDeclaration {
                 mtd_type: decl_mtd_type,
                 mtd_attributes,
-                mtd_loc: arena.to_location(mtd.pmtd_loc),
+                mtd_loc: tctx.intern_loc(arena.to_location(mtd.pmtd_loc)),
             };
             new_env.add_modtype(mtd_id, decl_mtd.clone());
 
@@ -19673,7 +19682,7 @@ fn type_structure_item<'a>(
                 for (sig_index, item) in sig_items.iter().enumerate() {
                     match item {
                         crate::types::decl::SignatureItem::SigValue(id, desc) => {
-                            check_value_name_for_env(id, desc)?;
+                            check_value_name_for_env(tctx.type_ctx, id, desc)?;
                             new_env.add_value(*id, desc.clone());
                         }
                         crate::types::decl::SignatureItem::SigType(id, decl, _) => {
@@ -20032,8 +20041,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_manifest: decl.ptype_manifest.map(|_| ctx.new_var(None)),
                 type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
                 type_newtype_level: None,
-                type_loc: arena.to_location(decl.ptype_loc),
-                type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
+                type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
+                type_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes),
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
                 type_inlined_types: vec![],
@@ -20231,8 +20240,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             ld_mutable: mutable_flag,
                             ld_optional: label.pld_optional,
                             ld_type: internal_lbl_type,
-                            ld_loc: arena.to_location(label.pld_loc),
-                            ld_attributes: parser_attrs_to_decl_attrs(arena, &label.pld_attributes),
+                            ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
+                            ld_attributes: parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &label.pld_attributes),
                         });
 
                         typed_tree_labels.push(TypedLabelDeclaration {
@@ -20458,9 +20467,9 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                                         ld_mutable: mutable_flag,
                                         ld_optional: label.pld_optional,
                                         ld_type: internal_lbl_type,
-                                        ld_loc: arena.to_location(label.pld_loc),
+                                        ld_loc: tctx.intern_loc(arena.to_location(label.pld_loc)),
                                         ld_attributes: parser_attrs_to_decl_attrs(
-                                            arena,
+                                            arena, tctx.type_ctx,
                                             &label.pld_attributes,
                                         ),
                                     });
@@ -20524,11 +20533,11 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             cd_runtime_tag: runtime_tag.clone(),
                             cd_args: internal_args,
                             cd_res: internal_res,
-                            cd_loc: arena.to_location(cstr.pcd_loc),
+                            cd_loc: tctx.intern_loc(arena.to_location(cstr.pcd_loc)),
                             cd_attributes: {
                                 let mut attrs = tag_attrs.clone();
                                 attrs.extend(cstr.pcd_attributes.iter().cloned());
-                                parser_attrs_to_decl_attrs(arena, &Attributes::from_vec(attrs))
+                                parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &Attributes::from_vec(attrs))
                             },
                         });
                         typed_tree_cstrs.push(TypedConstructorDeclaration {
@@ -20613,7 +20622,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
             let typ_private = decl.ptype_private;
 
-            let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+            let type_attributes = parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
             let type_representation = match &internal_type_kind {
                 crate::types::TypeKind::TypeVariant(cstrs, _)
                     if decl_has_unboxed_attr && cstrs.len() <= 1 =>
@@ -20656,7 +20665,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_manifest: manifest_type_ref,
                 type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
                 type_newtype_level: None,
-                type_loc: arena.to_location(decl.ptype_loc),
+                type_loc: tctx.intern_loc(arena.to_location(decl.ptype_loc)),
                 type_attributes,
                 type_immediate,
                 type_representation,

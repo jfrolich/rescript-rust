@@ -4592,7 +4592,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.apply_coercion_result_raw(loc, strict, arg, param, carg, cc_res)
             }
             ModuleCoercion::Tcoerce_primitive(pc) => {
-                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, pc.pc_loc)
+                self.transl_primitive_raw(&pc.pc_desc, pc.pc_type, self.type_ctx.resolve_loc(pc.pc_loc))
             }
             ModuleCoercion::Tcoerce_alias(env_ref, path, inner) => {
                 self.name_lambda_raw(strict, arg, |this, _| {
@@ -4655,7 +4655,7 @@ impl<'a> RawLambdaConverter<'a> {
                             block_fields.push(self.transl_primitive_raw(
                                 &pc.pc_desc,
                                 pc.pc_type,
-                                pc.pc_loc,
+                                self.type_ctx.resolve_loc(pc.pc_loc),
                             ));
                         }
                         _ => {
@@ -7585,7 +7585,7 @@ mod tests {
             ),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
-            cstr_loc: Location::none(),
+            cstr_loc: crate::types::DeclLoc::none(),
             cstr_attributes: Vec::new(),
             cstr_inlined: None,
         };
@@ -7632,7 +7632,7 @@ mod tests {
             cstr_kind: crate::types::ConstructorKind::Ordinary(representation),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
-            cstr_loc: Location::none(),
+            cstr_loc: crate::types::DeclLoc::none(),
             cstr_attributes: Vec::new(),
             cstr_inlined: Some(Box::new(crate::types::TypeDeclaration {
                 type_params: vec![],
@@ -7648,7 +7648,7 @@ mod tests {
                 type_manifest: None,
                 type_variance: vec![],
                 type_newtype_level: None,
-                type_loc: Location::none(),
+                type_loc: crate::types::DeclLoc::none(),
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
@@ -7708,7 +7708,7 @@ mod tests {
             cstr_kind: crate::types::ConstructorKind::Extension(path.clone()),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
-            cstr_loc: Location::none(),
+            cstr_loc: crate::types::DeclLoc::none(),
             cstr_attributes: Vec::new(),
             cstr_inlined: None,
         };
@@ -8157,7 +8157,7 @@ mod tests {
             type_manifest: Some(manifest),
             type_variance: vec![],
             type_newtype_level: None,
-            type_loc: Location::none(),
+            type_loc: crate::types::DeclLoc::none(),
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
@@ -8229,13 +8229,13 @@ mod tests {
                             crate::types::Path::Pident(local_n),
                         ),
                         md_attributes: Vec::new(),
-                        md_loc: Location::none(),
+                        md_loc: crate::types::DeclLoc::none(),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
                 )]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8325,13 +8325,13 @@ mod tests {
                             crate::types::Path::Pident(pkg_list),
                         ),
                         md_attributes: Vec::new(),
-                        md_loc: Location::none(),
+                        md_loc: crate::types::DeclLoc::none(),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
                 )]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8340,7 +8340,7 @@ mod tests {
             crate::types::decl::ModuleDeclaration {
                 md_type: test_signature_module_type(vec![]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8455,7 +8455,7 @@ mod tests {
                     modtype_x,
                 )),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8499,13 +8499,13 @@ mod tests {
                             crate::types::Path::Pident(pkg_list),
                         ),
                         md_attributes: Vec::new(),
-                        md_loc: Location::none(),
+                        md_loc: crate::types::DeclLoc::none(),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
                 )]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8517,13 +8517,13 @@ mod tests {
                     crate::types::decl::ValueDescription {
                         val_type: ctx.new_var(None),
                         val_kind: crate::types::decl::ValueKind::ValReg,
-                        val_loc: Location::none(),
+                        val_loc: crate::types::DeclLoc::none(),
                         val_attributes: Vec::new(),
                         val_path: None,
                     },
                 )]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8577,13 +8577,13 @@ mod tests {
                 crate::types::decl::ValueDescription {
                     val_type: ctx.new_var(None),
                     val_kind: crate::types::decl::ValueKind::ValReg,
-                    val_loc: Location::none(),
+                    val_loc: crate::types::DeclLoc::none(),
                     val_attributes: Vec::new(),
                     val_path: None,
                 },
             )]),
             md_attributes: Vec::new(),
-            md_loc: Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         };
 
@@ -8611,27 +8611,27 @@ mod tests {
                                                     main_path.clone(),
                                                 ),
                                                 md_attributes: Vec::new(),
-                                                md_loc: Location::none(),
+                                                md_loc: crate::types::DeclLoc::none(),
                                                 md_path: None,
                                             },
                                             crate::types::decl::RecStatus::TrecNot,
                                         ),
                                     ]),
                                     md_attributes: Vec::new(),
-                                    md_loc: Location::none(),
+                                    md_loc: crate::types::DeclLoc::none(),
                                     md_path: None,
                                 },
                                 crate::types::decl::RecStatus::TrecNot,
                             ),
                         ]),
                         md_attributes: Vec::new(),
-                        md_loc: Location::none(),
+                        md_loc: crate::types::DeclLoc::none(),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
                 )]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8681,7 +8681,7 @@ mod tests {
                         crate::types::decl::ModuleDeclaration {
                             md_type: test_signature_module_type(vec![]),
                             md_attributes: Vec::new(),
-                            md_loc: Location::none(),
+                            md_loc: crate::types::DeclLoc::none(),
                             md_path: None,
                         },
                         crate::types::decl::RecStatus::TrecNot,
@@ -8695,14 +8695,14 @@ mod tests {
                                     crate::types::decl::ValueDescription {
                                         val_type: ctx.new_var(None),
                                         val_kind: crate::types::decl::ValueKind::ValReg,
-                                        val_loc: Location::none(),
+                                        val_loc: crate::types::DeclLoc::none(),
                                         val_attributes: Vec::new(),
                                         val_path: None,
                                     },
                                 ),
                             ])),
                             mtd_attributes: Vec::new(),
-                            mtd_loc: Location::none(),
+                            mtd_loc: crate::types::DeclLoc::none(),
                         },
                     ),
                     crate::types::SignatureItem::SigModule(
@@ -8715,7 +8715,7 @@ mod tests {
                                 ),
                             ),
                             md_attributes: Vec::new(),
-                            md_loc: Location::none(),
+                            md_loc: crate::types::DeclLoc::none(),
                             md_path: None,
                         },
                         crate::types::decl::RecStatus::TrecNot,
@@ -8725,14 +8725,14 @@ mod tests {
                         crate::types::decl::ModuleDeclaration {
                             md_type: test_signature_module_type(vec![]),
                             md_attributes: Vec::new(),
-                            md_loc: Location::none(),
+                            md_loc: crate::types::DeclLoc::none(),
                             md_path: None,
                         },
                         crate::types::decl::RecStatus::TrecNot,
                     ),
                 ]),
                 md_attributes: Vec::new(),
-                md_loc: Location::none(),
+                md_loc: crate::types::DeclLoc::none(),
                 md_path: None,
             },
         );
@@ -8784,7 +8784,7 @@ mod tests {
             crate::types::decl::ValueDescription {
                 val_type: func_ty,
                 val_kind: crate::types::decl::ValueKind::ValReg,
-                val_loc: Location::none(),
+                val_loc: crate::types::DeclLoc::none(),
                 val_attributes: Vec::new(),
                 val_path: None,
             },
