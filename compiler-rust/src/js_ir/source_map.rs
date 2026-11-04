@@ -1,7 +1,7 @@
 //! Source Map v3 generation, ported from `compiler/core/js_source_map.ml`.
 
 use crate::intern::StrIdx;
-use crate::location::Location;
+use crate::lambda::{LamLoc, LamLocTable};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -38,7 +38,8 @@ pub struct SourceMapBuilder {
     source_root: String,
     sources_content: bool,
     default_source: PathBuf,
-    source_file_names: Arc<HashMap<StrIdx, String>>,
+    /// Resolves the JS IR location handles and their source file names.
+    lam_locs: Arc<LamLocTable>,
     sources: HashMap<PathBuf, usize>,
     /// `sources` index already resolved for a location's file-name index.
     sources_by_file_name: HashMap<StrIdx, usize>,
@@ -64,7 +65,7 @@ impl SourceMapBuilder {
             source_root,
             sources_content,
             default_source: default_source.to_path_buf(),
-            source_file_names: Arc::new(HashMap::new()),
+            lam_locs: Arc::new(LamLocTable::opaque()),
             sources: HashMap::new(),
             sources_by_file_name: HashMap::new(),
             source_list: Vec::new(),
@@ -73,11 +74,8 @@ impl SourceMapBuilder {
         }
     }
 
-    pub fn with_source_file_names(
-        mut self,
-        source_file_names: Arc<HashMap<StrIdx, String>>,
-    ) -> Self {
-        self.source_file_names = source_file_names;
+    pub fn with_lam_locs(mut self, lam_locs: Arc<LamLocTable>) -> Self {
+        self.lam_locs = lam_locs;
         self
     }
 
@@ -92,9 +90,8 @@ impl SourceMapBuilder {
 
     fn resolve_source(&mut self, source_file_name: StrIdx) -> usize {
         let source_file = self
-            .source_file_names
-            .get(&source_file_name)
-            .map(String::as_str)
+            .lam_locs
+            .file_name(source_file_name)
             .filter(|name| !name.is_empty() && *name != "_none_")
             .map(Path::new)
             .unwrap_or(&self.default_source);
@@ -113,7 +110,10 @@ impl SourceMapBuilder {
         index
     }
 
-    pub fn add_mapping(&mut self, generated_line: usize, generated_column: usize, loc: &Location) {
+    pub fn add_mapping(&mut self, generated_line: usize, generated_column: usize, loc: &LamLoc) {
+        let Some(loc) = self.lam_locs.get(*loc) else {
+            return;
+        };
         if loc.loc_ghost || loc.loc_start.cnum < 0 {
             return;
         }
@@ -428,34 +428,31 @@ mod tests {
 
     #[test]
     fn records_the_source_file_from_each_mapping() {
-        use crate::location::Position;
+        use crate::location::{Location, Position};
 
         let first = StrIdx(1);
         let second = StrIdx(2);
-        let source_file_names = Arc::new(HashMap::from([
+        let mut lam_locs = LamLocTable::located(Arc::new(HashMap::from([
             (first, "/project/src/first.res".to_string()),
             (second, "/project/generated/second.res".to_string()),
-        ]));
+        ])));
+        let first_loc = lam_locs.intern(Location::from_positions(
+            Position::new(first, 1, 0, 0),
+            Position::new(first, 1, 0, 1),
+        ));
+        let second_loc = lam_locs.intern(Location::from_positions(
+            Position::new(second, 1, 0, 0),
+            Position::new(second, 1, 0, 1),
+        ));
         let mut builder = SourceMapBuilder::new(
             Path::new("/project/lib/app.js"),
             Path::new("/project/src/default.res"),
             String::new(),
             false,
         )
-        .with_source_file_names(source_file_names);
-        builder.add_mapping(
-            0,
-            0,
-            &Location::from_positions(Position::new(first, 1, 0, 0), Position::new(first, 1, 0, 1)),
-        );
-        builder.add_mapping(
-            1,
-            0,
-            &Location::from_positions(
-                Position::new(second, 1, 0, 0),
-                Position::new(second, 1, 0, 1),
-            ),
-        );
+        .with_lam_locs(Arc::new(lam_locs));
+        builder.add_mapping(0, 0, &first_loc);
+        builder.add_mapping(1, 0, &second_loc);
 
         let json: serde_json::Value = serde_json::from_str(&builder.json()).unwrap();
         assert_eq!(

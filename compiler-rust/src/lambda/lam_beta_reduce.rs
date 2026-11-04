@@ -16,6 +16,7 @@
 //! arguments to variables when needed.
 
 use ahash::AHashMap as HashMap;
+use crate::lambda::LamLoc;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -29,7 +30,6 @@ use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_subst::Subst;
 use crate::lambda::lam_util::refine_let;
 use crate::lambda::{Apply, Lambda, PrimInfo};
-use crate::location::Location;
 
 /// Tracking state for simple beta reduction.
 struct ArgUsage {
@@ -457,7 +457,7 @@ fn bound_param_substitution(new_param: Ident, arg: &Lambda) -> Lambda {
         Lambda::prim(
             Primitive::Pidentity,
             vec![Lambda::var(new_param)],
-            Location::none(),
+            LamLoc::NONE,
         )
     } else {
         Lambda::var(new_param)
@@ -466,7 +466,7 @@ fn bound_param_substitution(new_param: Ident, arg: &Lambda) -> Lambda {
 
 fn bound_param_binding(arg: &Lambda) -> Lambda {
     if is_boxed_optional_binding(arg) {
-        Lambda::prim(Primitive::Pidentity, vec![arg.clone()], Location::none())
+        Lambda::prim(Primitive::Pidentity, vec![arg.clone()], LamLoc::NONE)
     } else {
         arg.clone()
     }
@@ -774,7 +774,7 @@ mod tests {
     use super::*;
     use crate::lambda::lam_closure::VarStats;
     use crate::lambda::{Constant, FunctionAttribute, LambdaSwitch, Primitive};
-    use crate::location::Location;
+    use LamLoc;
 
     #[test]
     fn test_simple_beta_reduce_prim() {
@@ -786,7 +786,7 @@ mod tests {
         let body = Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(x), Lambda::var(y)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let args = vec![
             Lambda::const_(Constant::int(1)),
@@ -835,7 +835,7 @@ mod tests {
         let body = Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(x), Lambda::var(x)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let args = vec![Lambda::const_(Constant::int(1))];
 
@@ -859,11 +859,11 @@ mod tests {
                 Lambda::prim(
                     Primitive::Paddint,
                     vec![Lambda::var(x), Lambda::var(x)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::var(y),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         let f = Ident::create_local("f");
         let g = Ident::create_local("g");
@@ -895,7 +895,7 @@ mod tests {
                     transformed_jsx: false,
                 },
                 vec![],
-                Location::none(),
+                LamLoc::NONE,
             )
         };
         let first = call("first");
@@ -945,7 +945,7 @@ mod tests {
                 vec![inner],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         );
         let args = vec![Lambda::const_(Constant::String("".to_string()))];
@@ -971,12 +971,12 @@ mod tests {
             Lambda::prim(
                 Primitive::PisNotNone,
                 vec![Lambda::var(x)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::prim(
                 Primitive::PvalFromOption,
                 vec![Lambda::var(x)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::const_(Constant::JsUndefined { is_unit: false }),
         );
@@ -990,9 +990,9 @@ mod tests {
                     transformed_jsx: false,
                 },
                 vec![Lambda::const_(Constant::string("subject"))],
-                Location::none(),
+                LamLoc::NONE,
             )],
-            Location::none(),
+            LamLoc::NONE,
         )];
 
         let reduced = propagate_beta_reduce(&params, &body, &args);
@@ -1058,7 +1058,7 @@ mod tests {
             vec![none],
             Lambda::var(none),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 
@@ -1090,7 +1090,7 @@ mod tests {
         let body = Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
-            Location::none(),
+            LamLoc::NONE,
         );
         let args = vec![Lambda::const_(Constant::int(5))];
 
@@ -1125,7 +1125,7 @@ mod tests {
         let body = Lambda::prim(
             Primitive::Paddint,
             vec![Lambda::var(x), Lambda::const_(Constant::int(1))],
-            Location::none(),
+            LamLoc::NONE,
         );
         // Lambda::var is pure
         let args = vec![Lambda::var(y)];
@@ -1160,7 +1160,7 @@ mod tests {
             vec![none],
             Lambda::var(none),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let args = vec![Lambda::const_(Constant::JsUndefined { is_unit: false })];
 

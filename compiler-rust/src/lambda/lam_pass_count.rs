@@ -8,6 +8,7 @@
 //! `lam_pass_count.ml`. Do not add Rust-only logic.
 
 use ahash::AHashMap as HashMap;
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;
@@ -391,7 +392,7 @@ mod tests {
                 directive: None,
                 one_unit_arg: false,
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
         let lam = Lambda::let_(LetKind::Strict, v, Lambda::Lconst(Constant::int(1)), func);
         let occ = collect_occurs(&lam);

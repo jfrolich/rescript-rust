@@ -14,6 +14,7 @@ use super::js_exp_make::{
     to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler};
+use crate::lambda::LamLoc;
 use super::lam_compile_input::{LambdaInputView, LambdaInputs};
 use crate::ident::Ident;
 use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
@@ -21,14 +22,13 @@ use crate::js_ir::{BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Lambda, TagInfo};
-use crate::location::Location;
 
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(
         &mut self,
         prim: &Primitive,
         args: &[Lambda],
-        loc: &Location,
+        loc: &LamLoc,
     ) -> Compiled {
         if let Some(compiled) =
             self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
@@ -104,7 +104,7 @@ impl LambdaCompiler {
         prim: &Primitive,
         mut compiled_args: Vec<Expression>,
         mut prelude: Block,
-        loc: &Location,
+        loc: &LamLoc,
     ) -> Compiled {
         use Primitive::*;
         let expr = match prim {
@@ -602,14 +602,14 @@ impl LambdaCompiler {
             }
             Pdebugger => {
                 let mut statement = Statement::debugger();
-                statement.source_loc = (self.source_loc(loc)).map(Box::new);
+                statement.source_loc = (self.source_loc(loc));
                 prelude.push(statement);
                 Expression::undefined(false)
             }
             Praise => {
                 let expr = first_arg(compiled_args).unwrap_or_else(|| Expression::undefined(false));
                 let mut statement = Statement::throw(expr);
-                statement.source_loc = (self.source_loc(loc)).map(Box::new);
+                statement.source_loc = (self.source_loc(loc));
                 prelude.push(statement);
                 Expression::undefined(false)
             }
