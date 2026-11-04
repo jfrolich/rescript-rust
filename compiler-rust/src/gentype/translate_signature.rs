@@ -137,7 +137,7 @@ pub fn translate_module_type_declaration(
                         name,
                         signature.clone(),
                         crate::types::typemod::decl_signature_from_typed_signature(
-                            signature, arena,
+                            signature, arena, ctx,
                         ),
                         type_env,
                     ),

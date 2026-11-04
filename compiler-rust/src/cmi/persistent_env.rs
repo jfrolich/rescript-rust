@@ -900,7 +900,7 @@ impl ModuleRegistry {
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
@@ -938,6 +938,7 @@ impl ModuleRegistry {
                     variant_layouts: Vec::new(),
                     mutabilities: Vec::new(),
                 },
+                locations: Default::default(),
             },
             None,
             fingerprint,
@@ -2287,6 +2288,7 @@ impl PersistentEnv {
             let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
                 &typed_signature,
                 parser.arena(),
+                ctx,
             );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
@@ -2775,7 +2777,7 @@ impl PersistentEnv {
         Some(ModuleDeclaration {
             md_type: ModuleType::MtySignature(std::sync::Arc::new(ps.ps_sig.as_ref().clone())),
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         })
     }
@@ -2867,7 +2869,7 @@ impl PersistentEnv {
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
@@ -7687,6 +7689,7 @@ mod resolution_view_tests {
                     variant_layouts: vec![],
                     mutabilities: vec![],
                 },
+                locations: Default::default(),
             },
             None,
             7,
@@ -7754,6 +7757,7 @@ mod resolution_view_tests {
                     variant_layouts: vec![],
                     mutabilities: vec![],
                 },
+                locations: Default::default(),
             },
             None,
             0,

@@ -977,7 +977,7 @@ fn record_all_labels(
                             lbl_all: crate::types::decl::LabelArrayRef(0),
                             lbl_repres: repr,
                             lbl_private: crate::types::asttypes::PrivateFlag::Public,
-                            lbl_loc: crate::location::Location::none(),
+                            lbl_loc: crate::types::DeclLoc::none(),
                             lbl_attributes: attrs,
                         })
                         .collect(),
@@ -8378,7 +8378,7 @@ fn label_descriptions_from_cached_entries(
             lbl_all: crate::types::decl::LabelArrayRef(0),
             lbl_repres: repr,
             lbl_private: crate::types::asttypes::PrivateFlag::Public,
-            lbl_loc: crate::location::Location::none(),
+            lbl_loc: crate::types::DeclLoc::none(),
             lbl_attributes: attrs,
         })
         .collect()
@@ -8418,7 +8418,7 @@ fn resolve_labels_from_type(
                         lbl_all: crate::types::decl::LabelArrayRef(0),
                         lbl_repres: repr,
                         lbl_private: crate::types::asttypes::PrivateFlag::Public,
-                        lbl_loc: crate::location::Location::none(),
+                        lbl_loc: crate::types::DeclLoc::none(),
                         lbl_attributes: attrs,
                     })
                     .collect(),

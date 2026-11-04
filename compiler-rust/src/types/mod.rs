@@ -36,6 +36,7 @@ pub mod btype;
 pub mod context;
 pub mod ctype;
 pub mod decl;
+pub mod decl_loc;
 pub mod env;
 pub(crate) mod env_lazy;
 pub mod external_ffi_types;
@@ -61,6 +62,7 @@ pub mod variant_runtime;
 // Re-exports for convenience
 pub use asttypes::{ArgLabel, Label, Located, MutableFlag, PrivateFlag};
 pub use context::TypeContext;
+pub use decl_loc::{DeclLoc, DeclLocTable, DeclLocs};
 pub use decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
     ConstructorDescription, ConstructorKind, ExtStatus, ExtensionConstructor, LabelArrayRef,
