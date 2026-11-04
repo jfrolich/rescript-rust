@@ -209,6 +209,8 @@ mod tests {
     #[test]
     fn type_labels_hold_compact_locations() {
         assert_eq!(std::mem::size_of::<Located<String, DeclLoc>>(), 32);
-        assert_eq!(std::mem::size_of::<ArgLabel>(), 32);
+        // The `Nolabel` discriminant needs its own word: `Located<String, DeclLoc>`
+        // has no niche the enum can use. A full inline `Location` made this 64.
+        assert_eq!(std::mem::size_of::<ArgLabel>(), 40);
     }
 }
