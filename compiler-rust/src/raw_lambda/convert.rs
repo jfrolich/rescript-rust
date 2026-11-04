@@ -7690,7 +7690,7 @@ mod tests {
             cstr_inlined: None,
         };
 
-        let lowered = converter.convert_construct_raw(Location::none(), &cstr, &[]);
+        let lowered = converter.convert_construct_raw(SrcLoc::from(Location::none()), &cstr, &[]);
 
         assert!(matches!(
             lowered,
@@ -7757,7 +7757,7 @@ mod tests {
             })),
         };
 
-        let lowered = converter.convert_construct_raw(Location::none(), &cstr, &[arg]);
+        let lowered = converter.convert_construct_raw(SrcLoc::from(Location::none()), &cstr, &[arg]);
 
         assert!(matches!(
             lowered,
@@ -7950,7 +7950,7 @@ mod tests {
                 prim_from_constructor: false,
             },
             primitive_type,
-            Location::none(),
+            SrcLoc::from(Location::none()),
         );
         let RawLambda::Lfunction(function) = converted else {
             panic!("expected primitive conversion to allocate a wrapper")
@@ -7979,7 +7979,7 @@ mod tests {
                 caught,
                 Box::new(RawLambda::var(caught)),
             )],
-            loc: Location::none(),
+            loc: LamLoc::NONE,
         }));
         let indexed_raw = converter.finish_indexed_raw(raw);
         let mut inline = |_: &Ident, _: &str| None;
@@ -8037,14 +8037,16 @@ mod tests {
                     crate::lambda::lam_primitive::Mutable::Immutable,
                 ),
                 vec![RawLambda::unit()],
-                Location::none(),
+                LamLoc::NONE,
             );
+            let hoisted_loc =
+                converter.lam_loc(Location::new_for_error("sealed-warning.res", 2, 4));
             let indexed_raw = converter.finish_indexed_raw(raw);
             let hoisted = crate::lambda::HoistedFunction {
                 binding: Ident::new("missing", 9, IdentFlags::NONE),
                 path: vec!["Missing".into()],
-                loc: Location::new_for_error("sealed-warning.res", 2, 4),
-                target_loc: Location::none(),
+                loc: hoisted_loc,
+                target_loc: LamLoc::NONE,
             };
             let mut inline = |_: &Ident, _: &str| None;
             let mut arity = |_: &Ident, _: &str| None;
@@ -8298,7 +8300,7 @@ mod tests {
         let alias_ty = ctx.new_constr(crate::types::Path::Pident(alias_id), vec![]);
 
         let primitive = primitive_wrapper_body_primitive(converter.translate_primitive_raw_in_env(
-            Location::none(),
+            SrcLoc::from(Location::none()),
             &prim,
             alias_ty,
             &env,
@@ -8392,7 +8394,7 @@ mod tests {
         let alias_ty = ctx.new_constr(crate::types::Path::Pident(alias_id), vec![]);
 
         let primitive = primitive_wrapper_body_primitive(converter.translate_primitive_raw_in_env(
-            Location::none(),
+            SrcLoc::from(Location::none()),
             &prim,
             alias_ty,
             &env,
@@ -8448,7 +8450,7 @@ mod tests {
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_module_path_raw(
             &crate::types::Path::pdot(crate::types::Path::Pident(pkg), "List"),
-            Location::none(),
+            SrcLoc::from(Location::none()),
         );
 
         assert!(matches!(
@@ -8467,7 +8469,7 @@ mod tests {
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter
-            .translate_module_path_raw(&crate::types::Path::Pident(side_effect), Location::none());
+            .translate_module_path_raw(&crate::types::Path::Pident(side_effect), SrcLoc::from(Location::none()));
         let possible_required_modules = converter.take_possible_required_modules();
 
         assert!(matches!(
@@ -8564,7 +8566,7 @@ mod tests {
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
             &crate::types::Path::pdot(crate::types::Path::Pident(local_l), "length"),
-            Location::none(),
+            SrcLoc::from(Location::none()),
         );
 
         let RawLambda::Lprim(info) = lowered else {
@@ -8635,7 +8637,7 @@ mod tests {
                 crate::types::Path::pdot(crate::types::Path::Pident(pkg), "List"),
                 "length",
             ),
-            Location::none(),
+            SrcLoc::from(Location::none()),
         );
 
         let RawLambda::Lprim(info) = lowered else {
@@ -8741,7 +8743,7 @@ mod tests {
             make.name().to_string(),
         );
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
-        let lowered = converter.translate_value_path_raw_in_env(&env, &path, Location::none());
+        let lowered = converter.translate_value_path_raw_in_env(&env, &path, SrcLoc::from(Location::none()));
 
         let RawLambda::Lprim(make_info) = lowered else {
             panic!("expected value path to lower to make field access");
@@ -8845,7 +8847,7 @@ mod tests {
                 "f1",
                 0,
             ),
-            Location::none(),
+            SrcLoc::from(Location::none()),
         );
 
         let RawLambda::Lprim(info) = lowered else {

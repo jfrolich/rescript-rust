@@ -1,5 +1,4 @@
 use super::*;
-use crate::lambda::LamLoc;
 pub(super) use crate::cmi::persistent_env::PersistentEnv;
 pub(super) use crate::js_ir::op::{ImportAttributes as JsImportAttributes, PropertyName};
 pub(super) use crate::js_ir::{

@@ -988,6 +988,7 @@ pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Re
 mod tests {
     use super::{Sexp, constant, escape_ocaml_string, switch_key};
     use crate::lambda::lam_constant::Constant;
+    use crate::lambda::LamLoc;
 
     #[test]
     fn sexp_layout_indents_multi_item_lists() {

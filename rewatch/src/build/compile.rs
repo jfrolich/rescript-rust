@@ -2344,7 +2344,7 @@ fn in_memory_module_info_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
-    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
+    cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
@@ -2370,7 +2370,7 @@ fn js_metadata_registry_updates_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
-    cmj_export_lambdas: AHashMap<String, rescript_compiler::lambda::Lambda>,
+    cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
     hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
@@ -3776,7 +3776,7 @@ fn compile_module_in_process_to_js_boundary(
         provisional_is_pure,
         AHashMap::new(),
         AHashMap::new(),
-        AHashMap::new(),
+        Default::default(),
         Vec::new(),
         is_runtime,
     );

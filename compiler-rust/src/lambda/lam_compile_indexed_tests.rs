@@ -89,7 +89,7 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
     let param = Ident::new("value", 40, IdentFlags::NONE);
     compiler.cmj_lambda_cache.insert(
         "External".into(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".into(),
             Lambda::function_(
                 1,
@@ -146,7 +146,7 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
     let exception = Ident::new("exn", 41, IdentFlags::from_bits_truncate(0x2b));
     compiler.cmj_lambda_cache.insert(
         "External".into(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".into(),
             Lambda::function_(
                 1,
@@ -206,7 +206,7 @@ fn rejected_cmj_does_not_import_and_lowers_arguments_after_arity_query_rtl() {
     };
     compiler.cmj_lambda_cache.insert(
         "External".into(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".into(),
             Lambda::function_(
                 2,
