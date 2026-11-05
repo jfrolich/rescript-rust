@@ -22,6 +22,7 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
+pub mod arena;
 pub mod indexed;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
@@ -306,19 +307,49 @@ enum UntaggedAction {
     Undecided,
 }
 
+/// The case `untagged_action` picks, by position in the switch's keys.
+pub(crate) enum UntaggedChoice {
+    Const(usize),
+    Block(usize),
+    /// Decided, but no case of the switch matches.
+    NoCase,
+    Undecided,
+}
+
 /// lambda.ml `switch`'s `untagged_action`.
 fn untagged_action(
     facts: &crate::types::VariantMatchingFacts,
     cst: &Constant,
     switch: &LambdaSwitch,
 ) -> UntaggedAction {
+    let const_keys: Vec<SwitchKey> = switch.sw_consts.iter().map(|(k, _)| k.clone()).collect();
+    let block_keys: Vec<SwitchKey> = switch.sw_blocks.iter().map(|(k, _)| k.clone()).collect();
+    match untagged_action_index(facts, cst, &const_keys, &block_keys) {
+        UntaggedChoice::Const(i) => UntaggedAction::Case(Some(switch.sw_consts[i].1.clone())),
+        UntaggedChoice::Block(i) => UntaggedAction::Case(Some(switch.sw_blocks[i].1.clone())),
+        UntaggedChoice::NoCase => UntaggedAction::Case(None),
+        UntaggedChoice::Undecided => UntaggedAction::Undecided,
+    }
+}
+
+/// lambda.ml `switch`'s `untagged_action`, over the switch keys.
+pub(crate) fn untagged_action_index(
+    facts: &crate::types::VariantMatchingFacts,
+    cst: &Constant,
+    const_keys: &[SwitchKey],
+    block_keys: &[SwitchKey],
+) -> UntaggedChoice {
     let literal_of_tag = |tag: &crate::types::VariantTag| match &tag.literal {
         Some(literal) => literal.clone(),
         None => crate::types::VariantLiteralTag::String(tag.name.clone()),
     };
+    let found = |i: Option<usize>, f: fn(usize) -> UntaggedChoice| match i {
+        Some(i) => f(i),
+        None => UntaggedChoice::NoCase,
+    };
     let kind = runtime_value_kind(cst);
     match &kind {
-        ValueKind::UnknownValue => UntaggedAction::Undecided,
+        ValueKind::UnknownValue => UntaggedChoice::Undecided,
         ValueKind::IsLiteral(literal)
             if facts
                 .literal_tags
@@ -326,17 +357,14 @@ fn untagged_action(
                 .any(|tag| literal_denotes_same(literal, tag)) =>
         {
             // The literal side wins, exactly as it does at runtime.
-            UntaggedAction::Case(
-                switch
-                    .sw_consts
-                    .iter()
-                    .find(|(key, _)| match key {
-                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
-                            tag,
-                        )) => literal_denotes_same(literal, &literal_of_tag(tag)),
-                        _ => false,
-                    })
-                    .map(|(_, action)| action.clone()),
+            found(
+                const_keys.iter().position(|key| match key {
+                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                        literal_denotes_same(literal, &literal_of_tag(tag))
+                    }
+                    _ => false,
+                }),
+                UntaggedChoice::Const,
             )
         }
         _ => {
@@ -345,22 +373,17 @@ fn untagged_action(
                 value_has_block_type(&facts.block_types, &kind, block_type)
             };
             if facts.block_types.iter().any(matches_block) {
-                UntaggedAction::Case(
-                    switch
-                        .sw_blocks
-                        .iter()
-                        .find(|(key, _)| match key {
-                            SwitchKey::Constructor(
-                                crate::types::VariantConstructorCase::Block(
-                                    crate::types::VariantBlock::Untagged { block_type, .. },
-                                ),
-                            ) => matches_block(block_type),
-                            _ => false,
-                        })
-                        .map(|(_, action)| action.clone()),
+                found(
+                    block_keys.iter().position(|key| match key {
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                            crate::types::VariantBlock::Untagged { block_type, .. },
+                        )) => matches_block(block_type),
+                        _ => false,
+                    }),
+                    UntaggedChoice::Block,
                 )
             } else {
-                UntaggedAction::Undecided
+                UntaggedChoice::Undecided
             }
         }
     }
