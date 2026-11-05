@@ -20,7 +20,7 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
         )),
         Box::new(Lambda::var(message)),
     );
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::if_(
                 Lambda::var(cond),
@@ -69,7 +69,7 @@ fn nested_return_staticcatch_preserves_exit_dispatch_in_enclosing_jump() {
         )),
     );
     let block = compiler.with_static_jump_handler(1, &outer_exit, &[], |compiler| {
-        compiler.compile_return_block(&inner)
+        compiler.compile_return_block_tree(&inner)
     });
     let rendered = print_block(&block);
     assert!(
@@ -85,7 +85,7 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
     let g = Ident::create_local("g");
     let exn = Ident::create_local("exn");
     let val = Ident::create_local("val");
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::LtryWith(
             Box::new(Lambda::LstaticRaise(
                 -2,
@@ -232,7 +232,7 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
         Lambda::unit(),
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
 
     assert!(
@@ -450,7 +450,7 @@ fn fallthrough_handlers_do_not_reorder_grouped_named_string_return_cases() {
     ];
 
     let block = compiler.with_fallthrough_return_handler(1, &[], |this| {
-        this.compile_named_string_switch_return(Expression::var(scrutinee), &cases, None, true)
+        this.compile_named_string_switch_return_tree(Expression::var(scrutinee), &cases, None, true)
     });
 
     let [switch_stmt] = block.as_slice() else {
@@ -481,7 +481,7 @@ fn fallthrough_handlers_do_not_reorder_grouped_string_switch_return_blocks() {
     let mut compiler = LambdaCompiler::new();
     let scrutinee = Ident::create_local("scrutinee");
     let block = compiler.with_fallthrough_return_handler(1, &[], |this| {
-        this.compile_string_switch_return_block(
+        this.compile_string_switch_return_block_tree(
             &Lambda::var(scrutinee),
             &[
                 ("A".to_string(), Lambda::const_(Constant::int(2))),
@@ -520,7 +520,7 @@ fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
     let cond = Ident::create_local("cond");
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action)),
             Box::new(LambdaSwitch {
@@ -594,7 +594,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
     let int_value = Ident::create_local("intValue");
     let int_func = Ident::create_local("intFunc");
     let int_param = Ident::create_local("intParam");
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(state)),
@@ -722,7 +722,7 @@ fn unit_return_staticcatch_bindings_without_handler_exits_share_fallthrough_tail
     let carried = Ident::create_local("carried");
     let seen = Ident::create_local("seen");
     let block = compiler.with_return_unit_context(true, |compiler| {
-        compiler.compile_return_block(&Lambda::LstaticCatch(
+        compiler.compile_return_block_tree(&Lambda::LstaticCatch(
             Box::new(Lambda::if_(
                 Lambda::var(cond1),
                 Lambda::static_raise(1, vec![Lambda::var(first)]),
@@ -765,7 +765,7 @@ fn return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");
     let kind = Ident::create_local("kind");
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::LstaticCatch(
             Box::new(Lambda::if_(
                 Lambda::var(cond),
@@ -808,7 +808,7 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
     let mut compiler = LambdaCompiler::new();
     let kind = Ident::create_local("kind");
     let do_with_b = Ident::create_local("doWithB");
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::LstringSwitch(
             Box::new(Lambda::var(kind)),
             vec![
@@ -852,7 +852,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
     let block = compiler.with_return_unit_context(true, |compiler| {
-        compiler.compile_return_block(&Lambda::LstaticCatch(
+        compiler.compile_return_block_tree(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action)),
                 Box::new(LambdaSwitch {
@@ -924,7 +924,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
 fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_through_to_handler() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
-    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+    let block = compiler.compile_return_block_tree(&Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
             Box::new(Lambda::var(action)),
             Box::new(LambdaSwitch {
@@ -986,7 +986,7 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
     let then_seen = Ident::create_local("then_seen");
     let else_seen = Ident::create_local("else_seen");
     let block = compiler.with_return_unit_context(true, |compiler| {
-        compiler.compile_return_block(&Lambda::LstaticCatch(
+        compiler.compile_return_block_tree(&Lambda::LstaticCatch(
             Box::new(Lambda::Lswitch(
                 Box::new(Lambda::var(action)),
                 Box::new(LambdaSwitch {

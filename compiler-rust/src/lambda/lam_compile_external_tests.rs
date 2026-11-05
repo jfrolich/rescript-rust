@@ -8,7 +8,7 @@ fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_p
     let simplified =
         crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(&lam, false);
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&simplified);
+    let compiled = compiler.compile_expr_tree(&simplified);
     let mut block = compiled.prelude;
     let exports = extract_toplevel_exports(compiled.expr, &mut block)
         .expect("expected ImportAttributes-style lambda to end in a module export block");
@@ -22,7 +22,7 @@ fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_p
     let deps = apply_js_flatten_pass(DepsProgram {
         program,
         modules: vec![],
-        side_effect: module_side_effect_reason(&simplified),
+        side_effect: module_side_effect_reason_tree(&simplified),
     });
     assert_import_attributes_alias_block_shape(&deps.program.block, "after js_flatten");
 
@@ -61,7 +61,7 @@ fn lowers_js_var_without_args_to_a_value() {
         LamLoc::NONE,
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     assert!(compiled.prelude.is_empty());
     assert!(matches!(
         compiled.expr,
@@ -392,7 +392,7 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
     );
 
     let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
-    let compiled = compiler.compile_expr(&simplified);
+    let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = if compiled.prelude.is_empty() {
         print_expression(&compiled.expr)
     } else {
@@ -652,7 +652,7 @@ fn lowers_marshaled_constant_args_in_js_call() {
 fn lowers_js_object_create_with_marshaled_fields() {
     let mut compiler = LambdaCompiler::new();
     let name_ident = Ident::create_local("name");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![
             ObjParam {
                 obj_arg_type: Attr::ArgCst(Cst::ArgJsonLit("false".to_string())),
@@ -726,7 +726,7 @@ fn lowers_js_object_create_with_marshaled_fields() {
 #[test]
 fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::PolyVarString {
                 descr: vec![
@@ -764,7 +764,7 @@ fn lowers_js_object_create_with_polyvar_string_field_like_ocaml() {
 #[test]
 fn lowers_js_object_create_with_optional_polyvar_string_field_inline_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::PolyVarString {
                 descr: vec![
@@ -842,7 +842,7 @@ fn bind_switch_scrutinee_once_uses_tmp_name_like_ocaml() {
 #[test]
 fn lowers_js_object_create_with_statically_present_optional_field_inline_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::Nothing,
             obj_arg_label: Label::ObjOptional {
@@ -881,7 +881,7 @@ fn lowers_js_object_create_with_statically_present_optional_field_inline_like_oc
 fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let opt = Ident::create_local("opt");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::Nothing,
             obj_arg_label: Label::ObjOptional {
@@ -978,7 +978,7 @@ fn lowers_js_object_create_with_unknown_optional_field_to_conditional_assignment
 #[test]
 fn lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PjsObjectCreate(vec![ObjParam {
             obj_arg_type: Attr::Nothing,
             obj_arg_label: Label::ObjOptional {
@@ -1145,7 +1145,7 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
         LamLoc::NONE,
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     assert!(
         compiled.prelude.is_empty(),
         "expected ignored-call effects to stay in the expression, got {:?}",
@@ -1225,7 +1225,7 @@ fn lowers_ignored_js_object_fields_to_ocaml_sequence_effects() {
         LamLoc::NONE,
     );
 
-    let compiled = compiler.compile_expr(&lam);
+    let compiled = compiler.compile_expr_tree(&lam);
     assert!(
         compiled.prelude.is_empty(),
         "expected ignored-object effects to stay in the expression, got {:?}",
@@ -1341,7 +1341,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
 fn compile_dict_has_primitive_emits_in_operator_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let dict = Ident::create_local("dict");
-    let compiled = compiler.compile_expr(&Lambda::prim(
+    let compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PdictHas,
         vec![Lambda::var(dict), Lambda::const_(Constant::string("key1"))],
         LamLoc::NONE,
@@ -1712,7 +1712,10 @@ fn module_side_effect_reason_uses_first_impure_group_in_final_order_like_ocaml()
         ),
     );
 
-    assert_eq!(module_side_effect_reason(&lam).as_deref(), Some("first"));
+    assert_eq!(
+        module_side_effect_reason_tree(&lam).as_deref(),
+        Some("first")
+    );
 }
 
 #[test]
@@ -1728,7 +1731,10 @@ fn module_side_effect_reason_uses_binding_name_for_impure_group_bodies() {
         Lambda::unit(),
     );
 
-    assert_eq!(module_side_effect_reason(&lam).as_deref(), Some("match"));
+    assert_eq!(
+        module_side_effect_reason_tree(&lam).as_deref(),
+        Some("match")
+    );
 }
 
 #[test]
@@ -1738,7 +1744,7 @@ fn module_side_effect_reason_keeps_empty_reason_for_impure_nops() {
         Lambda::unit(),
     );
 
-    assert_eq!(module_side_effect_reason(&lam).as_deref(), Some(""));
+    assert_eq!(module_side_effect_reason_tree(&lam).as_deref(), Some(""));
 }
 
 #[test]
@@ -1866,17 +1872,17 @@ fn lowers_nullable_predicates_to_js_null_checks() {
     let mut compiler = LambdaCompiler::new();
     let value = Ident::create_local("value");
 
-    let null_compiled = compiler.compile_expr(&Lambda::prim(
+    let null_compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PisNull,
         vec![Lambda::var(value)],
         LamLoc::NONE,
     ));
-    let undefined_compiled = compiler.compile_expr(&Lambda::prim(
+    let undefined_compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PisUndefined,
         vec![Lambda::var(value)],
         LamLoc::NONE,
     ));
-    let nullable_compiled = compiler.compile_expr(&Lambda::prim(
+    let nullable_compiled = compiler.compile_expr_tree(&Lambda::prim(
         Primitive::PisNullUndefined,
         vec![Lambda::var(value)],
         LamLoc::NONE,

@@ -255,6 +255,94 @@ pub struct SwitchSpec {
     pub dispatch: SwitchDispatch,
 }
 
+/// A node with its payloads, shaped like the recursive [`Lambda`], for
+/// read-only matching. Variants without borrowed fields can be held while
+/// the arena is mutated.
+#[derive(Clone, Copy)]
+pub enum View<'a> {
+    Var(Ident),
+    GlobalModule(Ident),
+    Const(&'a Constant),
+    Apply {
+        func: Lam,
+        args: &'a [Lam],
+        info: &'a ApInfo,
+        transformed_jsx: bool,
+    },
+    Function {
+        params: &'a [Ident],
+        body: Lam,
+        func: &'a FuncPayload,
+    },
+    Let(LetKind, Ident, Lam, Lam),
+    LetRec(&'a [Ident], &'a [Lam], Lam),
+    Prim(&'a Primitive, &'a [Lam], LamLoc),
+    Switch(Lam, SwitchView<'a>),
+    StringSwitch(Lam, StrSwitchView<'a>),
+    StaticRaise(i32, &'a [Lam]),
+    StaticCatch(Lam, i32, &'a [Ident], Lam),
+    TryWith(Lam, Ident, Lam),
+    If(Lam, Lam, Lam),
+    Sequence(Lam, Lam),
+    Break,
+    Continue,
+    While(Lam, Lam),
+    For(Ident, Lam, Lam, DirectionFlag, Lam),
+    ForOf(Ident, Lam, Lam),
+    ForAwaitOf(Ident, Lam, Lam),
+    Assign(Ident, Lam),
+}
+
+/// The keys and actions of a switch node.
+#[derive(Clone, Copy)]
+pub struct SwitchView<'a> {
+    pub payload: &'a SwitchPayload,
+    pub const_keys: &'a [SwitchKey],
+    pub block_keys: &'a [SwitchKey],
+    pub actions: SwitchActions<'a>,
+}
+
+impl<'a> SwitchView<'a> {
+    pub fn consts(&self) -> impl Iterator<Item = (&'a SwitchKey, Lam)> + 'a {
+        self.const_keys
+            .iter()
+            .zip(self.actions.consts.iter().copied())
+    }
+    pub fn blocks(&self) -> impl Iterator<Item = (&'a SwitchKey, Lam)> + 'a {
+        self.block_keys
+            .iter()
+            .zip(self.actions.blocks.iter().copied())
+    }
+}
+
+/// The cases and default of a string switch node.
+#[derive(Clone, Copy)]
+pub struct StrSwitchView<'a> {
+    arena: &'a LamArena,
+    info: StrSwitchId,
+    pub actions: &'a [Lam],
+    pub default: Option<Lam>,
+}
+
+impl<'a> StrSwitchView<'a> {
+    pub fn len(&self) -> usize {
+        self.actions.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+    pub fn key(&self, i: usize) -> &'a str {
+        self.arena.str_switch_key(self.info, i)
+    }
+    pub fn cases(&self) -> impl Iterator<Item = (&'a str, Lam)> + 'a {
+        let (arena, info) = (self.arena, self.info);
+        self.actions
+            .iter()
+            .enumerate()
+            .map(move |(i, lam)| (arena.str_switch_key(info, i), *lam))
+    }
+}
+
 #[derive(Clone)]
 pub struct LamArena {
     nodes: Vec<Node>,
@@ -446,6 +534,105 @@ impl LamArena {
     #[inline]
     pub fn catch_payload(&self, id: CatchId) -> CatchPayload {
         self.catches[id.index()]
+    }
+
+    // --------------------------------------------------------------- views
+
+    /// The node with its payloads, shaped like the recursive [`Lambda`].
+    pub fn view(&self, lam: Lam) -> View<'_> {
+        match self.node(lam) {
+            Node::Var(id) => View::Var(self.ident(id)),
+            Node::GlobalModule(id) => View::GlobalModule(self.ident(id)),
+            Node::Const(c) => View::Const(self.constant(c)),
+            Node::Apply { func, args, info } => {
+                let p = &self.applies[info.index()];
+                View::Apply {
+                    func,
+                    args: self.list(args),
+                    info: &p.info,
+                    transformed_jsx: p.transformed_jsx,
+                }
+            }
+            Node::Function { body, info } => View::Function {
+                params: self.params(info),
+                body,
+                func: &self.funcs[info.index()],
+            },
+            Node::Let {
+                kind,
+                id,
+                value,
+                body,
+            } => View::Let(kind, self.ident(id), value, body),
+            Node::LetRec { ids, values, body } => {
+                let values = self.list(values);
+                View::LetRec(self.ident_run(ids, values.len()), values, body)
+            }
+            Node::Prim { args, info } => {
+                let p = &self.prims[info.index()];
+                View::Prim(&p.primitive, self.list(args), p.loc)
+            }
+            Node::Switch {
+                scrut,
+                actions,
+                info,
+            } => View::Switch(
+                scrut,
+                SwitchView {
+                    payload: &self.switches[info.index()],
+                    const_keys: self.switch_const_keys(info),
+                    block_keys: self.switch_block_keys(info),
+                    actions: self.switch_actions(info, actions),
+                },
+            ),
+            Node::StringSwitch {
+                scrut,
+                actions,
+                info,
+            } => {
+                let all = self.list(actions);
+                let p = self.str_switch_payload(info);
+                let n = p.n_cases();
+                View::StringSwitch(
+                    scrut,
+                    StrSwitchView {
+                        arena: self,
+                        info,
+                        actions: &all[..n],
+                        default: p.has_default.then(|| all[n]),
+                    },
+                )
+            }
+            Node::StaticRaise { label, args } => View::StaticRaise(label, self.list(args)),
+            Node::StaticCatch {
+                body,
+                handler,
+                info,
+            } => {
+                let p = self.catch_payload(info);
+                View::StaticCatch(body, p.label, self.idents(p.params), handler)
+            }
+            Node::TryWith { body, id, handler } => View::TryWith(body, self.ident(id), handler),
+            Node::If { cond, then_, else_ } => View::If(cond, then_, else_),
+            Node::Sequence(a, b) => View::Sequence(a, b),
+            Node::Break => View::Break,
+            Node::Continue => View::Continue,
+            Node::While(a, b) => View::While(a, b),
+            Node::For { dir, id, kids } => {
+                let (start, finish, body) = self.for_parts(kids);
+                View::For(self.ident(id), start, finish, dir, body)
+            }
+            Node::ForOf { id, iter, body } => View::ForOf(self.ident(id), iter, body),
+            Node::ForAwaitOf { id, iter, body } => View::ForAwaitOf(self.ident(id), iter, body),
+            Node::Assign { id, value } => View::Assign(self.ident(id), value),
+        }
+    }
+
+    /// The elements of `list`, copied out so the arena can be borrowed
+    /// mutably while they are visited.
+    #[inline]
+    pub fn list_small(&self, list: LamList) -> smallvec::SmallVec<[Lam; 8]> {
+        smallvec::SmallVec::from_slice(self.list(list))
     }
 
     // ------------------------------------------------------- shape helpers

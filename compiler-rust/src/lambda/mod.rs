@@ -43,7 +43,6 @@ pub mod lam_compile;
 pub mod lam_compile_const;
 pub mod lam_compile_context;
 pub mod lam_compile_external;
-pub(crate) mod lam_compile_input;
 pub mod lam_compile_main;
 pub mod lam_compile_main_arena;
 pub mod lam_compile_primitive;

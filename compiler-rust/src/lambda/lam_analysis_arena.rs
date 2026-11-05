@@ -2,7 +2,7 @@
 //! profitability.
 
 use crate::ident::Ident;
-use crate::lambda::arena::{FuncId, Lam, LamArena, Node};
+use crate::lambda::arena::{FuncId, Lam, LamArena, Node, View};
 use crate::lambda::lam_analysis::{SMALL_INLINE_SIZE, is_pure_primitive, size_constant};
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::Constant;
@@ -229,4 +229,58 @@ pub fn safe_to_inline(a: &LamArena, lam: Lam) -> bool {
         }
         _ => false,
     }
+}
+
+/// `Lam_exit_code.has_exit_code` (lam_exit_code.ml:25-33): a static raise
+/// to a label satisfying `exits`, not under a function.
+pub fn has_exit_code(a: &LamArena, lam: Lam, exits: &impl Fn(i32) -> bool) -> bool {
+    match a.node(lam) {
+        Node::Function { .. } => false,
+        Node::StaticRaise { label, .. } if exits(label) => true,
+        _ => {
+            let mut found = false;
+            a.iter_children(lam, |x| found = found || has_exit_code(a, x, exits));
+            found
+        }
+    }
+}
+
+/// `Lambda_traverse.free_ids` (lambda_traverse.ml:200-224): the variables
+/// `lam` uses and does not bind. Binders are removed from the one shared
+/// set after their children are visited.
+pub fn free_variables(a: &LamArena, lam: Lam) -> ahash::AHashSet<Ident> {
+    fn go(a: &LamArena, lam: Lam, fv: &mut ahash::AHashSet<Ident>) {
+        a.iter_children(lam, |x| go(a, x, fv));
+        match a.view(lam) {
+            View::Var(id) | View::Assign(id, _) => {
+                fv.insert(id);
+            }
+            View::StaticCatch(_, _, vars, _) => {
+                for id in vars {
+                    fv.remove(id);
+                }
+            }
+            View::Function { params, .. } => {
+                for id in params {
+                    fv.remove(id);
+                }
+            }
+            View::LetRec(ids, _, _) => {
+                for id in ids {
+                    fv.remove(id);
+                }
+            }
+            View::Let(_, id, _, _)
+            | View::TryWith(_, id, _)
+            | View::For(id, ..)
+            | View::ForOf(id, ..)
+            | View::ForAwaitOf(id, ..) => {
+                fv.remove(&id);
+            }
+            _ => {}
+        }
+    }
+    let mut fv = ahash::AHashSet::new();
+    go(a, lam, &mut fv);
+    fv
 }
