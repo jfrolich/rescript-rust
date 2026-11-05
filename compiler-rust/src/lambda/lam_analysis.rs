@@ -914,7 +914,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod indexed_helper_extraction_tests {
+mod primitive_purity_tests {
     use super::*;
     use LamLoc;
 

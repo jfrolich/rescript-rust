@@ -21,7 +21,7 @@ use crate::lambda::LamLoc;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::no_side_effects;
-use crate::lambda::lam_beta_reduce_indexed::reference_fold_order;
+use crate::lambda::lam_hash_ident::reference_fold_order;
 use crate::lambda::lam_closure::StatsMap;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::{IdKind, IdentTable};

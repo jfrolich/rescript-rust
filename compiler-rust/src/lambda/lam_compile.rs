@@ -18,7 +18,6 @@ use crate::js_ir::{
     ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
     StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
-use crate::lambda::indexed::{IndexedLambdaContext, NodeId, NodeSnapshot};
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
     apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
@@ -32,12 +31,7 @@ use crate::lambda::js_shake::{
 };
 use crate::lambda::lam_analysis;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;
-use crate::lambda::lam_analysis_indexed::is_closed_with_map as is_closed_with_map_indexed;
 use crate::lambda::lam_arity::Arity;
-use crate::lambda::lam_beta_reduce_indexed::{
-    BetaDiagnostics as IndexedBetaDiagnostics,
-    propagate_beta_reduce_with_map as propagate_beta_reduce_with_map_indexed,
-};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_compile_context::{Element, ExternalArityInfo, IdKind, LamStats};
@@ -74,21 +68,6 @@ use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_c
 pub(crate) struct Compiled {
     pub(crate) prelude: Block,
     pub(crate) expr: Expression,
-}
-
-/// Owner-private result of inspecting one indexed external-field application.
-/// The fallback keeps only scalar metadata and same-store IDs across resolver
-/// calls; it never owns a recursive copy of an indexed child.
-enum PreparedIndexedExternalApply {
-    Reduced(NodeId),
-    Call {
-        module: ModuleId,
-        field_name: String,
-        args: Vec<NodeId>,
-        info: ApInfo,
-        transformed_jsx: bool,
-        known_arity: Option<Arity>,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -1207,118 +1186,6 @@ impl LambdaCompiler {
             },
             name.as_str(),
         ))
-    }
-
-    /// Imports an eligible CMJ function at the consumer query boundary and
-    /// beta-reduces it against argument IDs already in the owning store.
-    ///
-    /// OCaml performs this after `query_external_id_info` and the
-    /// same-length/inlineability guards in `lam_compile.ml:339-357`. The
-    /// caller must run those guards before calling this method, so rejected
-    /// candidates are never imported merely to inspect their payload.
-    fn import_and_beta_indexed_cmj_function(
-        &mut self,
-        context: &mut IndexedLambdaContext,
-        function: LFunction,
-        args: &[NodeId],
-    ) -> NodeId {
-        assert_eq!(
-            function.params.len(),
-            args.len(),
-            "indexed CMJ beta requires a fully applied function"
-        );
-        assert!(
-            args.iter().all(|arg| context.store().contains(*arg)),
-            "indexed CMJ beta argument is foreign or out of range"
-        );
-
-        let imported = context.import_cmj_function(function);
-        let NodeSnapshot::Function(_, params, body, attr, _) = context.store().snapshot(imported)
-        else {
-            unreachable!("CMJ function import did not produce an indexed function")
-        };
-        debug_assert!(!attr.async_ && attr.directive.is_none());
-        let exports = AHashSet::new();
-        let (_, parameter_map) =
-            is_closed_with_map_indexed(context.store(), &exports, &params, body);
-        let mut diagnostics = IndexedBetaDiagnostics::default();
-        let (store, metadata, beta_hash_bucket_count) = context.parts_mut();
-        propagate_beta_reduce_with_map_indexed(
-            store,
-            metadata,
-            &parameter_map,
-            &params,
-            body,
-            args,
-            &self.id_gen,
-            beta_hash_bucket_count,
-            &mut diagnostics,
-        )
-    }
-
-    /// Performs the mutable part of indexed external-call lowering.
-    ///
-    /// The initial store inspection ends before the CMJ resolver is queried.
-    /// A selected function is then imported into the same store and reduced
-    /// with the original argument IDs. If the function is absent or rejected,
-    /// the arity query runs afterwards, matching `lam_compile.ml:339-383`.
-    fn prepare_indexed_external_field_apply(
-        &mut self,
-        context: &mut IndexedLambdaContext,
-        application: NodeId,
-    ) -> Option<PreparedIndexedExternalApply> {
-        let (module, field_name, args, info, transformed_jsx) = {
-            let NodeSnapshot::Apply(function, args, info, transformed_jsx) =
-                context.store().snapshot(application)
-            else {
-                return None;
-            };
-            let NodeSnapshot::Prim(
-                Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
-                field_args,
-                _,
-            ) = context.store().snapshot(function)
-            else {
-                return None;
-            };
-            let [base] = field_args.as_slice() else {
-                return None;
-            };
-            let NodeSnapshot::GlobalModule(id) = context.store().snapshot(*base) else {
-                return None;
-            };
-            (
-                ModuleId {
-                    id,
-                    kind: Kind::Ml,
-                    dynamic_import: false,
-                },
-                name,
-                args,
-                info,
-                transformed_jsx,
-            )
-        };
-
-        if let Some(Lambda::Lfunction(function)) =
-            self.resolve_cmj_module_field_lambda(&module, &field_name)
-            && function.params.len() == args.len()
-            && lfunction_can_be_inlined(&function)
-        {
-            let reduced =
-                self.import_and_beta_indexed_cmj_function(context, *function, args.as_slice());
-            return Some(PreparedIndexedExternalApply::Reduced(reduced));
-        }
-
-        let known_arity = self.resolve_cmj_module_field_arity(&module, &field_name);
-        Some(PreparedIndexedExternalApply::Call {
-            module,
-            field_name,
-            args,
-            info,
-            transformed_jsx,
-            known_arity,
-        })
     }
 
     fn compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
@@ -8471,16 +8338,6 @@ pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option
 #[path = "lam_compile_tests.rs"]
 mod tests;
 
-#[cfg(test)]
-#[path = "lam_compile_allocator_tests.rs"]
-mod allocator_tests;
-
-#[cfg(test)]
-#[path = "lam_compile_input_js_tests.rs"]
-mod input_js_tests;
-
-#[path = "lam_compile_indexed.rs"]
-mod indexed_consumer;
 
 /// `Lam_coercion.flatten` groups the top-level spine and `Lam_group.nop_cons`
 /// drops sequence heads that are a variable, constant or function

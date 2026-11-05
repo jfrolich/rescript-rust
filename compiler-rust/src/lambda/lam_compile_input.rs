@@ -1,12 +1,7 @@
-//! Borrowed input facade for the recursive and indexed Lambda stores.
-//!
-//! JS lowering uses this cursor so the indexed optimizer result remains canonical
-//! through the consumer. Indexed cursors carry their lookup store and obey the
-//! owner-scoped same-store contract; this is not compile-time arena branding.
+//! Borrowed input facade over Lambda for the shared JS lowering helpers.
 
 use crate::ident::Ident;
 use crate::lambda::LamLoc;
-use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{
     ApInfo, ApplyStatus, Constant, DirectionFlag, FunctionAttribute, Lambda, Primitive,
@@ -16,10 +11,6 @@ use crate::lambda::{
 #[derive(Clone, Copy)]
 pub(crate) enum LambdaInput<'a> {
     Recursive(&'a Lambda),
-    Indexed {
-        store: &'a IndexedLambda,
-        node: NodeId,
-    },
 }
 
 impl<'a> From<&'a Lambda> for LambdaInput<'a> {
@@ -37,17 +28,12 @@ impl<'a> From<&'a Box<Lambda>> for LambdaInput<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum LambdaInputs<'a> {
     Recursive(&'a [Lambda]),
-    Indexed {
-        store: &'a IndexedLambda,
-        nodes: &'a [NodeId],
-    },
 }
 
 impl<'a> LambdaInputs<'a> {
     pub(crate) fn len(self) -> usize {
         match self {
             Self::Recursive(values) => values.len(),
-            Self::Indexed { nodes, .. } => nodes.len(),
         }
     }
 
@@ -58,10 +44,6 @@ impl<'a> LambdaInputs<'a> {
     pub(crate) fn get(self, index: usize) -> Option<LambdaInput<'a>> {
         match self {
             Self::Recursive(values) => values.get(index).map(LambdaInput::Recursive),
-            Self::Indexed { store, nodes } => nodes
-                .get(index)
-                .copied()
-                .map(|node| LambdaInput::Indexed { store, node }),
         }
     }
 
@@ -99,16 +81,11 @@ impl ExactSizeIterator for LambdaInputsIter<'_> {}
 #[derive(Clone, Copy)]
 pub(crate) enum LambdaBindings<'a> {
     Recursive(&'a [(Ident, Lambda)]),
-    Indexed {
-        store: &'a IndexedLambda,
-        values: &'a [(Ident, NodeId)],
-    },
 }
 impl<'a> LambdaBindings<'a> {
     pub(crate) fn len(self) -> usize {
         match self {
             Self::Recursive(v) => v.len(),
-            Self::Indexed { values, .. } => values.len(),
         }
     }
     pub(crate) fn is_empty(self) -> bool {
@@ -119,9 +96,6 @@ impl<'a> LambdaBindings<'a> {
             Self::Recursive(values) => values
                 .get(index)
                 .map(|(id, value)| (id, LambdaInput::Recursive(value))),
-            Self::Indexed { store, values } => values
-                .get(index)
-                .map(|(id, node)| (id, LambdaInput::Indexed { store, node: *node })),
         }
     }
     pub(crate) fn iter(self) -> LambdaBindingsIter<'a> {
@@ -154,16 +128,11 @@ pub(crate) enum LambdaCases<'a> {
     Recursive {
         store: &'a [(SwitchKey, Lambda)],
     },
-    Indexed {
-        lambda: &'a IndexedLambda,
-        store: &'a [(SwitchKey, NodeId)],
-    },
 }
 impl<'a> LambdaCases<'a> {
     pub(crate) fn len(self) -> usize {
         match self {
             Self::Recursive { store } => store.len(),
-            Self::Indexed { store, .. } => store.len(),
         }
     }
     pub(crate) fn is_empty(self) -> bool {
@@ -174,15 +143,6 @@ impl<'a> LambdaCases<'a> {
             Self::Recursive { store } => store
                 .get(index)
                 .map(|(key, value)| (key, LambdaInput::Recursive(value))),
-            Self::Indexed { lambda, store } => store.get(index).map(|(key, node)| {
-                (
-                    key,
-                    LambdaInput::Indexed {
-                        store: lambda,
-                        node: *node,
-                    },
-                )
-            }),
         }
     }
     pub(crate) fn first(self) -> Option<(&'a SwitchKey, LambdaInput<'a>)> {
@@ -216,16 +176,11 @@ impl ExactSizeIterator for LambdaCasesIter<'_> {}
 #[derive(Clone, Copy)]
 pub(crate) enum StringCases<'a> {
     Recursive(&'a [(String, Lambda)]),
-    Indexed {
-        store: &'a IndexedLambda,
-        values: &'a [(String, NodeId)],
-    },
 }
 impl<'a> StringCases<'a> {
     pub(crate) fn len(self) -> usize {
         match self {
             Self::Recursive(v) => v.len(),
-            Self::Indexed { values, .. } => values.len(),
         }
     }
     pub(crate) fn is_empty(self) -> bool {
@@ -236,9 +191,6 @@ impl<'a> StringCases<'a> {
             Self::Recursive(values) => values
                 .get(index)
                 .map(|(key, value)| (key, LambdaInput::Recursive(value))),
-            Self::Indexed { store, values } => values
-                .get(index)
-                .map(|(key, node)| (key, LambdaInput::Indexed { store, node: *node })),
         }
     }
     pub(crate) fn first(self) -> Option<(&'a String, LambdaInput<'a>)> {
@@ -325,9 +277,6 @@ pub(crate) enum LambdaInputView<'a> {
 }
 
 impl<'a> LambdaInput<'a> {
-    pub(crate) fn indexed(store: &'a IndexedLambda, node: NodeId) -> Self {
-        Self::Indexed { store, node }
-    }
     pub(crate) fn view(self) -> LambdaInputView<'a> {
         match self {
             Self::Recursive(lambda) => match lambda {
@@ -421,118 +370,6 @@ impl<'a> LambdaInput<'a> {
                     LambdaInput::Recursive(b),
                 ),
                 Lambda::Lassign(id, v) => LambdaInputView::Assign(id, LambdaInput::Recursive(v)),
-            },
-            Self::Indexed { store, node } => match store.view(node) {
-                NodeView::Var(id) => LambdaInputView::Var(id),
-                NodeView::GlobalModule(id) => LambdaInputView::GlobalModule(id),
-                NodeView::Const(c) => LambdaInputView::Const(c),
-                NodeView::Apply(f, a, i, j) => LambdaInputView::Apply(ApplyInput {
-                    function: Self::Indexed { store, node: f },
-                    args: LambdaInputs::Indexed { store, nodes: a },
-                    info: i,
-                    transformed_jsx: j,
-                }),
-                NodeView::Function(arity, p, b, a, _) => LambdaInputView::Function(FunctionInput {
-                    arity,
-                    params: p,
-                    body: Self::Indexed { store, node: b },
-                    attr: a,
-                }),
-                NodeView::Let(k, id, v, b) => LambdaInputView::Let(
-                    k,
-                    id,
-                    Self::Indexed { store, node: v },
-                    Self::Indexed { store, node: b },
-                ),
-                NodeView::LetRec(v, b) => LambdaInputView::LetRec(
-                    LambdaBindings::Indexed { store, values: v },
-                    Self::Indexed { store, node: b },
-                ),
-                NodeView::Prim(p, a, l) => {
-                    LambdaInputView::Prim(p, LambdaInputs::Indexed { store, nodes: a }, l)
-                }
-                NodeView::Switch {
-                    scrutinee,
-                    consts_full,
-                    consts,
-                    blocks_full,
-                    blocks,
-                    fail_action,
-                    dispatch,
-                } => LambdaInputView::Switch(
-                    Self::Indexed {
-                        store,
-                        node: scrutinee,
-                    },
-                    SwitchInput {
-                        consts_full,
-                        consts: LambdaCases::Indexed {
-                            lambda: store,
-                            store: consts,
-                        },
-                        blocks_full,
-                        blocks: LambdaCases::Indexed {
-                            lambda: store,
-                            store: blocks,
-                        },
-                        fail_action: fail_action.map(|node| Self::Indexed { store, node }),
-                        dispatch,
-                    },
-                ),
-                NodeView::StringSwitch(s, c, d) => LambdaInputView::StringSwitch(
-                    Self::Indexed { store, node: s },
-                    StringCases::Indexed { store, values: c },
-                    d.map(|node| Self::Indexed { store, node }),
-                ),
-                NodeView::StaticRaise(id, a) => {
-                    LambdaInputView::StaticRaise(id, LambdaInputs::Indexed { store, nodes: a })
-                }
-                NodeView::StaticCatch(b, id, p, h) => LambdaInputView::StaticCatch(
-                    Self::Indexed { store, node: b },
-                    id,
-                    p,
-                    Self::Indexed { store, node: h },
-                ),
-                NodeView::TryWith(b, id, h) => LambdaInputView::TryWith(
-                    Self::Indexed { store, node: b },
-                    id,
-                    Self::Indexed { store, node: h },
-                ),
-                NodeView::IfThenElse(a, b, c) => LambdaInputView::IfThenElse(
-                    Self::Indexed { store, node: a },
-                    Self::Indexed { store, node: b },
-                    Self::Indexed { store, node: c },
-                ),
-                NodeView::Sequence(a, b) => LambdaInputView::Sequence(
-                    Self::Indexed { store, node: a },
-                    Self::Indexed { store, node: b },
-                ),
-                NodeView::Break => LambdaInputView::Break,
-                NodeView::Continue => LambdaInputView::Continue,
-                NodeView::While(a, b) => LambdaInputView::While(
-                    Self::Indexed { store, node: a },
-                    Self::Indexed { store, node: b },
-                ),
-                NodeView::For(id, a, b, d, c) => LambdaInputView::For(
-                    id,
-                    Self::Indexed { store, node: a },
-                    Self::Indexed { store, node: b },
-                    d,
-                    Self::Indexed { store, node: c },
-                ),
-                NodeView::ForOf(id, a, b) => LambdaInputView::ForOf(
-                    id,
-                    Self::Indexed { store, node: a },
-                    Self::Indexed { store, node: b },
-                ),
-                NodeView::ForAwaitOf(id, a, b) => LambdaInputView::ForAwaitOf(
-                    id,
-                    Self::Indexed { store, node: a },
-                    Self::Indexed { store, node: b },
-                ),
-                NodeView::Assign(id, v) => {
-                    LambdaInputView::Assign(id, Self::Indexed { store, node: v })
-                }
             },
         }
     }
