@@ -1,0 +1,232 @@
+//! `Lam_analysis` over the Lambda arena: side effects, size, and inlining
+//! profitability.
+
+use crate::ident::Ident;
+use crate::lambda::arena::{FuncId, Lam, LamArena, Node};
+use crate::lambda::lam_analysis::{SMALL_INLINE_SIZE, is_pure_primitive, size_constant};
+use crate::lambda::lam_compat::FieldDbgInfo;
+use crate::lambda::lam_constant::Constant;
+use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::{InlineAttribute, TagInfo};
+
+/// `Lam_analysis.no_side_effects`.
+pub fn no_side_effects(a: &LamArena, lam: Lam) -> bool {
+    match a.node(lam) {
+        Node::Var(_) | Node::Const(_) | Node::Function { .. } | Node::GlobalModule(_) => true,
+        Node::Prim { args, info } => {
+            let args = a.list(args);
+            if !args.iter().all(|x| no_side_effects(a, *x)) {
+                return false;
+            }
+            is_pure_primitive(
+                &a.prim_payload(info).primitive,
+                args.get(1).and_then(|x| a.as_const(*x)),
+            )
+        }
+        Node::Let { value, body, .. } => no_side_effects(a, value) && no_side_effects(a, body),
+        Node::Switch { .. }
+        | Node::StringSwitch { .. }
+        | Node::StaticRaise { .. }
+        | Node::StaticCatch { .. } => false,
+        Node::TryWith { body, handler, .. } => {
+            no_side_effects(a, body) && no_side_effects(a, handler)
+        }
+        Node::If { cond, then_, else_ } => {
+            no_side_effects(a, cond) && no_side_effects(a, then_) && no_side_effects(a, else_)
+        }
+        Node::Sequence(x, y) => no_side_effects(a, x) && no_side_effects(a, y),
+        Node::LetRec { values, body, .. } => {
+            a.list(values).iter().all(|x| no_side_effects(a, *x)) && no_side_effects(a, body)
+        }
+        Node::While(..)
+        | Node::For { .. }
+        | Node::ForOf { .. }
+        | Node::ForAwaitOf { .. }
+        | Node::Break
+        | Node::Continue
+        | Node::Assign { .. } => false,
+        Node::Apply { func, args, .. } => {
+            // `Lazy.from_fun` application.
+            if let Some((Primitive::Pfield(_, FieldDbgInfo::Module { name }), _, _)) =
+                a.as_prim(func)
+                && name == "from_fun"
+                && let [arg] = a.list(args)
+            {
+                return no_side_effects(a, *arg);
+            }
+            false
+        }
+    }
+}
+
+const TOO_BIG_TO_INLINE: i32 = 1000;
+
+/// `Lam_analysis.size`.
+pub fn size(a: &LamArena, lam: Lam) -> i32 {
+    size_inner(a, lam).unwrap_or(TOO_BIG_TO_INLINE)
+}
+
+fn size_inner(a: &LamArena, lam: Lam) -> Option<i32> {
+    match a.node(lam) {
+        Node::Var(_) | Node::GlobalModule(_) => Some(1),
+        Node::Const(c) => Some(size_constant(a.constant(c))),
+        Node::Let { value, body, .. } => Some(1 + size_inner(a, value)? + size_inner(a, body)?),
+        Node::LetRec { .. } => None,
+        Node::Prim { args, info } => {
+            let args = a.list(args);
+            match &a.prim_payload(info).primitive {
+                Primitive::Pfield(_, FieldDbgInfo::Module { .. }) => {
+                    if let [x] = args
+                        && matches!(a.node(*x), Node::GlobalModule(_) | Node::Var(_))
+                    {
+                        return Some(1);
+                    }
+                }
+                Primitive::Praise | Primitive::PisNotNone => {
+                    if let [x] = args {
+                        return size_inner(a, *x);
+                    }
+                }
+                Primitive::Pmakeblock(
+                    tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
+                    _,
+                ) => {
+                    let missing = tag_info.logical_field_count().saturating_sub(args.len());
+                    return size_lams(a, 1 + missing as i32, args);
+                }
+                Primitive::PjsObjectCreate(obj_params) => {
+                    let logical = obj_params
+                        .iter()
+                        .filter(|p| {
+                            !matches!(
+                                p.obj_arg_type,
+                                crate::types::external_ffi_types::Attr::ArgCst(_)
+                            )
+                        })
+                        .count();
+                    let missing = logical.saturating_sub(args.len());
+                    return size_lams(a, 1 + missing as i32, args);
+                }
+                Primitive::PrawJsCode(_) => return None,
+                _ => {}
+            }
+            size_lams(a, 1, args)
+        }
+        Node::Apply { func, args, .. } => {
+            let f = size_inner(a, func)?;
+            size_lams(a, f, a.list(args))
+        }
+        Node::Function { body, .. } => size_inner(a, body),
+        Node::Switch { .. }
+        | Node::StringSwitch { .. }
+        | Node::StaticCatch { .. }
+        | Node::TryWith { .. }
+        | Node::While(..)
+        | Node::For { .. }
+        | Node::ForOf { .. }
+        | Node::ForAwaitOf { .. } => None,
+        Node::Break | Node::Continue => Some(1),
+        Node::StaticRaise { args, .. } => size_lams(a, 1, a.list(args)),
+        Node::If { cond, then_, else_ } => {
+            Some(1 + size_inner(a, cond)? + size_inner(a, then_)? + size_inner(a, else_)?)
+        }
+        Node::Sequence(x, y) => Some(size_inner(a, x)? + size_inner(a, y)?),
+        Node::Assign { value, .. } => Some(1 + size_inner(a, value)?),
+    }
+}
+
+fn size_lams(a: &LamArena, acc: i32, lams: &[Lam]) -> Option<i32> {
+    let mut total = acc;
+    for x in lams {
+        total += size_inner(a, *x)?;
+    }
+    Some(total)
+}
+
+pub fn args_all_const(a: &LamArena, args: &[Lam]) -> bool {
+    args.iter().all(|x| a.is_const(*x))
+}
+
+/// `Lam_analysis.lfunction_can_be_inlined`.
+pub fn lfunction_can_be_inlined(a: &LamArena, func: FuncId) -> bool {
+    let attr = &a.func_payload(func).attr;
+    !attr.async_ && attr.directive.is_none()
+}
+
+/// `Lam_analysis.ok_to_inline_fun_when_app`.
+pub fn ok_to_inline_fun_when_app(a: &LamArena, func: FuncId, body: Lam, args: &[Lam]) -> bool {
+    match a.func_payload(func).attr.inline {
+        InlineAttribute::Always => true,
+        InlineAttribute::Never => false,
+        InlineAttribute::Default => {
+            let s = size(a, body);
+            s < SMALL_INLINE_SIZE
+                || destruct_pattern(a, body, a.params(func), args)
+                || (args_all_const(a, args) && s < 10 && no_side_effects(a, body))
+        }
+    }
+}
+
+/// `Lam_analysis.destruct_pattern`: a switch or conditional on a parameter
+/// whose argument is a constant, measured after folding.
+pub(crate) fn destruct_pattern(a: &LamArena, body: Lam, params: &[Ident], args: &[Lam]) -> bool {
+    let find_arg = |v: &Ident| {
+        params
+            .iter()
+            .position(|p| p == v)
+            .and_then(|i| args.get(i).copied())
+    };
+    match a.node(body) {
+        Node::Switch {
+            scrut,
+            actions,
+            info,
+        } => {
+            if let Some(v) = a.as_var(scrut)
+                && let Some(arg) = find_arg(&v)
+                && a.is_const(arg)
+            {
+                // `Lam.switch` on the constant picks an action; a switch
+                // that stays is too big to inline.
+                return match a.decide_switch(arg, actions, info) {
+                    Some(action) => size(a, action) < SMALL_INLINE_SIZE,
+                    None => false,
+                };
+            }
+            false
+        }
+        Node::If { cond, then_, else_ } => {
+            if let Some(v) = a.as_var(cond)
+                && let Some(arg) = find_arg(&v)
+                && let Some(c) = a.as_const(arg)
+            {
+                let branch = if c.eval_as_bool() { then_ } else { else_ };
+                return size(a, branch) < SMALL_INLINE_SIZE;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// `Lam_analysis.safe_to_inline`.
+pub fn safe_to_inline(a: &LamArena, lam: Lam) -> bool {
+    match a.node(lam) {
+        Node::Function { .. } => true,
+        Node::Const(c) => {
+            let c = a.constant(c);
+            matches!(
+                c,
+                Constant::Pointer(_)
+                    | Constant::JsTrue
+                    | Constant::JsFalse
+                    | Constant::JsUndefined { .. }
+            ) || matches!(
+                c,
+                Constant::Int { comment: Some(info), .. }
+                    if matches!(**info, crate::lambda::lam_constant::PointerInfo::Constructor(_))
+            )
+        }
+        _ => false,
+    }
+}

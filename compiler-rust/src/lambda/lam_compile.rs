@@ -612,9 +612,8 @@ impl LambdaCompiler {
         self.external_module_ids.clear();
         self.dynamic_import_modules.clear();
         self.if_return_finished.clear();
-        let simplified_result = crate::timing::measure(
-            crate::timing::Phase::LambdaOptimization,
-            || {
+        let simplified_result =
+            crate::timing::measure(crate::timing::Phase::LambdaOptimization, || {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
                 let jsx_preserve = self.jsx_preserve;
                 let module_path_resolver = self.module_path_resolver.as_ref();
@@ -649,33 +648,33 @@ impl LambdaCompiler {
                     .cloned()
                     .map(cmj_export_arity_to_external)
                 };
-                crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_and_meta_owned(
-                    lam,
+                crate::lambda::lam_compile_main_arena::simplify_for_js_backend(
+                    &lam,
                     jsx_preserve,
                     &mut external_inline,
                     &mut external_arity,
                 )
-            },
-        );
-        let simplified_result = crate::lambda::lam_compile_main::add_hoisted_function_aliases(
-            simplified_result,
+            });
+        let mut simplified_result = simplified_result;
+        crate::lambda::lam_compile_main_arena::add_hoisted_function_aliases(
+            &mut simplified_result,
             &self.hoisted_functions,
         );
+        self.cmj_export_arities =
+            crate::lambda::lam_compile_main_arena::cmj_export_arities(&simplified_result);
+        let simplified_lambda = simplified_result.arena.export(simplified_result.lam);
+        drop(simplified_result);
         self.cmj_export_constants =
-            collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
+            collect_cmj_export_constants_from_simplified_lambda(&simplified_lambda);
         self.cmj_export_lambdas = if self.cross_module_inline {
             crate::lambda::CmjExportLambdas::export(
-                collect_cmj_export_lambdas_from_simplified_lambda(&simplified_result.lambda),
+                collect_cmj_export_lambdas_from_simplified_lambda(&simplified_lambda),
                 &self.lam_locs,
             )
         } else {
             Default::default()
         };
-        self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
-            &simplified_result.lambda,
-            &simplified_result.meta,
-        );
-        let simplified = drop_toplevel_pure_sequence_heads(simplified_result.lambda);
+        let simplified = drop_toplevel_pure_sequence_heads(simplified_lambda);
         // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
         // same global `Ident.currentstamp` as the Lambda identifiers entering
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
@@ -8337,7 +8336,6 @@ pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option
 #[cfg(test)]
 #[path = "lam_compile_tests.rs"]
 mod tests;
-
 
 /// `Lam_coercion.flatten` groups the top-level spine and `Lam_group.nop_cons`
 /// drops sequence heads that are a variable, constant or function

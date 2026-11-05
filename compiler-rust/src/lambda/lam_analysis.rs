@@ -421,7 +421,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
 }
 
 /// Compute the size of a constant.
-fn size_constant(c: &Constant) -> i32 {
+pub(crate) fn size_constant(c: &Constant) -> i32 {
     match c {
         Constant::Int { .. }
         | Constant::Constructor(_)

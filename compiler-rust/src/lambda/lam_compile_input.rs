@@ -125,9 +125,7 @@ impl ExactSizeIterator for LambdaBindingsIter<'_> {}
 
 #[derive(Clone, Copy)]
 pub(crate) enum LambdaCases<'a> {
-    Recursive {
-        store: &'a [(SwitchKey, Lambda)],
-    },
+    Recursive { store: &'a [(SwitchKey, Lambda)] },
 }
 impl<'a> LambdaCases<'a> {
     pub(crate) fn len(self) -> usize {

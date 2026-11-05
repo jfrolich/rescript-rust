@@ -78,7 +78,6 @@ pub(crate) fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Ve
     buckets.into_iter().flatten().collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -579,7 +579,10 @@ impl LamArena {
     fn add_switch_keys(&mut self, keys: impl IntoIterator<Item = SwitchKey>) -> (u32, u32) {
         let start = self.switch_keys.len();
         self.switch_keys.extend(keys);
-        (checked_u32(start), checked_u32(self.switch_keys.len() - start))
+        (
+            checked_u32(start),
+            checked_u32(self.switch_keys.len() - start),
+        )
     }
 
     /// Payload for a switch with the given keys; actions are supplied by the
@@ -829,7 +832,14 @@ impl LamArena {
         self.push(Node::While(cond, body))
     }
 
-    pub fn for_(&mut self, var: Ident, start: Lam, finish: Lam, dir: DirectionFlag, body: Lam) -> Lam {
+    pub fn for_(
+        &mut self,
+        var: Ident,
+        start: Lam,
+        finish: Lam,
+        dir: DirectionFlag,
+        body: Lam,
+    ) -> Lam {
         let id = self.add_ident(var);
         self.for_with(id, start, finish, dir, body)
     }
@@ -894,7 +904,12 @@ impl LamArena {
     }
 
     /// New string switch, through `Lam.stringswitch`.
-    pub fn string_switch(&mut self, scrut: Lam, cases: &[(&str, Lam)], default: Option<Lam>) -> Lam {
+    pub fn string_switch(
+        &mut self,
+        scrut: Lam,
+        cases: &[(&str, Lam)],
+        default: Option<Lam>,
+    ) -> Lam {
         let actions = self.add_list_iter(cases.iter().map(|(_, a)| *a).chain(default));
         let info = self.add_str_switch(cases.iter().map(|(k, _)| *k), default.is_some());
         self.string_switch_with(scrut, actions, info)
@@ -1025,14 +1040,18 @@ impl LamArena {
                         Primitive::Pasrint => c(Constant::int(aa.wrapping_shr(*bb as u32))),
                         _ => unreachable!(),
                     },
-                    (Primitive::Psequand, Constant::JsFalse, Constant::JsTrue | Constant::JsFalse) => {
-                        b(false)
-                    }
+                    (
+                        Primitive::Psequand,
+                        Constant::JsFalse,
+                        Constant::JsTrue | Constant::JsFalse,
+                    ) => b(false),
                     (Primitive::Psequand, Constant::JsTrue, Constant::JsTrue) => b(true),
                     (Primitive::Psequand, Constant::JsTrue, Constant::JsFalse) => b(false),
-                    (Primitive::Psequor, Constant::JsTrue, Constant::JsTrue | Constant::JsFalse) => {
-                        b(true)
-                    }
+                    (
+                        Primitive::Psequor,
+                        Constant::JsTrue,
+                        Constant::JsTrue | Constant::JsFalse,
+                    ) => b(true),
                     (Primitive::Psequor, Constant::JsFalse, Constant::JsTrue) => b(true),
                     (Primitive::Psequor, Constant::JsFalse, Constant::JsFalse) => b(false),
                     (Primitive::Pstringadd, Constant::String(a_s), Constant::String(b_s)) => {
@@ -1108,7 +1127,13 @@ impl LamArena {
         }
     }
 
-    fn decide_switch(&self, scrut: Lam, actions: LamList, info: SwitchId) -> Option<Lam> {
+    /// The action `Lam.switch` selects for a constant scrutinee, if any.
+    pub(crate) fn decide_switch(
+        &self,
+        scrut: Lam,
+        actions: LamList,
+        info: SwitchId,
+    ) -> Option<Lam> {
         let cst = self.as_const(scrut)?;
         let payload = &self.switches[info.index()];
         let acts = self.switch_actions(info, actions);
@@ -1306,10 +1331,12 @@ impl LamArena {
             .iter()
             .zip(inner_args.iter())
             .zip(outer_args.iter())
-            .map(|((param, inner_arg), outer_arg)| match self.as_var(*inner_arg) {
-                Some(id) if param.same(&id) => Some(*outer_arg),
-                _ => None,
-            })
+            .map(
+                |((param, inner_arg), outer_arg)| match self.as_var(*inner_arg) {
+                    Some(id) if param.same(&id) => Some(*outer_arg),
+                    _ => None,
+                },
+            )
             .collect()
     }
 
@@ -1389,7 +1416,11 @@ impl LamArena {
     /// `Lam.if_`.
     pub fn if_(&mut self, cond: Lam, then_: Lam, else_: Lam) -> Lam {
         if let Some(constant) = self.as_const(cond) {
-            return if constant.eval_as_bool() { then_ } else { else_ };
+            return if constant.eval_as_bool() {
+                then_
+            } else {
+                else_
+            };
         }
         if self.is_assertfalse(else_) {
             return self.seq(cond, then_);
@@ -1572,8 +1603,7 @@ impl LamArena {
                 let (l1, l2) = (self.list(a1), self.list(a2));
                 self.eq_approx(s1, s2)
                     && p1.has_default == p2.has_default
-                    && (!p1.has_default
-                        || self.eq_approx(l1[p1.n_cases()], l2[p2.n_cases()]))
+                    && (!p1.has_default || self.eq_approx(l1[p1.n_cases()], l2[p2.n_cases()]))
                     && p1.n_cases() == p2.n_cases()
                     && (0..p1.n_cases()).all(|i| {
                         self.str_switch_key(i1, i) == self.str_switch_key(i2, i)
@@ -1597,6 +1627,25 @@ impl LamArena {
     /// switches) and plain construction otherwise. Unchanged nodes keep
     /// their handle.
     pub fn shallow_map(&mut self, lam: Lam, f: &mut impl FnMut(&mut Self, Lam) -> Lam) -> Lam {
+        self.shallow_map_impl(lam, f, true)
+    }
+
+    /// [`Self::shallow_map`] rebuilding every changed node with its plain
+    /// constructor, without folding.
+    pub fn shallow_map_plain(
+        &mut self,
+        lam: Lam,
+        f: &mut impl FnMut(&mut Self, Lam) -> Lam,
+    ) -> Lam {
+        self.shallow_map_impl(lam, f, false)
+    }
+
+    fn shallow_map_impl(
+        &mut self,
+        lam: Lam,
+        f: &mut impl FnMut(&mut Self, Lam) -> Lam,
+        smart: bool,
+    ) -> Lam {
         match self.node(lam) {
             Node::Var(_)
             | Node::GlobalModule(_)
@@ -1609,7 +1658,11 @@ impl LamArena {
                 if nf == func && !changed {
                     return lam;
                 }
-                self.apply_with(nf, nargs, info)
+                if smart {
+                    self.apply_with(nf, nargs, info)
+                } else {
+                    self.apply_raw_with(nf, nargs, info)
+                }
             }
             Node::Function { body, info } => {
                 let nb = f(self, body);
@@ -1647,7 +1700,11 @@ impl LamArena {
                 if !changed {
                     return lam;
                 }
-                self.prim_with(info, nargs)
+                if smart {
+                    self.prim_with(info, nargs)
+                } else {
+                    self.prim_raw_with(info, nargs)
+                }
             }
             Node::Switch {
                 scrut,
@@ -1659,7 +1716,11 @@ impl LamArena {
                 if ns == scrut && !changed {
                     return lam;
                 }
-                self.switch_with(ns, nactions, info)
+                if smart {
+                    self.switch_with(ns, nactions, info)
+                } else {
+                    self.switch_raw(ns, nactions, info)
+                }
             }
             Node::StringSwitch {
                 scrut,
@@ -1671,7 +1732,11 @@ impl LamArena {
                 if ns == scrut && !changed {
                     return lam;
                 }
-                self.string_switch_with(ns, nactions, info)
+                if smart {
+                    self.string_switch_with(ns, nactions, info)
+                } else {
+                    self.string_switch_raw(ns, nactions, info)
+                }
             }
             Node::StaticRaise { label, args } => {
                 let (nargs, changed) = self.map_list(args, f);
@@ -1709,8 +1774,10 @@ impl LamArena {
                 let ne = f(self, else_);
                 if nc == cond && nt == then_ && ne == else_ {
                     lam
-                } else {
+                } else if smart {
                     self.if_(nc, nt, ne)
+                } else {
+                    self.if_raw(nc, nt, ne)
                 }
             }
             Node::Sequence(a, b) => {
@@ -1718,8 +1785,10 @@ impl LamArena {
                 let nb = f(self, b);
                 if na == a && nb == b {
                     lam
-                } else {
+                } else if smart {
                     self.seq(na, nb)
+                } else {
+                    self.seq_raw(na, nb)
                 }
             }
             Node::While(a, b) => {
@@ -1929,7 +1998,8 @@ impl LamArena {
                     .map(|a| self.import(a))
                     .collect();
                 let actions = self.add_list(&actions);
-                let info = self.add_str_switch(cases.iter().map(|(k, _)| k.as_str()), default.is_some());
+                let info =
+                    self.add_str_switch(cases.iter().map(|(k, _)| k.as_str()), default.is_some());
                 self.string_switch_raw(scrut, actions, info)
             }
             Lambda::LstaticRaise(label, args) => {
@@ -2093,7 +2163,9 @@ impl LamArena {
                 let (cases, default) = self.str_switch_cases(info, actions);
                 Lambda::LstringSwitch(
                     Box::new(self.export(scrut)),
-                    cases.map(|(k, a)| (k.to_string(), self.export(a))).collect(),
+                    cases
+                        .map(|(k, a)| (k.to_string(), self.export(a)))
+                        .collect(),
                     default.map(|d| Box::new(self.export(d))),
                 )
             }
@@ -2202,7 +2274,10 @@ mod tests {
                             (1, vec![e]),
                             Box::new(Lambda::LstringSwitch(
                                 Box::new(Lambda::var(e)),
-                                vec![("a".into(), Lambda::true_()), ("b".into(), Lambda::false_())],
+                                vec![
+                                    ("a".into(), Lambda::true_()),
+                                    ("b".into(), Lambda::false_()),
+                                ],
                                 Some(Box::new(Lambda::unit())),
                             )),
                         ),
