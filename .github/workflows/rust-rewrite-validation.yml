@@ -1,11 +1,8 @@
 name: Rust rewrite validation
 
 on:
+  # Every pull request, including ones stacked on another PR's branch.
   pull_request:
-    branches:
-      - ocaml-to-rust-rewrite
-      - type-mutation-journal
-      - layout-typecheck-performance
 
 permissions:
   contents: read
