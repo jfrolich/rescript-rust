@@ -57,6 +57,19 @@ fn module_export(a: &LamArena, mut lam: Lam) -> Option<(&[Ident], &[Lam])> {
     }
 }
 
+/// `Lam_coercion.handle_exports` raises `Bs_duplicate_exports` for the first
+/// export name seen twice folding the export list from the right
+/// (lam_coercion.ml:83-98).
+pub fn duplicate_export_name(a: &LamArena, lam: Lam) -> Option<String> {
+    let (export_ids, _) = module_export(a, lam)?;
+    let mut seen = AHashSet::new();
+    export_ids
+        .iter()
+        .rev()
+        .find(|id| !seen.insert(id.name().to_string()))
+        .map(|id| id.name().to_string())
+}
+
 /// lam_compile_main.ml:148-200, then `Lam_coercion.handle_exports`.
 pub fn simplify_for_js_backend(
     lam: &crate::lambda::Lambda,

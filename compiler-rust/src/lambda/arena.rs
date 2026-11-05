@@ -255,6 +255,7 @@ pub struct SwitchSpec {
     pub dispatch: SwitchDispatch,
 }
 
+#[derive(Clone)]
 pub struct LamArena {
     nodes: Vec<Node>,
     /// Length-prefixed lists: `pool[h]` holds the length as a `Lam`, the
@@ -271,6 +272,20 @@ pub struct LamArena {
     str_keys: Vec<(u32, u32)>,
     text: String,
     catches: Vec<CatchPayload>,
+}
+
+/// A program: an arena and the root of its term.
+#[derive(Clone)]
+pub struct LamProgram {
+    pub arena: LamArena,
+    pub root: Lam,
+}
+
+impl LamProgram {
+    /// The program as a recursive Lambda, for dumps and tests.
+    pub fn to_tree(&self) -> Lambda {
+        self.arena.export(self.root)
+    }
 }
 
 impl Default for LamArena {

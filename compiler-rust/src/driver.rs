@@ -10859,13 +10859,13 @@ fn compile_source_to_js_with_options_inner(
         trace.raw_lambda = format!("{raw_lambda:#?}");
     }
 
-    let (lowered_lambda, export_idents) =
+    let (mut lowered_arena, lowered_root, export_idents) =
         crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda);
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dump_lambda {
         use std::io::Write;
         let mut buf = Vec::new();
-        crate::lambda::printlambda::print_lambda(&lowered_lambda, &mut buf);
+        crate::lambda::printlambda::print_lambda(&lowered_arena.export(lowered_root), &mut buf);
         buf.push(b'\n');
         let mut stderr = std::io::stderr();
         let _ = stderr.write_all(&buf);
@@ -10875,18 +10875,24 @@ fn compile_source_to_js_with_options_inner(
         }
     }
     // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
-    let lowered_lambda =
-        crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents);
-    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
+    let lowered_root = crate::lambda::lam_pass_collapse_var_aliases::collapse(
+        &mut lowered_arena,
+        lowered_root,
+        &export_idents,
+    );
+    if let Some(name) =
+        crate::lambda::lam_compile_main_arena::duplicate_export_name(&lowered_arena, lowered_root)
+    {
         return Err(duplicate_export_error(filename, &name));
     }
 
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
-        trace.lowered_lambda = format!("{lowered_lambda:#?}");
+        trace.lowered_lambda = format!("{:#?}", lowered_arena.export(lowered_root));
     }
 
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
+        let lowered_lambda = lowered_arena.export(lowered_root);
         if options.dump_lambda_sexp {
             use std::io::Write;
             let mut stderr = std::io::stderr();
@@ -10940,9 +10946,16 @@ fn compile_source_to_js_with_options_inner(
     );
     compiler.set_hoisted_functions(hoisted_functions);
     compiler.set_lam_locs(lam_locs);
-    let program = compiler.compile_deps_program_with_possible_required_modules(
-        &lowered_lambda,
-        &possible_required_modules,
+    let mut all_possible_required_modules =
+        crate::lambda::lam_compile::collect_possible_required_modules_in_arena(
+            &lowered_arena,
+            lowered_root,
+        );
+    all_possible_required_modules.extend(possible_required_modules.iter().cloned());
+    let program = compiler.compile_deps_program_in_arena(
+        lowered_arena,
+        lowered_root,
+        all_possible_required_modules,
     );
     #[cfg(test)]
     if let Some(trace) = discriminator_trace {
@@ -11005,7 +11018,6 @@ fn compile_source_to_js_with_options_inner(
     if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
         std::mem::forget(compiler);
         std::mem::forget(program);
-        std::mem::forget(lowered_lambda);
         std::mem::forget(raw_converter);
         std::mem::forget(implementation_coercion);
         std::mem::forget(typed_structure);
@@ -13104,7 +13116,7 @@ pub struct InProcessCompileResult {
 /// Owned in-process compilation state after typechecking and Lambda lowering,
 /// before JS backend metadata from dependencies is required.
 pub struct InProcessPreJsCompileResult {
-    pub lowered_lambda: crate::lambda::Lambda,
+    pub lowered_lambda: crate::lambda::arena::LamProgram,
     pub possible_required_modules: AHashSet<ModuleId>,
     pub hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
@@ -13486,7 +13498,7 @@ fn finish_js_backend(
 
 #[allow(clippy::too_many_arguments)]
 fn compile_js_program_for_output(
-    lowered_lambda: &crate::lambda::Lambda,
+    lowered_lambda: &crate::lambda::arena::LamProgram,
     hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
@@ -13513,9 +13525,12 @@ fn compile_js_program_for_output(
         jsx_preserve,
         lam_locs.clone(),
     );
-    let program = compiler.compile_deps_program_with_possible_required_modules(
-        lowered_lambda,
-        possible_required_modules,
+    // `possible_required_modules` already holds the modules of the lowered
+    // program (collected at the pre-JS boundary).
+    let program = compiler.compile_deps_program_in_arena(
+        lowered_lambda.arena.clone(),
+        lowered_lambda.root,
+        possible_required_modules.clone(),
     );
     finish_js_backend(compiler, program, options)
 }
@@ -13526,7 +13541,7 @@ fn compile_js_program_for_output(
 /// `compile_preprocessed_structure_in_process_until_js`).
 #[allow(clippy::too_many_arguments)]
 fn compile_js_program_for_output_owned(
-    lowered_lambda: crate::lambda::Lambda,
+    lowered_lambda: crate::lambda::arena::LamProgram,
     hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     possible_required_modules: AHashSet<ModuleId>,
     options: &CompilerOptions,
@@ -13554,8 +13569,9 @@ fn compile_js_program_for_output_owned(
         jsx_preserve,
         lam_locs,
     );
-    let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
-        lowered_lambda,
+    let program = compiler.compile_deps_program_in_arena(
+        lowered_lambda.arena,
+        lowered_lambda.root,
         possible_required_modules,
     );
     finish_js_backend(compiler, program, options)
@@ -14332,27 +14348,41 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         String::new()
     };
 
-    let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
-        let _phase = info_span!("compiler.lower_lambda").entered();
-        crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda)
-    });
-    let (lowered_lambda, export_idents) = lowered_lambda;
+    let (mut lowered_arena, lowered_root, export_idents) =
+        crate::timing::measure(crate::timing::Phase::Lambda, || {
+            let _phase = info_span!("compiler.lower_lambda").entered();
+            crate::raw_lambda::lower::lower_to_translmod_lambda(raw_lambda)
+        });
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
     if options.dumps.contains(&DumpKind::RawLambda) {
         let mut buf = Vec::new();
-        crate::lambda::printlambda::print_lambda(&lowered_lambda, &mut buf);
+        crate::lambda::printlambda::print_lambda(&lowered_arena.export(lowered_root), &mut buf);
         buf.push(b'\n');
         dumps.push((DumpKind::RawLambda, latin1_dump(buf)));
     }
     // lam_compile_main.ml:288-290: the first pass of Lam_compile_main.compile.
-    let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
-        crate::lambda::lam_pass_collapse_var_aliases::collapse(lowered_lambda, &export_idents)
+    let lowered_root = crate::timing::measure(crate::timing::Phase::Lambda, || {
+        crate::lambda::lam_pass_collapse_var_aliases::collapse(
+            &mut lowered_arena,
+            lowered_root,
+            &export_idents,
+        )
     });
-    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
+    let lowered_lambda = crate::lambda::arena::LamProgram {
+        arena: lowered_arena,
+        root: lowered_root,
+    };
+    if let Some(name) = crate::lambda::lam_compile_main_arena::duplicate_export_name(
+        &lowered_lambda.arena,
+        lowered_lambda.root,
+    ) {
         return Err(duplicate_export_error(filename, &name));
     }
     let mut possible_required_modules =
-        crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(&lowered_lambda);
+        crate::lambda::lam_compile::collect_possible_required_modules_in_arena(
+            &lowered_lambda.arena,
+            lowered_lambda.root,
+        );
     possible_required_modules.extend(raw_possible_required_modules);
     // OCaml has one mutable `Ident.currentstamp` through typechecking,
     // `Translmod.transl_implementation`, and `Lam_compile_main.compile`
@@ -14365,10 +14395,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     for kind in [DumpKind::Lambda, DumpKind::LambdaLocs] {
         if options.dumps.contains(&kind) {
             let mut buf = Vec::new();
+            let tree = lowered_lambda.to_tree();
             let _ = if kind == DumpKind::Lambda {
-                crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, &mut buf)
+                crate::lambda::sexp_lambda::print_lambda(&tree, &mut buf)
             } else {
-                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut buf)
+                crate::lambda::sexp_lambda::print_lambda_with_locs(&tree, &mut buf)
             };
             dumps.push((kind, latin1_dump(buf)));
         }
@@ -14377,7 +14408,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
-        let _ = crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut buf);
+        let _ =
+            crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda.to_tree(), &mut buf);
         String::from_utf8_lossy(&buf).into_owned()
     } else {
         String::new()

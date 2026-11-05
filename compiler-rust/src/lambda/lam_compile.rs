@@ -603,6 +603,20 @@ impl LambdaCompiler {
         lam: Lambda,
         possible_required_modules: AHashSet<ModuleId>,
     ) -> DepsProgram {
+        let mut arena = crate::lambda::arena::LamArena::with_capacity(1024);
+        let root = arena.import(&lam);
+        drop(lam);
+        self.compile_deps_program_in_arena(arena, root, possible_required_modules)
+    }
+
+    /// Simplify `lam` in its arena (lam_compile_main.ml:148-200) and lower
+    /// the result to a JS program with module metadata.
+    pub fn compile_deps_program_in_arena(
+        &mut self,
+        arena: crate::lambda::arena::LamArena,
+        lam: crate::lambda::arena::Lam,
+        possible_required_modules: AHashSet<ModuleId>,
+    ) -> DepsProgram {
         let _span = info_span!(
             "compiler.lambda_to_js_collected",
             possible_required_modules = possible_required_modules.len(),
@@ -648,8 +662,9 @@ impl LambdaCompiler {
                     .cloned()
                     .map(cmj_export_arity_to_external)
                 };
-                crate::lambda::lam_compile_main_arena::simplify_for_js_backend(
-                    &lam,
+                crate::lambda::lam_compile_main_arena::simplify_in_arena(
+                    arena,
+                    lam,
                     jsx_preserve,
                     &mut external_inline,
                     &mut external_arity,
@@ -7009,6 +7024,31 @@ fn ocaml_sort_modules(modules: &mut [ModuleId]) {
         trickleup(modules, bubble_index, entry);
     }
     modules.swap(0, 1);
+}
+
+/// [`collect_possible_required_modules_for_lambda`] over the nodes reachable
+/// from `lam`.
+pub(crate) fn collect_possible_required_modules_in_arena(
+    a: &crate::lambda::arena::LamArena,
+    lam: crate::lambda::arena::Lam,
+) -> AHashSet<ModuleId> {
+    fn go(
+        a: &crate::lambda::arena::LamArena,
+        lam: crate::lambda::arena::Lam,
+        seen: &mut AHashSet<ModuleId>,
+    ) {
+        if let crate::lambda::arena::Node::GlobalModule(id) = a.node(lam) {
+            seen.insert(ModuleId {
+                id: a.ident(id),
+                kind: Kind::Ml,
+                dynamic_import: false,
+            });
+        }
+        a.iter_children(lam, |x| go(a, x, seen));
+    }
+    let mut seen = AHashSet::new();
+    go(a, lam, &mut seen);
+    seen
 }
 
 pub(crate) fn collect_possible_required_modules_for_lambda(lam: &Lambda) -> AHashSet<ModuleId> {
