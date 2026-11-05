@@ -5,6 +5,7 @@
 //! point in `driver.rs`.
 
 use crate::fast_hash::AHashSet as HashSet;
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
@@ -12,7 +13,6 @@ use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
-use crate::location::Location;
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
@@ -154,7 +154,7 @@ impl LoweringContext {
         &mut self,
         primitive: Primitive,
         args: Vec<RawLambda>,
-        loc: Location,
+        loc: LamLoc,
     ) -> Lambda {
         if let Primitive::PrawJsCode(info) = &primitive {
             let mut info = info.clone();
@@ -258,7 +258,7 @@ impl LoweringContext {
                         comment: None,
                     }),
                 ],
-                Location::none(),
+                LamLoc::NONE,
             );
         }
 
@@ -287,7 +287,7 @@ impl LoweringContext {
 /// `Translcore.wrap_exn` (compiler/ml/translcore.ml:912-920): apply
 /// `Primitive_exceptions.internalToException` to a caught value, so matching
 /// sees a ReScript exception. Used by the conversion's `pack_trywith_exn`.
-pub(crate) fn wrap_exn_raw(loc: Location, arg: RawLambda) -> RawLambda {
+pub(crate) fn wrap_exn_raw(loc: LamLoc, arg: RawLambda) -> RawLambda {
     let internal_to_exception = RawLambda::prim(
         Primitive::Pfield(
             0,
@@ -314,7 +314,7 @@ pub(crate) fn wrap_exn_raw(loc: Location, arg: RawLambda) -> RawLambda {
 
 /// [`wrap_exn_raw`] in Lambda, for the backend tests.
 #[cfg(test)]
-pub(crate) fn wrap_exn(loc: Location, arg: Lambda) -> Lambda {
+pub(crate) fn wrap_exn(loc: LamLoc, arg: Lambda) -> Lambda {
     let internal_to_exception = Lambda::prim(
         Primitive::Pfield(
             0,
@@ -693,7 +693,7 @@ fn pointer_constant_value(constant: &Constant) -> Option<&str> {
     }
 }
 
-fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Location) -> Lambda {
+fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: LamLoc) -> Lambda {
     match args.as_slice() {
         [Lambda::Lconst(constant)] => match (&primitive, constant) {
             (Primitive::Pnegint, Constant::Int { i, .. }) => {
@@ -1146,7 +1146,7 @@ mod tests {
             ap_func: Box::new(RawLambda::var(func)),
             ap_args: vec![RawLambda::var(arg)],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
@@ -1173,14 +1173,14 @@ mod tests {
                 RawLambda::prim(
                     Primitive::Paddint,
                     vec![RawLambda::var(prim0), RawLambda::var(prim1)],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 crate::lambda::FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             )),
             ap_args: vec![RawLambda::var(lhs), RawLambda::var(rhs)],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
@@ -1206,7 +1206,7 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PextensionSlotEq,
             vec![RawLambda::var(exn), RawLambda::var(slot)],
-            Location::none(),
+            LamLoc::NONE,
         ));
 
         let Lambda::Lprim(info) = lowered else {
@@ -1279,7 +1279,7 @@ mod tests {
                 RawLambda::const_(Constant::int(1)),
                 RawLambda::const_(Constant::int(2)),
             ],
-            Location::none(),
+            LamLoc::NONE,
         ));
 
         assert!(matches!(lowered, Lambda::Lconst(Constant::JsFalse)));
@@ -1326,7 +1326,7 @@ mod tests {
             RawLambda::prim(
                 Primitive::Pmakeblock(TagInfo::ModuleExport(vec![alias]), Mutable::Immutable),
                 vec![RawLambda::var(alias)],
-                Location::none(),
+                LamLoc::NONE,
             ),
         );
 
@@ -1398,7 +1398,7 @@ mod tests {
                 }),
                 RawLambda::const_(Constant::int(1)),
             ],
-            Location::none(),
+            LamLoc::NONE,
         ));
 
         let Lambda::Lprim(info) = lowered else {
@@ -1499,7 +1499,7 @@ mod tests {
                     }))),
                 }),
             ],
-            Location::none(),
+            LamLoc::NONE,
         ));
 
         assert!(matches!(
@@ -1657,9 +1657,9 @@ mod tests {
                     },
                 ),
                 vec![RawLambda::var(module_id)],
-                Location::none(),
+                LamLoc::NONE,
             )],
-            Location::none(),
+            LamLoc::NONE,
         ));
 
         let Lambda::Lprim(block) = lowered else {
@@ -1690,7 +1690,7 @@ mod tests {
                 is_stmt: false,
             }),
             vec![RawLambda::const_(Constant::String("__DEV__".to_string()))],
-            Location::none(),
+            LamLoc::NONE,
         ));
 
         let Lambda::Lprim(info) = lowered else {

@@ -31,6 +31,27 @@ matrix in this directory records what the current Rewatch implementation
 accepts, including compatibility fields which are not recommended for new
 projects.
 
+## Location-free build path
+
+Ordinary builds retain the parsed AST between dependency discovery and compilation,
+but do not populate source-position or location side tables. Scanner cursor positions
+remain transient grammar state. AST handles retain declaration identity and whether a
+node is generated; neither carries a source span. The source bytes are retained for a
+location-enabled retry, then dropped with the AST after compilation.
+
+- A frontend warning or parse error reparses the file with locations before reporting it.
+- Compiler warnings retry only the affected module with locations. Type/backend errors
+  restart the build with located dependency signatures too: cross-module errors can cite
+  a declaration in another source file. Speculative diagnostic text is never shown.
+  Subsequent watch builds can use the fast path again.
+- Location-valued generated code (`__LINE__`, assertions, match failures, recursive
+  module initialization) retries only that module, before publishing its signature or JS.
+- External PPXs, source maps, editor tooling and requested IR dumps use locations.
+
+The default standalone parser API still retains complete location side tables for
+formatting, AST marshalling and parity tests. Location-free compilation does not change
+the OCaml wire representation.
+
 ## Building and testing
 
 Run commands from the repository root:

@@ -15,7 +15,7 @@ use crate::lambda::lam_indexed_helpers::{
 use crate::lambda::lam_pass_collect_indexed::{IndexedIdKind, IndexedLamStats, kind_of_block};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 #[cfg(test)]
-use crate::location::Location;
+use crate::lambda::LamLoc;
 
 struct Usage {
     node: NodeId,
@@ -453,7 +453,7 @@ mod tests {
                 transformed_jsx: false,
             },
             vec![],
-            Location::none(),
+            LamLoc::NONE,
         )
     }
 
@@ -463,7 +463,7 @@ mod tests {
         let body = crate::lambda::Lambda::prim(
             Primitive::Pidentity,
             vec![crate::lambda::Lambda::var(params[0])],
-            Location::none(),
+            LamLoc::NONE,
         );
         let mut store = IndexedLambda::from_lambda(body);
         let root = store.root();
@@ -495,7 +495,7 @@ mod tests {
                 crate::lambda::Lambda::var(params[0]),
                 crate::lambda::Lambda::var(params[0]),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         let mut store = IndexedLambda::from_lambda(body);
         let root = store.root();

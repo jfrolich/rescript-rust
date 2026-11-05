@@ -95,10 +95,10 @@ fn parsed_deprecated_reason(arena: &ParseArena, payload: &Payload) -> Option<Str
     if let Some(msg) = string_constant(arena, e) {
         return Some(msg);
     }
-    match &*arena.get_expr(e).pexp_desc {
+    match &arena.get_expr(e).pexp_desc {
         ExpressionDesc::Pexp_record(record) => {
             let mut reason = String::new();
-            for field in &record.0 {
+            for field in arena.expr_field_list(record.0) {
                 if let Longident::Lident(txt) = arena.get_longident(field.lid.txt)
                     && arena.get_string(*txt) == "reason"
                     && let Some(msg) = string_constant(arena, field.expr)
@@ -134,13 +134,13 @@ pub fn find_editor_complete_from_attribute(attrs: Attrs<'_>) -> Vec<ModulePathLi
                 let Some(e) = payload_expression(payload) else {
                     continue;
                 };
-                let items: Vec<ExprIdx> = match &*arena.get_expr(e).pexp_desc {
-                    ExpressionDesc::Pexp_array(items) => items.to_vec(),
+                let items: Vec<ExprIdx> = match &arena.get_expr(e).pexp_desc {
+                    ExpressionDesc::Pexp_array(items) => arena.expr_list(*items).to_vec(),
                     _ => vec![e],
                 };
                 let mut from_array: Vec<ModulePathList> = items
                     .iter()
-                    .filter_map(|item| match &*arena.get_expr(*item).pexp_desc {
+                    .filter_map(|item| match &arena.get_expr(*item).pexp_desc {
                         ExpressionDesc::Pexp_construct(lid, args) if args.txt.is_empty() => {
                             Some(flatten_long_ident(arena, arena.get_longident(lid.txt)))
                         }

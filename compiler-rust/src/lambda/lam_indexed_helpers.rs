@@ -4,6 +4,7 @@
 //! are shared by exits, beta reduction, alias simplification, and deep flatten.
 
 use ahash::AHashMap;
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
@@ -120,7 +121,7 @@ fn eq_approx(store: &IndexedLambda, left: NodeId, right: NodeId) -> bool {
     }
 }
 
-fn boolean_location(store: &IndexedLambda, node: NodeId) -> Option<crate::location::Location> {
+fn boolean_location(store: &IndexedLambda, node: NodeId) -> Option<LamLoc> {
     match store.view(node) {
         NodeView::Prim(
             Primitive::Pnot
@@ -154,7 +155,7 @@ fn is_false(store: &IndexedLambda, node: NodeId) -> bool {
     matches!(store.view(node), NodeView::Const(Constant::JsFalse))
 }
 
-fn append_not(store: &mut IndexedLambda, loc: crate::location::Location, node: NodeId) -> NodeId {
+fn append_not(store: &mut IndexedLambda, loc: LamLoc, node: NodeId) -> NodeId {
     if let NodeSnapshot::Prim(Primitive::Pintcomp(crate::lambda::Comparison::Neq), args, old_loc) =
         store.snapshot(node)
     {
@@ -292,7 +293,7 @@ fn append_if(
 fn append_pisint_if(
     store: &mut IndexedLambda,
     args: Vec<NodeId>,
-    loc: crate::location::Location,
+    loc: LamLoc,
     then_node: NodeId,
     else_node: NodeId,
 ) -> NodeId {

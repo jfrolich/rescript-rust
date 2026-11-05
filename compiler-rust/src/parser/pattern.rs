@@ -28,7 +28,7 @@ fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
 
 fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
     Pattern {
-        ppat_desc: Box::new(desc),
+        ppat_desc: desc,
         ppat_loc: loc,
         ppat_attributes: attrs,
     }
@@ -48,7 +48,10 @@ fn construct_lident(
         p.push_longident(Longident::Lident(name_idx))
     };
     pat(
-        PatternDesc::Ppat_construct(with_loc(lid_idx, loc), ctor_args(Vec::new(), loc)),
+        PatternDesc::Ppat_construct(
+            with_loc(lid_idx, loc),
+            crate::parse_arena::Located::new(crate::parse_arena::PatList::EMPTY, loc),
+        ),
         loc,
         attrs,
     )
@@ -66,14 +69,14 @@ fn parse_template_constant(
         p.next();
         return match prefix {
             None => match crate::string_literal::decode_js_template_escapes(&text) {
-                Some(semantic) => Constant::string(&semantic),
+                Some(semantic) => p.arena_mut().string_constant(&semantic),
                 None => {
                     p.err_at(
                         start_pos,
                         p.prev_end_pos,
                         DiagnosticCategory::Message("Invalid string escape sequence".to_string()),
                     );
-                    Constant::string("")
+                    p.arena_mut().string_constant("")
                 }
             },
             Some(_) => {
@@ -84,7 +87,7 @@ fn parse_template_constant(
                         super::core::error_messages::TAGGED_TEMPLATE_IN_PATTERN.to_string(),
                     ),
                 );
-                Constant::string(&text)
+                p.arena_mut().string_constant(&text)
             }
         };
     }
@@ -106,7 +109,7 @@ fn parse_template_constant(
             super::core::error_messages::STRING_INTERPOLATION_IN_PATTERN.to_string(),
         ),
     );
-    Constant::string("")
+    p.arena_mut().string_constant("")
 }
 
 /// OCaml `parse_pattern` with the default `~alias:true ~or_:true`.
@@ -149,22 +152,14 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 )
             } else {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                pat(
-                    PatternDesc::Ppat_constant(Box::new(c)),
-                    loc,
-                    Attributes::new(),
-                )
+                pat(PatternDesc::Ppat_constant(c), loc, Attributes::new())
             }
         }
         Token::Backtick => {
             let start_pos = *p.arena().get_position(start_pos_idx);
             let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            pat(
-                PatternDesc::Ppat_constant(Box::new(constant)),
-                loc,
-                Attributes::new(),
-            )
+            pat(PatternDesc::Ppat_constant(constant), loc, Attributes::new())
         }
         Token::Lparen => {
             p.next();
@@ -210,11 +205,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 let start_pos = *p.arena().get_position(start_pos_idx);
                 let constant = parse_template_constant(p, start_pos, Some(Cow::Owned(ident)));
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                pat(
-                    PatternDesc::Ppat_constant(Box::new(constant)),
-                    loc,
-                    Attributes::new(),
-                )
+                pat(PatternDesc::Ppat_constant(constant), loc, Attributes::new())
             } else {
                 let name_idx = p.arena_mut().push_interned_string(&ident);
                 pat(
@@ -231,7 +222,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             } else {
                 let loc = constr.loc;
                 pat(
-                    PatternDesc::Ppat_construct(constr, ctor_args(Vec::new(), loc)),
+                    PatternDesc::Ppat_construct(
+                        constr,
+                        crate::parse_arena::Located::new(crate::parse_arena::PatList::EMPTY, loc),
+                    ),
                     loc,
                     attrs.clone(),
                 )
@@ -273,7 +267,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                         PatternDesc::Ppat_variant(Box::new((
                             Cow::Owned(ident),
                             Located {
-                                txt: Vec::new(),
+                                txt: crate::parse_arena::PatList::EMPTY,
                                 loc,
                             },
                         ))),
@@ -461,7 +455,7 @@ pub fn parse_tuple_pattern(
         .map(|pattern| p.arena_mut().push_pat(pattern))
         .collect();
     pat(
-        PatternDesc::Ppat_tuple(Box::new(pattern_indices)),
+        PatternDesc::Ppat_tuple(p.arena_mut().push_pat_list(&pattern_indices)),
         loc,
         Attributes::from_vec(attrs),
     )
@@ -572,7 +566,7 @@ fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
         .map(|pattern| p.arena_mut().push_pat(pattern))
         .collect();
     pat(
-        PatternDesc::Ppat_array(Box::new(pattern_indices)),
+        PatternDesc::Ppat_array(p.arena_mut().push_pat_list(&pattern_indices)),
         loc,
         attrs,
     )
@@ -581,7 +575,7 @@ fn parse_array_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
 /// OCaml `parse_pattern_args` (res_core.ml): the parenthesized argument
 /// list of a constructor or polymorphic variant pattern, located at its
 /// parentheses. `C()` is `C(())`.
-fn parse_pattern_args(p: &mut Parser<'_>) -> Located<Vec<PatIdx>> {
+fn parse_pattern_args(p: &mut Parser<'_>) -> Located<crate::parse_arena::PatList> {
     let lparen = p.start_pos_idx();
     p.expect(Token::Lparen);
     let args = super::core::parse_comma_delimited_region(
@@ -597,11 +591,11 @@ fn parse_pattern_args(p: &mut Parser<'_>) -> Located<Vec<PatIdx>> {
     } else {
         args
     };
-    let txt = args
+    let txt: Vec<PatIdx> = args
         .into_iter()
         .map(|a| p.arena_mut().push_pat(a))
         .collect();
-    Located { txt, loc }
+    p.arena_mut().pat_ctor_args(&txt, loc)
 }
 
 /// OCaml `parse_constructor_pattern_args` (res_core.ml).
@@ -613,11 +607,7 @@ fn parse_constructor_pattern_args(
 ) -> Pattern {
     let args = parse_pattern_args(p);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    pat(
-        PatternDesc::Ppat_construct(constr, Box::new(args)),
-        loc,
-        attrs,
-    )
+    pat(PatternDesc::Ppat_construct(constr, args), loc, attrs)
 }
 
 /// OCaml `parse_variant_pattern_args` (res_core.ml).
@@ -859,7 +849,11 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     }
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed, rest)))),
+        ppat_desc: PatternDesc::Ppat_record(Box::new((
+            p.arena_mut().push_pat_field_list(&fields),
+            closed,
+            rest,
+        ))),
         ppat_loc: loc,
         ppat_attributes: attrs,
     }
@@ -899,11 +893,11 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
-            fields,
+        ppat_desc: PatternDesc::Ppat_record(Box::new((
+            p.arena_mut().push_pat_field_list(&fields),
             ClosedFlag::Open,
             None,
-        )))),
+        ))),
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(
             mknoloc(dict_idx),
@@ -929,49 +923,49 @@ mod tests {
     #[test]
     fn test_parse_pattern_underscore() {
         let pat = parse_pattern_with_timeout("_");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_any));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_any));
     }
 
     #[test]
     fn test_parse_pattern_var() {
         let pat = parse_pattern_with_timeout("foo");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_var(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_var(_)));
     }
 
     #[test]
     fn test_parse_pattern_unit() {
         let pat = parse_pattern_with_timeout("()");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_construct(..)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_construct(..)));
     }
 
     #[test]
     fn test_parse_pattern_constant() {
         let pat = parse_pattern_with_timeout("42");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_constant(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_constant(_)));
     }
 
     #[test]
     fn test_parse_pattern_tuple() {
         let pat = parse_pattern_with_timeout("(a, b, c)");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_tuple(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_tuple(_)));
     }
 
     #[test]
     fn test_parse_pattern_array() {
         let pat = parse_pattern_with_timeout("[a, b]");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_array(_)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_array(_)));
     }
 
     #[test]
     fn test_parse_pattern_constructor() {
         let pat = parse_pattern_with_timeout("Some(x)");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_construct(..)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_construct(..)));
     }
 
     #[test]
     fn test_parse_pattern_record() {
         let pat = parse_pattern_with_timeout("{a, b: x}");
-        assert!(matches!(*pat.ppat_desc, PatternDesc::Ppat_record(..)));
+        assert!(matches!(pat.ppat_desc, PatternDesc::Ppat_record(..)));
     }
 
     #[test]

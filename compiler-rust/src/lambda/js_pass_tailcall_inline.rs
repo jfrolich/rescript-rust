@@ -5,6 +5,7 @@
 //! status for variable declarations.
 
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::lambda::LamLoc;
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, UsedStats};
@@ -1788,7 +1789,7 @@ fn collect_tail_callees(block: &Block) -> HashSet<Ident> {
 mod source_loc_tests {
     use super::*;
     use crate::js_ir::Number;
-    use crate::location::Location;
+    use LamLoc;
 
     #[test]
     fn int_switch_clause_keeps_source_loc() {
@@ -1798,7 +1799,7 @@ mod source_loc_tests {
             body: vec![],
             should_break: true,
             comment: None,
-            source_loc: Some(Location::none()),
+            source_loc: Some(LamLoc::NONE),
         };
         let program = Program::new(
             vec![Statement {

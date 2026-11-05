@@ -47,6 +47,7 @@ pub mod lam_compile_main;
 pub(crate) mod lam_compile_main_indexed;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
+pub mod lam_loc;
 pub mod lam_constant;
 pub mod lam_eta_conversion;
 pub mod lam_exit_code;
@@ -81,11 +82,11 @@ pub mod printlambda;
 pub mod sexp_lambda;
 
 use crate::ident::Ident;
-use crate::location::Location;
 pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 pub use lam_constant::Constant;
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
+pub use lam_loc::{CmjExportLambdas, LamLoc, LamLocTable};
 
 /// Source binding selected by `@res.hoistedFunction` for a flat JS export.
 /// Mirrors `Lambda.hoisted_function` in `compiler/ml/lambda.ml`.
@@ -93,8 +94,8 @@ pub use lam_tag_info::TagInfo;
 pub struct HoistedFunction {
     pub binding: Ident,
     pub path: Vec<String>,
-    pub loc: Location,
-    pub target_loc: Location,
+    pub loc: LamLoc,
+    pub target_loc: LamLoc,
 }
 
 /// CMJ lookup entry for a successfully materialized flat export.
@@ -130,8 +131,8 @@ pub enum InlineAttribute {
 /// Application info for function calls
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApInfo {
-    /// Source location
-    pub loc: Location,
+    /// Source location handle (`ap_info.ap_loc`).
+    pub loc: LamLoc,
     /// Inline hint
     pub inlined: InlineAttribute,
     /// Application status
@@ -408,7 +409,7 @@ pub struct LFunction {
     pub attr: FunctionAttribute,
     /// Source location (`lfunction.loc`, compiler/ml/lambda.mli:374-379),
     /// read by source maps (compiler/core/lam_compile.ml:436, 1829).
-    pub loc: Location,
+    pub loc: LamLoc,
 }
 
 /// Primitive operation info
@@ -418,8 +419,8 @@ pub struct PrimInfo {
     pub primitive: Primitive,
     /// Arguments to the primitive
     pub args: Vec<Lambda>,
-    /// Source location
-    pub loc: Location,
+    /// Source location handle
+    pub loc: LamLoc,
 }
 
 /// Function application
@@ -567,7 +568,7 @@ impl Lambda {
         params: Vec<Ident>,
         body: Lambda,
         attr: FunctionAttribute,
-        loc: Location,
+        loc: LamLoc,
     ) -> Self {
         Lambda::Lfunction(Box::new(LFunction {
             arity,
@@ -613,8 +614,8 @@ impl Lambda {
         }
     }
 
-    pub fn prim(primitive: Primitive, args: Vec<Lambda>, loc: Location) -> Self {
-        let default = |primitive: Primitive, args: Vec<Lambda>, loc: Location| -> Lambda {
+    pub fn prim(primitive: Primitive, args: Vec<Lambda>, loc: LamLoc) -> Self {
+        let default = |primitive: Primitive, args: Vec<Lambda>, loc: LamLoc| -> Lambda {
             Lambda::Lprim(Box::new(PrimInfo {
                 primitive,
                 args,
@@ -1474,7 +1475,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
     Some(source_lam)
 }
 
-fn lambda_not(loc: Location, lam: Lambda) -> Lambda {
+fn lambda_not(loc: LamLoc, lam: Lambda) -> Lambda {
     match lam {
         Lambda::Lprim(__prim2)
             if matches!(
@@ -1504,7 +1505,7 @@ fn lambda_not(loc: Location, lam: Lambda) -> Lambda {
     }
 }
 
-fn has_boolean_type(lam: &Lambda) -> Option<Location> {
+fn has_boolean_type(lam: &Lambda) -> Option<LamLoc> {
     match lam {
         Lambda::Lprim(__prim1)
             if matches!(
@@ -1659,7 +1660,7 @@ mod tests {
             vec![x],
             Lambda::var(x),
             FunctionAttribute::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         );
 
         match func {
@@ -1745,7 +1746,7 @@ mod tests {
         let cond = Lambda::prim(
             Primitive::Pintcomp(Comparison::Eq),
             vec![Lambda::var(x), Lambda::const_(Constant::int(0))],
-            Location::none(),
+            LamLoc::NONE,
         );
 
         let if_expr = Lambda::if_(cond.clone(), Lambda::true_(), Lambda::false_());
@@ -1759,7 +1760,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pintcomp(Comparison::Neq),
                 vec![Lambda::var(x), Lambda::const_(Constant::int(0))],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::false_(),
             Lambda::true_(),
@@ -1794,12 +1795,12 @@ mod tests {
             Lambda::prim(
                 Primitive::Pintcomp(Comparison::Eq),
                 vec![Lambda::var(x), Lambda::const_(Constant::int(0))],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::prim(
                 Primitive::Praise,
                 vec![Lambda::var(Ident::create_local("exn"))],
-                Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::static_raise(1, Vec::new()),
         );
@@ -1838,7 +1839,7 @@ mod tests {
             Box::new(Lambda::prim(
                 Primitive::Pintcomp(Comparison::Eq),
                 vec![Lambda::var(value), Lambda::const_(Constant::int(0))],
-                Location::none(),
+                LamLoc::NONE,
             )),
             Box::new(Lambda::const_(Constant::int(1))),
             Box::new(Lambda::false_()),
@@ -1848,7 +1849,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pisint,
                 vec![Lambda::var(value)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             inner_if.clone(),
             Lambda::false_(),

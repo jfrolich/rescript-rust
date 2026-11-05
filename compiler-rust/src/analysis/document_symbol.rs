@@ -114,10 +114,10 @@ impl Collector {
 }
 
 fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
-    match &*arena.get_expr(idx).pexp_desc {
+    match &arena.get_expr(idx).pexp_desc {
         ExpressionDesc::Pexp_fun(_) => SymbolKind::Function,
         ExpressionDesc::Pexp_constraint(inner) => expr_kind(arena, inner.0),
-        ExpressionDesc::Pexp_constant(constant) => match **constant {
+        ExpressionDesc::Pexp_constant(constant) => match *constant {
             Constant::String(_) | Constant::Json(_) | Constant::RawSource(_) => SymbolKind::String,
             Constant::Float(..) | Constant::Integer(..) => SymbolKind::Number,
             Constant::Char { .. } => SymbolKind::Constant,
@@ -130,9 +130,9 @@ fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
 impl AstIter for Collector {
     fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
         let pat = arena.get_pat(vb.pvb_pat);
-        let name = match &*pat.ppat_desc {
+        let name = match &pat.ppat_desc {
             PatternDesc::Ppat_var(name) => Some(name.txt),
-            PatternDesc::Ppat_constraint(inner) => match &*arena.get_pat(inner.0).ppat_desc {
+            PatternDesc::Ppat_constraint(inner) => match &arena.get_pat(inner.0).ppat_desc {
                 PatternDesc::Ppat_var(name) => Some(name.txt),
                 _ => None,
             },
@@ -151,7 +151,7 @@ impl AstIter for Collector {
 
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
         let e = arena.get_expr(idx);
-        match &*e.pexp_desc {
+        match &e.pexp_desc {
             ExpressionDesc::Pexp_letmodule(letmodule) => {
                 let (name, mod_expr, _) = &**letmodule;
                 // `{e.pexp_loc with loc_end = mod_expr.pmod_loc.loc_end}`.
@@ -178,7 +178,7 @@ impl AstIter for Collector {
     }
 
     fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_primitive(vd) => self.add(
                 arena,
                 arena.get_string(vd.pval_name.txt),
@@ -213,7 +213,7 @@ impl AstIter for Collector {
     }
 
     fn signature_item(&mut self, arena: &ParseArena, item: &SignatureItem) {
-        match &*item.psig_desc {
+        match &item.psig_desc {
             SignatureItemDesc::Psig_value(vd) => self.add(
                 arena,
                 arena.get_string(vd.pval_name.txt),
@@ -248,7 +248,7 @@ impl AstIter for Collector {
     }
 
     fn module_expr(&mut self, arena: &ParseArena, idx: ModExprIdx) {
-        match &*arena.get_mod_expr(idx).pmod_desc {
+        match &arena.get_mod_expr(idx).pmod_desc {
             // Don't double-list items in implementation and interface.
             ModuleExprDesc::Pmod_constraint(mod_expr, _) => {
                 ast_iter::walk_module_expr(self, arena, *mod_expr)

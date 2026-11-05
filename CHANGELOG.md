@@ -41,6 +41,8 @@
 
 #### :house: Internal
 
+- Retain location-free parsed ASTs in ordinary Rust builds instead of parsing every module twice; retry with location side tables for diagnostics and location-dependent output. https://github.com/jfrolich/rescript-rust/pull/38
+
 - Represent inline record definitions with an explicit parsetree origin while retaining the existing PPX wire representation. https://github.com/rescript-lang/rescript/pull/8686
 - Make expression attributes immutable in the current parsetree, now that editor refactors construct new expression nodes. https://github.com/rescript-lang/rescript/pull/8685
 - Remove the unused `pat_record_label` alias from the current parsetree. https://github.com/rescript-lang/rescript/pull/8684

@@ -392,8 +392,7 @@ pub struct InMemoryModuleInfo {
     pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
     /// Non-constant `persistent_closed_lambda` exports (replaces the `.cmj`
     /// lookup used for cross-module inlining, js_cmj_format.ml:112-121).
-    #[serde(serialize_with = "serialize_sorted")]
-    pub cmj_export_lambdas: Arc<HashMap<String, Lambda>>,
+    pub cmj_export_lambdas: Arc<crate::lambda::CmjExportLambdas>,
     /// Flat hoisted-export path metadata (replaces `.cmj` lookup).
     pub cmj_hoisted_exports: Arc<Vec<crate::lambda::HoistedExport>>,
     /// Whether this module belongs to `@rescript/runtime`
@@ -422,7 +421,7 @@ impl InMemoryModuleInfo {
             is_pure,
             cmj_export_constants: Arc::new(cmj_export_constants),
             cmj_export_arities: Arc::new(HashMap::new()),
-            cmj_export_lambdas: Arc::new(HashMap::new()),
+            cmj_export_lambdas: Arc::new(crate::lambda::CmjExportLambdas::default()),
             cmj_hoisted_exports: Arc::new(Vec::new()),
             is_runtime,
             package_name: None,
@@ -437,7 +436,10 @@ impl InMemoryModuleInfo {
         self
     }
 
-    pub fn with_cmj_export_lambdas(mut self, cmj_export_lambdas: HashMap<String, Lambda>) -> Self {
+    pub fn with_cmj_export_lambdas(
+        mut self,
+        cmj_export_lambdas: crate::lambda::CmjExportLambdas,
+    ) -> Self {
         self.cmj_export_lambdas = Arc::new(cmj_export_lambdas);
         self
     }
@@ -900,7 +902,7 @@ impl ModuleRegistry {
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
@@ -923,24 +925,26 @@ impl ModuleRegistry {
             },
             &sig_items,
         );
-        let portable = PortablePersStruct {
-            ps_name: namespace_name.to_string(),
-            ps_filename: format!("{}.mlmap", namespace_name),
-            ps_deprecated: None,
+        let portable = PortablePersStruct::new(
+            namespace_name.to_string(),
+            format!("{}.mlmap", namespace_name),
+            None,
             // The saved `.cmi`'s CRC list, recorded by importers like any
             // loaded unit's (env.ml:627-638, 1924-1930).
             ps_crcs,
-            ps_sig: sig_items,
-            raw_ps_sig: None,
-            cmi_longident_names: Vec::new(),
-            type_graph: portable_types::PortableTypeGraph {
-                entries: Vec::new(),
-                variant_layouts: Vec::new(),
-                mutabilities: Vec::new(),
+            portable_types::PortableSignature {
+                ps_sig: sig_items,
+                cmi_longident_names: Vec::new(),
+                type_graph: portable_types::PortableTypeGraph {
+                    entries: Vec::new(),
+                    variant_layouts: Vec::new(),
+                    mutabilities: Vec::new(),
+                },
+                locations: Default::default(),
             },
-            raw_type_graph: None,
+            None,
             fingerprint,
-        };
+        );
         self.insert_cached_module(namespace_name.to_string(), Arc::new(portable));
     }
 
@@ -2161,7 +2165,10 @@ impl PersistentEnv {
     /// This mirrors the `cross_module_inline = true` arm of OCaml
     /// `js_cmj_format.ml:112-121`, where non-constant
     /// `persistent_closed_lambda` values are preserved for backend inlining.
-    pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<Arc<HashMap<String, Lambda>>> {
+    pub fn module_cmj_export_lambdas(
+        &self,
+        name: &str,
+    ) -> Option<Arc<crate::lambda::CmjExportLambdas>> {
         if let Some(lambdas) =
             self.in_memory_info_with(name, |info| info.cmj_export_lambdas.clone())
         {
@@ -2174,7 +2181,9 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        decode_cmj_export_lambdas(&self.cmj_value(&path)?).map(Arc::new)
+        // The disk decoder keeps no locations (`decode_cmj_lambda`).
+        decode_cmj_export_lambdas(&self.cmj_value(&path)?)
+            .map(|lambdas| Arc::new(crate::lambda::CmjExportLambdas::without_locations(lambdas)))
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
@@ -2286,6 +2295,7 @@ impl PersistentEnv {
             let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
                 &typed_signature,
                 parser.arena(),
+                ctx,
             );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
@@ -2774,7 +2784,7 @@ impl PersistentEnv {
         Some(ModuleDeclaration {
             md_type: ModuleType::MtySignature(std::sync::Arc::new(ps.ps_sig.as_ref().clone())),
             md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
+            md_loc: crate::types::DeclLoc::none(),
             md_path: None,
         })
     }
@@ -2866,7 +2876,7 @@ impl PersistentEnv {
                         Path::Pident(Ident::create_persistent(internal_name.as_str())),
                     ),
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
                 },
                 RecStatus::TrecNot,
@@ -3370,7 +3380,7 @@ fn decode_cmj_lfunction(value: &OcamlValue) -> Option<LFunction> {
         attr: decode_cmj_function_attribute(&fields[2])?,
         // Locations of decoded `.cmj` lambdas are not kept (as for
         // applications and primitives above).
-        loc: Location::none(),
+        loc: crate::lambda::LamLoc::NONE,
     })
 }
 
@@ -3417,7 +3427,7 @@ fn decode_cmj_ap_info(value: &OcamlValue) -> Option<ApInfo> {
     // `Lambda.ap_info = {ap_loc; ap_inlined}`.
     let (_, fields) = value.as_block_opt()?;
     Some(ApInfo {
-        loc: Location::none(),
+        loc: crate::lambda::LamLoc::NONE,
         inlined: fields
             .get(1)
             .and_then(decode_cmj_inline_attribute)
@@ -3434,7 +3444,7 @@ fn decode_cmj_prim_info(value: &OcamlValue) -> Option<PrimInfo> {
     Some(PrimInfo {
         primitive: decode_cmj_primitive(&fields[0])?,
         args: decode_cmj_list(&fields[1], decode_cmj_lambda)?,
-        loc: Location::none(),
+        loc: crate::lambda::LamLoc::NONE,
     })
 }
 
@@ -7673,22 +7683,24 @@ mod resolution_view_tests {
 
     #[test]
     fn stored_modules_register_lazily_and_decode_on_first_lookup() {
-        let portable = PortablePersStruct {
-            ps_name: "Stored".to_string(),
-            ps_filename: "Stored.res".to_string(),
-            ps_deprecated: None,
-            ps_crcs: Vec::new(),
-            ps_sig: vec![],
-            raw_ps_sig: None,
-            cmi_longident_names: vec![],
-            type_graph: portable_types::PortableTypeGraph {
-                entries: vec![],
-                variant_layouts: vec![],
-                mutabilities: vec![],
+        let portable = PortablePersStruct::new(
+            "Stored".to_string(),
+            "Stored.res".to_string(),
+            None,
+            Vec::new(),
+            portable_types::PortableSignature {
+                ps_sig: vec![],
+                cmi_longident_names: vec![],
+                type_graph: portable_types::PortableTypeGraph {
+                    entries: vec![],
+                    variant_layouts: vec![],
+                    mutabilities: vec![],
+                },
+                locations: Default::default(),
             },
-            raw_type_graph: None,
-            fingerprint: 7,
-        };
+            None,
+            7,
+        );
         let mut compiled = ModuleRegistry::new();
         compiled.register_module(
             "Stored",
@@ -7739,22 +7751,24 @@ mod resolution_view_tests {
 
     #[test]
     fn portable_override_first_write_keeps_backing_graph_shared() {
-        let portable = Arc::new(PortablePersStruct {
-            ps_name: "Portable".to_string(),
-            ps_filename: "Portable.res".to_string(),
-            ps_deprecated: None,
-            ps_crcs: Vec::new(),
-            ps_sig: vec![],
-            raw_ps_sig: None,
-            cmi_longident_names: vec![],
-            type_graph: portable_types::PortableTypeGraph {
-                entries: vec![],
-                variant_layouts: vec![],
-                mutabilities: vec![],
+        let portable = Arc::new(PortablePersStruct::new(
+            "Portable".to_string(),
+            "Portable.res".to_string(),
+            None,
+            Vec::new(),
+            portable_types::PortableSignature {
+                ps_sig: vec![],
+                cmi_longident_names: vec![],
+                type_graph: portable_types::PortableTypeGraph {
+                    entries: vec![],
+                    variant_layouts: vec![],
+                    mutabilities: vec![],
+                },
+                locations: Default::default(),
             },
-            raw_type_graph: None,
-            fingerprint: 0,
-        });
+            None,
+            0,
+        ));
         let mut original = PersistentEnv::new();
         original
             .view_mut()

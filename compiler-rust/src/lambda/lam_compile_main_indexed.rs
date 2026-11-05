@@ -6,6 +6,7 @@
 //! recursive pipeline until the JS consumer is migrated in M6.
 
 use std::sync::Arc;
+use crate::lambda::LamLoc;
 
 use ahash::{AHashMap, AHashSet};
 
@@ -51,7 +52,7 @@ pub(crate) enum IndexedPreJsError {
     MissingExportBlock,
     HoistedNameCollision {
         name: String,
-        loc: crate::location::Location,
+        loc: LamLoc,
         warnings: Vec<IndexedHoistedWarning>,
     },
     FatalWarnings,
@@ -74,7 +75,7 @@ impl std::fmt::Display for IndexedPreJsError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IndexedHoistedWarning {
     pub(crate) path: Vec<String>,
-    pub(crate) loc: crate::location::Location,
+    pub(crate) loc: LamLoc,
     pub(crate) warning: Warning,
     pub(crate) is_error: bool,
 }
@@ -1213,7 +1214,7 @@ mod tests {
     use super::*;
     use crate::ident::IdentFlags;
     use crate::lambda::lam_constant::Constant;
-    use crate::location::Location;
+    use LamLoc;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -1222,7 +1223,7 @@ mod tests {
         Lambda::prim(
             Primitive::Pmakeblock(TagInfo::ModuleExport(exports), Mutable::Immutable),
             args,
-            Location::none(),
+            LamLoc::NONE,
         )
     }
     fn run(
@@ -1306,7 +1307,7 @@ mod tests {
         let effect = Lambda::prim(
             Primitive::Pdebugger,
             vec![Lambda::var(low), Lambda::var(high)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let context = IndexedLambdaContext::from_lambda(effect, []);
         let groups = vec![(None, IndexedGroup::Nop(context.current_root()))];
@@ -1329,7 +1330,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pdebugger,
                 vec![Lambda::var(global)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             [],
         );
@@ -1341,7 +1342,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pdebugger,
                 vec![Lambda::var(js)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             [],
         );
@@ -1355,7 +1356,7 @@ mod tests {
             vec![Lambda::var(id("Math", 0)), Lambda::var(js)],
         ] {
             let context = IndexedLambdaContext::from_lambda(
-                Lambda::prim(Primitive::Pdebugger, args, Location::none()),
+                Lambda::prim(Primitive::Pdebugger, args, LamLoc::NONE),
                 [],
             );
             let groups = vec![(None, IndexedGroup::Nop(context.current_root()))];
@@ -1370,7 +1371,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pdebugger,
                 vec![Lambda::var(persistent_without_global_flag)],
-                Location::none(),
+                LamLoc::NONE,
             ),
             [],
         );
@@ -1520,7 +1521,7 @@ mod tests {
                 Mutable::Immutable,
             ),
             vec![Lambda::const_(Constant::int(4))],
-            Location::none(),
+            LamLoc::NONE,
         );
         let mut inline = |_: &Ident, _: &str| None;
         let mut arity = |_: &Ident, _: &str| None;
@@ -1560,7 +1561,7 @@ mod tests {
         let module_value = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
             vec![Lambda::var(binding)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -1570,7 +1571,7 @@ mod tests {
                 vec![],
                 Lambda::unit(),
                 Default::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -1582,8 +1583,8 @@ mod tests {
         let hoisted = HoistedFunction {
             binding,
             path: vec!["A".into(), "make".into()],
-            loc: Location::none(),
-            target_loc: Location::none(),
+            loc: LamLoc::NONE,
+            target_loc: LamLoc::NONE,
         };
         let result = run(
             input,
@@ -1617,7 +1618,7 @@ mod tests {
         let effectful = run(
             module_export(
                 vec![id("effectful", 1)],
-                vec![Lambda::prim(Primitive::Pdebugger, vec![], Location::none())],
+                vec![Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE)],
             ),
             &[],
             Arc::new(IdGenerator::with_start_stamp(5)),
@@ -1679,13 +1680,13 @@ mod tests {
                 superseded_nodes: 20,
                 hot_node_occupied_bytes: 168,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 1760,
-                side_payload_shallow_capacity_bytes: 3040,
+                side_payload_shallow_occupied_bytes: 1440,
+                side_payload_shallow_capacity_bytes: 2528,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 56,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 1704,
+                superseded_unreachable_side_payload_shallow_bytes: 1384,
             }
         );
     }
@@ -1707,14 +1708,14 @@ mod tests {
                         inline: crate::lambda::InlineAttribute::Always,
                         ..Default::default()
                     },
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::function_(
                     1,
                     vec![id("y", 5)],
                     Lambda::unit(),
                     Default::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
             ],
         );
@@ -1757,7 +1758,7 @@ mod tests {
                 Lambda::prim(
                     Primitive::Pmakeblock(TagInfo::Module(vec![]), Mutable::Immutable),
                     vec![],
-                    Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::const_(Constant::Constructor(crate::types::VariantTag {
                     name: "Done".into(),
@@ -1791,7 +1792,7 @@ mod tests {
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
                 vec![Lambda::global_module(module)],
-                Location::none(),
+                LamLoc::NONE,
             )
         };
         let value = Lambda::prim(
@@ -1803,7 +1804,7 @@ mod tests {
                 field(first_module, false, "a"),
                 field(second_module, true, "b"),
             ],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -1873,7 +1874,7 @@ mod tests {
         let module_value = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
             vec![Lambda::var(binding)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -1883,7 +1884,7 @@ mod tests {
                 vec![],
                 Lambda::unit(),
                 Default::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -1896,38 +1897,38 @@ mod tests {
             ),
         );
         let locations = (0..5)
-            .map(|index| Location::new_for_error("warnings.res", index, index + 1))
+            .map(|index| LamLoc::for_test(23))
             .collect::<Vec<_>>();
         let items = vec![
             HoistedFunction {
                 binding: binding,
                 path: vec![],
                 loc: locations[0],
-                target_loc: Location::none(),
+                target_loc: LamLoc::NONE,
             },
             HoistedFunction {
                 binding: binding,
                 path: vec!["Missing".into(), "make".into()],
                 loc: locations[1],
-                target_loc: Location::none(),
+                target_loc: LamLoc::NONE,
             },
             HoistedFunction {
                 binding: binding,
                 path: vec!["NoGroup".into(), "make".into()],
                 loc: locations[2],
-                target_loc: Location::none(),
+                target_loc: LamLoc::NONE,
             },
             HoistedFunction {
                 binding: binding,
                 path: vec!["A".into(), "absent".into()],
                 loc: locations[3],
-                target_loc: Location::none(),
+                target_loc: LamLoc::NONE,
             },
             HoistedFunction {
                 binding: id("wrong", 99),
                 path: vec!["A".into(), "make".into()],
                 loc: locations[4],
-                target_loc: Location::none(),
+                target_loc: LamLoc::NONE,
             },
         ];
         let result = run(input, &items, Arc::new(IdGenerator::with_start_stamp(100))).unwrap();
@@ -1953,8 +1954,8 @@ mod tests {
         let item = HoistedFunction {
             binding: id("missing", 9),
             path: vec!["Missing".into()],
-            loc: Location::new_for_error("warning-config.res", 2, 5),
-            target_loc: Location::none(),
+            loc: LamLoc::for_test(24),
+            target_loc: LamLoc::NONE,
         };
         let compile = |config: &WarningConfig, observer: &mut Observer| {
             let input = module_export(vec![id("value", 1)], vec![Lambda::unit()]);
@@ -2013,7 +2014,7 @@ mod tests {
         let module_value = Lambda::prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
             vec![Lambda::var(binding)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -2023,7 +2024,7 @@ mod tests {
                 vec![],
                 Lambda::unit(),
                 Default::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -2033,7 +2034,7 @@ mod tests {
                     vec![],
                     Lambda::unit(),
                     Default::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::let_(
                     LetKind::Strict,
@@ -2046,8 +2047,8 @@ mod tests {
                 ),
             ),
         );
-        let hoisted_loc = Location::new_for_error("hoisted.res", 1, 2);
-        let target_loc = Location::new_for_error("hoisted.res", 10, 20);
+        let hoisted_loc = LamLoc::for_test(25);
+        let target_loc = LamLoc::for_test(26);
         let hoisted = HoistedFunction {
             binding,
             path: vec!["A".into(), "make".into()],
@@ -2083,7 +2084,7 @@ mod tests {
         let module_root = context.store_mut().append(NodeSnapshot::Prim(
             Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
             vec![target_var],
-            Location::none(),
+            LamLoc::NONE,
         ));
         let occupied_root = context
             .store_mut()
@@ -2100,8 +2101,8 @@ mod tests {
             ),
         ];
         let mut export_map = Vec::new();
-        let hoisted_loc = Location::new_for_error("nonfunction.res", 3, 7);
-        let missing_loc = Location::new_for_error("nonfunction.res", 1, 2);
+        let hoisted_loc = LamLoc::for_test(27);
+        let missing_loc = LamLoc::for_test(28);
         let mut observer = Vec::new();
         let mut warning_sink: Option<&mut dyn FnMut(&IndexedHoistedWarning)> =
             Some(&mut |warning: &IndexedHoistedWarning| observer.push(warning.clone()));
@@ -2114,13 +2115,13 @@ mod tests {
                     binding: id("missing", 99),
                     path: vec!["Missing".into()],
                     loc: missing_loc,
-                    target_loc: Location::none(),
+                    target_loc: LamLoc::NONE,
                 },
                 HoistedFunction {
                     binding: binding,
                     path: vec!["A".into(), "make".into()],
                     loc: hoisted_loc,
-                    target_loc: Location::new_for_error("nonfunction.res", 20, 30),
+                    target_loc: LamLoc::for_test(29),
                 },
             ],
             &IdGenerator::with_start_stamp(10),
@@ -2152,13 +2153,13 @@ mod tests {
                     binding,
                     path: vec!["A".into(), "make".into()],
                     loc: hoisted_loc,
-                    target_loc: Location::new_for_error("nonfunction.res", 20, 30),
+                    target_loc: LamLoc::for_test(29),
                 },
                 HoistedFunction {
                     binding: id("missing", 99),
                     path: vec!["Missing".into()],
                     loc: missing_loc,
-                    target_loc: Location::none(),
+                    target_loc: LamLoc::NONE,
                 },
             ],
             &IdGenerator::with_start_stamp(10),
@@ -2187,7 +2188,7 @@ mod tests {
                 Mutable::Immutable,
             ),
             vec![Lambda::var(first), Lambda::var(second)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let input = Lambda::let_(
             LetKind::Strict,
@@ -2197,7 +2198,7 @@ mod tests {
                 vec![],
                 Lambda::unit(),
                 Default::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -2207,7 +2208,7 @@ mod tests {
                     vec![],
                     Lambda::unit(),
                     Default::default(),
-                    crate::location::Location::none(),
+                    LamLoc::NONE,
                 ),
                 Lambda::let_(
                     LetKind::Strict,
@@ -2220,8 +2221,8 @@ mod tests {
         let make = |binding, field: &str| HoistedFunction {
             binding,
             path: vec!["A".into(), field.into()],
-            loc: Location::none(),
-            target_loc: Location::none(),
+            loc: LamLoc::NONE,
+            target_loc: LamLoc::NONE,
         };
         let result = run(
             input,
@@ -2311,14 +2312,14 @@ mod tests {
         let single = context.store_mut().append_compat_lambda(Lambda::prim(
             Primitive::Pidentity,
             vec![Lambda::var(exotic)],
-            Location::new_for_error("groups.res", 4, 8),
+            LamLoc::for_test(30),
         ));
         let rec_root = context.store_mut().append_compat_lambda(Lambda::function_(
             0,
             vec![],
             Lambda::unit(),
             Default::default(),
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ));
         let nop = context.store_mut().append_compat_lambda(Lambda::Lbreak);
         let groups = vec![
@@ -2337,7 +2338,7 @@ mod tests {
                     (id.name(), id.stamp(), id.is_global()),
                     ("\\\"odd-name\"", 1, true)
                 );
-                assert_eq!(info.loc, Location::new_for_error("groups.res", 4, 8));
+                assert_eq!(info.loc, LamLoc::for_test(30));
                 assert_eq!(bindings[0].0, recursive);
             }
             _ => panic!("unexpected diagnostic groups"),
@@ -2369,13 +2370,13 @@ mod tests {
                 superseded_nodes: 11,
                 hot_node_occupied_bytes: 88,
                 hot_node_capacity_bytes: 128,
-                side_payload_shallow_occupied_bytes: 1416,
-                side_payload_shallow_capacity_bytes: 2304,
+                side_payload_shallow_occupied_bytes: 1096,
+                side_payload_shallow_capacity_bytes: 1792,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 1416,
+                superseded_unreachable_side_payload_shallow_bytes: 1096,
             }
         );
     }

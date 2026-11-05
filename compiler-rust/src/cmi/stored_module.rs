@@ -43,7 +43,7 @@ struct CoreRef<'a> {
 }
 
 /// GenType type declarations of one typed artifact, by `.cmt` path.
-pub type GentypeDeclarations = std::sync::Arc<Vec<crate::gentype::code_item::TypeDeclaration>>;
+pub type GentypeDeclarations = crate::gentype::main::EncodedTypeDeclarations;
 
 /// The part of a stored module registered up front.
 #[derive(serde::Deserialize, Default)]
@@ -51,7 +51,7 @@ pub struct StoredExtras {
     /// The alias rewrites the module registered (flattened name to path).
     pub alias_rewrites: Vec<(String, Path)>,
     /// The GenType declarations of the module's typed artifacts.
-    pub gentype_declarations: Vec<(String, Vec<crate::gentype::code_item::TypeDeclaration>)>,
+    pub gentype_declarations: Vec<(String, GentypeDeclarations)>,
 }
 
 impl StoredExtras {

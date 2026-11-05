@@ -12,8 +12,9 @@
 use std::borrow::Cow;
 
 use crate::parse_arena::{
-    ArityIdx, CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, PatIdx,
-    PosIdx, StrIdx,
+    ApplyArgs, ArityIdx, CaseList, CoreTypeIdx, ExprFieldList, ExprIdx, ExprList, LidentIdx,
+    LocIdx, Located, ModExprIdx, ModTypeIdx, PatFieldList, PatIdx, PatList, PosIdx, StrIdx,
+    TypeList, VbList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -179,40 +180,62 @@ pub type Label = Cow<'static, str>;
 /// Uses `Cow<'static, str>` for string data to support shared APIs between parser
 /// and PPX-generated nodes. Parser-produced values are normalized to owned strings
 /// when needed to keep this representation fully safe.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Constant {
     /// Integer constant with optional suffix (l, L, n).
-    Integer(Cow<'static, str>, Option<char>),
+    Integer(StrIdx, Option<char>),
     /// An ordinary character literal (OCaml `Pconst_char {source; semantic}`):
     /// `source` is the text between the single quotes as scanned, kept for
     /// printing; `semantic` is the decoded Unicode code point.
-    Char {
-        source: Cow<'static, str>,
-        semantic: i32,
-    },
+    Char { source: StrIdx, semantic: i32 },
     /// An ordinary double-quoted string literal (OCaml `Pconst_string`).
-    String(StringLiteral),
+    String(StringConst),
     /// The JavaScript source inside a non-interpolated ``json`...` `` literal.
-    Json(Cow<'static, str>),
+    Json(StrIdx),
     /// JavaScript source carried by a compiler extension such as `raw`,
     /// `ffi` or `re`.
-    RawSource(Cow<'static, str>),
+    RawSource(StrIdx),
     /// Float constant with optional suffix.
-    Float(Cow<'static, str>, Option<char>),
+    Float(StrIdx, Option<char>),
 }
 
-impl Constant {
-    /// OCaml `Ast_helper.Const.string`: a string constant with canonical
-    /// source spelling for a semantic value.
-    pub fn string(semantic: &str) -> Constant {
-        Constant::String(crate::string_literal::string_from_semantic(semantic))
+/// OCaml `String_literal.payload` with both spellings interned in the owning
+/// `ParseArena` (see `crate::string_literal::StringLiteral`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StringConst {
+    Valid { source: StrIdx, semantic: StrIdx },
+    InvalidSource(StrIdx),
+}
+
+impl StringConst {
+    /// OCaml `string_source`.
+    pub fn source(self, arena: &crate::parse_arena::ParseArena) -> &str {
+        match self {
+            StringConst::Valid { source, .. } | StringConst::InvalidSource(source) => {
+                arena.get_string(source)
+            }
+        }
     }
 
-    /// OCaml `Ast_helper.Const.char`.
-    pub fn char(semantic: i32) -> Constant {
-        Constant::Char {
-            source: Cow::Owned(crate::string_literal::encode_char_source(semantic)),
-            semantic,
+    /// OCaml `string_semantic`. Invalid strings kept for parser recovery
+    /// return the empty placeholder value.
+    pub fn semantic(self, arena: &crate::parse_arena::ParseArena) -> &str {
+        match self {
+            StringConst::Valid { semantic, .. } => arena.get_string(semantic),
+            StringConst::InvalidSource(_) => "",
+        }
+    }
+
+    /// An owned copy, for code that works on `StringLiteral` values.
+    pub fn to_literal(self, arena: &crate::parse_arena::ParseArena) -> StringLiteral {
+        match self {
+            StringConst::Valid { source, semantic } => StringLiteral::Valid {
+                source: Cow::Owned(arena.get_string(source).to_owned()),
+                semantic: Cow::Owned(arena.get_string(semantic).to_owned()),
+            },
+            StringConst::InvalidSource(source) => {
+                StringLiteral::InvalidSource(Cow::Owned(arena.get_string(source).to_owned()))
+            }
         }
     }
 }
@@ -464,7 +487,7 @@ pub enum Payload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoreType {
     /// Type description.
-    pub ptyp_desc: Box<CoreTypeDesc>,
+    pub ptyp_desc: CoreTypeDesc,
     /// Location.
     pub ptyp_loc: Location,
     /// Attributes.
@@ -488,13 +511,13 @@ pub enum CoreTypeDesc {
     /// Any type: `_`.
     Ptyp_any,
     /// Type variable: `'a`.
-    Ptyp_var(Box<Cow<'static, str>>),
+    Ptyp_var(StrIdx),
     /// Arrow type: `T1 -> T2`.
     Ptyp_arrow(Box<(Box<TypeArg>, CoreTypeIdx, Arity)>),
     /// Tuple type: `(T1, T2, ..., Tn)`.
-    Ptyp_tuple(Box<Vec<CoreTypeIdx>>),
+    Ptyp_tuple(TypeList),
     /// Type constructor: `tconstr` or `T tconstr` or `(T1, ..., Tn) tconstr`.
-    Ptyp_constr(Box<(Loc<LidentIdx>, Vec<CoreTypeIdx>)>),
+    Ptyp_constr((Loc<LidentIdx>, TypeList)),
     /// Object type: `{. field: T, ... }`.
     Ptyp_object(Box<(Vec<ObjectField>, ClosedFlag)>),
     /// Type alias: `T as 'a`.
@@ -550,7 +573,7 @@ pub enum ObjectField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pattern {
     /// Pattern description.
-    pub ppat_desc: Box<PatternDesc>,
+    pub ppat_desc: PatternDesc,
     /// Location.
     pub ppat_loc: Location,
     /// Attributes.
@@ -567,23 +590,23 @@ pub enum PatternDesc {
     /// Alias: `P as x`.
     Ppat_alias(PatIdx, StringLoc),
     /// Constant: `1`, `'a'`, `"hello"`.
-    Ppat_constant(Box<Constant>),
+    Ppat_constant(Constant),
     /// Interval: `'a'..'z'`.
     Ppat_interval(Box<(Constant, Constant)>),
     /// Tuple: `(P1, P2, ..., Pn)`.
-    Ppat_tuple(Box<Vec<PatIdx>>),
+    Ppat_tuple(PatList),
     /// Constructor: `C`, `C(P)` or `C(P1, ..., Pn)`. The arguments are the
     /// source list, located at the argument parentheses (or the enclosing
     /// node when there are none); see parsetree.ml `Ppat_construct`.
-    Ppat_construct(Loc<LidentIdx>, Box<Loc<Vec<PatIdx>>>),
+    Ppat_construct(Loc<LidentIdx>, Loc<PatList>),
     /// Variant: `#A`, `#A(P)` or `#A(P1, ..., Pn)`.
-    Ppat_variant(Box<(Label, Loc<Vec<PatIdx>>)>),
+    Ppat_variant(Box<(Label, Loc<PatList>)>),
     /// Record: `{l1: P1, ..., ln: Pn}`.
     /// Record: `{l1: P1, ...}`, closed flag, and an optional `...Type.t as name` rest
     /// (compiler/ml/parsetree.ml:164-168).
-    Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag, Option<RecordPatRest>)>),
+    Ppat_record(Box<(PatFieldList, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
-    Ppat_array(Box<Vec<PatIdx>>),
+    Ppat_array(PatList),
     /// Or-pattern: `P1 | P2`.
     Ppat_or(PatIdx, PatIdx),
     /// Constraint: `(P: T)`.
@@ -599,7 +622,7 @@ pub enum PatternDesc {
 }
 
 /// A record field in a pattern.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PatternRecordField {
     /// Field name.
     pub lid: Loc<LidentIdx>,
@@ -629,7 +652,7 @@ pub struct RecordPatRest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Expression {
     /// Expression description.
-    pub pexp_desc: Box<ExpressionDesc>,
+    pub pexp_desc: ExpressionDesc,
     /// Location.
     pub pexp_loc: Location,
     /// Attributes.
@@ -662,11 +685,12 @@ pub struct PexpFun {
     pub is_async: bool,
 }
 
-/// Named struct for Pexp_apply variant (boxed for enum size optimization).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Payload of `Pexp_apply`, stored inline; the arguments live in the arena.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PexpApply {
     pub funct: ExprIdx,
-    pub args: Vec<(ArgLabel, ExprIdx)>,
+    /// Read with `ParseArena::apply_args`.
+    pub args: ApplyArgs,
     pub partial: bool,
     pub transformed_jsx: bool,
 }
@@ -690,7 +714,7 @@ pub struct PexpTaggedTemplate {
 /// OCaml `Pexp_braces {expr; braces_loc}`: explicit braces around an
 /// expression. The node's `pexp_loc` stays on the enclosed expression;
 /// `braces_loc` covers the delimiters for printing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PexpBraces {
     pub expr: ExprIdx,
     pub braces_loc: Location,
@@ -707,36 +731,36 @@ pub struct PexpRegexp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExpressionDesc {
     /// Explicit braces: `{E}`.
-    Pexp_braces(Box<PexpBraces>),
+    Pexp_braces(PexpBraces),
     /// Identifier: `x` or `M.x`.
     Pexp_ident(Loc<LidentIdx>),
     /// Constant: `1`, `'a'`, `"hello"`.
-    Pexp_constant(Box<Constant>),
+    Pexp_constant(Constant),
     /// Let binding: `let P = E in E'`.
-    Pexp_let(Box<(RecFlag, Vec<ValueBinding>, ExprIdx)>),
+    Pexp_let((RecFlag, VbList, ExprIdx)),
     /// Function: `(P) => E`.
     Pexp_fun(Box<PexpFun>),
     /// Application: `E(E1, E2, ...)`.
-    Pexp_apply(Box<PexpApply>),
+    Pexp_apply(PexpApply),
     /// Match: `switch E { | P1 => E1 | ... }`.
-    Pexp_match(Box<(ExprIdx, Vec<Case>)>),
+    Pexp_match((ExprIdx, CaseList)),
     /// Try: `try E { | P1 => E1 | ... }`.
-    Pexp_try(Box<(ExprIdx, Vec<Case>)>),
+    Pexp_try((ExprIdx, CaseList)),
     /// Tuple: `(E1, E2, ..., En)`.
-    Pexp_tuple(Box<Vec<ExprIdx>>),
+    Pexp_tuple(ExprList),
     /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument
     /// list located at its parentheses (parsetree.ml `Pexp_construct`).
-    Pexp_construct(Loc<LidentIdx>, Box<Loc<Vec<ExprIdx>>>),
+    Pexp_construct(Loc<LidentIdx>, Loc<ExprList>),
     /// Variant: `#A`, `#A(E)` or `#A(E1, ..., En)`.
-    Pexp_variant(Box<(Label, Loc<Vec<ExprIdx>>)>),
+    Pexp_variant(Box<(Label, Loc<ExprList>)>),
     /// Record: `{l1: E1, ..., ln: En}` or `{...E, l1: E1, ...}`.
-    Pexp_record(Box<(Vec<ExpressionRecordField>, Option<ExprIdx>)>),
+    Pexp_record((ExprFieldList, Option<ExprIdx>)),
     /// Field access: `E.l`.
     Pexp_field(ExprIdx, Loc<LidentIdx>),
     /// Field set: `E.l = E'`.
     Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
-    Pexp_array(Box<Vec<ExprIdx>>),
+    Pexp_array(ExprList),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Ternary: `E1 ? E2 : E3`.
@@ -793,7 +817,7 @@ pub enum ExpressionDesc {
 }
 
 /// A record field in an expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ExpressionRecordField {
     /// Field name.
     pub lid: Loc<LidentIdx>,
@@ -804,7 +828,7 @@ pub struct ExpressionRecordField {
 }
 
 /// A case in a match or try expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Case {
     /// Position of the `|` bar.
     pub pc_bar: Option<PosIdx>,
@@ -940,7 +964,7 @@ pub enum JsxProp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModuleExpr {
     /// Module expression description.
-    pub pmod_desc: Box<ModuleExprDesc>,
+    pub pmod_desc: ModuleExprDesc,
     /// Location.
     pub pmod_loc: Location,
     /// Attributes.
@@ -970,7 +994,7 @@ pub enum ModuleExprDesc {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModuleType {
     /// Module type description.
-    pub pmty_desc: Box<ModuleTypeDesc>,
+    pub pmty_desc: ModuleTypeDesc,
     /// Location.
     pub pmty_loc: Location,
     /// Attributes.
@@ -1017,7 +1041,7 @@ pub enum WithConstraint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StructureItem {
     /// Structure item description.
-    pub pstr_desc: Box<StructureItemDesc>,
+    pub pstr_desc: StructureItemDesc,
     /// Location.
     pub pstr_loc: Location,
 }
@@ -1028,7 +1052,7 @@ pub enum StructureItemDesc {
     /// Expression: `E`.
     Pstr_eval(Box<(ExprIdx, Attributes)>),
     /// Value: `let P = E`.
-    Pstr_value(Box<(RecFlag, Vec<ValueBinding>)>),
+    Pstr_value((RecFlag, VbList)),
     /// Primitive declaration: `external`.
     Pstr_primitive(Box<ValueDescription>),
     /// Type declaration: `type t = ...`.
@@ -1057,7 +1081,7 @@ pub enum StructureItemDesc {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignatureItem {
     /// Signature item description.
-    pub psig_desc: Box<SignatureItemDesc>,
+    pub psig_desc: SignatureItemDesc,
     /// Location.
     pub psig_loc: Location,
 }
@@ -1193,12 +1217,12 @@ pub struct ConstructorDeclaration {
 
 /// OCaml `Parsetree.constructor_tag`: the literal a constructor's `@as`
 /// denotes, with its source spelling.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ConstructorTag {
-    Pct_string(StringLiteral),
-    Pct_int(String),
-    Pct_float(String),
-    Pct_bigint(String),
+    Pct_string(StringConst),
+    Pct_int(StrIdx),
+    Pct_float(StrIdx),
+    Pct_bigint(StrIdx),
     Pct_bool(bool),
     Pct_null,
     Pct_undefined,
@@ -1220,7 +1244,7 @@ pub struct LabelDeclaration {
     pub pld_name: StringLoc,
     /// The `@as("...")` rename, taken out of the attributes when the field is
     /// built (OCaml `pld_runtime_name`). The location is the attribute's own.
-    pub pld_runtime_name: Option<Located<StringLiteral>>,
+    pub pld_runtime_name: Option<Located<StringConst>>,
     /// Mutable flag.
     pub pld_mutable: MutableFlag,
     /// Type (arena index).
@@ -1371,10 +1395,11 @@ mod tests {
 
     #[test]
     fn test_constant() {
-        let c = Constant::Integer(Cow::Borrowed("42"), None);
+        let mut arena = crate::parse_arena::ParseArena::new();
+        let c = Constant::Integer(arena.intern_string("42"), None);
         assert!(matches!(c, Constant::Integer(..)));
 
-        let c = Constant::string("hello");
+        let c = arena.string_constant("hello");
         assert!(matches!(c, Constant::String(..)));
     }
 

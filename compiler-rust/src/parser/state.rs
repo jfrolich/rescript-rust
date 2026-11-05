@@ -136,11 +136,22 @@ pub struct Parser<'src> {
 impl<'src> Parser<'src> {
     /// Create a new parser for the given source code.
     pub fn new(filename: impl Into<String>, src: &'src str) -> Self {
+        Self::with_locations(filename, src, true)
+    }
+
+    /// Parse with optional source-location side tables. The scanner still
+    /// tracks its current cursor because line breaks participate in grammar.
+    pub fn with_locations(
+        filename: impl Into<String>,
+        src: &'src str,
+        store_locations: bool,
+    ) -> Self {
         // Create arena first so we can intern the filename
-        let mut arena = ParseArena::new();
+        let mut arena = ParseArena::with_locations(store_locations);
         arena.reserve_for_source(src.len());
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
+        arena.set_source_file(filename_idx);
         let scanner = Scanner::new(filename_idx, src);
         // Push initial default positions to arena
         let default_pos = Position::default();
@@ -556,11 +567,16 @@ impl<'src> Parser<'src> {
 
             match result.token {
                 Token::Comment(mut comment) => {
-                    // Collect comment and continue scanning.
-                    comment.set_prev_tok_end_pos(self.end_pos);
-                    comment.set_prev_tok_is_question(preceding_is_question);
+                    // Ordinary comments are formatter metadata. A location-free
+                    // compilation must not retain their spans in this separate
+                    // collection after omitting the arena's location tables.
+                    // Doc/module comments are distinct tokens, handled below.
+                    if self.arena.stores_locations() {
+                        comment.set_prev_tok_end_pos(self.end_pos);
+                        comment.set_prev_tok_is_question(preceding_is_question);
+                        self.comments.push(comment);
+                    }
                     preceding_is_question = false;
-                    self.comments.push(comment);
                     self.prev_end_pos = self.end_pos;
                     self.prev_end_pos_idx = self.end_pos_idx;
                     self.end_pos = result.end_pos;
@@ -570,6 +586,14 @@ impl<'src> Parser<'src> {
                     // Continue to next token
                 }
                 _ => {
+                    // Source constructs whose generated code embeds source
+                    // coordinates (`__LOC__` and friends, `assert`): a
+                    // location-free arena records that this unit needs a
+                    // located parse, so the driver can reparse it before
+                    // type checking instead of type checking it twice.
+                    if !self.arena.stores_locations() && needs_semantic_coordinates(&result.token) {
+                        self.arena.require_locations();
+                    }
                     self.token = result.token;
                     self.prev_end_pos = prev_end;
                     self.start_pos = result.start_pos;
@@ -916,9 +940,120 @@ impl<'src> Parser<'src> {
     }
 }
 
+/// Tokens whose translation reads source coordinates (`Translcore`'s
+/// `__LOC__`/`__LINE__`/`__POS__` constants and `Assert_failure` payloads).
+/// Qualified forms (`Pervasives.__LOC__`) are still caught by the converter's
+/// `require_locations` fallback.
+fn needs_semantic_coordinates(token: &Token<'_>) -> bool {
+    match token {
+        Token::Assert => true,
+        Token::Lident(name) => matches!(
+            name.as_ref(),
+            "__LOC__" | "__LINE__" | "__POS__" | "__LOC_OF__" | "__LINE_OF__" | "__POS_OF__"
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_free_parser_preserves_ast_shape() {
+        let sources = [
+            "let x = 1\nlet y = x + 2",
+            "let f = (~x=1, y) => x + y\nlet z = f(~x=2, 3)",
+            "type t = {a: int, b?: string}\nlet x = {a: 1}",
+            "let f = x => switch x { | Some(y) => y | None => 0 }",
+            "let f = x => {\n x\n -1\n}",
+            "let x = <div className=\"test\">{React.string(\"hello\")}</div>",
+            "type t = (. int => int) => int",
+            "let x = `hello ${name}`",
+        ];
+        for source in sources {
+            let source = source.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let parse = |locations| {
+                    let mut parser = Parser::with_locations("test.res", &source, locations);
+                    let structure = crate::parser::module::parse_structure(&mut parser);
+                    assert!(
+                        parser.diagnostics.is_empty(),
+                        "{source}: {:?}",
+                        parser.diagnostics
+                    );
+                    // The regular AST sexp also exposes braces offsets. They
+                    // are intentionally absent; compare syntax, not locations.
+                    fn syntax_only(sexp: &mut crate::parser::sexp::Sexp) {
+                        use crate::parser::sexp::Sexp;
+                        if let Sexp::List(items) = sexp {
+                            if matches!(items.first(), Some(Sexp::Atom(tag)) if tag == "braces_loc")
+                            {
+                                items.truncate(1);
+                            } else {
+                                for item in items {
+                                    syntax_only(item);
+                                }
+                            }
+                        }
+                    }
+                    let mut output = crate::parser::sexp::structure(parser.arena(), &structure);
+                    syntax_only(&mut output);
+                    if !locations {
+                        assert_eq!(parser.arena().position_count(), 0);
+                        assert_eq!(parser.arena().location_count(), 0);
+                    }
+                    output.to_string()
+                };
+                assert_eq!(parse(true), parse(false), "{source}");
+                tx.send(()).unwrap();
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("location-free parse failed or hung");
+        }
+    }
+
+    #[test]
+    fn location_free_parser_does_not_retain_formatter_comment_spans() {
+        let source = "// heading\n/** doc */\nlet x = /* value */ 1\n";
+        let parse = |locations| {
+            let mut parser = Parser::with_locations("comments.res", source, locations);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            assert!(parser.diagnostics.is_empty());
+            assert_eq!(parser.comments().len(), if locations { 2 } else { 0 });
+            let syntax = crate::parser::sexp::structure(parser.arena(), &structure).to_string();
+            // Documentation is semantic attribute content, not a formatter comment.
+            assert!(syntax.contains("doc"));
+            syntax
+        };
+        assert_eq!(parse(false), parse(true));
+    }
+
+    #[test]
+    fn location_free_parser_flags_units_whose_output_embeds_coordinates() {
+        let flagged = |source: &str| {
+            let source = source.to_string();
+            std::thread::spawn(move || {
+                let mut parser = Parser::with_locations("flags.res", &source, false);
+                let _ = crate::parser::module::parse_structure(&mut parser);
+                assert!(parser.diagnostics.is_empty(), "{source}");
+                parser.arena().locations_required()
+            })
+            .join()
+            .unwrap()
+        };
+        assert!(!flagged("let x = 1\nlet f = y => y + x\nlet loc = \"__LOC__\""));
+        assert!(flagged("let here = __LOC__"));
+        assert!(flagged("let line = __LINE__"));
+        assert!(flagged("let pos = __POS__"));
+        assert!(flagged("let check = x => assert(x > 0)"));
+        assert!(flagged("module rec A: {let v: int} = {let v = 1}"));
+        // A located parse never needs a retry.
+        let mut located = Parser::with_locations("flags.res", "let here = __LOC__", true);
+        let _ = crate::parser::module::parse_structure(&mut located);
+        assert!(!located.arena().locations_required());
+    }
 
     #[test]
     fn test_parser_new() {

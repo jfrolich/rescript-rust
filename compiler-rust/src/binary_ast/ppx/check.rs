@@ -49,7 +49,7 @@ impl<'a> Checker<'a> {
 
     /// The work `structure_mapper` does for one item of the structure.
     pub(super) fn structure_mapper_item(&mut self, item: &StructureItem) -> PpxResult<()> {
-        if let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc {
+        if let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc {
             let ((ext_name, payload), _attrs) = &**inner;
             match self.arena.get_string(ext_name.txt) {
                 // `Ast_exp_handle_external.handle_raw_structure`: the Flow
@@ -74,7 +74,7 @@ impl<'a> Checker<'a> {
 
     /// `Bs_builtin_ppx.structure_item_mapper` (bs_builtin_ppx.ml:513-637).
     fn structure_item(&mut self, item: &StructureItem) -> PpxResult<()> {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
                 self.type_declarations_with_deriving(tdcls, true)
@@ -85,11 +85,12 @@ impl<'a> Checker<'a> {
                 self.external(vd)
             }
             StructureItemDesc::Pstr_value(inner) => {
-                let (rec_flag, bindings) = &**inner;
+                let (rec_flag, bindings) = &*inner;
+                let bindings = self.arena.vb_list(*bindings).to_vec();
                 match (rec_flag, bindings.as_slice()) {
                     (RecFlag::Nonrecursive, [vb])
                         if matches!(
-                            &*self.arena.get_pat(vb.pvb_pat).ppat_desc,
+                            &self.arena.get_pat(vb.pvb_pat).ppat_desc,
                             PatternDesc::Ppat_var(_)
                         ) && self.arena.value_constraint(vb.pvb_pat).is_none() =>
                     {
@@ -98,9 +99,9 @@ impl<'a> Checker<'a> {
                         self.expr(vb.pvb_expr)?;
                         self.attributes(&vb.pvb_attributes)
                     }
-                    (RecFlag::Nonrecursive, _) => self.value_bindings_flattened(bindings),
+                    (RecFlag::Nonrecursive, _) => self.value_bindings_flattened(&bindings),
                     (RecFlag::Recursive, _) => {
-                        for vb in bindings {
+                        for vb in &bindings {
                             self.value_binding(vb)?;
                         }
                         Ok(())
@@ -117,14 +118,14 @@ impl<'a> Checker<'a> {
 
     /// `Ast_mapper.M.map_structure_item` (ast_mapper.ml:236-255).
     fn default_structure_item(&mut self, item: &StructureItem) -> PpxResult<()> {
-        match &*item.pstr_desc {
+        match &item.pstr_desc {
             StructureItemDesc::Pstr_eval(inner) => {
                 let (expr, attrs) = &**inner;
                 self.expr(*expr)?;
                 self.attributes(attrs)
             }
             StructureItemDesc::Pstr_value(inner) => {
-                for vb in &inner.1 {
+                for vb in &self.arena.vb_list(inner.1).to_vec() {
                     self.value_binding(vb)?;
                 }
                 Ok(())
@@ -170,7 +171,7 @@ impl<'a> Checker<'a> {
 
     /// `Bs_builtin_ppx.signature_item_mapper` (bs_builtin_ppx.ml:435-511).
     fn signature_item(&mut self, item: &SignatureItem) -> PpxResult<()> {
-        match &*item.psig_desc {
+        match &item.psig_desc {
             SignatureItemDesc::Psig_type(inner) => {
                 let (_rec_flag, tdcls) = &**inner;
                 self.type_declarations_with_deriving(tdcls, false)
@@ -448,7 +449,7 @@ impl<'a> Checker<'a> {
     fn module_expr(&mut self, idx: ModExprIdx) -> PpxResult<()> {
         let mod_expr = self.arena.get_mod_expr(idx).clone();
         self.attributes(&mod_expr.pmod_attributes)?;
-        match &*mod_expr.pmod_desc {
+        match &mod_expr.pmod_desc {
             ModuleExprDesc::Pmod_ident(_) => Ok(()),
             ModuleExprDesc::Pmod_structure(items) => self.structure(items),
             ModuleExprDesc::Pmod_functor(inner) => {
@@ -476,7 +477,7 @@ impl<'a> Checker<'a> {
     fn module_type(&mut self, idx: ModTypeIdx) -> PpxResult<()> {
         let mod_type = self.arena.get_mod_type(idx).clone();
         self.attributes(&mod_type.pmty_attributes)?;
-        match &*mod_type.pmty_desc {
+        match &mod_type.pmty_desc {
             ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
             ModuleTypeDesc::Pmty_signature(items) => self.signature(items),
             ModuleTypeDesc::Pmty_functor(inner) => {
@@ -513,7 +514,7 @@ impl<'a> Checker<'a> {
     /// `Ast_core_type_class_type.typ_mapper` (ast_core_type_class_type.ml:79-136).
     fn typ(&mut self, idx: CoreTypeIdx) -> PpxResult<()> {
         let typ = self.arena.get_core_type(idx).clone();
-        if let CoreTypeDesc::Ptyp_object(inner) = &*typ.ptyp_desc {
+        if let CoreTypeDesc::Ptyp_object(inner) = &typ.ptyp_desc {
             // Object fields are mapped from the last one
             // (`Ext_list.fold_right`); the object's own attributes and
             // inherited types are not mapped.
@@ -531,7 +532,7 @@ impl<'a> Checker<'a> {
     /// `T.map` (ast_mapper.ml:79-96).
     fn default_typ(&mut self, typ: &CoreType) -> PpxResult<()> {
         self.attributes(&typ.ptyp_attributes)?;
-        match &*typ.ptyp_desc {
+        match &typ.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => Ok(()),
             CoreTypeDesc::Ptyp_arrow(inner) => {
                 let (arg, ret, arity) = &**inner;
@@ -543,13 +544,13 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
-                for typ in types.iter() {
+                for typ in self.arena.type_list(*types).to_vec().iter() {
                     self.typ(*typ)?;
                 }
                 Ok(())
             }
             CoreTypeDesc::Ptyp_constr(inner) => {
-                for typ in &inner.1 {
+                for typ in self.arena.type_list(inner.1).to_vec().iter() {
                     self.typ(*typ)?;
                 }
                 Ok(())
@@ -588,8 +589,8 @@ impl<'a> Checker<'a> {
     /// `Bs_builtin_ppx.pat_mapper` (bs_builtin_ppx.ml:93-100).
     fn pat(&mut self, idx: PatIdx) -> PpxResult<()> {
         let pat = self.arena.get_pat(idx).clone();
-        if let PatternDesc::Ppat_constant(constant) = &*pat.ppat_desc {
-            match &**constant {
+        if let PatternDesc::Ppat_constant(constant) = &pat.ppat_desc {
+            match &*constant {
                 Constant::Json(_) => {
                     return Err(PpxError::at_loc(
                         pat.ppat_loc,
@@ -606,7 +607,7 @@ impl<'a> Checker<'a> {
     /// `P.map` (ast_mapper.ml:394-438).
     fn default_pat(&mut self, pat: &Pattern) -> PpxResult<()> {
         self.attributes(&pat.ppat_attributes)?;
-        match &*pat.ppat_desc {
+        match &pat.ppat_desc {
             PatternDesc::Ppat_any
             | PatternDesc::Ppat_var(_)
             | PatternDesc::Ppat_constant(_)
@@ -617,26 +618,26 @@ impl<'a> Checker<'a> {
                 self.pat(*inner)
             }
             PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
-                for item in items.iter() {
+                for item in self.arena.pat_list(*items).to_vec().iter() {
                     self.pat(*item)?;
                 }
                 Ok(())
             }
             PatternDesc::Ppat_construct(_, args) => {
-                for arg in args.txt.iter() {
+                for arg in self.arena.pat_list(args.txt).to_vec().iter() {
                     self.pat(*arg)?;
                 }
                 Ok(())
             }
             PatternDesc::Ppat_variant(inner) => {
-                for arg in inner.1.txt.iter() {
+                for arg in self.arena.pat_list(inner.1.txt).to_vec().iter() {
                     self.pat(*arg)?;
                 }
                 Ok(())
             }
             PatternDesc::Ppat_record(inner) => {
                 let (fields, _closed, rest) = &**inner;
-                for field in fields {
+                for field in self.arena.pat_field_list(*fields).to_vec() {
                     self.pat(field.pat)?;
                 }
                 if let Some(rest_type) = rest.as_ref().and_then(|rest| rest.rest_type) {
@@ -669,7 +670,7 @@ impl<'a> Checker<'a> {
         let result = self.expr_inner(&expr);
         self.async_context = async_saved;
         result?;
-        let awaits = match &*expr.pexp_desc {
+        let awaits = match &expr.pexp_desc {
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let mod_expr = self.arena.get_mod_expr(inner.1);
                 letmodule_expr_has_await_payload(mod_expr, self.arena)
@@ -690,7 +691,7 @@ impl<'a> Checker<'a> {
     fn expr_inner(&mut self, expr: &Expression) -> PpxResult<()> {
         let old_in_function_def = self.in_function_def;
         self.in_function_def = false;
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             // `Pexp_regexp`: `Ast_payload.validate_raw_source ~kind:Raw_re`
             // on `/pattern/flags`, then the attributes are mapped.
             ExpressionDesc::Pexp_regexp(regexp) => {
@@ -715,12 +716,12 @@ impl<'a> Checker<'a> {
                 match add_this_to_braced_function(&this_attrs, braces.expr, self.arena) {
                     Some(inner) => {
                         let rewritten = Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_braces(Box::new(
+                            pexp_desc: ExpressionDesc::Pexp_braces(
                                 crate::parser::ast::PexpBraces {
                                     expr: inner,
                                     braces_loc: braces.braces_loc,
                                 },
-                            ))),
+                            ),
                             pexp_loc: expr.pexp_loc,
                             pexp_attributes: Attributes::from_vec(other_attrs),
                         };
@@ -733,16 +734,19 @@ impl<'a> Checker<'a> {
             ExpressionDesc::Pexp_extension(extension) => {
                 self.expression_extension(expr.pexp_loc, extension)
             }
-            ExpressionDesc::Pexp_constant(constant) => match &**constant {
+            ExpressionDesc::Pexp_constant(constant) => match &*constant {
                 Constant::Integer(_, Some('l')) => Ok(()),
                 _ => self.attributes(&expr.pexp_attributes),
             },
             ExpressionDesc::Pexp_fun(fun) => self.function(expr, fun, old_in_function_def),
             ExpressionDesc::Pexp_apply(apply) => self.apply(expr, apply),
-            ExpressionDesc::Pexp_match(inner) if self.is_bool_match(&inner.1) => {
+            ExpressionDesc::Pexp_match(inner)
+                if self.is_bool_match(self.arena.case_list(inner.1)) =>
+            {
                 // Rewritten to `Pexp_ifthenelse (b, t, Some f)` and mapped by
                 // `default_expr_mapper`.
-                let (scrutinee, cases) = &**inner;
+                let (scrutinee, cases) = &*inner;
+                let cases = self.arena.case_list(*cases).to_vec();
                 self.attributes(&expr.pexp_attributes)?;
                 let (true_case, false_case) = if self.case_is_constructor(&cases[0], "true") {
                     (&cases[0], &cases[1])
@@ -840,13 +844,15 @@ impl<'a> Checker<'a> {
         }
         if expression_is_lident(apply.funct, "->", self.arena) {
             // `a |. f`: `let a = self.expr self a_ in let f = self.expr self f_`.
-            self.expr(apply.args[0].1)?;
-            self.expr(apply.args[1].1)
+            let args = self.arena.apply_args(apply.args);
+            let (lhs, rhs) = (args[0].1, args[1].1);
+            self.expr(lhs)?;
+            self.expr(rhs)
         } else {
             // `default_expr_mapper`: attributes, arguments, function.
             self.attributes(&expr.pexp_attributes)?;
-            for (_label, arg) in &apply.args {
-                self.expr(*arg)?;
+            for (_, arg) in self.arena.apply_args(apply.args).to_vec() {
+                self.expr(arg)?;
             }
             self.expr(apply.funct)
         }
@@ -857,15 +863,16 @@ impl<'a> Checker<'a> {
     fn let_expr(
         &mut self,
         expr: &Expression,
-        inner: &(RecFlag, Vec<ValueBinding>, ExprIdx),
+        inner: &(RecFlag, crate::parse_arena::VbList, ExprIdx),
     ) -> PpxResult<()> {
         let (rec_flag, bindings, body) = inner;
+        let bindings = &self.arena.vb_list(*bindings).to_vec();
         if *rec_flag == RecFlag::Nonrecursive
             && let [vb] = bindings.as_slice()
             && self.arena.value_constraint(vb.pvb_pat).is_none()
             && self.is_record_pattern(vb.pvb_pat)
             && !matches!(
-                &*crate::parser::parsetree_viewer::unwrap_braces(
+                &crate::parser::parsetree_viewer::unwrap_braces(
                     self.arena,
                     self.arena.get_expr(vb.pvb_expr)
                 )
@@ -928,18 +935,18 @@ impl<'a> Checker<'a> {
     /// `E.map` (ast_mapper.ml:282-390).
     fn default_expr(&mut self, expr: &Expression) -> PpxResult<()> {
         self.attributes(&expr.pexp_attributes)?;
-        match &*expr.pexp_desc {
+        match &expr.pexp_desc {
             ExpressionDesc::Pexp_ident(_)
             | ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_break
             | ExpressionDesc::Pexp_continue => Ok(()),
             ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (scrutinee, cases) = &**inner;
-                self.cases(cases)?;
+                let (scrutinee, cases) = &*inner;
+                self.cases(&self.arena.case_list(*cases).to_vec())?;
                 self.expr(*scrutinee)
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-                for item in items.iter() {
+                for item in self.arena.expr_list(*items).to_vec().iter() {
                     self.expr(*item)?;
                 }
                 Ok(())
@@ -959,23 +966,23 @@ impl<'a> Checker<'a> {
                 self.expr(template.tag)
             }
             ExpressionDesc::Pexp_construct(_, args) => {
-                for arg in args.txt.iter() {
+                for arg in self.arena.expr_list(args.txt).to_vec().iter() {
                     self.expr(*arg)?;
                 }
                 Ok(())
             }
             ExpressionDesc::Pexp_variant(inner) => {
-                for arg in inner.1.txt.iter() {
+                for arg in self.arena.expr_list(inner.1.txt).to_vec().iter() {
                     self.expr(*arg)?;
                 }
                 Ok(())
             }
             ExpressionDesc::Pexp_record(inner) => {
-                let (fields, spread) = &**inner;
+                let (fields, spread) = &*inner;
                 if let Some(spread) = spread {
                     self.expr(*spread)?;
                 }
-                for field in fields {
+                for field in self.arena.expr_field_list(*fields).to_vec() {
                     self.expr(field.expr)?;
                 }
                 Ok(())
@@ -1103,7 +1110,7 @@ impl<'a> Checker<'a> {
     fn case_is_constructor(&self, case: &Case, name: &str) -> bool {
         case.pc_guard.is_none()
             && matches!(
-                &*self.arena.get_pat(case.pc_lhs).ppat_desc,
+                &self.arena.get_pat(case.pc_lhs).ppat_desc,
                 PatternDesc::Ppat_construct(lid, args)
                     if args.txt.is_empty() && matches!(
                         self.arena.get_longident(lid.txt),
@@ -1121,10 +1128,10 @@ impl<'a> Checker<'a> {
     }
 
     fn is_record_pattern(&self, pat: PatIdx) -> bool {
-        match &*self.arena.get_pat(pat).ppat_desc {
+        match &self.arena.get_pat(pat).ppat_desc {
             PatternDesc::Ppat_record(_) => true,
             PatternDesc::Ppat_alias(inner, _) => matches!(
-                &*self.arena.get_pat(*inner).ppat_desc,
+                &self.arena.get_pat(*inner).ppat_desc,
                 PatternDesc::Ppat_record(_)
             ),
             _ => false,

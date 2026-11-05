@@ -14,12 +14,19 @@ use crate::types::typedtree::{
 
 type InProcessTypeDeclarations = Vec<crate::gentype::code_item::TypeDeclaration>;
 
+/// The GenType type declarations of one typed artifact, encoded. Every
+/// compiled module registers its declarations, but only modules importing its
+/// types from a GenType-annotated module read them, and the encoded form is a
+/// small fraction of the decoded one. It is stored as is with the module's
+/// interface, so restoring a stored module decodes nothing either.
+pub type EncodedTypeDeclarations = crate::binser::Encoded<InProcessTypeDeclarations>;
+
 /// Type declarations of the typed artifacts processed in this process, by
 /// normalized `.cmt`/`.cmti` path (OCaml GenType reads them from those files,
 /// which in-process builds do not write), and the paths each module owns.
 #[derive(Default)]
 struct InProcessTypeDeclarationsTables {
-    by_cmt: HashMap<String, std::sync::Arc<InProcessTypeDeclarations>>,
+    by_cmt: HashMap<String, EncodedTypeDeclarations>,
     by_module: HashMap<String, Vec<String>>,
 }
 
@@ -139,6 +146,8 @@ fn lookup_in_process_type_declarations(
         .lock()
         .ok()
         .and_then(|cache| cache.by_cmt.get(&key).cloned())
+        .and_then(|encoded| encoded.try_decode())
+        .map(std::sync::Arc::new)
 }
 
 fn register_in_process_type_declarations(
@@ -147,7 +156,7 @@ fn register_in_process_type_declarations(
     type_declarations: InProcessTypeDeclarations,
 ) {
     let key = normalize_cmt_cache_key(cmt_file);
-    let type_declarations = std::sync::Arc::new(type_declarations);
+    let type_declarations = EncodedTypeDeclarations::encode(&type_declarations);
     let replaced = in_process_type_declarations_cache()
         .lock()
         .ok()
@@ -166,9 +175,7 @@ fn register_in_process_type_declarations(
 /// module's interface: a later build that does not compile the module
 /// restores them with [`restore_type_declarations`], so modules that import
 /// its types translate them as when it was compiled.
-pub fn type_declarations_of_module(
-    module_name: &str,
-) -> Vec<(String, std::sync::Arc<InProcessTypeDeclarations>)> {
+pub fn type_declarations_of_module(module_name: &str) -> Vec<(String, EncodedTypeDeclarations)> {
     let Ok(cache) = in_process_type_declarations_cache().lock() else {
         return Vec::new();
     };
@@ -186,7 +193,7 @@ pub fn type_declarations_of_module(
 /// Register type declarations stored by [`type_declarations_of_module`].
 pub fn restore_type_declarations(
     module_name: &str,
-    entries: Vec<(String, InProcessTypeDeclarations)>,
+    entries: Vec<(String, EncodedTypeDeclarations)>,
 ) {
     if entries.is_empty() {
         return;
@@ -197,7 +204,7 @@ pub fn restore_type_declarations(
     let keys = entries.iter().map(|(key, _)| key.clone()).collect();
     cache.by_module.insert(module_name.to_string(), keys);
     for (key, declarations) in entries {
-        cache.by_cmt.insert(key, std::sync::Arc::new(declarations));
+        cache.by_cmt.insert(key, declarations);
     }
 }
 

@@ -149,7 +149,7 @@ impl IndexedJsConsumer<'_> {
             Some(Box::new(init.value.expect("record initializer"))),
             props,
         ));
-        expr.source_loc = (self.compiler.source_loc(&loc)).map(Box::new);
+        expr.source_loc = (self.compiler.source_loc(&loc));
         Some(Output::of_block_and_expression(continuation, block, expr))
     }
 }

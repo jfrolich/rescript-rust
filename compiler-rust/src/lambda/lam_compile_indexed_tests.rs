@@ -1,4 +1,5 @@
 use super::*;
+use crate::lambda::LamLoc;
 use crate::ident::IdentFlags;
 use crate::js_ir::printer::{print_block, print_expression};
 use crate::lambda::FieldDbgInfo;
@@ -61,11 +62,11 @@ fn external_application(args: Vec<Lambda>, status: ApplyStatus, jsx: bool) -> La
         ap_func: Box::new(Lambda::prim(
             Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }),
             vec![Lambda::global_module(Ident::create_persistent("External"))],
-            Location::none(),
+            LamLoc::NONE,
         )),
         ap_args: args,
         ap_info: ApInfo {
-            loc: Location::new_for_error("caller.res", 10, 20),
+            loc: LamLoc::for_test(13),
             inlined: InlineAttribute::Default,
             status,
         },
@@ -88,14 +89,14 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
     let param = Ident::new("value", 40, IdentFlags::NONE);
     compiler.cmj_lambda_cache.insert(
         "External".into(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".into(),
             Lambda::function_(
                 1,
                 vec![param],
                 Lambda::var(param),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )]))),
     );
@@ -145,7 +146,7 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
     let exception = Ident::new("exn", 41, IdentFlags::from_bits_truncate(0x2b));
     compiler.cmj_lambda_cache.insert(
         "External".into(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".into(),
             Lambda::function_(
                 1,
@@ -156,7 +157,7 @@ fn cmj_reduced_try_reaches_actual_js_with_shared_beta_and_js_allocations() {
                     Box::new(Lambda::unit()),
                 ),
                 FunctionAttribute::default(),
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )]))),
     );
@@ -205,14 +206,14 @@ fn rejected_cmj_does_not_import_and_lowers_arguments_after_arity_query_rtl() {
     };
     compiler.cmj_lambda_cache.insert(
         "External".into(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".into(),
             Lambda::function_(
                 2,
                 vec![Ident::create_persistent("a"), Ident::create_persistent("b")],
                 Lambda::unit(),
                 attr,
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )]))),
     );
@@ -264,7 +265,7 @@ fn normal_calls_visit_arguments_then_function_rtl_but_emit_source_order() {
                 Lambda::const_(Constant::int(2)),
             ],
             ap_info: ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 status: ApplyStatus::Uncurry,
                 inlined: InlineAttribute::Default,
             },
@@ -386,7 +387,7 @@ fn indexed_for_compiles_finish_then_start_and_removes_native_minus_one_shape() {
             Lambda::var(Ident::new("finish", 42, IdentFlags::NONE)),
             Lambda::const_(Constant::int(1)),
         ],
-        loc: Location::none(),
+        loc: LamLoc::NONE,
     }));
     let mut context = IndexedLambdaContext::from_lambda(
         Lambda::Lfor(
@@ -496,7 +497,7 @@ fn indexed_function_keeps_attributes_and_restores_outer_control_state() {
                 return_unit: true,
                 ..FunctionAttribute::default()
             },
-            crate::location::Location::none(),
+            LamLoc::NONE,
         ),
         [],
     );
@@ -567,7 +568,7 @@ fn indexed_short_circuit_preserves_distinct_native_nonreturn_continuations() {
                         Primitive::Psequor
                     },
                     args: vec![branch("left"), branch("right")],
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                 })),
                 [],
             );
@@ -625,7 +626,7 @@ fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() 
                     Lambda::var(Ident::new("left", 41, IdentFlags::NONE)),
                     Lambda::var(Ident::new("right", 42, IdentFlags::NONE)),
                 ],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             })),
             [],
         );

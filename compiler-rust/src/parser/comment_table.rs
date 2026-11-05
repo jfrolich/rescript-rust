@@ -566,7 +566,7 @@ fn is_block_expr_idx(arena: &ParseArena, idx: ExprIdx) -> bool {
 }
 
 fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) => is_block_expr_idx(arena, braces.expr),
         ExpressionDesc::Pexp_letmodule(..)
         | ExpressionDesc::Pexp_letexception(..)
@@ -575,7 +575,7 @@ fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
         | ExpressionDesc::Pexp_sequence(..) => true,
         ExpressionDesc::Pexp_apply(apply_inner)
             if {
-                let PexpApply { ref funct, .. } = **apply_inner;
+                let PexpApply { ref funct, .. } = *apply_inner;
                 is_block_expr_idx(arena, *funct)
             } =>
         {
@@ -592,7 +592,7 @@ fn is_block_expr(arena: &ParseArena, expr: &Expression) -> bool {
 /// (res_comments_table.ml `is_conditional_expr`).
 fn is_conditional_expr(expr: &Expression) -> bool {
     matches!(
-        &*expr.pexp_desc,
+        &expr.pexp_desc,
         ExpressionDesc::Pexp_ifthenelse(..) | ExpressionDesc::Pexp_ternary(..)
     )
 }
@@ -603,14 +603,14 @@ fn collect_list_patterns(arena: &ParseArena, pattern: &Pattern) -> Vec<Pattern> 
     let mut current = pattern;
 
     loop {
-        match &*current.ppat_desc {
+        match &current.ppat_desc {
             // `::` takes its head and rest as two arguments, or as one 2-tuple.
             PatternDesc::Ppat_construct(name, args) if arena.is_lident(name.txt, "::") => {
-                let pair = match args.txt.as_slice() {
+                let pair = match arena.pat_list(args.txt) {
                     [pat, rest] => Some((*pat, *rest)),
-                    [arg] => match &*arena.get_pat(*arg).ppat_desc {
+                    [arg] => match &arena.get_pat(*arg).ppat_desc {
                         PatternDesc::Ppat_tuple(tuple) if tuple.len() == 2 => {
-                            Some((tuple[0], tuple[1]))
+                            Some((arena.pat_list(*tuple)[0], arena.pat_list(*tuple)[1]))
                         }
                         _ => None,
                     },
@@ -645,14 +645,14 @@ fn collect_list_exprs(arena: &ParseArena, expr: &Expression) -> Vec<Expression> 
     let mut current = expr;
 
     loop {
-        match &*current.pexp_desc {
+        match &current.pexp_desc {
             // `::` takes its head and rest as two arguments, or as one 2-tuple.
             ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "::") => {
-                let pair = match args.txt.as_slice() {
+                let pair = match arena.expr_list(args.txt) {
                     [expr, rest] => Some((*expr, *rest)),
-                    [arg] => match &*arena.get_expr(*arg).pexp_desc {
+                    [arg] => match &arena.get_expr(*arg).pexp_desc {
                         ExpressionDesc::Pexp_tuple(tuple) if tuple.len() == 2 => {
-                            Some((tuple[0], tuple[1]))
+                            Some((arena.expr_list(*tuple)[0], arena.expr_list(*tuple)[1]))
                         }
                         _ => None,
                     },
@@ -857,12 +857,12 @@ fn walk_structure_item(
         return;
     }
 
-    match &*si.pstr_desc {
+    match &si.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {
-            let (_, ref bindings) = **inner;
-            walk_value_bindings(bindings, t, comments, arena)
+            let (_, ref bindings) = *inner;
+            walk_value_bindings(&arena.vb_list(*bindings).to_vec(), t, comments, arena)
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (_, ref declarations) = **inner;
@@ -903,7 +903,7 @@ fn walk_signature_item(
         return;
     }
 
-    match &*si.psig_desc {
+    match &si.psig_desc {
         SignatureItemDesc::Psig_value(vd) => walk_value_description(vd, t, comments, arena),
         SignatureItemDesc::Psig_type(inner) => {
             let (_, ref declarations) = **inner;
@@ -1065,7 +1065,7 @@ fn walk_module_binding(
 
     let pmb_expr = arena.get_mod_expr(mb.pmb_expr);
     let pmb_expr_loc = pmb_expr.pmod_loc;
-    let is_constraint = matches!(&*pmb_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(..));
+    let is_constraint = matches!(&pmb_expr.pmod_desc, ModuleExprDesc::Pmod_constraint(..));
     let (leading, inside, trailing) = partition_by_loc(rest, pmb_expr_loc, arena);
 
     // Safety: arena is append-only, module expression won't be invalidated
@@ -1152,7 +1152,7 @@ fn rewrite_value_binding_locs(
     let default = (pvb_pat.ppat_loc, vb.pvb_expr, pvb_expr_loc);
 
     // Check for the sugar cases that OCaml handles specially
-    match (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc) {
+    match (&pvb_pat.ppat_desc, &pvb_expr.pexp_desc) {
         // Case 1: Ppat_constraint with Pexp_constraint, empty Ptyp_poly
         // let x: t = (expr: typ)
         (PatternDesc::Ppat_constraint(pat_inner), ExpressionDesc::Pexp_constraint(expr_inner)) => {
@@ -1160,7 +1160,7 @@ fn rewrite_value_binding_locs(
             let (ref expr_idx, _) = **expr_inner;
             let pat_loc = arena.get_pat(*pat_idx).ppat_loc;
             let typ = arena.get_core_type(*typ_idx);
-            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if vars.is_empty() {
@@ -1169,6 +1169,7 @@ fn rewrite_value_binding_locs(
                         loc_start: *arena.loc_start(pat_loc),
                         loc_end: *arena.loc_end(inner_typ_loc),
                         loc_ghost: false,
+                        origin: Default::default(),
                     });
                     let inner_expr_loc = arena.get_expr(*expr_idx).pexp_loc;
                     (new_pat_loc, *expr_idx, inner_expr_loc)
@@ -1185,7 +1186,7 @@ fn rewrite_value_binding_locs(
         (PatternDesc::Ppat_constraint(pat_inner), ExpressionDesc::Pexp_fun(_)) => {
             let (ref _pat_idx, ref typ_idx) = **pat_inner;
             let typ = arena.get_core_type(*typ_idx);
-            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if !vars.is_empty() {
@@ -1194,6 +1195,7 @@ fn rewrite_value_binding_locs(
                         loc_start: *arena.loc_start(pvb_pat.ppat_loc),
                         loc_end: *arena.loc_end(inner_typ_loc),
                         loc_ghost: false,
+                        origin: Default::default(),
                     });
                     (new_pat_loc, vb.pvb_expr, pvb_expr_loc)
                 } else {
@@ -1211,7 +1213,7 @@ fn rewrite_value_binding_locs(
             let (ref _pat_idx, ref typ_idx) = **pat_inner;
             let (_name, ref inner_expr_idx) = **newtype_inner;
             let typ = arena.get_core_type(*typ_idx);
-            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &*typ.ptyp_desc {
+            if let CoreTypeDesc::Ptyp_poly(poly_inner) = &typ.ptyp_desc {
                 let (ref vars, ref inner_typ_idx) = **poly_inner;
                 let inner_typ_loc = arena.get_core_type(*inner_typ_idx).ptyp_loc;
                 if !vars.is_empty() {
@@ -1220,7 +1222,7 @@ fn rewrite_value_binding_locs(
                     let constraint_expr_idx = {
                         let inner_expr = arena.get_expr(*inner_expr_idx).clone();
                         if let ExpressionDesc::Pexp_constraint(constraint_inner) =
-                            &*inner_expr.pexp_desc
+                            &inner_expr.pexp_desc
                         {
                             let (ref expr_idx, _) = **constraint_inner;
                             Some(*expr_idx)
@@ -1233,6 +1235,7 @@ fn rewrite_value_binding_locs(
                             loc_start: *arena.loc_start(pvb_pat.ppat_loc),
                             loc_end: *arena.loc_end(inner_typ_loc),
                             loc_ghost: false,
+                            origin: Default::default(),
                         });
                         let expr_loc = arena.get_expr(expr_idx).pexp_loc;
                         (new_pat_loc, expr_idx, expr_loc)
@@ -1552,7 +1555,7 @@ fn walk_expression(
         return;
     }
 
-    match &*expr.pexp_desc {
+    match &expr.pexp_desc {
         ExpressionDesc::Pexp_braces(braces) if is_block_expr_idx(arena, braces.expr) => {
             let inner = arena.get_expr(braces.expr).clone();
             walk_expression(&inner, t, comments, arena);
@@ -1578,16 +1581,16 @@ fn walk_expression(
             t.attach_trailing(longident.loc, trailing, arena);
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (_, ref bindings, ref body_idx) = **inner;
+            let (_, ref bindings, ref body_idx) = *inner;
             // Safety: arena is append-only, expression won't be invalidated
             let body = arena.get_expr(*body_idx).clone();
             // Check if body is unit
-            let body_is_unit = matches!(&*body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
+            let body_is_unit = matches!(&body.pexp_desc, ExpressionDesc::Pexp_construct(name, args) if arena.is_lident(name.txt, "()") && args.txt.is_empty());
             if body_is_unit {
-                walk_value_bindings(bindings, t, comments, arena);
+                walk_value_bindings(&arena.vb_list(*bindings).to_vec(), t, comments, arena);
             } else {
                 let comments = visit_list_but_continue_with_remaining_comments(
-                    bindings,
+                    &arena.vb_list(*bindings).to_vec(),
                     |vb, arena| {
                         let pvb_pat = arena.get_pat(vb.pvb_pat);
                         if arena.loc_ghost(pvb_pat.ppat_loc) {
@@ -1837,26 +1840,32 @@ fn walk_expression(
                 let (after_longident, rest) =
                     partition_adjacent_trailing(name.loc, trailing, arena);
                 t.attach_trailing(name.loc, after_longident, arena);
-                let nodes: Vec<Node<'_>> =
-                    args.txt.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+                let nodes: Vec<Node<'_>> = arena
+                    .expr_list(args.txt)
+                    .iter()
+                    .map(|e| Node::ExpressionIdx(*e))
+                    .collect();
                 walk_list(&nodes, t, rest, arena);
             }
         }
         ExpressionDesc::Pexp_variant(inner) => {
-            let nodes: Vec<Node<'_>> = inner
-                .1
-                .txt
+            let nodes: Vec<Node<'_>> = arena
+                .expr_list(inner.1.txt)
                 .iter()
                 .map(|e| Node::ExpressionIdx(*e))
                 .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_array(exprs) | ExpressionDesc::Pexp_tuple(exprs) => {
-            let nodes: Vec<Node<'_>> = exprs.iter().map(|e| Node::ExpressionIdx(*e)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .expr_list(*exprs)
+                .iter()
+                .map(|e| Node::ExpressionIdx(*e))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref spread_idx) = **inner;
+            let (ref fields, ref spread_idx) = *inner;
             if fields.is_empty() {
                 t.attach_inside(expr.pexp_loc, comments, arena);
             } else {
@@ -1876,6 +1885,7 @@ fn walk_expression(
                     }
                 };
 
+                let fields = arena.expr_field_list(*fields).to_vec();
                 let nodes: Vec<Node<'_>> = fields
                     .iter()
                     .map(|f| Node::ExprRecordRow(&f.lid, f.expr))
@@ -1953,7 +1963,7 @@ fn walk_expression(
             }
         }
         ExpressionDesc::Pexp_ifthenelse(_) | ExpressionDesc::Pexp_ternary(_) => {
-            let (cond_idx, then_idx, else_idx) = match &*expr.pexp_desc {
+            let (cond_idx, then_idx, else_idx) = match &expr.pexp_desc {
                 ExpressionDesc::Pexp_ifthenelse(inner) => (&inner.0, &inner.1, inner.2),
                 ExpressionDesc::Pexp_ternary(inner) => (&inner.0, &inner.1, Some(inner.2)),
                 _ => unreachable!(),
@@ -2130,7 +2140,7 @@ fn walk_expression(
             t.attach_trailing(mod_expr.pmod_loc, after, arena);
         }
         ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (ref match_expr_idx, ref cases) = **inner;
+            let (ref match_expr_idx, ref cases) = *inner;
             // Safety: arena is append-only, expression won't be invalidated
             let match_expr = arena.get_expr(*match_expr_idx).clone();
             let (before, inside, after) = partition_by_loc(comments, match_expr.pexp_loc, arena);
@@ -2151,20 +2161,18 @@ fn walk_expression(
             let (after_expr, rest) = partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
             t.attach_trailing(match_expr.pexp_loc, after_expr, arena);
 
+            let cases = arena.case_list(*cases).to_vec();
             let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
             walk_list(&nodes, t, rest, arena);
         }
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
+            let PexpApply { ref funct, .. } = *inner;
+            let args = arena.apply_args(inner.args).to_vec();
             // Safety: arena is append-only, expression won't be invalidated
             let funct_expr = arena.get_expr(*funct).clone();
             // Check for unary expressions
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
                         if matches!(op_str, "~+" | "~+." | "~-" | "~-." | "~~~" | "not" | "!") {
@@ -2184,7 +2192,7 @@ fn walk_expression(
 
             // Special case for Array.get: walk arguments directly like OCaml
             if args.len() == 2 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Ldot(base, method_idx) = arena.get_longident(ident.txt) {
                         if let Longident::Lident(module_idx) = base.as_ref() {
                             let module = arena.get_string(*module_idx);
@@ -2207,7 +2215,7 @@ fn walk_expression(
 
             // Special case for Array.set: walk arguments directly like OCaml
             if args.len() == 3 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Ldot(base, method_idx) = arena.get_longident(ident.txt) {
                         if let Longident::Lident(module_idx) = base.as_ref() {
                             let module = arena.get_string(*module_idx);
@@ -2250,7 +2258,7 @@ fn walk_expression(
             // Special case for Primitive_dict.make (dict{} syntax)
             // Match OCaml: just walk the key_values array expression
             if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
                         if arena.get_string(*method_idx) == "make" {
                             if let Longident::Lident(module_idx) = parent.as_ref() {
@@ -2281,12 +2289,12 @@ fn walk_expression(
             {
                 let (_, arg_idx) = &args[0];
                 let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_arrays) = &*arg.pexp_desc {
+                if let ExpressionDesc::Pexp_array(sub_arrays) = &arg.pexp_desc {
                     let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
-                    for sub_array_idx in sub_arrays.iter() {
+                    for sub_array_idx in arena.expr_list(*sub_arrays).iter() {
                         let sub_array = arena.get_expr(*sub_array_idx);
-                        if let ExpressionDesc::Pexp_array(exprs) = &*sub_array.pexp_desc {
-                            all_expr_idxs.extend(exprs.iter().copied());
+                        if let ExpressionDesc::Pexp_array(exprs) = &sub_array.pexp_desc {
+                            all_expr_idxs.extend(arena.expr_list(*exprs).iter().copied());
                         } else {
                             all_expr_idxs.push(*sub_array_idx);
                         }
@@ -2303,9 +2311,9 @@ fn walk_expression(
             if args.len() == 1 && parsetree_viewer::is_spread_belt_list_concat(arena, &funct_expr) {
                 let (_, arg_idx) = &args[0];
                 let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
+                if let ExpressionDesc::Pexp_array(sub_lists) = &arg.pexp_desc {
                     let mut all_exprs: Vec<Expression> = Vec::new();
-                    for sub_list_idx in sub_lists.iter() {
+                    for sub_list_idx in arena.expr_list(*sub_lists).iter() {
                         let sub_list = arena.get_expr(*sub_list_idx);
                         let (exprs, spread) =
                             parsetree_viewer::collect_list_expressions(arena, sub_list);
@@ -2322,7 +2330,7 @@ fn walk_expression(
 
             // Check for binary expressions - match OCaml's special handling
             if args.len() == 2 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
+                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
                     if let Longident::Lident(op) = arena.get_longident(ident.txt) {
                         let op_str = arena.get_string(*op);
                         if matches!(
@@ -2381,7 +2389,7 @@ fn walk_expression(
             }
 
             // Regular apply
-            walk_apply_expr(&funct_expr, args, t, comments, arena);
+            walk_apply_expr(&funct_expr, &args, t, comments, arena);
         }
         ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => {
             // Walk through function parameters and body, matching OCaml's handling
@@ -2429,7 +2437,7 @@ fn walk_expression(
                                 label: ArgLabel::Nolabel,
                                 default_expr: None,
                                 pat: Pattern {
-                                    ppat_desc: Box::new(PatternDesc::Ppat_var(name)),
+                                    ppat_desc: PatternDesc::Ppat_var(name),
                                     ppat_loc: name.loc,
                                     ppat_attributes: crate::parser::ast::Attributes::new(),
                                 },
@@ -2559,7 +2567,7 @@ fn walk_expression(
             }
 
             // Walk return expression
-            match &*return_expr.pexp_desc {
+            match &return_expr.pexp_desc {
                 ExpressionDesc::Pexp_constraint(constraint_inner)
                     if {
                         let inner_loc = arena.get_expr(constraint_inner.0).pexp_loc;
@@ -3013,7 +3021,7 @@ fn walk_pattern(
         return;
     }
 
-    match &*pattern.ppat_desc {
+    match &pattern.ppat_desc {
         PatternDesc::Ppat_any
         | PatternDesc::Ppat_constant { .. }
         | PatternDesc::Ppat_interval { .. } => {
@@ -3061,7 +3069,7 @@ fn walk_pattern(
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
-            match args.txt.as_slice() {
+            match arena.pat_list(args.txt).to_vec().as_slice() {
                 [] => t.attach_trailing(name.loc, trailing, arena),
                 [arg_pat_idx] => {
                     let (after_longident, rest) =
@@ -3084,15 +3092,24 @@ fn walk_pattern(
             }
         }
         PatternDesc::Ppat_variant(inner) => {
-            let nodes: Vec<Node<'_>> = inner.1.txt.iter().map(|p| Node::PatternIdx(*p)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .pat_list(inner.1.txt)
+                .iter()
+                .map(|p| Node::PatternIdx(*p))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
-            let nodes: Vec<Node<'_>> = pats.iter().map(|p| Node::PatternIdx(*p)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .pat_list(*pats)
+                .iter()
+                .map(|p| Node::PatternIdx(*p))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {
             let (ref fields, _, ref record_rest) = **inner;
+            let fields = arena.pat_field_list(*fields).to_vec();
             let mut nodes: Vec<Node<'_>> = fields
                 .iter()
                 .map(|f| Node::PatternRecordRow(&f.lid, f.pat))
@@ -3214,14 +3231,14 @@ fn walk_core_type(
         return;
     }
 
-    match &*ct.ptyp_desc {
+    match &ct.ptyp_desc {
         CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {
             let (leading, trailing) = partition_leading_trailing(comments, ct.ptyp_loc, arena);
             t.attach_leading(ct.ptyp_loc, leading, arena);
             t.attach_trailing(ct.ptyp_loc, trailing, arena);
         }
         CoreTypeDesc::Ptyp_constr(inner) => {
-            let (ref name, ref args) = **inner;
+            let (ref name, ref args) = *inner;
             let (leading, trailing) = partition_leading_trailing(comments, name.loc, arena);
             t.attach_leading(name.loc, leading, arena);
 
@@ -3232,7 +3249,7 @@ fn walk_core_type(
                 t.attach_trailing(name.loc, after_name, arena);
 
                 visit_list_but_continue_with_remaining_comments(
-                    args,
+                    &arena.type_list(*args).to_vec(),
                     |arg, arena| arena.get_core_type(*arg).ptyp_loc,
                     |arg, t, comments, arena| {
                         // Safety: arena is append-only, core type won't be invalidated
@@ -3274,7 +3291,11 @@ fn walk_core_type(
             t.attach_trailing(return_type.ptyp_loc, after_ret, arena);
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
-            let nodes: Vec<Node<'_>> = types.iter().map(|ty| Node::CoreTypeIdx(*ty)).collect();
+            let nodes: Vec<Node<'_>> = arena
+                .type_list(*types)
+                .iter()
+                .map(|ty| Node::CoreTypeIdx(*ty))
+                .collect();
             walk_list(&nodes, t, comments, arena);
         }
         CoreTypeDesc::Ptyp_object(inner) => {
@@ -3468,7 +3489,7 @@ fn walk_module_expr(
         return;
     }
 
-    match &*me.pmod_desc {
+    match &me.pmod_desc {
         ModuleExprDesc::Pmod_ident(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
@@ -3517,7 +3538,7 @@ fn walk_module_expr(
 
             // Handle return expression, with special case for Pmod_constraint
             // where the constraint comes before the expression (: Set => expr)
-            match &*return_mod_expr.pmod_desc {
+            match &return_mod_expr.pmod_desc {
                 ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx) => {
                     let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
                     let mod_type = arena.get_mod_type(*mod_type_idx).clone();
@@ -3657,7 +3678,7 @@ fn walk_mod_type(
         return;
     }
 
-    match &*mt.pmty_desc {
+    match &mt.pmty_desc {
         ModuleTypeDesc::Pmty_ident(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
@@ -3877,7 +3898,7 @@ fn functor_type_params(
         modtype: &ModuleType,
         arena: &ParseArena,
     ) -> (Vec<OwnedModTypeFunctorParam>, ModuleType) {
-        match &*modtype.pmty_desc {
+        match &modtype.pmty_desc {
             ModuleTypeDesc::Pmty_functor(inner) => {
                 let (ref lbl, ref arg_type, ref return_type) = **inner;
                 acc.push(OwnedModTypeFunctorParam {

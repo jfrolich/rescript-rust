@@ -5,6 +5,7 @@
 //! that justifies it; do not introduce Rust-only logic.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_compile_context::{Element, IdKind, IdentTable};
 use crate::lambda::lam_constant::Constant;
@@ -12,7 +13,6 @@ use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{Apply, Lambda, lam_analysis};
-use crate::location::Location;
 
 /// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
 fn is_block_constructor(primitive: &Primitive) -> bool {
@@ -154,7 +154,7 @@ pub fn field_flatten_get(
         Some(IdKind::Module(g)) => Lambda::prim(
             Primitive::Pfield(i, info.clone()),
             vec![Lambda::global_module(*g)],
-            Location::none(),
+            LamLoc::NONE,
         ),
         // lam_util.ml:208-213 — ImmutableBlock: lift element if `SimpleForm`,
         // bail otherwise. Out-of-bounds index is treated as bail (OCaml uses
@@ -211,7 +211,7 @@ mod tests {
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::Constant;
     use crate::lambda::lam_primitive::Mutable;
-    use crate::location::Location;
+    use LamLoc;
 
     fn ident(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -235,7 +235,7 @@ mod tests {
         let body = Lambda::prim(
             Primitive::Pidentity,
             vec![Lambda::Lvar(x)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let result = refine_let(LetKind::Strict, x, e, body);
         match result {
@@ -277,12 +277,12 @@ mod tests {
         let mk = Lambda::prim(
             Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable),
             vec![inner_e],
-            Location::none(),
+            LamLoc::NONE,
         );
         let body = Lambda::prim(
             Primitive::Pidentity,
             vec![Lambda::Lvar(x)],
-            Location::none(),
+            LamLoc::NONE,
         );
         let result = refine_let(LetKind::Strict, x, mk, body);
         // Should keep let-binding (Prim clause refused due to is_block_constructor)
@@ -305,7 +305,7 @@ mod tests {
             ap_func: Box::new(Lambda::Lvar(f)),
             ap_args: vec![Lambda::Lvar(x)],
             ap_info: crate::lambda::ApInfo {
-                loc: Location::none(),
+                loc: LamLoc::NONE,
                 inlined: crate::lambda::InlineAttribute::Default,
                 status: crate::lambda::ApplyStatus::Na,
             },

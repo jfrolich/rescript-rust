@@ -459,7 +459,8 @@ pub fn incremental_build_without_lock(
     // A fresh in-process build compiles only what changed since the JavaScript
     // was written (see `incremental`). It still parses every module: the
     // dependency graph comes from the parse.
-    let incremental = fresh_in_process && incremental::applies(build_state);
+    let incremental =
+        fresh_in_process && !build_state.diagnostic_locations && incremental::applies(build_state);
     if incremental
         && build_state.build_state.source_map_command == SourceMapCommand::Build
         && incremental::everything_up_to_date(build_state)
@@ -645,9 +646,6 @@ pub fn incremental_build_without_lock(
         }
     }
     let has_parse_warnings = has_output(&parse_warnings);
-    if has_parse_warnings {
-        eprintln!("{}", &parse_warnings);
-    }
 
     mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     current_step += 1;
@@ -692,6 +690,44 @@ pub fn incremental_build_without_lock(
         }
     })?;
 
+    if build_state
+        .diagnostic_retry
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+    {
+        pb.finish_and_clear();
+        // No first-pass diagnostic escapes. Discard the speculative registry
+        // and recompile its dependencies too: inclusion/type errors can quote
+        // a declaration in another module, not just the failing source file.
+        build_state.diagnostic_locations = true;
+        *build_state.module_registry.lock().unwrap() =
+            rescript_compiler::cmi::persistent_env::ModuleRegistry::new();
+        build_state.stored_asts.lock().unwrap().clear();
+        build_state.in_memory_interfaces.lock().unwrap().clear();
+        build_state.loaded_units.lock().unwrap().clear();
+        build_state.unit_reads.lock().unwrap().clear();
+        build_state.verified_imports.lock().unwrap().clear();
+        build_state.module_alias_rewrites.lock().unwrap().clear();
+        build_state.incremental_plan = None;
+        build_state.previous_in_process = None;
+        build_state.loaded_modules.clear();
+        build_state.compiled_modules.clear();
+        build_state.parse_warnings_replayed = false;
+        mark_modules_dirty(build_state);
+        let result = incremental_build_without_lock(
+            build_state,
+            default_timing,
+            initial_build,
+            show_progress,
+            only_incremental,
+            plain_output,
+        );
+        build_state.diagnostic_locations = false;
+        return result;
+    }
+
+    if has_parse_warnings {
+        eprintln!("{}", &parse_warnings);
+    }
     let compile_duration = start_compiling.elapsed();
     phase_mark("compile-end");
 

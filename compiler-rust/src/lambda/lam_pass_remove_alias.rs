@@ -8,6 +8,7 @@
 //! logic.
 
 use crate::ident::Ident;
+use crate::lambda::LamLoc;
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
@@ -18,7 +19,6 @@ use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::{Apply, Lambda, PrimInfo};
-use crate::location::Location;
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:143-159).
@@ -71,7 +71,7 @@ fn is_const_some(cst: &Constant) -> bool {
 
 /// Port of `Lam.not_` (lam.ml:584-588). Folds `Pintcomp Cneq -> Pintcomp Ceq`
 /// to keep the outcome shape clean; otherwise wraps the argument in `Pnot`.
-fn lam_not(loc: Location, x: Lambda) -> Lambda {
+fn lam_not(loc: LamLoc, x: Lambda) -> Lambda {
     match x {
         Lambda::Lprim(__prim9)
             if matches!(
@@ -315,8 +315,8 @@ impl<'a> Simplifier<'a> {
                 };
                 let optional_test = |primitive: Primitive, l: Lambda| {
                     lam_not(
-                        Location::none(),
-                        Lambda::prim(primitive, vec![l], Location::none()),
+                        LamLoc::NONE,
+                        Lambda::prim(primitive, vec![l], LamLoc::NONE),
                     )
                 };
                 match self.ident_tbl.get(&id).cloned() {

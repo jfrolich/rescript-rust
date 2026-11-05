@@ -4,6 +4,7 @@
 //! the OCaml compiler's output, enabling parity testing between implementations.
 
 use std::io::Write;
+use crate::lambda::LamLoc;
 
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::Constant;
@@ -987,6 +988,7 @@ pub fn print_lambda_with_locs(lam: &Lambda, out: &mut impl Write) -> std::io::Re
 mod tests {
     use super::{Sexp, constant, escape_ocaml_string, switch_key};
     use crate::lambda::lam_constant::Constant;
+    use crate::lambda::LamLoc;
 
     #[test]
     fn sexp_layout_indents_multi_item_lists() {
@@ -1002,7 +1004,7 @@ mod tests {
     #[test]
     fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
         let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
-        let location = crate::location::Location::new_for_error("printer.res", 3, 9);
+        let location = LamLoc::for_test(31);
         let lambda = crate::lambda::Lambda::prim(
             crate::lambda::Primitive::Pidentity,
             vec![crate::lambda::Lambda::var(id)],

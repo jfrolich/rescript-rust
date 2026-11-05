@@ -1,4 +1,5 @@
 use super::*;
+use crate::lambda::LamLoc;
 
 #[test]
 fn named_variant_switch_expressions_split_const_and_block_dispatch() {
@@ -211,10 +212,10 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
             Lambda::prim(
                 Primitive::Pfield(0, FieldDbgInfo::Variant),
                 vec![Lambda::var(state)],
-                Location::none(),
+                LamLoc::NONE,
             ),
         ],
-        Location::none(),
+        LamLoc::NONE,
     );
     let block = compiler.compile_return_block(&Lambda::Lswitch(
         Box::new(Lambda::var(state)),

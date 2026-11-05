@@ -1,4 +1,5 @@
 use super::*;
+use crate::lambda::LamLoc;
 use crate::lambda::{FunctionAttribute, InlineAttribute};
 
 #[test]
@@ -53,7 +54,7 @@ fn indexed_cmj_beta_imports_into_owner_store_and_reuses_argument_ids() {
     let parameter = Ident::new("cmjArg", 40, crate::ident::IdentFlags::NONE);
     let exception = Ident::new("cmjExn", 41, crate::ident::IdentFlags::JS_OBJECT);
     let function = LFunction {
-        loc: crate::location::Location::none(),
+        loc: LamLoc::NONE,
         arity: 1,
         params: vec![parameter],
         body: Box::new(Lambda::LtryWith(
@@ -112,11 +113,11 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
                 crate::lambda::FieldDbgInfo::Module { name: "run".into() },
             ),
             vec![Lambda::global_module(module)],
-            Location::none(),
+            LamLoc::NONE,
         ),
         vec![argument],
         ApInfo {
-            loc: Location::new_for_error("caller.res", 10, 20),
+            loc: LamLoc::for_test(13),
             inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
@@ -136,11 +137,11 @@ fn indexed_external_apply_queries_then_beta_reduces_in_the_owner_store() {
         vec![parameter],
         Lambda::var(parameter),
         FunctionAttribute::default(),
-        crate::location::Location::none(),
+        LamLoc::NONE,
     );
     compiler.cmj_lambda_cache.insert(
         module.name().to_string(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".to_string(),
             external,
         )]))),
@@ -173,11 +174,11 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
                 crate::lambda::FieldDbgInfo::Module { name: "run".into() },
             ),
             vec![Lambda::global_module(module)],
-            Location::none(),
+            LamLoc::NONE,
         ),
         vec![Lambda::unit()],
         ApInfo {
-            loc: Location::none(),
+            loc: LamLoc::NONE,
             inlined: InlineAttribute::Default,
             status: ApplyStatus::Na,
         },
@@ -191,14 +192,14 @@ fn indexed_external_apply_rejection_defers_to_arity_after_lambda_query() {
     attr.async_ = true;
     compiler.cmj_lambda_cache.insert(
         module.name().to_string(),
-        Some(Arc::new(AHashMap::from_iter([(
+        Some(Arc::new(crate::lambda::CmjExportLambdas::from_iter([(
             "run".to_string(),
             Lambda::function_(
                 1,
                 vec![parameter],
                 Lambda::var(parameter),
                 attr,
-                crate::location::Location::none(),
+                LamLoc::NONE,
             ),
         )]))),
     );

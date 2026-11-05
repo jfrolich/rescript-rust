@@ -146,6 +146,7 @@ pub fn item_digests(
 ) -> BTreeMap<String, u64> {
     let mut digests: BTreeMap<String, u64> = BTreeMap::new();
     if let Some(ps) = ps {
+        let ps = ps.signature();
         let graph = super::portable_types::HashGraph::of(&ps.type_graph);
         // Hoisted exports grouped by their top-level name, in their original
         // relative order.
@@ -414,6 +415,7 @@ pub struct UnitRefs {
 
 /// The references of every item of `ps`.
 pub fn unit_refs(unit: &str, ps: &PortablePersStruct, source: &dyn UnitSource) -> UnitRefs {
+    let ps = ps.signature();
     let own_keys: ahash::AHashSet<(Kind, &'static str)> =
         ps.ps_sig.iter().filter_map(sig_item_kind_name).collect();
     let mut refs: ahash::AHashMap<String, Vec<UnitRead>> = ahash::AHashMap::new();

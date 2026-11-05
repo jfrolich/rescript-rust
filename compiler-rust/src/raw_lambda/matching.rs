@@ -17,7 +17,9 @@ use crate::lambda::LetKind;
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, TagInfo};
+use crate::lambda::LamLoc;
 use crate::location::Location;
+use crate::raw_lambda::loc::LocArena;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
 use crate::raw_lambda::switch::Shared;
@@ -977,7 +979,7 @@ fn record_all_labels(
                             lbl_all: crate::types::decl::LabelArrayRef(0),
                             lbl_repres: repr,
                             lbl_private: crate::types::asttypes::PrivateFlag::Public,
-                            lbl_loc: crate::location::Location::none(),
+                            lbl_loc: crate::types::DeclLoc::none(),
                             lbl_attributes: attrs,
                         })
                         .collect(),
@@ -1899,7 +1901,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                     ap_func: Box::new(func),
                     ap_args: args,
                     ap_info: crate::lambda::ApInfo {
-                        loc: Location::none(),
+                        loc: LamLoc::NONE,
                         ..ap.ap_info.clone()
                     },
                     ap_transformed_jsx: ap.ap_transformed_jsx,
@@ -1943,7 +1945,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 Some(RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: info.primitive.clone(),
                     args,
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                 })))
             }
             RawLambda::Lswitch(scrut, sw) => {
@@ -2862,7 +2864,7 @@ fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLam
 pub fn simplify_cases<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     args: &[(RawLambda, LetKind)],
     cls: Vec<Clause<'p>>,
 ) -> Vec<Clause<'p>> {
@@ -2873,7 +2875,7 @@ pub fn simplify_cases<'p>(
     fn simplify<'p>(
         ctx_ref: Option<&TypeContext>,
         pa: &'p PatArena,
-        arena: &ParseArena,
+        arena: &LocArena<'_>,
         arg: &RawLambda,
         cls: Vec<Clause<'p>>,
     ) -> Vec<Clause<'p>> {
@@ -2914,7 +2916,7 @@ pub fn simplify_cases<'p>(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
                                 vec![arg.clone()],
                                 // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
-                                arena.to_location(pat.pat_loc),
+                                arena.lam_loc(pat.pat_loc),
                             ),
                         ),
                         None => action,
@@ -2932,7 +2934,7 @@ pub fn simplify_cases<'p>(
                                 Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
                                 vec![arg.clone()],
                                 // matching.ml:585/596 `bind_record_rest pat.pat_loc`.
-                                arena.to_location(pat.pat_loc),
+                                arena.lam_loc(pat.pat_loc),
                             ),
                         ),
                         None => action,
@@ -3616,7 +3618,7 @@ fn rebuild_nexts<'p>(
 fn split_or<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     argo: &Option<Ident>,
     cls: Vec<Clause<'p>>,
     args: &MatchArgs,
@@ -3644,7 +3646,7 @@ fn split_or<'p>(
 fn do_split_or<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     argo: &Option<Ident>,
     mut before: VecDeque<Clause<'p>>,
     mut ors: VecDeque<Clause<'p>>,
@@ -3703,7 +3705,7 @@ fn do_split_or<'p>(
 fn cons_next_or<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     argo: &Option<Ident>,
     yes: Vec<Clause<'p>>,
     yesor: Vec<Clause<'p>>,
@@ -3759,7 +3761,7 @@ fn cons_next_or<'p>(
 fn split_naive<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     cls: &[Clause<'p>],
     args: &MatchArgs,
     def: DefaultEnv<'p>,
@@ -3801,7 +3803,7 @@ fn split_naive<'p>(
 fn split_exc<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     cstr0: &crate::types::ConstructorDescription,
     yes: Vec<Clause<'p>>,
     rest: &[Clause<'p>],
@@ -3916,7 +3918,7 @@ fn split_exc<'p>(
 fn split_noexc<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     yes: Vec<Clause<'p>>,
     rest: &[Clause<'p>],
     args: &MatchArgs,
@@ -3980,7 +3982,7 @@ fn split_noexc<'p>(
 fn split_constr<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     cls: &[Clause<'p>],
     args: &MatchArgs,
     def: DefaultEnv<'p>,
@@ -4038,7 +4040,7 @@ fn split_constr<'p>(
 fn split_ex<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     group: fn(&'p Pattern) -> bool,
     yes: Vec<Clause<'p>>,
     no: Vec<Clause<'p>>,
@@ -4143,7 +4145,7 @@ fn split_ex<'p>(
 fn split_noex<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     group: fn(&'p Pattern) -> bool,
     yes: Vec<Clause<'p>>,
     no: Vec<Clause<'p>>,
@@ -4283,7 +4285,7 @@ fn split_noex<'p>(
 fn precompile_var<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
     def: DefaultEnv<'p>,
@@ -4377,7 +4379,7 @@ fn dont_precompile_var<'p>(
 fn precompile_or<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     argo: &Option<Ident>,
     cls: Vec<Clause<'p>>,
     ors: Vec<Clause<'p>>,
@@ -4532,7 +4534,7 @@ fn do_cases_or_deque<'p>(
 pub fn split_precompile<'p>(
     ctx_ref: Option<&TypeContext>,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     argo: &Option<Ident>,
     pm: &PatternMatching<'p>,
     next_raise: &mut i32,
@@ -4771,7 +4773,7 @@ fn divide_constant<'p>(
 /// Equivalent to OCaml's `make_field_args`.
 fn make_field_args(
     fld_info: FieldDbgInfo,
-    loc: Location,
+    loc: LamLoc,
     binding_kind: LetKind,
     arg: &RawLambda,
     first_pos: i32,
@@ -4958,7 +4960,7 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 fn make_constr_matching<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
     ctx: &[Ctx<'p>],
@@ -5016,7 +5018,7 @@ fn make_constr_matching<'p>(
                                 primitive: from_option,
                                 args: vec![arg.clone()],
                                 // matching.ml:1307 `p.pat_loc`.
-                                loc: arena.to_location(p.pat_loc),
+                                loc: arena.lam_loc(p.pat_loc),
                             })),
                             LetKind::Alias,
                         )];
@@ -5032,7 +5034,7 @@ fn make_constr_matching<'p>(
                         make_field_args(
                             fld_info,
                             // matching.ml:1309-1313 `make_field_args p.pat_loc`.
-                            arena.to_location(p.pat_loc),
+                            arena.lam_loc(p.pat_loc),
                             LetKind::Alias,
                             arg,
                             0,
@@ -5042,7 +5044,7 @@ fn make_constr_matching<'p>(
                     }
                     crate::types::ConstructorKind::Extension(_) => make_field_args(
                         FieldDbgInfo::Extension,
-                        arena.to_location(p.pat_loc),
+                        arena.lam_loc(p.pat_loc),
                         LetKind::Alias,
                         arg,
                         1,
@@ -5070,7 +5072,7 @@ fn make_constr_matching<'p>(
 fn divide_constructor<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
@@ -5161,7 +5163,7 @@ fn matcher_variant_nonconst<'p>(
 /// Equivalent to OCaml's `make_variant_matching_nonconst`.
 fn make_variant_matching_nonconst<'p>(
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
@@ -5183,7 +5185,7 @@ fn make_variant_matching_nonconst<'p>(
                     primitive: Primitive::Pfield(1, FieldDbgInfo::PolyVarContent),
                     args: vec![arg.clone()],
                     // matching.ml:1366-1368 `p.pat_loc`.
-                    loc: arena.to_location(p.pat_loc),
+                    loc: arena.lam_loc(p.pat_loc),
                 })),
                 LetKind::Alias,
             )];
@@ -5206,7 +5208,7 @@ fn make_variant_matching_nonconst<'p>(
 fn divide_variant<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     row: &RowDesc,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
@@ -5216,7 +5218,7 @@ fn divide_variant<'p>(
     fn divide_rec<'p>(
         ctx_ref: &TypeContext,
         pa: &'p PatArena,
-        arena: &ParseArena,
+        arena: &LocArena<'_>,
         row: &RowDesc,
         cases: &[Clause<'p>],
         def: &DefaultEnv<'p>,
@@ -5390,7 +5392,7 @@ fn matcher_tuple<'p>(
 /// Make a tuple matching.
 /// Equivalent to OCaml's `make_tuple_matching`.
 fn make_tuple_matching<'p>(
-    loc: Location,
+    loc: LamLoc,
     arity: usize,
     def: &DefaultEnv<'p>,
     args: &MatchArgs,
@@ -5424,7 +5426,7 @@ fn make_tuple_matching<'p>(
 /// Equivalent to OCaml's `divide_tuple`.
 fn divide_tuple<'p>(
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     arity: usize,
     p: &'p Pattern,
     ctx: &[Ctx<'p>],
@@ -5432,7 +5434,7 @@ fn divide_tuple<'p>(
 ) -> MatchCell<'p> {
     divide_line(
         |c| filter_ctx(None, pa, p, c),
-        |def, args| make_tuple_matching(arena.to_location(p.pat_loc), arity, def, args),
+        |def, args| make_tuple_matching(arena.lam_loc(p.pat_loc), arity, def, args),
         |pat, rem| get_args_tuple(arity, pat, rem),
         p,
         ctx,
@@ -5523,7 +5525,7 @@ fn matcher_record<'p>(
 /// Make a record matching.
 /// Equivalent to OCaml's `make_record_matching`.
 fn make_record_matching<'p>(
-    loc: Location,
+    loc: LamLoc,
     all_labels: &[LabelDescription],
     def: &DefaultEnv<'p>,
     args: &MatchArgs,
@@ -5587,7 +5589,7 @@ fn make_record_matching<'p>(
 fn divide_record<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     all_labels: &[LabelDescription],
     p: &'p Pattern,
     ctx: &[Ctx<'p>],
@@ -5596,7 +5598,7 @@ fn divide_record<'p>(
     let num_fields = all_labels.len();
     divide_line(
         |c| filter_ctx(Some(ctx_ref), pa, p, c),
-        |def, args| make_record_matching(arena.to_location(p.pat_loc), all_labels, def, args),
+        |def, args| make_record_matching(arena.lam_loc(p.pat_loc), all_labels, def, args),
         |pat, rem| get_args_record(num_fields, pat, rem),
         p,
         ctx,
@@ -5650,7 +5652,7 @@ fn matcher_array<'p>(
 /// Equivalent to OCaml's `make_array_matching`.
 fn make_array_matching<'p>(
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
     ctx: &[Ctx<'p>],
@@ -5674,7 +5676,7 @@ fn make_array_matching<'p>(
                             }),
                         ],
                         // matching.ml:1552 `p.pat_loc`.
-                        loc: arena.to_location(p.pat_loc),
+                        loc: arena.lam_loc(p.pat_loc),
                     })),
                     LetKind::StrictOpt,
                 ));
@@ -5699,7 +5701,7 @@ fn make_array_matching<'p>(
 /// Equivalent to OCaml's `divide_array`.
 fn divide_array<'p>(
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     ctx: &[Ctx<'p>],
     pm: &PatternMatching<'p>,
 ) -> Vec<(usize, MatchCell<'p>)> {
@@ -5857,7 +5859,7 @@ fn sort_lambda_list(mut l: Vec<(Constant, RawLambda)>) -> Vec<(Constant, RawLamb
 // ============================================================================
 
 fn do_tests_fail_owned(
-    loc: Location,
+    loc: LamLoc,
     fail: RawLambda,
     tst: Primitive,
     arg: RawLambda,
@@ -5882,7 +5884,7 @@ fn do_tests_fail_owned(
 }
 
 fn do_tests_nofail_owned(
-    loc: Location,
+    loc: LamLoc,
     tst: Primitive,
     arg: RawLambda,
     mut cases: Vec<(Constant, RawLambda)>,
@@ -5926,7 +5928,7 @@ fn typed_const_to_lambda_const(c: &Constant) -> RawLambda {
 /// Uses dichotomic splitting when there are enough cases and a less-than test is available.
 /// Equivalent to OCaml's `make_test_sequence`.
 fn make_test_sequence(
-    loc: Location,
+    loc: LamLoc,
     fail: Option<RawLambda>,
     tst: Primitive,
     lt_tst: Primitive,
@@ -5939,7 +5941,7 @@ fn make_test_sequence(
         share_actions_tree(const_lambda_list, fail, next_raise_count);
 
     fn make_test_seq_inner_owned(
-        loc: &Location,
+        loc: &LamLoc,
         fail: Option<RawLambda>,
         tst: &Primitive,
         lt_tst: &Primitive,
@@ -6747,7 +6749,7 @@ fn share_actions_tree_string(
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
 fn combine_constant<'p>(
-    loc: Location,
+    loc: LamLoc,
     arg: RawLambda,
     cst: &Constant,
     partial: &Partial,
@@ -6907,7 +6909,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
                 },
             ),
             args: vec![transl_normal_path(p)],
-            loc: Location::none(),
+            loc: LamLoc::NONE,
         })),
         Path::Papply(_, _) => panic!("transl_normal_path: Papply"),
     }
@@ -7030,7 +7032,7 @@ fn normalize_module_path_via_ctx(
 fn combine_constructor<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    loc: Location,
+    loc: LamLoc,
     arg: RawLambda,
     ex_pat: &'p Pattern,
     cstr: &ConstructorDescription,
@@ -7265,7 +7267,7 @@ fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
             arg.clone(),
             raw_polyvariant_hash_const(*first_hash, first_name),
         ],
-        loc: Location::none(),
+        loc: LamLoc::NONE,
     }));
     hash_names[1..].iter().fold(init, |acc, (hash, name)| {
         RawLambda::Lprim(Box::new(RawPrimInfo {
@@ -7275,10 +7277,10 @@ fn or_list_polyvar(arg: &RawLambda, hash_names: &[(i32, String)]) -> RawLambda {
                 RawLambda::Lprim(Box::new(RawPrimInfo {
                     primitive: Primitive::Pintcomp(Comparison::Eq),
                     args: vec![arg.clone(), raw_polyvariant_hash_const(*hash, name)],
-                    loc: Location::none(),
+                    loc: LamLoc::NONE,
                 })),
             ],
-            loc: Location::none(),
+            loc: LamLoc::NONE,
         }))
     })
 }
@@ -7332,7 +7334,7 @@ fn call_switcher_variant_constant(
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constr`.
 fn call_switcher_variant_constr(
     ctx_ref: &TypeContext,
-    loc: Location,
+    loc: LamLoc,
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: Vec<(i32, (String, RawLambda))>,
@@ -7358,7 +7360,7 @@ fn call_switcher_variant_constr(
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant<'p>(
     ctx_ref: &TypeContext,
-    loc: Location,
+    loc: LamLoc,
     row: &RowDesc,
     arg: RawLambda,
     partial: &Partial,
@@ -7449,7 +7451,7 @@ fn combine_variant<'p>(
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array<'p>(
     ctx_ref: &TypeContext,
-    loc: Location,
+    loc: LamLoc,
     arg: RawLambda,
     partial: &Partial,
     ctx: &[Ctx<'p>],
@@ -7895,7 +7897,7 @@ fn lambda_unit() -> RawLambda {
 fn compile_match<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     _repr: Option<()>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
@@ -7978,7 +7980,7 @@ fn compile_match<'p>(
 fn do_compile_matching<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     arg: &RawLambda,
@@ -8033,7 +8035,7 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_constant(cst) => {
-                    let loc = arena.to_location(pat.pat_loc);
+                    let loc = arena.lam_loc(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let cst_clone = cst.clone();
                     compile_test_wrapper(
@@ -8060,7 +8062,7 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_construct(_, cstr, _) => {
-                    let loc = arena.to_location(pat.pat_loc);
+                    let loc = arena.lam_loc(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let ex_pat: &'p Pattern = pat;
                     let cstr_clone = cstr.clone();
@@ -8091,7 +8093,7 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_array(_) => {
-                    let loc = arena.to_location(pat.pat_loc);
+                    let loc = arena.lam_loc(pat.pat_loc);
                     let arg_clone = arg.clone();
                     compile_test_wrapper(
                         ctx_ref,
@@ -8117,7 +8119,7 @@ fn do_compile_matching<'p>(
                     )
                 }
                 PatternDesc::Tpat_variant(_, _, _row_ref) => {
-                    let loc = arena.to_location(pat.pat_loc);
+                    let loc = arena.lam_loc(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let row_desc =
                         extract_row_from_type_with_env(ctx_ref, pat.pat_type, pat.pat_env);
@@ -8194,7 +8196,7 @@ fn do_compile_matching<'p>(
 fn compile_no_test<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> MatchCell<'p>,
     up_ctx: &dyn Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
     partial: &Partial,
@@ -8224,7 +8226,7 @@ fn compile_no_test<'p>(
 fn compile_test_wrapper<'p, K: Clone>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     partial: &Partial,
     divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)>,
     combine_fn: &dyn Fn(
@@ -8378,7 +8380,7 @@ fn label_descriptions_from_cached_entries(
             lbl_all: crate::types::decl::LabelArrayRef(0),
             lbl_repres: repr,
             lbl_private: crate::types::asttypes::PrivateFlag::Public,
-            lbl_loc: crate::location::Location::none(),
+            lbl_loc: crate::types::DeclLoc::none(),
             lbl_attributes: attrs,
         })
         .collect()
@@ -8418,7 +8420,7 @@ fn resolve_labels_from_type(
                         lbl_all: crate::types::decl::LabelArrayRef(0),
                         lbl_repres: repr,
                         lbl_private: crate::types::asttypes::PrivateFlag::Public,
-                        lbl_loc: crate::location::Location::none(),
+                        lbl_loc: crate::types::DeclLoc::none(),
                         lbl_attributes: attrs,
                     })
                     .collect(),
@@ -8793,7 +8795,7 @@ pub(crate) fn resolve_shared_actions(lam: &mut RawLambda) {
 
 pub fn compile_matching(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
@@ -8818,7 +8820,7 @@ pub fn compile_matching(
 fn compile_matching_unresolved<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
@@ -8886,7 +8888,9 @@ fn compile_matching_unresolved<'p>(
 
 /// Build a match failure exception raise.
 /// Equivalent to OCaml's `partial_function`.
-pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
+pub fn partial_function(arena: &LocArena<'_>, loc: Location) -> RawLambda {
+    // OCaml matching.ml:2688-2691 embeds the source position in the payload.
+    arena.require_locations();
     let line = loc.loc_start.line;
     let char_pos = loc.loc_start.column();
     // `Filename.basename fname` (matching.ml:2690-2691).
@@ -8901,6 +8905,7 @@ pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
             .to_string()
     };
 
+    let node_loc = arena.locs.intern(loc);
     let match_failure_ident = crate::types::predef::ident_match_failure();
     let exn = RawLambda::global_module(match_failure_ident);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
@@ -8917,9 +8922,9 @@ pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
         args: vec![RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
             args: vec![exn, payload],
-            loc,
+            loc: node_loc,
         }))],
-        loc,
+        loc: node_loc,
     }))
 }
 
@@ -8927,7 +8932,7 @@ pub fn partial_function(arena: &ParseArena, loc: Location) -> RawLambda {
 /// Equivalent to OCaml's `for_function`.
 pub fn for_function(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
@@ -8950,7 +8955,7 @@ pub fn for_function(
 /// Equivalent to OCaml's `for_trywith`.
 pub fn for_trywith(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     param: RawLambda,
     pat_act_list: Vec<(&Pattern, CaseAction)>,
     next_raise_count: &mut i32,
@@ -8963,7 +8968,7 @@ pub fn for_trywith(
             RawLambda::Lprim(Box::new(RawPrimInfo {
                 primitive: Primitive::Praise,
                 args: vec![param_clone],
-                loc: Location::none(),
+                loc: LamLoc::NONE,
             }))
         },
         param,
@@ -8977,7 +8982,7 @@ pub fn for_trywith(
 /// Equivalent to OCaml's `simple_for_let`.
 pub fn simple_for_let(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
@@ -9000,7 +9005,7 @@ pub fn simple_for_let(
 /// Equivalent to OCaml's `for_let`.
 pub fn for_let(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     param: RawLambda,
     pat: &Pattern,
@@ -9024,7 +9029,7 @@ pub fn for_let(
 /// Equivalent to OCaml's `for_tupled_function`.
 pub fn for_tupled_function(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<&Pattern>, CaseAction)>,
@@ -9049,7 +9054,7 @@ pub fn for_tupled_function(
 fn for_tupled_function_unresolved<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     paraml: &[Ident],
     pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
@@ -9220,7 +9225,7 @@ fn flatten_precompiled<'p>(
 fn compile_flattened<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     partial: &Partial,
     ctx: &[Ctx<'p>],
     _arg: &RawLambda,
@@ -9265,7 +9270,7 @@ fn compile_flattened<'p>(
 pub fn do_for_multiple_match<'p>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
@@ -9284,7 +9289,7 @@ pub fn do_for_multiple_match<'p>(
     let tuple_arg = RawLambda::Lprim(Box::new(RawPrimInfo {
         primitive: Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
         args: paraml.clone(),
-        loc,
+        loc: arena.locs.intern(loc),
     }));
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
@@ -9426,7 +9431,7 @@ fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
 /// Equivalent to OCaml's `for_multiple_match`.
 pub fn for_multiple_match(
     ctx_ref: &TypeContext,
-    arena: &ParseArena,
+    arena: &LocArena<'_>,
     loc: Location,
     paraml: Vec<RawLambda>,
     pat_act_list: Vec<(&Pattern, CaseAction)>,

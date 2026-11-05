@@ -159,6 +159,7 @@ impl<'a> Decoder<'a> {
             loc_start: self.position(f.at(0)?)?,
             loc_end: self.position(f.at(1)?)?,
             loc_ghost: self.bool(f.at(2)?)?,
+            origin: Default::default(),
         })
     }
 
