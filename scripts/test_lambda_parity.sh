@@ -109,6 +109,10 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 TIMEOUT_SECONDS=10
+# The tight limit is there to catch Rust hangs. The OCaml reference only
+# produces the expected output; on a loaded CI runner it can take over 10 s to
+# print a large dump (big_polyvar_test.res writes 15 MB of lambda sexp).
+OCAML_TIMEOUT_SECONDS="${OCAML_TIMEOUT_SECONDS:-60}"
 
 if [[ ! -x "$OCAML_BSC" ]]; then
     echo -e "${RED}Error: OCaml bsc not found at $OCAML_BSC${RESET}"
@@ -222,7 +226,7 @@ echo ""
 RESULTS_DIR="$TEMP_DIR/results"
 mkdir -p "$RESULTS_DIR" "$TEMP_DIR/work"
 
-export OCAML_BSC RESCRIPT_CLI RUST_DUMP_DIR DUMP_KIND TEST_PACKAGE_NAME TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
+export OCAML_BSC RESCRIPT_CLI RUST_DUMP_DIR DUMP_KIND TEST_PACKAGE_NAME TIMEOUT_SECONDS OCAML_TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
 
 test_single_file() {
     local file="$1"
@@ -284,7 +288,7 @@ test_single_file() {
 
         if [[ "${#compiler_args[@]}" -gt 0 ]]; then
             cd "$TEST_PROJECT/lib/bs"
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" "$lambda_flag" "${compiler_args[@]}" 2> "$file_temp/ocaml.out" 1>/dev/null; then
+            if timeout "$OCAML_TIMEOUT_SECONDS" "$OCAML_BSC" "$lambda_flag" "${compiler_args[@]}" 2> "$file_temp/ocaml.out" 1>/dev/null; then
                 ocaml_pass=1
             else
                 ocaml_fail=1
@@ -305,7 +309,7 @@ test_single_file() {
             fi
         fi
     else
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" "$lambda_flag" "$full_file_path" 2> "$file_temp/ocaml.out" 1>/dev/null; then
+        if timeout "$OCAML_TIMEOUT_SECONDS" "$OCAML_BSC" "$lambda_flag" "$full_file_path" 2> "$file_temp/ocaml.out" 1>/dev/null; then
             ocaml_pass=1
         else
             ocaml_fail=1
