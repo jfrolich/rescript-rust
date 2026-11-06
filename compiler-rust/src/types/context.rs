@@ -23,7 +23,7 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, PackageLidsRef,
-    RowDesc, RowDescRef, RowField, RowFieldRef, TypeArg, TypeArgList, TypeArgs, TypeDesc, TypeExpr,
+    RowDesc, RowDescRef, RowField, RowFieldRef, TypeArg, TypeArgList, TypeArgs, TypeDesc,
     TypeExprRef, TypeRefList, TypeRefs,
 };
 use super::typedtree::EnvRef;
@@ -35,73 +35,118 @@ use crate::parser::longident::Longident;
 use crate::types::path::PathView;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
-use std::ptr::NonNull;
 use std::sync::Arc;
 
-/// Append-only type arena using chunked allocation for zero-copy access.
-///
-/// Safe because:
-/// - `typed_arena::Arena<TypeExpr>` gives stable addresses for allocated nodes
-/// - The pointer Vec only grows (push), never shrinks or reorders
-/// - Individual TypeExpr.desc RefCells are independent
-pub(crate) struct TypeArena {
-    arena: typed_arena::Arena<TypeExpr>,
-    types: std::cell::UnsafeCell<Vec<NonNull<TypeExpr>>>,
+/// Append-only store of type nodes (OCaml `type_expr` records,
+/// `compiler/ml/types.ml:22-26`) with `Copy` descriptor, level and id
+/// fields. Nodes live in chunks that double in size and are never moved, so
+/// allocation does not copy earlier nodes and reads take no borrow flag; a
+/// node's position is its `TypeExprRef` index.
+pub(crate) struct TypeNodes {
+    chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
+    len: Cell<usize>,
 }
 
-impl TypeArena {
+/// One node of [`TypeNodes`]. A node's descriptor and level are usually
+/// read together, so they share a cache line.
+struct TypeNode {
+    desc: Cell<TypeDesc>,
+    level: Cell<i32>,
+    id: Cell<i32>,
+}
+
+impl TypeNodes {
+    const FIRST_CHUNK_BITS: u32 = 8;
+    /// Chunk `k` holds `1 << (FIRST_CHUNK_BITS + k)` nodes; together the
+    /// chunks cover every index a `TypeExprRef` can hold.
+    const CHUNKS: usize = 32 - Self::FIRST_CHUNK_BITS as usize;
+
     pub(crate) fn new() -> Self {
-        TypeArena {
-            arena: typed_arena::Arena::new(),
-            types: std::cell::UnsafeCell::new(Vec::new()),
+        TypeNodes {
+            chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
+            len: Cell::new(0),
         }
+    }
+
+    /// Chunk and offset of node `idx`.
+    #[inline(always)]
+    fn locate(idx: usize) -> (usize, usize) {
+        let biased = idx + (1 << Self::FIRST_CHUNK_BITS);
+        let bit = (usize::BITS - 1 - biased.leading_zeros()) as usize;
+        (bit - Self::FIRST_CHUNK_BITS as usize, biased - (1 << bit))
+    }
+
+    /// Node `idx` (a local index or a store index with the tag stripped).
+    #[inline(always)]
+    fn node(&self, idx: usize) -> &TypeNode {
+        let (chunk, offset) = Self::locate(idx);
+        &self.chunks[chunk]
+            .get()
+            .expect("type node index refers to an unallocated chunk")[offset]
     }
 
     #[inline]
-    fn get(&self, r: TypeExprRef) -> &TypeExpr {
-        self.get_at(r.index())
+    pub(crate) fn desc(&self, idx: usize) -> TypeDesc {
+        self.node(idx).desc.get()
     }
 
-    /// Node at raw arena position `idx` (local index or store index; the
-    /// caller has already stripped the store tag).
     #[inline]
-    pub(crate) fn get_at(&self, idx: usize) -> &TypeExpr {
-        // Safety: `idx` is an arena index returned by `push_raw`, and `types`
-        // only grows append-only after the pointed `TypeExpr` has been arena
-        // allocated.
-        unsafe {
-            let types = &*self.types.get();
-            types[idx].as_ref()
-        }
+    pub(crate) fn set_desc(&self, idx: usize, desc: TypeDesc) {
+        self.node(idx).desc.set(desc);
     }
 
-    fn push(&self, ty: TypeExpr) -> TypeExprRef {
-        TypeExprRef::from_usize(self.push_raw(ty))
+    #[inline]
+    pub(crate) fn level(&self, idx: usize) -> i32 {
+        self.node(idx).level.get()
     }
 
-    /// Append a node and return its raw arena position.
-    pub(crate) fn push_raw(&self, ty: TypeExpr) -> usize {
-        let ptr = NonNull::from(self.arena.alloc(ty));
-        // Safety: `types` is an append-only side table of stable arena
-        // pointers. `UnsafeCell` is used so `TypeContext` can allocate through
-        // shared references like OCaml's mutable type arena.
-        unsafe {
-            let types = &mut *self.types.get();
-            let idx = types.len();
-            types.push(ptr);
-            idx
-        }
+    #[inline]
+    pub(crate) fn set_level(&self, idx: usize, level: i32) {
+        self.node(idx).level.set(level);
+    }
+
+    #[inline]
+    pub(crate) fn id(&self, idx: usize) -> i32 {
+        self.node(idx).id.get()
+    }
+
+    /// Append a node and return its index.
+    pub(crate) fn push(&self, desc: TypeDesc, level: i32, id: i32) -> usize {
+        let idx = self.len.get();
+        let (chunk, offset) = Self::locate(idx);
+        let node = &self.chunks[chunk].get_or_init(|| {
+            (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
+                .map(|_| TypeNode {
+                    desc: Cell::new(TypeDesc::Tnil),
+                    level: Cell::new(0),
+                    id: Cell::new(0),
+                })
+                .collect()
+        })[offset];
+        node.desc.set(desc);
+        node.level.set(level);
+        node.id.set(id);
+        self.len.set(idx + 1);
+        idx
     }
 
     pub(crate) fn len(&self) -> usize {
-        // Safety: immutable length read from the append-only side table.
-        unsafe { (*self.types.get()).len() }
+        self.len.get()
     }
 }
 
-/// Borrow of a type descriptor. Shared dependency nodes are borrowed through
-/// `TypeContext::shared_pages` (`Ref::map`), so every borrow is a `Ref`.
-pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
+/// A type descriptor read by value. `TypeDesc` is `Copy`, so a reader never
+/// holds a borrow of the node store; the lifetime only ties the copy to the
+/// context it was read from.
+pub struct TypeDescRef<'a>(TypeDesc, std::marker::PhantomData<&'a ()>);
+
+impl Deref for TypeDescRef<'_> {
+    type Target = TypeDesc;
+    #[inline]
+    fn deref(&self) -> &TypeDesc {
+        &self.0
+    }
+}
 
 /// `Cmt_utils.deprecated_used_context`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,7 +547,7 @@ pub struct TypeContext {
     current_abbreviations: Cell<AbbrevMemoRef>,
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
-    types: TypeArena,
+    types: TypeNodes,
 
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
@@ -510,7 +555,7 @@ pub struct TypeContext {
     /// Descriptor writes preserve the stored handle's physical identity, but
     /// live only for this compilation. The append-only arena keeps descriptor
     /// borrows valid while another stored node is written.
-    store_descs: TypeArena,
+    store_descs: TypeNodes,
     /// Type lists (`TypeRefList`) allocated by this compilation.
     type_lists: super::type_expr::TypePayloadPool,
     store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
@@ -1145,9 +1190,9 @@ impl TypeContext {
             reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: TypeArena::new(),
+            types: TypeNodes::new(),
             store,
-            store_descs: TypeArena::new(),
+            store_descs: TypeNodes::new(),
             type_lists: Default::default(),
             store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
@@ -2498,7 +2543,7 @@ impl TypeContext {
             return self.store.alloc_type(desc, level);
         }
         let id = self.id_gen.next_type_id();
-        self.types.push(TypeExpr::new(desc, level, id))
+        TypeExprRef::from_usize(self.types.push(desc, level, id))
     }
 
     /// Allocate an immutable type list (constructor, package and
@@ -2853,57 +2898,54 @@ impl TypeContext {
     // Type Access
     // ========================================================================
 
-    /// Borrow the descriptor of a stored (worker-store or shared) node:
-    /// this compilation's overlay copy if it wrote one, else the immutable
+    /// The descriptor of a stored (worker-store or shared) node: this
+    /// compilation's overlay copy if it wrote one, else the immutable
     /// published descriptor.
     #[inline(never)]
-    fn store_desc_ref(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+    fn store_desc(&self, r: TypeExprRef) -> TypeDesc {
         if r.is_shared() {
             let idx = r.shared_index();
             if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
-                return self.store_descs.get_at(*index).desc();
+                return self.store_descs.desc(*index);
             }
-            return std::cell::Ref::map(self.shared_pages.borrow(), |pages| {
-                &super::shared_store::page_node(pages, idx).desc
-            });
+            return super::shared_store::page_node(&self.shared_pages.borrow(), idx).desc;
         }
         if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
-            return self.store_descs.get_at(*index).desc();
+            return self.store_descs.desc(*index);
         }
-        self.store.node(r).desc()
+        self.store.desc(r)
     }
 
-    /// Clone the descriptor so callers can hold it across node mutations.
+    /// The descriptor of `r`. Local nodes are by far the most common
+    /// (hundreds of millions of reads per build), so their path is inlined
+    /// into callers.
+    #[inline(always)]
+    fn desc(&self, r: TypeExprRef) -> TypeDesc {
+        if r.is_store() {
+            return self.store_desc(r);
+        }
+        self.poison_store_build();
+        self.types.desc(r.index())
+    }
+
+    /// The descriptor of `r`, as a value the caller can hold across node
+    /// mutations.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        TypeDescSnapshot(self.with_desc(r, TypeDesc::clone))
+        TypeDescSnapshot(self.desc(r))
     }
 
-    /// Apply `f` to the descriptor of `r`. The local path is a plain
-    /// `RefCell` borrow, so hot readers (`repr`, `get_desc`) inline exactly as
-    /// they did before stored nodes had two representations.
+    /// Apply `f` to the descriptor of `r`.
     #[inline(always)]
     pub(crate) fn with_desc<R>(&self, r: TypeExprRef, f: impl FnOnce(&TypeDesc) -> R) -> R {
-        if r.is_store() {
-            return f(&self.store_desc_ref(r));
-        }
-        self.poison_store_build();
-        f(&self.types.get(r).desc())
+        f(&self.desc(r))
     }
 
-    /// Borrow the descriptor of a type without cloning it.
-    ///
-    /// Prefer this in short read-only hot paths. Use `get_desc()` when the
-    /// descriptor must be held across code that may mutate the same type node.
-    /// Local nodes are by far the most common (hundreds of millions of reads
-    /// per build), so their path is inlined into callers.
+    /// The descriptor of `r` for a short read. Since descriptors are copied
+    /// out, this is the same read as `get_desc`.
     #[inline]
     pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
-        if r.is_store() {
-            return self.store_desc_ref(r);
-        }
-        self.poison_store_build();
-        self.types.get(r).desc()
+        TypeDescRef(self.desc(r), std::marker::PhantomData)
     }
 
     /// Get the level of a type.
@@ -2913,7 +2955,7 @@ impl TypeContext {
             return self.store_level(r);
         }
         self.poison_store_build();
-        self.types.get(r).level()
+        self.types.level(r.index())
     }
 
     #[inline(never)]
@@ -2933,7 +2975,7 @@ impl TypeContext {
             .borrow()
             .get(r.store_index())
             .copied()
-            .unwrap_or_else(|| self.store.node(r).level())
+            .unwrap_or_else(|| self.store.level(r))
     }
 
     /// Number of allocated type expressions.
@@ -3023,7 +3065,7 @@ impl TypeContext {
                 .set(r.store_index(), level);
         } else {
             self.poison_store_build();
-            self.types.get(r).set_level(level);
+            self.types.set_level(r.index(), level);
         }
     }
 
@@ -3031,7 +3073,7 @@ impl TypeContext {
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         self.record_type_mutation(
-            || TypeMutation::TypeDesc(r, self.get_desc(r).0),
+            || TypeMutation::TypeDesc(r, self.desc(r)),
             r,
             crate::perf_counters::TypeMutationKind::Desc,
         );
@@ -3058,19 +3100,18 @@ impl TypeContext {
                 .get(r.store_index())
                 .copied();
             if let Some(index) = index {
-                self.store_descs.get_at(index).set_desc(desc);
+                self.store_descs.set_desc(index, desc);
             } else {
-                let original = self.store.node(r);
-                let index =
-                    self.store_descs
-                        .push_raw(TypeExpr::new(desc, original.level(), original.id()));
+                let index = self
+                    .store_descs
+                    .push(desc, self.store.level(r), self.store.id(r));
                 self.store_desc_overlay
                     .borrow_mut()
                     .set(r.store_index(), index);
             }
         } else {
             self.poison_store_build();
-            self.types.get(r).set_desc(desc);
+            self.types.set_desc(r.index(), desc);
         }
     }
 
@@ -3081,14 +3122,14 @@ impl TypeContext {
         let idx = r.shared_index();
         let index = self.shared_desc_overlay.borrow().get(idx as usize).copied();
         if let Some(index) = index {
-            self.store_descs.get_at(index).set_desc(desc);
+            self.store_descs.set_desc(index, desc);
         } else {
             let (level, id) = {
                 let pages = self.shared_pages.borrow();
                 let original = super::shared_store::page_node(&pages, idx);
                 (original.level, original.id)
             };
-            let index = self.store_descs.push_raw(TypeExpr::new(desc, level, id));
+            let index = self.store_descs.push(desc, level, id);
             self.shared_desc_overlay
                 .borrow_mut()
                 .set(idx as usize, index);
@@ -5162,6 +5203,25 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn type_nodes_address_every_node_across_chunks() {
+        let nodes = TypeNodes::new();
+        let count = (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
+        for i in 0..count {
+            assert_eq!(nodes.push(TypeDesc::Tnil, i as i32, -(i as i32)), i);
+        }
+        assert_eq!(nodes.len(), count);
+        for i in (0..count).step_by(7) {
+            nodes.set_level(i, i as i32 + 1);
+        }
+        for i in 0..count {
+            let level = if i % 7 == 0 { i as i32 + 1 } else { i as i32 };
+            assert_eq!(nodes.level(i), level);
+            assert_eq!(nodes.id(i), -(i as i32));
+            assert!(matches!(nodes.desc(i), TypeDesc::Tnil));
+        }
+    }
+
+    #[test]
     fn borrowed_path_keys_find_owned_cache_entries() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let module = Path::pdot(super::super::predef::path_int(), "M");
@@ -5471,8 +5531,8 @@ mod tests {
         );
         ctx.set_desc(untouched, TypeDesc::Tlink(local));
         ctx.set_level(untouched, 5);
-        assert!(matches!(*ctx.store.node(ty).desc(), TypeDesc::Tnil));
-        assert_eq!(ctx.store.node(ty).level(), GENERIC_LEVEL);
+        assert!(matches!(ctx.store.desc(ty), TypeDesc::Tnil));
+        assert_eq!(ctx.store.level(ty), GENERIC_LEVEL);
         ctx.restore_type_state(changed);
         assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(Some(ref name)) if name == "stored"));
         assert_eq!(ctx.get_level(ty), 12);
@@ -5517,7 +5577,7 @@ mod tests {
         assert_eq!(ctx.repr(stored_int), stored_int);
         assert_eq!(ctx.get_level(stored_int), GENERIC_LEVEL);
         assert!(matches!(
-            *ctx.store.node(stored_int).desc(),
+            ctx.store.desc(stored_int),
             TypeDesc::Tconstr { .. }
         ));
     }
@@ -5531,7 +5591,7 @@ mod tests {
         super::super::ctype::link_type(&ctx, stored, middle);
         assert_eq!(ctx.repr(stored), target);
         assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == target));
-        assert!(matches!(*ctx.store.node(stored).desc(), TypeDesc::Tnil));
+        assert!(matches!(ctx.store.desc(stored), TypeDesc::Tnil));
     }
 
     #[test]

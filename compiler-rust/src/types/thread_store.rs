@@ -15,12 +15,10 @@
 //!
 //! Design: `projects/in-process-performance/THREAD_TYPE_STORE.md`.
 
-use super::context::TypeArena;
+use super::context::TypeNodes;
 use super::decl::{Signature, TypeDeclaration};
 use super::path::Path;
-use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExpr, TypeExprRef,
-};
+use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
@@ -130,7 +128,7 @@ pub(crate) type SharedRecordLabels = (
 
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
-    types: TypeArena,
+    types: TypeNodes,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
     /// internalization, like `compiler/ml/subst.ml:173-177` on save). Writes go
     /// to the reading compilation's overlay.
@@ -193,7 +191,7 @@ impl ThreadTypeStore {
     fn new() -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
-            types: TypeArena::new(),
+            types: TypeNodes::new(),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             type_lists: super::type_expr::TypePayloadPool::with_tag(
@@ -393,9 +391,20 @@ impl ThreadTypeStore {
         self.shared_pool().intern_longident_name(name)
     }
 
+    /// The descriptor of store node `r` as written in the store.
     #[inline]
-    pub(crate) fn node(&self, r: TypeExprRef) -> &TypeExpr {
-        self.types.get_at(r.store_index())
+    pub(crate) fn desc(&self, r: TypeExprRef) -> TypeDesc {
+        self.types.desc(r.store_index())
+    }
+
+    #[inline]
+    pub(crate) fn level(&self, r: TypeExprRef) -> i32 {
+        self.types.level(r.store_index())
+    }
+
+    #[inline]
+    pub(crate) fn id(&self, r: TypeExprRef) -> i32 {
+        self.types.id(r.store_index())
     }
 
     /// Allocate a type list in the worker store.
@@ -464,18 +473,18 @@ impl ThreadTypeStore {
         let id = self.next_type_id.get();
         self.next_type_id
             .set(id.checked_add(1).expect("thread store type id exhausted"));
-        TypeExprRef::from_store_index(self.types.push_raw(TypeExpr::new(desc, level, id)))
+        TypeExprRef::from_store_index(self.types.push(desc, level, id))
     }
 
     /// Write the descriptor of a store node that is still being built by the
     /// current compilation (see `TypeContext::build_in_store`).
     pub(crate) fn set_desc_backing(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.node(r).set_desc(desc);
+        self.types.set_desc(r.store_index(), desc);
     }
 
     /// Write the level of a store node that is still being built.
     pub(crate) fn set_level_backing(&self, r: TypeExprRef, level: i32) {
-        self.node(r).set_level(level);
+        self.types.set_level(r.store_index(), level);
     }
 
     pub(crate) fn row_field_count(&self) -> usize {
@@ -675,12 +684,12 @@ mod tests {
             let nested = current();
             assert_eq!(nested.type_count(), 0);
             nested.alloc_type(TypeDesc::Tvar(None), GENERIC_LEVEL);
-            assert!(matches!(*outer.node(outer_ty).desc(), TypeDesc::Tnil));
+            assert!(matches!(outer.desc(outer_ty), TypeDesc::Tnil));
             drop(nested);
             drop(outer);
             let reused = current();
             assert_eq!(reused.type_count(), 1);
-            assert!(matches!(*reused.node(outer_ty).desc(), TypeDesc::Tnil));
+            assert!(matches!(reused.desc(outer_ty), TypeDesc::Tnil));
         })
         .join()
         .unwrap();
