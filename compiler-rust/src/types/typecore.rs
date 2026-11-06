@@ -355,8 +355,12 @@ fn check_no_record_syntax_on_dict(
     ty: TypeExprRef,
     first_lid: Option<LidentIdx>,
 ) -> TypeCoreResult<()> {
+    // typecore.ml:1003-1008 matches `((expand_head env ty).desc, fields)`, so
+    // the type is expanded (and its path normalized, which can force a
+    // persistent signature) even for an empty field list.
+    let is_dict = expands_to_dict(tctx.type_ctx, env, ty);
     match first_lid {
-        Some(lid) if expands_to_dict(tctx.type_ctx, env, ty) => {
+        Some(lid) if is_dict => {
             let key = tctx
                 .arena
                 .get_string(tctx.arena.get_longident(lid).last_idx());
