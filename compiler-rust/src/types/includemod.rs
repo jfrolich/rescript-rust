@@ -2874,7 +2874,7 @@ fn rewrite_substituted_type_paths(
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             rewrite_substituted_type_paths(type_ctx, *target, subst, seen);
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -3409,7 +3409,7 @@ fn row_more_can_match_fixed_private_super(type_ctx: &TypeContext, row_more: Type
     let desc = type_ctx.get_desc(row_more);
     matches!(
         &*desc,
-        TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil
+        TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil
     )
 }
 
@@ -3581,7 +3581,7 @@ fn fixed_private_object_manifest_for_inclusion(
         let desc = type_ctx.get_desc(impl_rest);
         matches!(
             &*desc,
-            TypeDesc::Tnil | TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }
+            TypeDesc::Tnil | TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. }
         )
     };
     if !rest_ok {
@@ -4001,8 +4001,10 @@ fn type_exprs_equal_for_inclusion_inner(
     }
 
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
-        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
-        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
+        (TypeDesc::Tvar(impl_name, ..), TypeDesc::Tvar(sig_name, ..))
+        | (TypeDesc::Tunivar(impl_name, ..), TypeDesc::Tunivar(sig_name, ..)) => {
+            impl_name == sig_name
+        }
         (
             TypeDesc::Tarrow {
                 args: impl_args,

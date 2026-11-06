@@ -704,7 +704,7 @@ impl<'a> SigReadContext<'a> {
                 0 => {
                     // Tvar(string option)
                     let name = fields[0].as_option().map(|s| s.as_string().to_string());
-                    TypeDesc::Tvar(name)
+                    TypeDesc::Tvar(name, crate::types::type_expr::VarDescBlock::OWN)
                 }
                 1 => {
                     // Caml1999I024 stores the complete parameter list directly;
@@ -780,7 +780,7 @@ impl<'a> SigReadContext<'a> {
                 9 => {
                     // Tunivar(string option)
                     let name = fields[0].as_option().map(|s| s.as_string().to_string());
-                    TypeDesc::Tunivar(name)
+                    TypeDesc::Tunivar(name, crate::types::type_expr::VarDescBlock::OWN)
                 }
                 10 => {
                     // Tpoly(type_expr, type_expr list)
@@ -816,10 +816,10 @@ impl<'a> SigReadContext<'a> {
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar
-                    TypeDesc::Tvar(None)
+                    TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN)
                 }
             },
-            _ => TypeDesc::Tvar(None), // fallback
+            _ => TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN), // fallback
         }
     }
 

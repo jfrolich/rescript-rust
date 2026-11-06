@@ -1953,23 +1953,28 @@ fn invalid_enabled_let_unwrap_in_expr(
                     .iter()
                     .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
             }),
-        ExpressionDesc::Pexp_match((scrutinee, cases)) => invalid_enabled_let_unwrap_in_expr(*scrutinee, arena)
-            .or_else(|| {
-                arena.case_list(*cases).iter().find_map(|case| {
-                    case.pc_guard
-                        .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
-                        .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
-                })
-            }),
-        ExpressionDesc::Pexp_try((body, cases, finally)) => invalid_enabled_let_unwrap_in_expr(*body, arena)
-            .or_else(|| {
+        ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+            invalid_enabled_let_unwrap_in_expr(*scrutinee, arena).or_else(|| {
                 arena.case_list(*cases).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
                         .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
                 })
             })
-            .or_else(|| finally.and_then(|finally| invalid_enabled_let_unwrap_in_expr(finally, arena))),
+        }
+        ExpressionDesc::Pexp_try((body, cases, finally)) => {
+            invalid_enabled_let_unwrap_in_expr(*body, arena)
+                .or_else(|| {
+                    arena.case_list(*cases).iter().find_map(|case| {
+                        case.pc_guard
+                            .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
+                            .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
+                    })
+                })
+                .or_else(|| {
+                    finally.and_then(|finally| invalid_enabled_let_unwrap_in_expr(finally, arena))
+                })
+        }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
             .expr_list(*items)
             .iter()
@@ -2144,23 +2149,28 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
                     .iter()
                     .find_map(|(_, arg)| disabled_let_unwrap_loc_in_expr(*arg, arena))
             }),
-        ExpressionDesc::Pexp_match((scrutinee, cases)) => disabled_let_unwrap_loc_in_expr(*scrutinee, arena)
-            .or_else(|| {
-                arena.case_list(*cases).iter().find_map(|case| {
-                    case.pc_guard
-                        .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
-                        .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
-                })
-            }),
-        ExpressionDesc::Pexp_try((body, cases, finally)) => disabled_let_unwrap_loc_in_expr(*body, arena)
-            .or_else(|| {
+        ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+            disabled_let_unwrap_loc_in_expr(*scrutinee, arena).or_else(|| {
                 arena.case_list(*cases).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
                         .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
                 })
             })
-            .or_else(|| finally.and_then(|finally| disabled_let_unwrap_loc_in_expr(finally, arena))),
+        }
+        ExpressionDesc::Pexp_try((body, cases, finally)) => {
+            disabled_let_unwrap_loc_in_expr(*body, arena)
+                .or_else(|| {
+                    arena.case_list(*cases).iter().find_map(|case| {
+                        case.pc_guard
+                            .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
+                            .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
+                    })
+                })
+                .or_else(|| {
+                    finally.and_then(|finally| disabled_let_unwrap_loc_in_expr(finally, arena))
+                })
+        }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
             .expr_list(*items)
             .iter()
@@ -7527,11 +7537,11 @@ fn type_clash_occurs_pair(
     let (a, b) = trace.iter().rev().find(|(a, b)| {
         let a = type_ctx.repr(*a);
         let b = type_ctx.repr(*b);
-        matches!(&*type_ctx.get_desc(a), TypeDesc::Tvar(_))
-            || matches!(&*type_ctx.get_desc(b), TypeDesc::Tvar(_))
+        matches!(&*type_ctx.get_desc(a), TypeDesc::Tvar(..))
+            || matches!(&*type_ctx.get_desc(b), TypeDesc::Tvar(..))
     })?;
     let (a, b) = (type_ctx.repr(*a), type_ctx.repr(*b));
-    let (var, ty) = if matches!(&*type_ctx.get_desc(a), TypeDesc::Tvar(_)) {
+    let (var, ty) = if matches!(&*type_ctx.get_desc(a), TypeDesc::Tvar(..)) {
         (a, b)
     } else {
         (b, a)
@@ -7564,7 +7574,7 @@ fn escaped_constructor_path(
     var_ty: TypeExprRef,
 ) -> Option<String> {
     let var_ty = type_ctx.repr(var_ty);
-    if !matches!(&*type_ctx.borrow_desc(var_ty), TypeDesc::Tvar(_)) {
+    if !matches!(&*type_ctx.borrow_desc(var_ty), TypeDesc::Tvar(..)) {
         return None;
     }
 
@@ -12492,7 +12502,7 @@ fn moregen_link(
     let iface_desc = ctx.get_desc(iface_ty);
 
     match (&*impl_desc, &*iface_desc) {
-        (TypeDesc::Tvar(_), _) if ctx.get_level(impl_ty) != GENERIC_LEVEL => {
+        (TypeDesc::Tvar(..), _) if ctx.get_level(impl_ty) != GENERIC_LEVEL => {
             // Non-generic impl Tvar: link to interface type
             drop(impl_desc);
             drop(iface_desc);

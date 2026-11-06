@@ -1470,7 +1470,7 @@ pub(super) fn print_not_a_variant(ppf: &mut Ppf<'_>, ctx: &TypeContext, ty: Type
     ppf.str("does not expand to a polymorphic variant type");
     ppf.close_box();
     // `Misc.did_you_mean ppf (fun () -> ["`" ^ s])` (PR#7012).
-    if let TypeDesc::Tvar(Some(name)) = &*ctx.get_desc(ctx.repr(ty)) {
+    if let TypeDesc::Tvar(Some(name), ..) = &*ctx.get_desc(ctx.repr(ty)) {
         let name = name.clone();
         ppf.flush();
         ppf.newline();

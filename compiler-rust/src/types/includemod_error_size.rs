@@ -54,7 +54,7 @@ use super::decl::{
 use super::includemod::{InclusionSubst, SubstEntry};
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, MutabilityRef, PathBlock, PathBlockOwner, RowField,
-    RowFieldRef, TypeDesc, TypeExprRef,
+    RowFieldRef, TypeDesc, TypeExprRef, VarDescBlock,
 };
 use super::variant_runtime::{
     Block as VariantBlock, BlockType, ConstructorCase, LayoutRef, LiteralTag, Tag,
@@ -176,6 +176,17 @@ struct ErrorSize<'a> {
     path_blocks: HashSet<PathBlockKey>,
     /// The arrow argument label blocks counted, by allocation.
     labels: HashSet<usize>,
+    /// The `Tvar`/`Tunivar` descriptor blocks counted.
+    var_descs: HashSet<(bool, VarDescKey)>,
+}
+
+/// The identity of a variable descriptor block.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum VarDescKey {
+    /// The descriptor allocated for this type node.
+    Node(TypeExprRef),
+    /// The static `Tvar None` or `Tunivar None`.
+    Static,
 }
 
 /// The identity of a path block of the error.
@@ -232,6 +243,7 @@ impl<'a> ErrorSize<'a> {
             rpresent_none: false,
             path_blocks: HashSet::default(),
             labels: HashSet::default(),
+            var_descs: HashSet::default(),
         }
     }
 
@@ -1191,12 +1203,31 @@ impl<'a> ErrorSize<'a> {
         self.path(path)
     }
 
+    /// A `Tvar name` / `Tunivar name` descriptor of `node`, counted once per
+    /// block (see [`VarDescBlock`]).
+    fn var_desc(
+        &mut self,
+        node: TypeExprRef,
+        univar: bool,
+        name: Option<&String>,
+        block: VarDescBlock,
+    ) -> Walk {
+        let key = match block {
+            VarDescBlock::Own => VarDescKey::Node(node),
+            VarDescBlock::Of(owner) => VarDescKey::Node(owner),
+            VarDescBlock::Static => VarDescKey::Static,
+        };
+        if !self.var_descs.insert((univar, key)) {
+            return Ok(());
+        }
+        self.block(0, 1)?;
+        self.option_string(name)
+    }
+
     fn type_desc(&mut self, node: TypeExprRef, desc: &TypeDesc) -> Walk {
         match desc {
-            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
-                self.block(0, 1)?;
-                self.option_string(name.as_ref())
-            }
+            TypeDesc::Tvar(name, block) => self.var_desc(node, false, name.as_ref(), *block),
+            TypeDesc::Tunivar(name, block) => self.var_desc(node, true, name.as_ref(), *block),
             TypeDesc::Tarrow { args, ret } => {
                 self.block(1, 2)?;
                 // arg = {lbl; typ}
@@ -1300,7 +1331,7 @@ impl<'a> ErrorSize<'a> {
     fn copied_type_expr(&mut self, ty: TypeExprRef) -> Walk {
         let ty = self.ctx.repr(ty);
         let desc = self.ctx.get_desc(ty).into_desc();
-        if matches!(desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) && !ty.is_store() {
+        if matches!(desc, TypeDesc::Tvar(..) | TypeDesc::Tunivar(..)) && !ty.is_store() {
             return self.original(|size| size.type_expr(ty));
         }
         if !self.types.insert((self.session, ty)) {
@@ -1309,10 +1340,8 @@ impl<'a> ErrorSize<'a> {
         self.block(0, 3)?;
         match &desc {
             // `newty2 ty.level desc` shares the descriptor.
-            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
-                self.block(0, 1)?;
-                self.option_string(name.as_ref())
-            }
+            TypeDesc::Tvar(name, block) => self.var_desc(ty, false, name.as_ref(), *block),
+            TypeDesc::Tunivar(name, block) => self.var_desc(ty, true, name.as_ref(), *block),
             TypeDesc::Tconstr {
                 path,
                 args,

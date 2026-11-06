@@ -5432,7 +5432,7 @@ fn substitute_type_expr_path(
                     work_stack.push(arg);
                 }
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
         }
         drop(desc);
         if let Some(new_desc) = replacement {
@@ -5550,7 +5550,7 @@ pub fn type_expr_mentions_path_prefixes(
             TypeDesc::Tpackage { path, args, .. } => {
                 hit(path) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => false,
         }
     }
     walk(ty, &PathPrefixes::new(prefixes), ctx, &mut HashSet::new())
@@ -5899,7 +5899,7 @@ fn rewrite_type_expr_prefix(
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -6614,7 +6614,7 @@ fn rewrite_type_expr_by_path_prefix_in(
                 rewrite_type_expr_by_path_prefix_in(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -6724,7 +6724,7 @@ fn rewrite_type_expr_by_path_prefixes(
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 

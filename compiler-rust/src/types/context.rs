@@ -2507,17 +2507,26 @@ impl TypeContext {
 
     /// Create a new type variable.
     pub fn new_var(&self, name: Option<String>) -> TypeExprRef {
-        self.new_type(TypeDesc::Tvar(name))
+        self.new_type(TypeDesc::Tvar(
+            name,
+            crate::types::type_expr::VarDescBlock::OWN,
+        ))
     }
 
     /// Create a new type variable at the global level.
     pub fn new_global_var(&self, name: Option<String>) -> TypeExprRef {
-        self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
+        self.alloc_type(
+            TypeDesc::Tvar(name, crate::types::type_expr::VarDescBlock::OWN),
+            self.global_level.get(),
+        )
     }
 
     /// Create a new generic type variable.
     pub fn new_generic_var(&self, name: Option<String>) -> TypeExprRef {
-        self.new_generic_type(TypeDesc::Tvar(name))
+        self.new_generic_type(TypeDesc::Tvar(
+            name,
+            crate::types::type_expr::VarDescBlock::OWN,
+        ))
     }
 
     /// Create an arrow (function) type. When `ret_type` is itself an arrow,
@@ -2695,7 +2704,10 @@ impl TypeContext {
 
     /// Create a universal type variable.
     pub fn new_univar(&self, name: Option<String>) -> TypeExprRef {
-        self.new_type(TypeDesc::Tunivar(name))
+        self.new_type(TypeDesc::Tunivar(
+            name,
+            crate::types::type_expr::VarDescBlock::OWN,
+        ))
     }
 
     /// Create a variant type.
@@ -3957,7 +3969,7 @@ impl TypeContext {
         } else {
             match &*self.get_desc(t) {
                 TypeDesc::Tfield { rest, .. } => Next::Follow(*rest),
-                TypeDesc::Tvar(_) => Next::Done(self.get_level(t) == GENERIC_LEVEL),
+                TypeDesc::Tvar(..) => Next::Done(self.get_level(t) == GENERIC_LEVEL),
                 // Already copied in this session: follow the copy.
                 TypeDesc::Tsubst(t2) => Next::Follow(*t2),
                 _ => Next::Done(false),
@@ -4482,7 +4494,7 @@ impl TypeContext {
     /// Poison the store build if `desc` refers to compilation-local cells.
     fn check_store_desc(&self, desc: &TypeDesc) {
         match desc {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
             TypeDesc::Tarrow { args, ret } => {
                 for arg in args.iter() {
                     self.check_store_ref(arg.typ);
@@ -5042,7 +5054,10 @@ mod tests {
             .publish(2, 0, |_| {
                 (
                     vec![
-                        (TypeDesc::Tvar(None), GENERIC_LEVEL),
+                        (
+                            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                            GENERIC_LEVEL,
+                        ),
                         (TypeDesc::Tnil, GENERIC_LEVEL),
                     ],
                     Vec::new(),
@@ -5062,11 +5077,11 @@ mod tests {
         assert_eq!(a.get_level(var), 3);
 
         let b = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
-        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None, ..)));
         assert_eq!(b.get_level(var), GENERIC_LEVEL);
         std::thread::spawn(move || {
             let c = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
-            assert!(matches!(*c.borrow_desc(var), TypeDesc::Tvar(None)));
+            assert!(matches!(*c.borrow_desc(var), TypeDesc::Tvar(None, ..)));
             assert!(matches!(*c.borrow_desc(nil), TypeDesc::Tnil));
         })
         .join()
@@ -5076,7 +5091,7 @@ mod tests {
         let snapshot = b.snapshot_type_state();
         b.set_desc(var, TypeDesc::Tnil);
         b.restore_type_state(snapshot);
-        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert!(matches!(*b.borrow_desc(var), TypeDesc::Tvar(None, ..)));
     }
 
     #[test]
@@ -5286,9 +5301,18 @@ mod tests {
     fn store_descriptor_and_level_writes_are_isolated_and_backtracked() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let ty = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
-        let untouched = ctx.store.alloc_type(TypeDesc::Tvar(None), GENERIC_LEVEL);
+        let untouched = ctx.store.alloc_type(
+            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            GENERIC_LEVEL,
+        );
         let initial = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("stored".into())));
+        ctx.set_desc(
+            ty,
+            TypeDesc::Tvar(
+                Some("stored".into()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+        );
         ctx.set_level(ty, 12);
         let changed = ctx.snapshot_type_state();
         let local = ctx.new_var(None);
@@ -5296,16 +5320,21 @@ mod tests {
         assert_eq!(ctx.repr(ty), local);
         assert_eq!(ctx.get_level(ty), 12);
         assert!(
-            matches!(*ctx.borrow_desc(local), TypeDesc::Tvar(Some(ref name)) if name == "stored")
+            matches!(*ctx.borrow_desc(local), TypeDesc::Tvar(Some(ref name), ..) if name == "stored")
         );
         ctx.set_desc(untouched, TypeDesc::Tlink(local));
         ctx.set_level(untouched, 5);
         assert!(matches!(*ctx.store.node(ty).desc(), TypeDesc::Tnil));
         assert_eq!(ctx.store.node(ty).level(), GENERIC_LEVEL);
         ctx.restore_type_state(changed);
-        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(Some(ref name)) if name == "stored"));
+        assert!(
+            matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(Some(ref name), ..) if name == "stored")
+        );
         assert_eq!(ctx.get_level(ty), 12);
-        assert!(matches!(*ctx.borrow_desc(untouched), TypeDesc::Tvar(None)));
+        assert!(matches!(
+            *ctx.borrow_desc(untouched),
+            TypeDesc::Tvar(None, ..)
+        ));
         assert_eq!(ctx.get_level(untouched), GENERIC_LEVEL);
         ctx.restore_type_state(initial);
         assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tnil));
@@ -5453,13 +5482,19 @@ mod tests {
         let level = ctx.get_level(ty);
         let snapshot = ctx.snapshot_type_state();
 
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("first".to_string())));
+        ctx.set_desc(
+            ty,
+            TypeDesc::Tvar(
+                Some("first".to_string()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+        );
         ctx.set_desc(ty, TypeDesc::Tnil);
         ctx.set_level(ty, level + 1);
         ctx.set_level(ty, level + 2);
         ctx.restore_type_state(snapshot);
 
-        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name), ..) if name == "original"));
         assert_eq!(ctx.get_level(ty), level);
     }
 
@@ -5480,7 +5515,7 @@ mod tests {
                 let desc = if nil {
                     TypeDesc::Tnil
                 } else {
-                    TypeDesc::Tvar(Some(format!("mutated-{index}-{level}")))
+                    TypeDesc::Tvar(Some(format!("mutated-{index}-{level}")), crate::types::type_expr::VarDescBlock::OWN)
                 };
                 ctx.set_desc(ty, desc);
                 ctx.set_level(ty, level);
@@ -5491,7 +5526,7 @@ mod tests {
                 let expected_name = format!("original-{index}");
                 prop_assert!(matches!(
                     &*ctx.get_desc(ty),
-                    TypeDesc::Tvar(Some(name)) if name == &expected_name
+                    TypeDesc::Tvar(Some(name), ..) if name == &expected_name
                 ));
                 prop_assert_eq!(ctx.get_level(ty), original_levels[index]);
             }
@@ -5503,17 +5538,23 @@ mod tests {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let ty = ctx.new_var(Some("outer".to_string()));
         let outer = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("middle".to_string())));
+        ctx.set_desc(
+            ty,
+            TypeDesc::Tvar(
+                Some("middle".to_string()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+        );
 
         let inner = ctx.snapshot_type_state();
         ctx.set_desc(ty, TypeDesc::Tnil);
         ctx.begin_def();
         ctx.restore_type_state(inner);
-        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "middle"));
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name), ..) if name == "middle"));
         assert_eq!(ctx.current_level(), 0);
 
         ctx.restore_type_state(outer);
-        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "outer"));
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name), ..) if name == "outer"));
     }
 
     #[test]
@@ -5531,7 +5572,7 @@ mod tests {
         assert_eq!(ctx.type_expr_count(), 2);
         assert!(matches!(&*ctx.get_desc(allocated), TypeDesc::Tnil));
         assert_eq!(ctx.get_level(allocated), 42);
-        assert!(matches!(&*ctx.get_desc(old), TypeDesc::Tvar(Some(name)) if name == "old"));
+        assert!(matches!(&*ctx.get_desc(old), TypeDesc::Tvar(Some(name), ..) if name == "old"));
     }
 
     #[test]
@@ -5630,16 +5671,22 @@ mod tests {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let ty = ctx.new_var(Some("original".to_string()));
         let outer = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        ctx.set_desc(
+            ty,
+            TypeDesc::Tvar(
+                Some("outer".to_string()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+        );
         let inner = ctx.snapshot_type_state();
         ctx.set_desc(ty, TypeDesc::Tnil);
 
         ctx.restore_type_state(inner);
 
         assert_eq!(ctx.mutation_journal.borrow().entries.len(), 1);
-        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "outer"));
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name), ..) if name == "outer"));
         ctx.restore_type_state(outer);
-        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name), ..) if name == "original"));
     }
 
     #[test]
@@ -5680,7 +5727,9 @@ mod tests {
         );
         ctx.restore_type_state(restored_inner);
 
-        assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name)) if name == "post"));
+        assert!(
+            matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name), ..) if name == "post")
+        );
         assert!(matches!(
             ctx.get_row_field(post_row),
             Some(RowField::Rpresent(None))
@@ -5707,7 +5756,9 @@ mod tests {
         drop(committed_inner);
         ctx.restore_type_state(outer);
 
-        assert!(matches!(&*ctx.get_desc(pre_type), TypeDesc::Tvar(Some(name)) if name == "pre"));
+        assert!(
+            matches!(&*ctx.get_desc(pre_type), TypeDesc::Tvar(Some(name), ..) if name == "pre")
+        );
         assert!(matches!(
             ctx.get_row_field(pre_row),
             Some(RowField::Rpresent(None))
@@ -5720,7 +5771,9 @@ mod tests {
             None
         );
         let _ = pre_expansion;
-        assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name)) if name == "post"));
+        assert!(
+            matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name), ..) if name == "post")
+        );
         assert!(matches!(
             ctx.get_row_field(post_row),
             Some(RowField::Rpresent(None))
@@ -5739,14 +5792,20 @@ mod tests {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let ty = ctx.new_var(Some("original".to_string()));
         let outer = ctx.snapshot_type_state();
-        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        ctx.set_desc(
+            ty,
+            TypeDesc::Tvar(
+                Some("outer".to_string()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+        );
         let inner = ctx.snapshot_type_state();
         ctx.set_desc(ty, TypeDesc::Tnil);
 
         ctx.restore_type_state(outer);
         ctx.restore_type_state(inner);
 
-        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name), ..) if name == "original"));
         assert!(!ctx.mutation_logging.full.get() && !ctx.mutation_logging.compress.get());
     }
 

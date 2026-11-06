@@ -282,7 +282,13 @@ mod tests {
                 (
                     vec![
                         (TypeDesc::Tnil, 7),
-                        (TypeDesc::Tvar(Some("a".into())), 8),
+                        (
+                            TypeDesc::Tvar(
+                                Some("a".into()),
+                                crate::types::type_expr::VarDescBlock::OWN,
+                            ),
+                            8,
+                        ),
                         (TypeDesc::Tnil, 9),
                     ],
                     Vec::new(),
@@ -302,7 +308,7 @@ mod tests {
             assert_eq!(page_node(&reader.pages(), base + 1).level, 8);
             assert!(matches!(
                 page_node(&reader.pages(), base + 1).desc,
-                TypeDesc::Tvar(Some(_))
+                TypeDesc::Tvar(Some(_), ..)
             ));
             assert!(reader.contains(base + 2));
             assert_eq!(

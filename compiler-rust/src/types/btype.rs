@@ -27,13 +27,13 @@ use std::borrow::Cow;
 /// Check if a type is a type variable (Tvar).
 pub fn is_tvar(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(..))
 }
 
 /// Check if a type is a universal type variable (Tunivar).
 pub fn is_tunivar(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(..))
 }
 
 /// Check if a type is a type constructor (Tconstr).
@@ -208,8 +208,8 @@ pub fn row_fixed(ctx: &TypeContext, row: &RowDesc) -> bool {
     let more = ctx.repr(row.row_more);
     match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_fixed(ctx, inner_row),
-        TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
-        TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => true,
+        TypeDesc::Tvar(..) | TypeDesc::Tnil => false,
+        TypeDesc::Tunivar(..) | TypeDesc::Tconstr { .. } => true,
         _ => false,
     }
 }
@@ -256,8 +256,8 @@ where
         let desc = ctx.borrow_desc(more);
         match &*desc {
             TypeDesc::Tvariant(inner_row) => MoreAction::Variant(*inner_row.clone()),
-            TypeDesc::Tvar(_)
-            | TypeDesc::Tunivar(_)
+            TypeDesc::Tvar(..)
+            | TypeDesc::Tunivar(..)
             | TypeDesc::Tsubst(_)
             | TypeDesc::Tconstr { .. }
             | TypeDesc::Tnil => MoreAction::RowNameTypes,
@@ -296,7 +296,7 @@ where
     let children = {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(_) => Children::None,
+            TypeDesc::Tvar(..) => Children::None,
             // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
             TypeDesc::Tarrow { args, ret } => {
                 let mut children = args
@@ -318,7 +318,7 @@ where
             TypeDesc::Tnil => Children::None,
             TypeDesc::Tlink(t) => Children::One(*t),
             TypeDesc::Tsubst(t) => Children::One(*t),
-            TypeDesc::Tunivar(_) => Children::None,
+            TypeDesc::Tunivar(..) => Children::None,
             TypeDesc::Tpoly { body, vars } => Children::Poly(*body, vars.iter().copied().collect()),
             TypeDesc::Tpackage { args, .. } => Children::Many(args.iter().copied().collect()),
         }
@@ -500,7 +500,7 @@ fn proxy_obj(ctx: &TypeContext, ty: TypeExprRef, original: TypeExprRef) -> TypeE
             drop(desc);
             proxy_obj(ctx, t, original)
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => ty,
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tconstr { .. } => ty,
         TypeDesc::Tnil => original,
         _ => original,
     }

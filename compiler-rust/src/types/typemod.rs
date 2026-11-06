@@ -1592,7 +1592,7 @@ fn rewrite_type_paths_in_place(
                 rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -2925,8 +2925,8 @@ fn expand_record_spread_label(
             for (idx, param) in params.iter().enumerate() {
                 let param_desc = ctx.get_desc(*param);
                 match &*param_desc {
-                    crate::types::TypeDesc::Tvar(Some(param_name))
-                    | crate::types::TypeDesc::Tunivar(Some(param_name))
+                    crate::types::TypeDesc::Tvar(Some(param_name), ..)
+                    | crate::types::TypeDesc::Tunivar(Some(param_name), ..)
                         if param_name == name =>
                     {
                         return Some(args[idx]);
@@ -2939,10 +2939,12 @@ fn expand_record_spread_label(
 
         let desc = ctx.get_desc(ty);
         let substituted = match &*desc {
-            crate::types::TypeDesc::Tvar(Some(name))
-            | crate::types::TypeDesc::Tunivar(Some(name)) => find_substitution(name).unwrap_or(ty),
-            crate::types::TypeDesc::Tvar(None)
-            | crate::types::TypeDesc::Tunivar(None)
+            crate::types::TypeDesc::Tvar(Some(name), ..)
+            | crate::types::TypeDesc::Tunivar(Some(name), ..) => {
+                find_substitution(name).unwrap_or(ty)
+            }
+            crate::types::TypeDesc::Tvar(None, ..)
+            | crate::types::TypeDesc::Tunivar(None, ..)
             | crate::types::TypeDesc::Tnil => ty,
             crate::types::TypeDesc::Tlink(target) => {
                 let new_target = substitute_type_params(ctx, *target, params, args, cache);
@@ -3982,7 +3984,7 @@ fn check_nonrecursive_gadt_enter_type(
 }
 
 fn type_is_tvar_without_repr(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
-    matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_))
+    matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(..))
 }
 
 fn collect_free_type_variables(
@@ -3998,7 +4000,7 @@ fn collect_free_type_variables(
     }
     let desc = ctx.get_desc(ty).into_desc();
     match desc {
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             result.insert(ty);
         }
         TypeDesc::Tobject { fields, .. } => {
@@ -4356,7 +4358,7 @@ fn check_type_decl_variance_requirements(
                     continue;
                 }
                 let arg = ctx.repr(arg);
-                let constrained = !matches!(&*ctx.borrow_desc(arg), TypeDesc::Tvar(_))
+                let constrained = !matches!(&*ctx.borrow_desc(arg), TypeDesc::Tvar(..))
                     || free_vars_by_arg
                         .iter()
                         .enumerate()
@@ -6684,7 +6686,7 @@ fn type_var_name_for_abbrev_recursion(
     ty: TypeExprRef,
 ) -> Option<String> {
     match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => name.clone(),
+        TypeDesc::Tvar(name, ..) | TypeDesc::Tunivar(name, ..) => name.clone(),
         _ => None,
     }
 }
@@ -6702,8 +6704,14 @@ fn instance_parameterized_type_keep_names_for_abbrev_recursion(
         };
         let fresh_param = ctx.repr(*fresh_param);
         let replacement = match &*ctx.get_desc(fresh_param) {
-            TypeDesc::Tvar(_) => Some(TypeDesc::Tvar(Some(name))),
-            TypeDesc::Tunivar(_) => Some(TypeDesc::Tunivar(Some(name))),
+            TypeDesc::Tvar(..) => Some(TypeDesc::Tvar(
+                Some(name),
+                crate::types::type_expr::VarDescBlock::OWN,
+            )),
+            TypeDesc::Tunivar(..) => Some(TypeDesc::Tunivar(
+                Some(name),
+                crate::types::type_expr::VarDescBlock::OWN,
+            )),
             _ => None,
         };
         if let Some(replacement) = replacement {
@@ -8865,7 +8873,7 @@ fn typed_params_are_constrained(
     params.iter().enumerate().any(|(index, param)| {
         let param = ctx.repr(*param);
         match &*ctx.get_desc(param) {
-            TypeDesc::Tvar(_) => params[index + 1..]
+            TypeDesc::Tvar(..) => params[index + 1..]
                 .iter()
                 .any(|other| ctx.repr(*other) == param),
             _ => true,
@@ -9207,7 +9215,7 @@ fn apply_with_type_constraints_to_module_type(
             TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                 rewrite_type_with_substs(ctx, target, substs, cache, visited);
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
         }
     }
 
@@ -10951,7 +10959,7 @@ fn rewrite_functor_param_type_paths_in_type(
                 manifest_subst_cache,
             );
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -13641,7 +13649,7 @@ fn strip_self_module_prefix_in_sig(
                     );
                 }
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
         }
     }
 
@@ -14722,7 +14730,7 @@ fn collect_unbound_type_vars_in_type_expr(
     }
 
     match &*ctx.get_desc(ty) {
-        TypeDesc::Tvar(_) => vars.push(ty),
+        TypeDesc::Tvar(..) => vars.push(ty),
         TypeDesc::Tobject { fields, .. } => {
             collect_unbound_type_vars_in_type_expr(ctx, *fields, allowed, visited, vars);
         }
@@ -14841,7 +14849,7 @@ fn type_var_report_name_from_type_expr(
     ty: TypeExprRef,
 ) -> String {
     match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => type_var_report_name(name),
+        TypeDesc::Tvar(name, ..) | TypeDesc::Tunivar(name, ..) => type_var_report_name(name),
         _ => "_".to_string(),
     }
 }
@@ -14977,7 +14985,7 @@ fn find_unbound_type_var_in_typed_core_type_before_closed_decl(
         TypedCoreTypeDesc::Ttyp_var(name) => {
             let ty = ctx.repr(ctyp.ctyp_type);
             match &*ctx.get_desc(ty) {
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => {
                     (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
                 }
                 _ => None,
@@ -15021,7 +15029,7 @@ fn find_unbound_type_var_in_typed_core_type(
         TypedCoreTypeDesc::Ttyp_var(name) => {
             let ty = ctx.repr(ctyp.ctyp_type);
             match &*ctx.get_desc(ty) {
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => {
                     (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
                 }
                 _ => None,
@@ -15112,7 +15120,7 @@ fn find_unbound_type_var_in_typed_type_decl_before_closed_decl(
         if !visited.insert(ty) {
             return;
         }
-        if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) {
+        if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(..)) {
             out.insert(ty);
             return;
         }
@@ -15224,7 +15232,7 @@ pub(crate) fn type_expr_has_free_variables(
             return false;
         }
         match &*ctx.get_desc(ty) {
-            crate::types::type_expr::TypeDesc::Tvar(_) => true,
+            crate::types::type_expr::TypeDesc::Tvar(..) => true,
             _ => {
                 let mut has_free = false;
                 crate::types::btype::iter_type_expr(ctx, ty, |child| {
@@ -15807,8 +15815,8 @@ fn type_module_expr_with_alias_inner<'a>(
                             })
                         })
                 }
-                crate::types::type_expr::TypeDesc::Tvar(_)
-                | crate::types::type_expr::TypeDesc::Tunivar(_) => {
+                crate::types::type_expr::TypeDesc::Tvar(..)
+                | crate::types::type_expr::TypeDesc::Tunivar(..) => {
                     return Err(TypeModError::CoreError(
                         TypeCoreError::CannotInferSignature { loc },
                     ));

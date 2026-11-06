@@ -62,7 +62,7 @@ fn free_vars_rec(
     }
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             result.insert(ty);
         }
         _ => {

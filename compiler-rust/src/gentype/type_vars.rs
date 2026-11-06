@@ -12,7 +12,7 @@ pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
 
     for type_expr in type_params {
         match &*type_expr.desc() {
-            TypeDesc::Tvar(Some(s)) => {
+            TypeDesc::Tvar(Some(s), ..) => {
                 let type_name = s.clone();
                 so_far.push(type_name);
             }
@@ -33,7 +33,7 @@ pub fn extract_from_type_expr_refs(ctx: &TypeContext, type_params: &[TypeExprRef
     let mut so_far = Vec::new();
     for type_expr in type_params {
         match &*ctx.get_desc(*type_expr) {
-            TypeDesc::Tvar(Some(s)) => {
+            TypeDesc::Tvar(Some(s), ..) => {
                 so_far.push(s.clone());
             }
             TypeDesc::Tlink(_) => {

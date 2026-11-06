@@ -176,11 +176,11 @@ fn type_cannot_contain_undefined_rec(
         | TypeDesc::Tarrow { .. } => true,
         TypeDesc::Tfield { .. }
         | TypeDesc::Tpoly { .. }
-        | TypeDesc::Tunivar(_)
+        | TypeDesc::Tunivar(..)
         | TypeDesc::Tlink(_)
         | TypeDesc::Tsubst(_)
         | TypeDesc::Tnil
-        | TypeDesc::Tvar(_)
+        | TypeDesc::Tvar(..)
         | TypeDesc::Tobject { .. } => false,
     }
 }

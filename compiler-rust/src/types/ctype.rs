@@ -835,7 +835,7 @@ fn mcomp_rec(
         let d1 = ctx.borrow_desc(t1);
         let d2 = ctx.borrow_desc(t2);
         match (&*d1, &*d2) {
-            (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => return Ok(()),
+            (TypeDesc::Tvar(..), _) | (_, TypeDesc::Tvar(..)) => return Ok(()),
             (
                 TypeDesc::Tconstr {
                     path: p1, args: a1, ..
@@ -858,7 +858,7 @@ fn mcomp_rec(
     let d1 = ctx.get_desc(t1p).into_desc();
     let d2 = ctx.get_desc(t2p).into_desc();
     match (&d1, &d2) {
-        (TypeDesc::Tvar(_), TypeDesc::Tvar(_)) => {
+        (TypeDesc::Tvar(..), TypeDesc::Tvar(..)) => {
             panic!("Ctype.mcomp: unexpected pair of type variables")
         }
         (
@@ -919,7 +919,7 @@ fn mcomp_rec(
         (TypeDesc::Tpoly { body: b1, vars: v1 }, TypeDesc::Tpoly { body: b2, vars: v2 }) => {
             mcomp_enter_poly(ctx, env, state, *b1, v1, *b2, v2)
         }
-        (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_)) => mcomp_unify_univar(ctx, state, t1p, t2p),
+        (TypeDesc::Tunivar(..), TypeDesc::Tunivar(..)) => mcomp_unify_univar(ctx, state, t1p, t2p),
         _ => mcomp_fail(),
     }
 }
@@ -972,7 +972,7 @@ fn mcomp_univars_escape(
                     occur(ctx, env, family, visited, body)
                 }
             }
-            TypeDesc::Tunivar(_) => family.contains(&t),
+            TypeDesc::Tunivar(..) => family.contains(&t),
             TypeDesc::Tconstr { args, .. } if args.is_empty() => false,
             TypeDesc::Tconstr { path, args, .. } => {
                 match lookup_type_decl_for_path(ctx, env, &path).map(|d| d.into_owned()) {
@@ -1201,7 +1201,7 @@ fn mcomp_fields(
     let concrete = |ty| {
         !matches!(
             &*ctx.borrow_desc(object_row_of_fields(ctx, ty)),
-            TypeDesc::Tvar(_)
+            TypeDesc::Tvar(..)
         )
     };
     if !(concrete(ty1) && concrete(ty2)) {
@@ -1642,14 +1642,17 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
 
         let desc = ctx.get_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(name) => {
+            TypeDesc::Tvar(name, ..) => {
                 let name = name.clone();
                 let level = ctx.get_level(ty);
                 drop(desc);
                 let reified = create_reified_constr(ctx, env, newtype_level, level, name);
                 link_type(ctx, ty, reified);
                 if level < newtype_level {
-                    let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
+                    let rhs = ctx.alloc_type_at_level(
+                        TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                        level,
+                    );
                     return Err(TypeError::Unify(vec![(reified, rhs)]));
                 }
                 Ok(())
@@ -1671,7 +1674,7 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
                         )?;
                     } else {
                         let m = ctx.repr(row.row_more);
-                        let TypeDesc::Tvar(name) = ctx.get_desc(m).into_desc() else {
+                        let TypeDesc::Tvar(name, ..) = ctx.get_desc(m).into_desc() else {
                             panic!("Ctype.reify: non-variable row_more in a non-static row");
                         };
                         let m_level = ctx.get_level(m);
@@ -1686,7 +1689,10 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
                             .alloc_type_at_level(TypeDesc::Tvariant(Box::new(fixed_row)), m_level);
                         link_type(ctx, m, fixed);
                         if m_level < newtype_level {
-                            let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), m_level);
+                            let rhs = ctx.alloc_type_at_level(
+                                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                                m_level,
+                            );
                             return Err(TypeError::Unify(vec![(t, rhs)]));
                         }
                     }
@@ -1764,7 +1770,7 @@ fn reaches_quick(
     };
     match &*desc {
         TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_) if shallow_rows => Some(false),
-        TypeDesc::Tvar(_) | TypeDesc::Tnil | TypeDesc::Tunivar(_) => Some(false),
+        TypeDesc::Tvar(..) | TypeDesc::Tnil | TypeDesc::Tunivar(..) => Some(false),
         TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => {
             search(&mut args.iter().copied())
         }
@@ -1837,8 +1843,8 @@ fn surely_univar_free(ctx: &TypeContext, ty: TypeExprRef, budget: &mut u32) -> b
     *budget -= 1;
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tvar(_) | TypeDesc::Tnil => true,
-        TypeDesc::Tunivar(_) | TypeDesc::Tpoly { .. } => false,
+        TypeDesc::Tvar(..) | TypeDesc::Tnil => true,
+        TypeDesc::Tunivar(..) | TypeDesc::Tpoly { .. } => false,
         TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => {
             args.iter().all(|arg| surely_univar_free(ctx, *arg, budget))
         }
@@ -2020,9 +2026,9 @@ pub(crate) fn occur_check(
         {
             let desc = ctx.borrow_desc(ty);
             match &*desc {
-                TypeDesc::Tvar(_)
+                TypeDesc::Tvar(..)
                 | TypeDesc::Tnil
-                | TypeDesc::Tunivar(_)
+                | TypeDesc::Tunivar(..)
                 | TypeDesc::Tobject { .. }
                 | TypeDesc::Tvariant(_) => return true,
                 TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. }
@@ -2105,7 +2111,7 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
 
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tunivar(_) => {
+            TypeDesc::Tunivar(..) => {
                 if !bound.contains(&ty) {
                     return Err(TypeError::Unify(vec![(ty, ctx.new_var(None))]));
                 }
@@ -2264,14 +2270,14 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
     let source_name = {
         let desc = ctx.borrow_desc(t1_repr);
         match &*desc {
-            TypeDesc::Tvar(name) => Some(name.clone()),
+            TypeDesc::Tvar(name, ..) => Some(name.clone()),
             _ => None,
         }
     };
     let target_name = {
         let desc = ctx.borrow_desc(t2_repr);
         match &*desc {
-            TypeDesc::Tvar(name) => Some(name.clone()),
+            TypeDesc::Tvar(name, ..) => Some(name.clone()),
             _ => None,
         }
     };
@@ -2281,11 +2287,17 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
     // - when both are named, keep source name if source level is lower
     match (source_name, target_name) {
         (Some(Some(name)), Some(None)) => {
-            ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
+            ctx.set_desc(
+                t2_repr,
+                TypeDesc::Tvar(Some(name), crate::types::type_expr::VarDescBlock::OWN),
+            );
         }
         (Some(Some(name)), Some(Some(_existing))) => {
             if ctx.get_level(t1_repr) < ctx.get_level(t2_repr) {
-                ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
+                ctx.set_desc(
+                    t2_repr,
+                    TypeDesc::Tvar(Some(name), crate::types::type_expr::VarDescBlock::OWN),
+                );
             }
         }
         _ => {}
@@ -5201,7 +5213,7 @@ impl BuildSubtype<'_, '_> {
         let t = ctx.repr(t);
         let desc = (*ctx.get_desc(t)).clone();
         match desc {
-            TypeDesc::Tvar(_) => (t, SubtypeChange::Unchanged),
+            TypeDesc::Tvar(..) => (t, SubtypeChange::Unchanged),
             TypeDesc::Tarrow { args, ret } => {
                 if self.memq_warn(t, visited) {
                     return (t, SubtypeChange::Unchanged);
@@ -5460,7 +5472,7 @@ impl BuildSubtype<'_, '_> {
                     (t, SubtypeChange::Unchanged)
                 }
             }
-            TypeDesc::Tunivar(_) | TypeDesc::Tpackage { .. } => (t, SubtypeChange::Unchanged),
+            TypeDesc::Tunivar(..) | TypeDesc::Tpackage { .. } => (t, SubtypeChange::Unchanged),
         }
     }
 }
@@ -5655,7 +5667,7 @@ fn subtype_rec(
     let desc1 = (*ctx.get_desc(t1)).clone();
     let desc2 = (*ctx.get_desc(t2)).clone();
     match (&desc1, &desc2) {
-        (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
+        (TypeDesc::Tvar(..), _) | (_, TypeDesc::Tvar(..)) => {
             push_subtype_cstr(cstrs, trace, t1, t2, None);
             Ok(())
         }
@@ -5907,10 +5919,10 @@ fn subtype_rec(
         (TypeDesc::Tobject { fields: f1, .. }, TypeDesc::Tobject { fields: f2, .. })
             if matches!(
                 &*ctx.borrow_desc(object_row_of_fields(ctx, *f1)),
-                TypeDesc::Tvar(_)
+                TypeDesc::Tvar(..)
             ) && matches!(
                 &*ctx.borrow_desc(object_row_of_fields(ctx, *f2)),
-                TypeDesc::Tvar(_)
+                TypeDesc::Tvar(..)
             ) =>
         {
             // Same row variable implies same object.
@@ -6164,8 +6176,8 @@ fn subtype_row(
             Ok(true)
         }
         (
-            TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
-            TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
+            TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
+            TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
         ) if row1.row_closed && r1.is_empty() => {
             for (_, f1, f2) in pairs {
                 match (
@@ -6212,7 +6224,7 @@ fn subtype_row(
             }
             Ok(true)
         }
-        (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_))
+        (TypeDesc::Tunivar(..), TypeDesc::Tunivar(..))
             if row1.row_closed == row2.row_closed && r1.is_empty() && r2.is_empty() =>
         {
             subtype_rec(
@@ -6579,7 +6591,7 @@ pub(crate) fn object_row(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 pub(crate) fn object_row_is_structurally_open(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     matches!(
         &*ctx.borrow_desc(object_row(ctx, ty)),
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. }
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tconstr { .. }
     )
 }
 
@@ -6603,7 +6615,7 @@ fn filter_method_field(
         Error,
     }
     let action = match &*ctx.get_desc(ty) {
-        TypeDesc::Tvar(_) => FieldAction::FreshField {
+        TypeDesc::Tvar(..) => FieldAction::FreshField {
             level: ctx.get_level(ty),
         },
         TypeDesc::Tfield {
@@ -6652,7 +6664,7 @@ pub fn filter_method(
 ) -> TypeResult<TypeExprRef> {
     let ty = expand_head(ctx, env, ty);
     let action = match &*ctx.get_desc(ty) {
-        TypeDesc::Tvar(_) => Some(Err(ctx.get_level(ty))),
+        TypeDesc::Tvar(..) => Some(Err(ctx.get_level(ty))),
         TypeDesc::Tobject { fields } => Some(Ok(*fields)),
         _ => None,
     };
@@ -6709,7 +6721,7 @@ pub fn filter_object_field_for_write(
             Missing,
         }
         let action = match &*ctx.get_desc(ty) {
-            TypeDesc::Tvar(_) => Action::Fresh(ctx.get_level(ty)),
+            TypeDesc::Tvar(..) => Action::Fresh(ctx.get_level(ty)),
             TypeDesc::Tfield {
                 name: n,
                 mutability,
@@ -6763,7 +6775,7 @@ pub fn filter_object_field_for_write(
 
     let ty = expand_head(ctx, env, ty);
     let action = match &*ctx.get_desc(ty) {
-        TypeDesc::Tvar(_) => Some(Err(ctx.get_level(ty))),
+        TypeDesc::Tvar(..) => Some(Err(ctx.get_level(ty))),
         TypeDesc::Tobject { fields } => Some(Ok(*fields)),
         _ => None,
     };
@@ -6776,7 +6788,7 @@ pub fn filter_object_field_for_write(
             Ok(write_field(ctx, env, name, true, fields_ty))
         }
         Some(Ok(fields)) => {
-            let can_promote = matches!(&*ctx.borrow_desc(object_row(ctx, ty)), TypeDesc::Tvar(_));
+            let can_promote = matches!(&*ctx.borrow_desc(object_row(ctx, ty)), TypeDesc::Tvar(..));
             Ok(write_field(ctx, env, name, can_promote, fields))
         }
         None => Ok(Err(ObjectFieldWriteError::OwriteMissing)),
@@ -6804,7 +6816,7 @@ fn subst_type(
 
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => {
             // Not a parameter, return as-is
             ty
         }
@@ -7238,7 +7250,7 @@ fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
         }
         let desc = ctx.get_desc(ty).into_desc();
         match desc {
-            TypeDesc::Tvar(_) => {
+            TypeDesc::Tvar(..) => {
                 if !vars.contains(&ty) {
                     vars.push(ty);
                 }
@@ -7246,10 +7258,10 @@ fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
             TypeDesc::Tvariant(row) => {
                 let row = crate::types::btype::row_repr(ctx, &row);
                 let more = ctx.repr(row.row_more);
-                if matches!(&*ctx.borrow_desc(more), TypeDesc::Tvar(_))
+                if matches!(&*ctx.borrow_desc(more), TypeDesc::Tvar(..))
                     && !crate::types::btype::row_fixed(ctx, &row)
                 {
-                    let more_prime = ctx.new_type(ctx.get_desc(more).into_desc());
+                    let more_prime = ctx.new_type(ctx.get_desc(more).into_desc().shared_from(more));
                     ctx.set_level(more_prime, ctx.get_level(more));
                     let fixed_row = crate::types::type_expr::RowDesc {
                         row_fields: Default::default(),
@@ -7302,7 +7314,7 @@ pub(crate) fn matches(ctx: &TypeContext, env: &Env, ty: TypeExprRef, ty2: TypeEx
                 false
             } else {
                 seen.push(expanded);
-                matches!(&*ctx.borrow_desc(expanded), TypeDesc::Tvar(_))
+                matches!(&*ctx.borrow_desc(expanded), TypeDesc::Tvar(..))
             }
         })
     };
@@ -7348,7 +7360,7 @@ pub fn unify_var(
     }
 
     // Only the variants are needed; read them without cloning descriptors.
-    let var1 = matches!(&*ctx.borrow_desc(t1), TypeDesc::Tvar(_));
+    let var1 = matches!(&*ctx.borrow_desc(t1), TypeDesc::Tvar(..));
     let constr2 = matches!(&*ctx.borrow_desc(t2), TypeDesc::Tconstr { .. });
     match (var1, constr2) {
         (true, true) if deep_occur(ctx, t1, t2) => unify(ctx, state, t1, t2),
@@ -7453,10 +7465,10 @@ fn unify_after_expansion(
         } else {
             (t1, ctx.repr(t1_expanded), t2, ctx.repr(t2_expanded))
         };
-        let left_is_var = matches!(&*ctx.borrow_desc(left_exp), TypeDesc::Tvar(_));
-        let right_is_var = matches!(&*ctx.borrow_desc(right_exp), TypeDesc::Tvar(_));
-        let left_is_univar = matches!(&*ctx.borrow_desc(left_exp), TypeDesc::Tunivar(_));
-        let right_is_univar = matches!(&*ctx.borrow_desc(right_exp), TypeDesc::Tunivar(_));
+        let left_is_var = matches!(&*ctx.borrow_desc(left_exp), TypeDesc::Tvar(..));
+        let right_is_var = matches!(&*ctx.borrow_desc(right_exp), TypeDesc::Tvar(..));
+        let left_is_univar = matches!(&*ctx.borrow_desc(left_exp), TypeDesc::Tunivar(..));
+        let right_is_univar = matches!(&*ctx.borrow_desc(right_exp), TypeDesc::Tunivar(..));
         if !(left_is_univar && right_is_univar) {
             let var_link = if left_is_var {
                 Some((left_exp, ctx.repr(right)))
@@ -7685,14 +7697,14 @@ fn unify_types(
     let (var1, constr1) = {
         let desc = ctx.borrow_desc(t1);
         (
-            matches!(&*desc, TypeDesc::Tvar(_)),
+            matches!(&*desc, TypeDesc::Tvar(..)),
             matches!(&*desc, TypeDesc::Tconstr { .. }),
         )
     };
     let (var2, constr2) = {
         let desc = ctx.borrow_desc(t2);
         (
-            matches!(&*desc, TypeDesc::Tvar(_)),
+            matches!(&*desc, TypeDesc::Tvar(..)),
             matches!(&*desc, TypeDesc::Tconstr { .. }),
         )
     };
@@ -7740,7 +7752,7 @@ fn unify_types(
         // Universal type variables
         // ctype.ml unify: `Tunivar _, Tunivar _ -> unify_univar t1 t2
         // !univar_pairs; update_level !env t1.level t2; link_type t1 t2`.
-        (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_)) => {
+        (TypeDesc::Tunivar(..), TypeDesc::Tunivar(..)) => {
             drop(desc1);
             drop(desc2);
             unify_univar(ctx, state, t1, t2)?;
@@ -9105,8 +9117,8 @@ fn unify_object_fields(
     // ctype.ml:2298-2301: sample openness before unifying the row tails;
     // `unify_mutability` needs the pre-unification state because tail
     // unification can close an open row.
-    let open1 = matches!(&*ctx.borrow_desc(ctx.repr(rest1)), TypeDesc::Tvar(_));
-    let open2 = matches!(&*ctx.borrow_desc(ctx.repr(rest2)), TypeDesc::Tvar(_));
+    let open1 = matches!(&*ctx.borrow_desc(ctx.repr(rest1)), TypeDesc::Tvar(..));
+    let open2 = matches!(&*ctx.borrow_desc(ctx.repr(rest2)), TypeDesc::Tvar(..));
 
     // Create shared row variable (OCaml make_rowvar)
     let va = if miss2.is_empty() {
@@ -9114,7 +9126,11 @@ fn unify_object_fields(
     } else if miss1.is_empty() {
         rest2
     } else {
-        ctx.alloc_type_at_level(TypeDesc::Tvar(None), min_level)
+        // ctype.ml:2427: `newty2 (min ...) (Tvar None)`, the static constant.
+        ctx.alloc_type_at_level(
+            TypeDesc::Tvar(None, super::type_expr::VarDescBlock::Static),
+            min_level,
+        )
     };
 
     // ctype.ml:2356-2377: on failure, restore the rest descriptions.
@@ -9255,7 +9271,7 @@ fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> T
         }
         if ctx.get_level(ty) > level {
             let desc = ctx.get_desc(ty);
-            if matches!(&*desc, TypeDesc::Tvar(_)) && ctx.get_level(ty) >= GENERIC_LEVEL - 1 {
+            if matches!(&*desc, TypeDesc::Tvar(..)) && ctx.get_level(ty) >= GENERIC_LEVEL - 1 {
                 return Err(TypeError::Unify(vec![]));
             }
             let static_variant_row = match &*desc {
@@ -9381,7 +9397,7 @@ fn moregen_row(
 
     let may_inst = {
         let rm1_desc = ctx.get_desc(rm1);
-        let is_instantiable_var = matches!(&*rm1_desc, TypeDesc::Tvar(_))
+        let is_instantiable_var = matches!(&*rm1_desc, TypeDesc::Tvar(..))
             && moregen_may_instantiate(ctx, inst_nongen, rm1);
         let is_nil = matches!(&*rm1_desc, TypeDesc::Tnil);
         is_instantiable_var || is_nil
@@ -9410,8 +9426,8 @@ fn moregen_row(
     let rm1_desc = ctx.get_desc(rm1);
     let rm2_desc = ctx.get_desc(rm2);
     match (&*rm1_desc, &*rm2_desc) {
-        (TypeDesc::Tunivar(name1), TypeDesc::Tunivar(name2)) if name1 == name2 => {}
-        (TypeDesc::Tunivar(_), _) | (_, TypeDesc::Tunivar(_)) => {
+        (TypeDesc::Tunivar(name1, ..), TypeDesc::Tunivar(name2, ..)) if name1 == name2 => {}
+        (TypeDesc::Tunivar(..), _) | (_, TypeDesc::Tunivar(..)) => {
             return Err(TypeError::Unify(vec![]));
         }
         _ if btype::static_row(ctx, &row1) => {}
@@ -9537,7 +9553,7 @@ fn moregen(
     // expansion from becoming an eager unification loop.
     {
         let desc1 = ctx.get_desc(t1);
-        if matches!(&*desc1, TypeDesc::Tvar(_)) && moregen_may_instantiate(ctx, inst_nongen, t1) {
+        if matches!(&*desc1, TypeDesc::Tvar(..)) && moregen_may_instantiate(ctx, inst_nongen, t1) {
             drop(desc1);
             moregen_occur(ctx, env, ctx.get_level(t1), t2)?;
             occur_check(ctx, Some(env), UnifyMode::Expression, t1, t2)?;
@@ -9580,7 +9596,7 @@ fn moregen(
     let desc1 = ctx.get_desc(t1_expanded);
     let desc2 = ctx.get_desc(t2_expanded);
     match (&*desc1, &*desc2) {
-        (TypeDesc::Tvar(_), _) if moregen_may_instantiate(ctx, inst_nongen, t1_expanded) => {
+        (TypeDesc::Tvar(..), _) if moregen_may_instantiate(ctx, inst_nongen, t1_expanded) => {
             drop(desc1);
             drop(desc2);
             moregen_occur(ctx, env, ctx.get_level(t1_expanded), t2)?;
@@ -9738,7 +9754,7 @@ fn moregen(
             drop(desc2);
             moregen(ctx, inst_nongen, type_pairs, env, body1, body2)
         }
-        (TypeDesc::Tunivar(name1), TypeDesc::Tunivar(name2)) if name1 == name2 => Ok(()),
+        (TypeDesc::Tunivar(name1, ..), TypeDesc::Tunivar(name2, ..)) if name1 == name2 => Ok(()),
         _ => Err(TypeError::Unify(vec![])),
     }
 }
@@ -9787,7 +9803,7 @@ fn closed_schema_rec(
     let action = {
         let desc = ctx.get_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(_) => Action::Tvar,
+            TypeDesc::Tvar(..) => Action::Tvar,
             TypeDesc::Tconstr { args, .. } => Action::Tconstr(args.to_vec()),
             TypeDesc::Tfield { typ, rest, .. } => Action::Tfield {
                 typ: *typ,
@@ -9898,7 +9914,7 @@ fn lower_nongen_type_expr_rec(
     }
 
     let level = ctx.get_level(ty);
-    let is_tvar = matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_));
+    let is_tvar = matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(..));
     if is_tvar && level < GENERIC_LEVEL && level > nglev {
         ctx.set_level(ty, nglev);
     }
@@ -10159,7 +10175,7 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
 
     let action = {
         let desc = ctx.get_desc(ty);
-        if matches!(&*desc, TypeDesc::Tvar(_)) && level > var_level {
+        if matches!(&*desc, TypeDesc::Tvar(..)) && level > var_level {
             Action::LowerVar
         } else if level > ctx.current_level() {
             match &*desc {
@@ -10531,7 +10547,7 @@ fn compute_variance_type(
     }
 
     let is_type_var =
-        |ty: TypeExprRef| matches!(&*ctx.borrow_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
+        |ty: TypeExprRef| matches!(&*ctx.borrow_desc(ctx.repr(ty)), TypeDesc::Tvar(..));
     let is_concrete = !is_abstract;
 
     // OCaml typedecl.ml:1200-1224: occurrence variance is unioned with the
@@ -10708,8 +10724,8 @@ fn equal_type_exprs_without_renaming_rec(
     }
 
     if type_pairs.rename
-        && matches!(*ctx.get_desc(left), TypeDesc::Tvar(_))
-        && matches!(*ctx.get_desc(right), TypeDesc::Tvar(_))
+        && matches!(*ctx.get_desc(left), TypeDesc::Tvar(..))
+        && matches!(*ctx.get_desc(right), TypeDesc::Tvar(..))
     {
         return eqtype_rename_vars(ctx, type_pairs, left, right);
     }
@@ -10746,8 +10762,8 @@ fn equal_type_exprs_without_renaming_rec(
         return Ok(());
     }
     if type_pairs.rename
-        && matches!(*ctx.get_desc(left_expanded), TypeDesc::Tvar(_))
-        && matches!(*ctx.get_desc(right_expanded), TypeDesc::Tvar(_))
+        && matches!(*ctx.get_desc(left_expanded), TypeDesc::Tvar(..))
+        && matches!(*ctx.get_desc(right_expanded), TypeDesc::Tvar(..))
     {
         return eqtype_rename_vars(ctx, type_pairs, left_expanded, right_expanded);
     }
@@ -10912,7 +10928,7 @@ fn equal_type_exprs_without_renaming_rec(
             drop(right_desc);
             equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_body, right_body)
         }
-        (TypeDesc::Tunivar(left_name), TypeDesc::Tunivar(right_name))
+        (TypeDesc::Tunivar(left_name, ..), TypeDesc::Tunivar(right_name, ..))
             if left_name == right_name =>
         {
             Ok(())
@@ -11471,7 +11487,7 @@ fn compute_univars_per_node(
     for node in nodes {
         let node = ctx.repr(node);
         let desc = ctx.get_desc(node);
-        let is_univar = matches!(&*desc, TypeDesc::Tunivar(_));
+        let is_univar = matches!(&*desc, TypeDesc::Tunivar(..));
         drop(desc);
         if is_univar {
             add_univar_to_parents(ctx, node, node, &inverted, &mut node_univars);
@@ -11598,7 +11614,7 @@ fn copy_sep_inner(
         return fresh;
     }
 
-    let ty_is_tunivar = matches!(desc, TypeDesc::Tunivar(_));
+    let ty_is_tunivar = matches!(desc, TypeDesc::Tunivar(..));
     for entry in visited {
         if entry.ty == ty {
             let dl = if ty_is_tunivar {
@@ -11634,7 +11650,8 @@ fn copy_sep_inner(
     }
 
     let copied_desc = match desc {
-        TypeDesc::Tvar(_) => TypeDesc::Tvar(None),
+        // btype.ml:510: the static `Tvar None`.
+        TypeDesc::Tvar(..) => TypeDesc::Tvar(None, super::type_expr::VarDescBlock::Static),
         // compiler/ml/btype.ml:422-423 maps every argument type and then ret.
         TypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: args
@@ -11758,7 +11775,7 @@ fn copy_sep_inner(
                 delayed_copy,
             );
         }
-        TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
+        TypeDesc::Tunivar(name, block) => TypeDesc::Tunivar(name, block.copied_from(ty)),
         TypeDesc::Tvariant(row0) => {
             let row = row_repr_ref(ctx, &row0);
             let row = row.as_ref();
@@ -11791,7 +11808,8 @@ fn copy_sep_inner(
             let fresh_vars: Vec<_> = vars
                 .iter()
                 .map(|v| {
-                    let copied = ctx.get_desc(*v).into_desc();
+                    // ctype.ml:1047 `newty t.desc` shares the descriptor.
+                    let copied = ctx.get_desc(*v).into_desc().shared_from(*v);
                     ctx.new_type(copied)
                 })
                 .collect();
@@ -11872,9 +11890,12 @@ fn instance_poly_in_session(
         .map(|u| {
             let desc = ctx.get_desc(*u);
             match &*desc {
-                TypeDesc::Tunivar(name) => {
+                TypeDesc::Tunivar(name, ..) => {
                     if keep_names {
-                        ctx.new_type(TypeDesc::Tvar(name.clone()))
+                        ctx.new_type(TypeDesc::Tvar(
+                            name.clone(),
+                            crate::types::type_expr::VarDescBlock::OWN,
+                        ))
                     } else {
                         ctx.new_var(None)
                     }
@@ -11957,7 +11978,7 @@ pub fn instance_constructor_in_pattern(
         let name = {
             let desc = ctx.get_desc(existential_repr);
             match &*desc {
-                super::type_expr::TypeDesc::Tvar(Some(name)) => {
+                super::type_expr::TypeDesc::Tvar(Some(name), ..) => {
                     format!("${}_'{}", cstr.cstr_name, name)
                 }
                 _ => format!("${}", cstr.cstr_name),
@@ -12016,12 +12037,13 @@ pub fn remap_label_type_to_params(
     let label_ty = ctx.repr(label_ty);
     let desc = ctx.get_desc(label_ty);
     match &*desc {
-        TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => {
+        TypeDesc::Tvar(Some(name), ..) | TypeDesc::Tunivar(Some(name), ..) => {
             for &param in type_params {
                 let param = ctx.repr(param);
                 let param_desc = ctx.get_desc(param);
                 match &*param_desc {
-                    TypeDesc::Tvar(Some(param_name)) | TypeDesc::Tunivar(Some(param_name))
+                    TypeDesc::Tvar(Some(param_name), ..)
+                    | TypeDesc::Tunivar(Some(param_name), ..)
                         if param_name == name =>
                     {
                         return param;
@@ -12042,7 +12064,9 @@ pub fn remap_label_type_to_params(
 
             let body_desc = ctx.get_desc(body);
             let body_name = match &*body_desc {
-                TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.clone()),
+                TypeDesc::Tvar(Some(name), ..) | TypeDesc::Tunivar(Some(name), ..) => {
+                    Some(name.clone())
+                }
                 _ => None,
             };
             drop(body_desc);
@@ -12055,7 +12079,8 @@ pub fn remap_label_type_to_params(
                 let param = ctx.repr(param);
                 let param_desc = ctx.get_desc(param);
                 match &*param_desc {
-                    TypeDesc::Tvar(Some(param_name)) | TypeDesc::Tunivar(Some(param_name))
+                    TypeDesc::Tvar(Some(param_name), ..)
+                    | TypeDesc::Tunivar(Some(param_name), ..)
                         if *param_name == body_name =>
                     {
                         if param == body {
@@ -12147,10 +12172,13 @@ pub fn check_univars(ctx: &TypeContext, vars: &[TypeExprRef]) {
     for &v in vars {
         let v = ctx.repr(v);
         let desc = ctx.get_desc(v);
-        if let super::TypeDesc::Tvar(name) = &*desc {
+        if let super::TypeDesc::Tvar(name, ..) = &*desc {
             let name = name.clone();
             drop(desc);
-            ctx.set_desc(v, super::TypeDesc::Tunivar(name));
+            ctx.set_desc(
+                v,
+                super::TypeDesc::Tunivar(name, crate::types::type_expr::VarDescBlock::OWN),
+            );
         }
     }
 }
@@ -12174,7 +12202,7 @@ pub fn copy_type_deep(
 
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tvar(_name) => {
+        TypeDesc::Tvar(_name, ..) => {
             // OCaml's copy_type creates anonymous type variables (None name)
             // for fresh copies, matching the Tvar None in the sexp output
             let fresh = ctx.new_var(None);
@@ -12332,7 +12360,7 @@ pub fn copy_type_deep(
         }
         TypeDesc::Tsubst(target) => copy_type_deep(ctx, *target, cache),
         TypeDesc::Tlink(target) => copy_type_deep(ctx, *target, cache),
-        TypeDesc::Tnil | TypeDesc::Tunivar(_) => ty, // Return as-is
+        TypeDesc::Tnil | TypeDesc::Tunivar(..) => ty, // Return as-is
         TypeDesc::Tpackage { path, lids, args } => {
             let new_args: Vec<_> = args
                 .iter()
@@ -12533,7 +12561,7 @@ fn subst_identity_copy_rec(
     match &*desc {
         // OCaml Subst.typexp returns identity for Tvar/Tunivar
         // (when not for_saving and id >= 0)
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {
             drop(desc);
             ty
         }
@@ -12547,7 +12575,7 @@ fn subst_identity_copy_rec(
 
             let desc = ctx.borrow_desc(ty);
             let new_desc = match &*desc {
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => unreachable!(),
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => unreachable!(),
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
                     let target = *target;
                     drop(desc);
@@ -12749,10 +12777,14 @@ fn subst_identity_copy_rec(
                                         row_more_markers,
                                     )
                                 }
-                                TypeDesc::Tunivar(_) => more,
-                                TypeDesc::Tvar(name) => {
+                                TypeDesc::Tunivar(..) => more,
+                                TypeDesc::Tvar(name, block) => {
                                     if dup {
-                                        ctx.new_generic_type(TypeDesc::Tvar(name))
+                                        // subst.ml:198-206 `newgenty more.desc`.
+                                        ctx.new_generic_type(TypeDesc::Tvar(
+                                            name,
+                                            block.copied_from(more),
+                                        ))
                                     } else {
                                         more
                                     }
@@ -12968,7 +13000,7 @@ pub(crate) fn copy_type_cached(
     enum CopyAction {
         ReturnSelf,
         NewVar(Option<String>),
-        NewUnivar(Option<String>),
+        NewUnivar(Option<String>, super::type_expr::VarDescBlock),
         Arrow {
             args: super::type_expr::TypeArgList,
             ret: TypeExprRef,
@@ -13032,8 +13064,8 @@ pub(crate) fn copy_type_cached(
         } else if level != GENERIC_LEVEL {
             match &*desc {
                 // OCaml's copy returns identity for all non-generic type nodes.
-                TypeDesc::Tvar(_)
-                | TypeDesc::Tunivar(_)
+                TypeDesc::Tvar(..)
+                | TypeDesc::Tunivar(..)
                 | TypeDesc::Ttuple(_)
                 | TypeDesc::Tobject { .. }
                 | TypeDesc::Tvariant(_)
@@ -13047,8 +13079,12 @@ pub(crate) fn copy_type_cached(
             }
         } else {
             match &*desc {
-                TypeDesc::Tvar(_) => CopyAction::NewVar(None),
-                TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
+                TypeDesc::Tvar(..) => CopyAction::NewVar(None),
+                // btype.ml:508-516 `Tunivar _ as ty -> ty`: the copy keeps
+                // the descriptor.
+                TypeDesc::Tunivar(name, block) => {
+                    CopyAction::NewUnivar(name.clone(), block.copied_from(ty))
+                }
                 TypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
                     args: args.clone(),
                     ret: *ret,
@@ -13096,15 +13132,22 @@ pub(crate) fn copy_type_cached(
     match action {
         CopyAction::ReturnSelf => ty,
         CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
-        CopyAction::Forget(level) => ctx.alloc_type_at_level(TypeDesc::Tvar(None), level),
+        // ctype.ml:771: `newty2 forget (Tvar None)`, the static constant.
+        CopyAction::Forget(level) => ctx.alloc_type_at_level(
+            TypeDesc::Tvar(None, super::type_expr::VarDescBlock::Static),
+            level,
+        ),
         CopyAction::NewVar(name) => {
-            // OCaml preserves Tvar names in copy: newvar2 ~name:(match ty.desc with Tvar name -> name | _ -> None)
-            let fresh = ctx.new_var(name);
+            // ctype.ml:775-829: a `newvar ()` stub whose descriptor becomes
+            // `copy_type_desc copy desc`, the static `Tvar None`
+            // (btype.ml:510).
+            debug_assert!(name.is_none());
+            let fresh = ctx.new_type(TypeDesc::Tvar(name, super::type_expr::VarDescBlock::Static));
             cache.nodes.insert(ty, fresh);
             fresh
         }
-        CopyAction::NewUnivar(name) => {
-            let fresh = ctx.new_univar(name);
+        CopyAction::NewUnivar(name, block) => {
+            let fresh = ctx.new_type(TypeDesc::Tunivar(name, block));
             cache.nodes.insert(ty, fresh);
             fresh
         }
@@ -13236,7 +13279,7 @@ pub(crate) fn copy_type_cached(
                         TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
                             copy_type_cached(ctx, more, cache)
                         }
-                        TypeDesc::Tvar(name) => {
+                        TypeDesc::Tvar(name, ..) => {
                             if keep {
                                 more
                             } else {
@@ -13247,7 +13290,7 @@ pub(crate) fn copy_type_cached(
                                 fresh
                             }
                         }
-                        TypeDesc::Tunivar(name) => {
+                        TypeDesc::Tunivar(name, ..) => {
                             if keep {
                                 more
                             } else {
@@ -13352,7 +13395,7 @@ pub(crate) fn copy_type_cached(
                 }
                 CopyAction::ReturnSelf
                 | CopyAction::NewVar(_)
-                | CopyAction::NewUnivar(_)
+                | CopyAction::NewUnivar(..)
                 | CopyAction::Link(_)
                 | CopyAction::Forget(_) => unreachable!(),
             };
@@ -13754,7 +13797,7 @@ fn nondep_type_rec(
     {
         let desc = ctx.get_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => return Some(ty),
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => return Some(ty),
             _ => {}
         }
     }
@@ -13764,7 +13807,10 @@ fn nondep_type_rec(
     }
 
     // Create a stub for recursion (OCaml: newgenvar ())
-    let stub = ctx.new_generic_type(TypeDesc::Tvar(None));
+    let stub = ctx.new_generic_type(TypeDesc::Tvar(
+        None,
+        crate::types::type_expr::VarDescBlock::OWN,
+    ));
     cache.insert(ty, stub);
 
     let desc = ctx.get_desc(ty).into_desc();
@@ -13995,7 +14041,7 @@ fn nondep_type_rec(
         TypeDesc::Tlink(inner) => {
             return nondep_type_rec(ctx, env, mid, *inner, cache);
         }
-        TypeDesc::Tsubst(_) | TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
+        TypeDesc::Tsubst(_) | TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {
             return Some(ty);
         }
     };
@@ -14016,7 +14062,7 @@ fn unroll_abbrev(
     let ty = ctx.repr(ty);
     {
         let desc = ctx.get_desc(ty);
-        if matches!(&*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_))
+        if matches!(&*desc, TypeDesc::Tvar(..) | TypeDesc::Tunivar(..))
             || params.iter().any(|param| deep_occur(ctx, ty, *param))
             || matches!(&*desc, TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#'))
         {
@@ -14344,7 +14390,7 @@ mod tests {
         state.restore_backtrack_state(state_snapshot);
 
         assert!(
-            matches!(&*ctx.borrow_desc(variable), TypeDesc::Tvar(Some(name)) if name == "kept")
+            matches!(&*ctx.borrow_desc(variable), TypeDesc::Tvar(Some(name), ..) if name == "kept")
         );
     }
 
@@ -14627,9 +14673,15 @@ mod tests {
         // The previous shallow container clone also shared TypeExprRef nodes.
         // Keep that sharing while independently owning writable metadata.
         assert_eq!(owned.type_params[0], manifest);
-        ctx.set_desc(manifest, TypeDesc::Tvar(Some("shared".to_string())));
+        ctx.set_desc(
+            manifest,
+            TypeDesc::Tvar(
+                Some("shared".to_string()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+        );
         assert!(
-            matches!(&*ctx.borrow_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared")
+            matches!(&*ctx.borrow_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name), ..) if name == "shared")
         );
     }
 

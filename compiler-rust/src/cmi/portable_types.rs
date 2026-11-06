@@ -892,7 +892,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 
     fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
         match desc {
-            TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
+            TypeDesc::Tvar(name, ..) => PortableTypeDesc::Tvar(name.clone()),
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
                 args: args
                     .iter()
@@ -932,7 +932,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             TypeDesc::Tvariant(row_desc) => {
                 PortableTypeDesc::Tvariant(self.serialize_row_desc(row_desc))
             }
-            TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(name.clone()),
+            TypeDesc::Tunivar(name, ..) => PortableTypeDesc::Tunivar(name.clone()),
             TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
                 body: self.serialize_type(*body),
                 vars: vars.iter().map(|t| self.serialize_type(*t)).collect(),
@@ -1525,7 +1525,10 @@ fn internalize_signature(
             } else {
                 entry.level
             };
-            ctx.alloc_type_at_level(TypeDesc::Tvar(None), level)
+            ctx.alloc_type_at_level(
+                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                level,
+            )
         })
         .collect();
 
@@ -1558,7 +1561,9 @@ fn internalize_desc<S: TypeNodeSink>(
     ctx: &S,
 ) -> TypeDesc {
     match desc {
-        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
+        PortableTypeDesc::Tvar(name) => {
+            TypeDesc::Tvar(name.clone(), crate::types::type_expr::VarDescBlock::OWN)
+        }
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: args
                 .iter()
@@ -1595,7 +1600,9 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tvariant(prd) => {
             TypeDesc::Tvariant(Box::new(internalize_row_desc(prd, remap, ctx)))
         }
-        PortableTypeDesc::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
+        PortableTypeDesc::Tunivar(name) => {
+            TypeDesc::Tunivar(name.clone(), crate::types::type_expr::VarDescBlock::OWN)
+        }
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
             body: remap[*body],
             vars: vars.iter().map(|&i| remap[i]).collect(),

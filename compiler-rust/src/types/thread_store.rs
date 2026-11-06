@@ -625,7 +625,10 @@ mod tests {
             let outer_ty = outer.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
             let nested = current();
             assert_eq!(nested.type_count(), 0);
-            nested.alloc_type(TypeDesc::Tvar(None), GENERIC_LEVEL);
+            nested.alloc_type(
+                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                GENERIC_LEVEL,
+            );
             assert!(matches!(*outer.node(outer_ty).desc(), TypeDesc::Tnil));
             drop(nested);
             drop(outer);

@@ -385,11 +385,11 @@ fn sexp_type_expr_inline(
     let te = ctx.repr(te); // Follow Tlink chains, but keep Tsubst visible.
     let desc = ctx.get_desc(te);
     match &*desc {
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             let id = state.tvar_id(te);
             return Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom(&id.to_string())]);
         }
-        TypeDesc::Tunivar(_) => {
+        TypeDesc::Tunivar(..) => {
             let id = state.tunivar_id(te);
             return Sexp::list(vec![Sexp::atom("Tunivar"), Sexp::atom(&id.to_string())]);
         }
@@ -424,7 +424,7 @@ fn sexp_type_expr_body_inline(
 ) -> Sexp {
     let desc = ctx.get_desc(te);
     match &*desc {
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => {
             unreachable!("variable nodes handled before body serialization")
         }
         TypeDesc::Tarrow { args, ret } => {

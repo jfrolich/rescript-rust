@@ -89,7 +89,7 @@ impl Collector<'_> {
                     stack.push(*body);
                     stack.extend(vars.iter().copied());
                 }
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
                 TypeDesc::Tvariant(row) => {
                     if let Some((path, _)) = &row.row_name {
                         read_of_path(path, Kind::Type, None, &mut self.out);

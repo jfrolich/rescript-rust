@@ -373,7 +373,7 @@ pub fn translateTypeExprFromTypes_(
 ) -> Translation {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:526-672.
     match type_expr_desc(ctx, type_expr) {
-        TypeDesc::Tvar(None) => Translation {
+        TypeDesc::Tvar(None, ..) => Translation {
             dependencies: vec![],
             type_: Type::TypeVar(
                 crate::gentype::gen_ident::js_type_name_for_anonymous_type_id(
@@ -382,7 +382,7 @@ pub fn translateTypeExprFromTypes_(
                 ),
             ),
         },
-        TypeDesc::Tvar(Some(s)) => Translation {
+        TypeDesc::Tvar(Some(s), ..) => Translation {
             dependencies: vec![],
             type_: Type::TypeVar(s),
         },
@@ -454,7 +454,7 @@ pub fn translateTypeExprFromTypes_(
         | TypeDesc::Tnil
         | TypeDesc::Tpoly { .. }
         | TypeDesc::Tsubst(_)
-        | TypeDesc::Tunivar(_) => Translation {
+        | TypeDesc::Tunivar(..) => Translation {
             dependencies: vec![],
             type_: unknown(),
         },
@@ -678,7 +678,7 @@ fn label_name(label: &ArgLabel) -> String {
 fn is_js_t_preserved(ctx: &TypeContext, type_expr: &TypeExprRef) -> bool {
     matches!(
         type_expr_desc(ctx, type_expr),
-        TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }
+        TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. }
     )
 }
 
@@ -718,7 +718,7 @@ fn get_field_types(
                 closed_flag
             }
             TypeDesc::Tlink(te) => go(ctx, config, type_vars_gen, type_env, &te, fields),
-            TypeDesc::Tvar(None) => ClosedFlag::Open,
+            TypeDesc::Tvar(None, ..) => ClosedFlag::Open,
             _ => ClosedFlag::Closed,
         }
     }

@@ -2539,7 +2539,7 @@ fn transl_type_globalized(
                     // OCaml typetexp.ml:675-676: under the Fixed policy an
                     // undeclared variable that is still a Tvar is unbound.
                     if fixed_type_variables
-                        && matches!(&*ctx.borrow_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
+                        && matches!(&*ctx.borrow_desc(ctx.repr(used_ty)), TypeDesc::Tvar(..))
                     {
                         let loc = tctx
                             .used_variable_locs
@@ -2563,7 +2563,7 @@ fn transl_type_globalized(
             } else {
                 // OCaml typetexp.ml:675-676 (Fixed policy).
                 if fixed_type_variables
-                    && matches!(&*ctx.borrow_desc(ctx.repr(used_ty)), TypeDesc::Tvar(_))
+                    && matches!(&*ctx.borrow_desc(ctx.repr(used_ty)), TypeDesc::Tvar(..))
                 {
                     let loc = tctx
                         .used_variable_locs
@@ -3192,10 +3192,16 @@ fn transl_type_inner(
                     let rename_desc = {
                         let proxy_desc = ctx.get_desc(proxy);
                         match &*proxy_desc {
-                            TypeDesc::Tvar(None) => Some(TypeDesc::Tvar(Some(name_str.clone()))),
-                            TypeDesc::Tunivar(None) => {
-                                Some(TypeDesc::Tunivar(Some(name_str.clone())))
+                            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN) => {
+                                Some(TypeDesc::Tvar(
+                                    Some(name_str.clone()),
+                                    crate::types::type_expr::VarDescBlock::OWN,
+                                ))
                             }
+                            TypeDesc::Tunivar(None, ..) => Some(TypeDesc::Tunivar(
+                                Some(name_str.clone()),
+                                crate::types::type_expr::VarDescBlock::OWN,
+                            )),
                             _ => None,
                         }
                     };
@@ -3265,7 +3271,7 @@ fn transl_type_inner(
                     let uni_name = {
                         let desc = ctx.get_desc(v);
                         match &*desc {
-                            TypeDesc::Tvar(name)
+                            TypeDesc::Tvar(name, ..)
                                 if ctx.get_level(v) == crate::types::type_expr::GENERIC_LEVEL =>
                             {
                                 Some(name.clone())
@@ -3274,7 +3280,10 @@ fn transl_type_inner(
                         }
                     };
                     if let Some(name) = uni_name {
-                        ctx.set_desc(v, TypeDesc::Tunivar(name));
+                        ctx.set_desc(
+                            v,
+                            TypeDesc::Tunivar(name, crate::types::type_expr::VarDescBlock::OWN),
+                        );
                         ty_list.push(v);
                     } else {
                         return Err(TypeCoreError::CannotQuantify {
@@ -3504,7 +3513,7 @@ fn transl_type_inner(
                             if let Some(path) = inherit_name
                                 && (matches!(
                                     &*ctx.borrow_desc(ctx.repr(expanded)),
-                                    TypeDesc::Tvar(_)
+                                    TypeDesc::Tvar(..)
                                 ) || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
@@ -3737,7 +3746,7 @@ fn transl_type_inner(
                             if let Some((path, _)) = inherit_name
                                 && (matches!(
                                     &*ctx.borrow_desc(ctx.repr(expanded)),
-                                    TypeDesc::Tvar(_)
+                                    TypeDesc::Tvar(..)
                                 ) || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
@@ -6552,7 +6561,7 @@ fn type_pattern_record(
             for var in &poly_vars {
                 let expanded = crate::types::ctype::expand_head(ctx, env, *var);
                 let desc = ctx.get_desc(ctx.repr(expanded));
-                let instantiated = !matches!(&*desc, TypeDesc::Tvar(_))
+                let instantiated = !matches!(&*desc, TypeDesc::Tvar(..))
                     || ctx.get_level(ctx.repr(expanded)) != crate::types::GENERIC_LEVEL;
                 drop(desc);
                 if instantiated {
@@ -7474,7 +7483,8 @@ fn type_statement<'a>(
     // variable generalizable past the current level (it never returns).
     let ty = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
     let tv = ctx.new_var(None);
-    if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) && ctx.get_level(ty) > ctx.get_level(tv) {
+    if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(..)) && ctx.get_level(ty) > ctx.get_level(tv)
+    {
         let loc = final_subexpression(tctx.arena, expr).pexp_loc;
         tctx.report_warning(loc, Warning::NonreturningStatement);
     }
@@ -8996,7 +9006,7 @@ fn force_lower_args_type_lookup_paths(
                     visit_manifest(tctx, env, arg, seen);
                 }
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
         }
     }
 
@@ -9924,7 +9934,7 @@ fn type_application(
     // compiler/ml/typecore.ml:4049-4069: a total call of an unknown
     // function commits it to one n-ary arrow matching the complete call site.
     let uncommitted_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
-    if total_app && matches!(&*ctx.borrow_desc(uncommitted_funct_ty), TypeDesc::Tvar(_)) {
+    if total_app && matches!(&*ctx.borrow_desc(uncommitted_funct_ty), TypeDesc::Tvar(..)) {
         let params = args
             .iter()
             .map(|(label, _)| {
@@ -9956,7 +9966,7 @@ fn type_application(
     let function_level = ctx.get_level(ctx.repr(expanded_funct_ty));
     let (declared_params, declared_ret) = match &*ctx.borrow_desc(expanded_funct_ty) {
         TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             return Err(TypeCoreError::ApplyNonFunction {
                 loc: typed_funct.exp_loc,
                 typ: expanded_funct_ty,
@@ -17253,7 +17263,7 @@ fn object_field_use_type(
         TypeDesc::Tpoly { body, vars } => {
             Ok(crate::types::ctype::instance_poly(ctx, false, false, &vars, body).1)
         }
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             let ty2 = ctx.new_var(None);
             let poly = ctx.new_poly(ty2, vec![]);
             let inst = crate::types::ctype::copy_type(ctx, typ);
@@ -18276,7 +18286,7 @@ fn check_inlined_record_escape(
                 }
                 return Ok(());
             }
-            (RecArg::Required, TypeDesc::Tvar(_)) => {
+            (RecArg::Required, TypeDesc::Tvar(..)) => {
                 return Err(TypeCoreError::InlinedRecordEscape { loc });
             }
             (RecArg::Required, TypeDesc::Tlink(_)) => {}
@@ -18295,7 +18305,7 @@ fn check_inlined_record_escape(
         (_, RecArg::Allowed, _) => false,
         (true, RecArg::Required, _) | (false, RecArg::Rejected, _) => false,
         (true, RecArg::Rejected, _)
-        | (false, RecArg::Required, TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }) => true,
+        | (false, RecArg::Required, TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. }) => true,
         (false, RecArg::Required, _) => false,
     };
 
@@ -18625,7 +18635,7 @@ fn pack_type_contains_local_module_dependency(
                     pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
                 })
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => false,
     }
 }
 
@@ -18648,7 +18658,7 @@ fn type_pack(
         let desc = ctx.get_desc(ctx.repr(expanded));
         match &*desc {
             TypeDesc::Tpackage { path, lids, args } => (path.clone(), lids.clone(), args.clone()),
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => {
                 return Err(TypeCoreError::CannotInferSignature { loc });
             }
             _ => {
@@ -18957,7 +18967,7 @@ fn module_type_from_package_binding(
             TypeDesc::Tpackage { path, lids, args } => {
                 Ok((path.clone(), lids.clone(), args.clone()))
             }
-            TypeDesc::Tvar(_) => Err(TypeCoreError::CannotInferSignature { loc }),
+            TypeDesc::Tvar(..) => Err(TypeCoreError::CannotInferSignature { loc }),
             _ => Err(TypeCoreError::ModuleError(Box::new(
                 crate::types::typemod::TypeModError::NotAPackedModule { loc, ty: expanded },
             ))),
@@ -19357,7 +19367,7 @@ fn check_univars_or_less_general(
         let var_name = {
             let desc = ctx.get_desc(var);
             match &*desc {
-                TypeDesc::Tvar(name)
+                TypeDesc::Tvar(name, ..)
                     if ctx.get_level(var) == crate::types::type_expr::GENERIC_LEVEL =>
                 {
                     Some(name.clone())
@@ -19366,7 +19376,10 @@ fn check_univars_or_less_general(
             }
         };
         if let Some(name) = var_name {
-            ctx.set_desc(var, TypeDesc::Tunivar(name));
+            ctx.set_desc(
+                var,
+                TypeDesc::Tunivar(name, crate::types::type_expr::VarDescBlock::OWN),
+            );
             universal_vars.push(var);
         }
     }
@@ -21159,7 +21172,7 @@ where
     }
 
     enum CopyTypeExprPlan {
-        Tvar(Option<String>),
+        Tvar(Option<String>, crate::types::type_expr::VarDescBlock),
         Tarrow {
             args: crate::types::type_expr::TypeArgList,
             ret: TypeExprRef,
@@ -21189,7 +21202,7 @@ where
             row_fixed: bool,
             row_name: Option<(Path, Vec<TypeExprRef>)>,
         },
-        Tunivar(Option<String>),
+        Tunivar(Option<String>, crate::types::type_expr::VarDescBlock),
         Tpoly {
             body: TypeExprRef,
             vars: crate::types::type_expr::TypeRefList,
@@ -21215,7 +21228,7 @@ where
     // ahead of OCaml's typedtree stamp stream when copying shared row variables.
     {
         let desc = ctx.borrow_desc(ty);
-        if matches!(*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) {
+        if matches!(*desc, TypeDesc::Tvar(..) | TypeDesc::Tunivar(..)) {
             drop(desc);
             cache.insert(ty, ty);
             return ty;
@@ -21230,7 +21243,10 @@ where
     let plan = {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
+            // subst.ml:135-143: `newty2 ty.level desc` keeps the descriptor.
+            TypeDesc::Tvar(name, block) => {
+                CopyTypeExprPlan::Tvar(name.clone(), block.copied_from(ty))
+            }
             TypeDesc::Tarrow { args, ret } => CopyTypeExprPlan::Tarrow {
                 args: args.clone(),
                 ret: *ret,
@@ -21300,7 +21316,9 @@ where
                 row_fixed: row.row_fixed,
                 row_name: row.row_name.clone(),
             },
-            TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
+            TypeDesc::Tunivar(name, block) => {
+                CopyTypeExprPlan::Tunivar(name.clone(), block.copied_from(ty))
+            }
             TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
                 body: *body,
                 vars: vars.clone(),
@@ -21315,7 +21333,7 @@ where
 
     let copied_desc = {
         match plan {
-            CopyTypeExprPlan::Tvar(name) => TypeDesc::Tvar(name),
+            CopyTypeExprPlan::Tvar(name, block) => TypeDesc::Tvar(name, block),
             CopyTypeExprPlan::Tarrow { args, ret } => {
                 let args = args
                     .iter()
@@ -21443,7 +21461,7 @@ where
                 };
                 TypeDesc::Tvariant(Box::new(copied_row))
             }
-            CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
+            CopyTypeExprPlan::Tunivar(name, block) => TypeDesc::Tunivar(name, block),
             CopyTypeExprPlan::Tpoly { body, vars } => {
                 let copied_body = copy_lookup_type_expr_with_paths(ctx, body, cache, type_path);
                 let copied_vars = vars
@@ -23687,7 +23705,7 @@ fn type_contains_unresolved_local_path(
         TypeDesc::Tpackage { args, .. } => args
             .iter()
             .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited)),
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => false,
     }
 }
 
@@ -23912,7 +23930,7 @@ fn qualify_label_description_paths(
                     );
                 }
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
         }
     }
 
@@ -25192,7 +25210,7 @@ fn force_type_paths_for_lookup_from_type(
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             force_type_paths_for_lookup_from_type(ctx, env, pers_env, target, seen);
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -25895,7 +25913,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 );
             }
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 

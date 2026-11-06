@@ -398,11 +398,45 @@ impl PathBlock {
     }
 }
 
+/// The physical identity of a `Tvar`/`Tunivar` descriptor block.
+///
+/// OCaml allocates `Tvar name` per `newvar`, but writes the constant
+/// `Tvar None` (allocated once, statically) where it copies a variable:
+/// `Btype.copy_type_desc` (btype.ml:510), `Subst.norm` (subst.ml:121-126),
+/// `Ctype.copy` on forget (ctype.ml:771, 849) and row unification
+/// (ctype.ml:2427). A copy that keeps the descriptor (`Tunivar _ as ty`,
+/// `Tvar _` with `keep_names`, `newty2 ty.level ty.desc`) shares the
+/// source node's block. Like [`PathBlock`], this only feeds
+/// `Includemod.is_big` and never takes part in type equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VarDescBlock {
+    /// A descriptor allocated for this node.
+    Own,
+    /// The static `Tvar None` / `Tunivar None` constant.
+    Static,
+    /// The descriptor allocated for another node.
+    Of(TypeExprRef),
+}
+
+impl VarDescBlock {
+    /// A descriptor allocated for this node.
+    pub const OWN: VarDescBlock = VarDescBlock::Own;
+
+    /// The block of a copy of `node` that keeps its descriptor.
+    #[inline]
+    pub fn copied_from(self, node: TypeExprRef) -> VarDescBlock {
+        match self {
+            VarDescBlock::Own => VarDescBlock::Of(node),
+            other => other,
+        }
+    }
+}
+
 /// Type descriptor - the actual content of a type expression.
 #[derive(Debug, Clone)]
 pub enum TypeDesc {
     /// Type variable: `'a` or `'_a`
-    Tvar(Option<String>),
+    Tvar(Option<String>, VarDescBlock),
 
     /// N-ary arrow (function) type: `(arg1, ..., argN) -> ret`.
     ///
@@ -464,7 +498,7 @@ pub enum TypeDesc {
     Tvariant(Box<RowDesc>),
 
     /// Universal type variable (from forall quantifier)
-    Tunivar(Option<String>),
+    Tunivar(Option<String>, VarDescBlock),
 
     /// Polymorphic type: `'a1 ... 'an. ty`
     Tpoly {
@@ -501,6 +535,8 @@ impl TypeDesc {
                 abbrev,
                 path_block: path_block.copied_from(node),
             },
+            TypeDesc::Tvar(name, block) => TypeDesc::Tvar(name, block.copied_from(node)),
+            TypeDesc::Tunivar(name, block) => TypeDesc::Tunivar(name, block.copied_from(node)),
             desc => desc,
         }
     }
@@ -1363,15 +1399,26 @@ mod tests {
 
     #[test]
     fn test_type_expr_creation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(Some("a".to_string())), GENERIC_LEVEL, 1);
+        let ty = TypeExpr::new(
+            TypeDesc::Tvar(
+                Some("a".to_string()),
+                crate::types::type_expr::VarDescBlock::OWN,
+            ),
+            GENERIC_LEVEL,
+            1,
+        );
         assert_eq!(ty.id(), 1);
         assert_eq!(ty.level(), GENERIC_LEVEL);
-        assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(_)));
+        assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(..)));
     }
 
     #[test]
     fn test_type_expr_mutation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
+        let ty = TypeExpr::new(
+            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            0,
+            1,
+        );
         ty.set_level(GENERIC_LEVEL);
         assert_eq!(ty.level(), GENERIC_LEVEL);
 
@@ -1381,9 +1428,21 @@ mod tests {
 
     #[test]
     fn test_type_expr_equality() {
-        let ty1 = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
-        let ty2 = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
-        let ty3 = TypeExpr::new(TypeDesc::Tvar(None), 0, 2);
+        let ty1 = TypeExpr::new(
+            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            0,
+            1,
+        );
+        let ty2 = TypeExpr::new(
+            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            0,
+            1,
+        );
+        let ty3 = TypeExpr::new(
+            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            0,
+            2,
+        );
 
         assert_eq!(ty1, ty2); // Same id
         assert_ne!(ty1, ty3); // Different id

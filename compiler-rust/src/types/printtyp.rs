@@ -319,7 +319,7 @@ impl<'a> Printtyp<'a> {
     }
 
     fn add_named_var(&mut self, ty: TypeExprRef) {
-        if let TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) =
+        if let TypeDesc::Tvar(Some(name), ..) | TypeDesc::Tunivar(Some(name), ..) =
             &*self.ctx.borrow_desc(ty)
             && !self.named_vars.contains(name)
         {
@@ -369,7 +369,9 @@ impl<'a> Printtyp<'a> {
             return name.clone();
         }
         let given = match &*self.ctx.borrow_desc(t) {
-            TypeDesc::Tvar(Some(name)) | TypeDesc::Tunivar(Some(name)) => Some(name.clone()),
+            TypeDesc::Tvar(Some(name), ..) | TypeDesc::Tunivar(Some(name), ..) => {
+                Some(name.clone())
+            }
             _ => None,
         };
         let name = match given {
@@ -430,7 +432,7 @@ impl<'a> Printtyp<'a> {
     fn aliasable(&self, ty: TypeExprRef) -> bool {
         !matches!(
             &*self.ctx.borrow_desc(ty),
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tpoly { .. }
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tpoly { .. }
         )
     }
 
@@ -463,7 +465,7 @@ impl<'a> Printtyp<'a> {
             let repr = self.ctx.repr(current);
             match &*self.ctx.borrow_desc(repr) {
                 TypeDesc::Tfield { rest, .. } => current = *rest,
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => {
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tconstr { .. } => {
                     return true;
                 }
                 _ => return false,
@@ -482,7 +484,7 @@ impl<'a> Printtyp<'a> {
         visited.push(px);
         let desc = (*self.ctx.get_desc(ty)).clone();
         match desc {
-            TypeDesc::Tvar(_) => self.add_named_var(ty),
+            TypeDesc::Tvar(..) => self.add_named_var(ty),
             TypeDesc::Tarrow { args, ret } => {
                 for arg in &args {
                     self.mark_loops_rec(visited, arg.typ);
@@ -554,7 +556,7 @@ impl<'a> Printtyp<'a> {
                 }
                 self.mark_loops_rec(visited, body);
             }
-            TypeDesc::Tunivar(_) => self.add_named_var(ty),
+            TypeDesc::Tunivar(..) => self.add_named_var(ty),
         }
         visited.truncate(depth);
     }
@@ -597,7 +599,7 @@ impl<'a> Printtyp<'a> {
     // ------------------------------------------------------------------
 
     fn is_non_gen(&self, sch: bool, ty: TypeExprRef) -> bool {
-        sch && matches!(&*self.ctx.borrow_desc(ty), TypeDesc::Tvar(_))
+        sch && matches!(&*self.ctx.borrow_desc(ty), TypeDesc::Tvar(..))
             && self.ctx.get_level(ty) != GENERIC_LEVEL
     }
 
@@ -613,7 +615,7 @@ impl<'a> Printtyp<'a> {
         let desc = (*self.ctx.get_desc(ty)).clone();
         let pr_typ = |this: &mut Self| -> OutType {
             match &desc {
-                TypeDesc::Tvar(_) => {
+                TypeDesc::Tvar(..) => {
                     let non_gen = this.is_non_gen(sch, ty);
                     let name = this.name_of_type(non_gen, ty);
                     OutType::Otyp_var(non_gen, name)
@@ -688,7 +690,7 @@ impl<'a> Printtyp<'a> {
                         tr
                     }
                 }
-                TypeDesc::Tunivar(_) => OutType::Otyp_var(false, this.name_of_type(false, ty)),
+                TypeDesc::Tunivar(..) => OutType::Otyp_var(false, this.name_of_type(false, ty)),
                 TypeDesc::Tpackage { path, lids, args } => {
                     let n = lids
                         .iter()
@@ -808,7 +810,7 @@ impl<'a> Printtyp<'a> {
             .map(|(s, mutable, t)| (s, mutable, self.tree_of_typexp(sch, t)))
             .collect();
         let rest = match &*self.ctx.borrow_desc(rest) {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => Some(self.is_non_gen(sch, rest)),
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => Some(self.is_non_gen(sch, rest)),
             TypeDesc::Tconstr { .. } => Some(false),
             TypeDesc::Tnil => None,
             _ => unreachable!("typfields (1)"),
@@ -924,7 +926,7 @@ impl<'a> Printtyp<'a> {
             visited.push(ty);
             let desc = (*ctx.get_desc(ty)).clone();
             match desc {
-                TypeDesc::Tvar(_) => vars.push(ty),
+                TypeDesc::Tvar(..) => vars.push(ty),
                 TypeDesc::Tobject { fields, .. } => go(ctx, visited, vars, fields),
                 TypeDesc::Tfield { typ, rest, .. } => {
                     go(ctx, visited, vars, typ);
@@ -988,9 +990,12 @@ impl<'a> Printtyp<'a> {
         if let Some(ty) = decl.type_manifest {
             let vars = self.free_variables(ty);
             for param in &params {
-                let is_underscore = matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name)) if name == "_");
+                let is_underscore = matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name), ..) if name == "_");
                 if is_underscore && vars.contains(param) {
-                    self.ctx.set_desc(*param, TypeDesc::Tvar(None));
+                    self.ctx.set_desc(
+                        *param,
+                        TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                    );
                 }
             }
         }
@@ -2497,7 +2502,7 @@ fn close_tag<W: std::io::Write>(ppf: &mut Formatter<W>) {
 
 impl<'a> Printtyp<'a> {
     fn is_tvar(&self, t: TypeExprRef) -> bool {
-        matches!(&*self.ctx.borrow_desc(self.ctx.repr(t)), TypeDesc::Tvar(_))
+        matches!(&*self.ctx.borrow_desc(self.ctx.repr(t)), TypeDesc::Tvar(..))
     }
 
     /// `same_path` (printtyp.ml:1219-1232); `best_type_path` is `(p, Id)`.
@@ -2586,9 +2591,10 @@ impl<'a> Printtyp<'a> {
             return t;
         }
         let more_level = self.ctx.get_level(btype::row_more(self.ctx, &row));
-        let row_more = self
-            .ctx
-            .alloc_type_at_level(TypeDesc::Tvar(None), more_level);
+        let row_more = self.ctx.alloc_type_at_level(
+            TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+            more_level,
+        );
         let level = self.ctx.get_level(t);
         self.ctx.alloc_type_at_level(
             TypeDesc::Tvariant(Box::new(RowDesc {
@@ -2606,7 +2612,7 @@ impl<'a> Printtyp<'a> {
         let level = self.ctx.get_level(ty);
         let desc = (*self.ctx.get_desc(ty)).clone();
         match desc {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => ty,
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => ty,
             TypeDesc::Tvariant(row) => {
                 let row = btype::row_repr(self.ctx, &row);
                 let more = self.ctx.repr(row.row_more);
@@ -2653,11 +2659,14 @@ impl<'a> Printtyp<'a> {
                     level,
                 )
             }
-            desc @ (TypeDesc::Tvar(_) | TypeDesc::Tnil) => {
+            desc @ (TypeDesc::Tvar(..) | TypeDesc::Tnil) => {
                 self.ctx.alloc_type_at_level(desc, level)
             }
-            TypeDesc::Tunivar(_) => ty,
-            _ => self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), level),
+            TypeDesc::Tunivar(..) => ty,
+            _ => self.ctx.alloc_type_at_level(
+                TypeDesc::Tvar(None, crate::types::type_expr::VarDescBlock::OWN),
+                level,
+            ),
         }
     }
 
@@ -2709,8 +2718,8 @@ impl<'a> Printtyp<'a> {
             | (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { .. })
             | (TypeDesc::Tnil, TypeDesc::Tconstr { .. })
             | (TypeDesc::Tconstr { .. }, TypeDesc::Tnil)
-            | (_, TypeDesc::Tvar(_))
-            | (TypeDesc::Tvar(_), _)
+            | (_, TypeDesc::Tvar(..))
+            | (TypeDesc::Tvar(..), _)
             | (TypeDesc::Tvariant(_), TypeDesc::Tvariant(_)) => true,
             (
                 TypeDesc::Tfield {
@@ -2863,27 +2872,28 @@ impl<'a> Printtyp<'a> {
         let d4 = (*self.ctx.get_desc(t4)).clone();
         let binding_time = |p: &Path| p.binding_time();
         match (&d3, &d4) {
-            (TypeDesc::Ttuple(l), TypeDesc::Tvar(_)) | (TypeDesc::Tvar(_), TypeDesc::Ttuple(l))
+            (TypeDesc::Ttuple(l), TypeDesc::Tvar(..))
+            | (TypeDesc::Tvar(..), TypeDesc::Ttuple(l))
                 if l.is_empty() =>
             {
                 ppf.cut();
                 ppf.str("Self type cannot escape its class");
             }
-            (TypeDesc::Tconstr { path: p, .. }, TypeDesc::Tvar(_))
+            (TypeDesc::Tconstr { path: p, .. }, TypeDesc::Tvar(..))
                 if unif && self.ctx.get_level(t4) < binding_time(p) =>
             {
                 self.escape_scope(ppf, p);
             }
-            (TypeDesc::Tvar(_), TypeDesc::Tconstr { path: p, .. })
+            (TypeDesc::Tvar(..), TypeDesc::Tconstr { path: p, .. })
                 if unif && self.ctx.get_level(t3) < binding_time(p) =>
             {
                 self.escape_scope(ppf, p);
             }
-            (TypeDesc::Tvar(_), TypeDesc::Tunivar(_))
-            | (TypeDesc::Tunivar(_), TypeDesc::Tvar(_)) => {
+            (TypeDesc::Tvar(..), TypeDesc::Tunivar(..))
+            | (TypeDesc::Tunivar(..), TypeDesc::Tvar(..)) => {
                 ppf.cut();
                 ppf.str("The universal variable ");
-                let u = if matches!(d3, TypeDesc::Tunivar(_)) {
+                let u = if matches!(d3, TypeDesc::Tunivar(..)) {
                     t3
                 } else {
                     t4
@@ -2891,8 +2901,8 @@ impl<'a> Printtyp<'a> {
                 self.pp_type_expr(ppf, u);
                 ppf.str(" would escape its scope");
             }
-            (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
-                let (t, t2) = if matches!(d3, TypeDesc::Tvar(_)) {
+            (TypeDesc::Tvar(..), _) | (_, TypeDesc::Tvar(..)) => {
+                let (t, t2) = if matches!(d3, TypeDesc::Tvar(..)) {
                     (t3, t4)
                 } else {
                     (t4, t3)
