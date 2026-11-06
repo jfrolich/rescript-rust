@@ -19,7 +19,7 @@ use crate::js_ir::{
     StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
 use crate::lambda::arena::{
-    ApplyId, CatchId, FuncId, IdentId, Lam, LamArena, LamList, Node, PrimId, StrSwitchId, SwitchId,
+    ApplyId, CatchId, IdentId, Lam, LamArena, LamList, Node, PrimId, StrSwitchId, SwitchId,
     View,
 };
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
@@ -34,14 +34,14 @@ use crate::lambda::js_shake::{
     move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
 use crate::lambda::lam_analysis_arena as lam_analysis;
-use crate::lambda::lam_analysis_arena::{free_variables, has_exit_code, lfunction_can_be_inlined};
+use crate::lambda::lam_analysis_arena::{free_variables, has_exit_code};
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_closure_arena::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_compile_context::ExternalArityInfo;
 use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_primitive::{Cst, Primitive};
-use crate::lambda::{ApInfo, ApplyStatus, Lambda, SwitchCaseTag, SwitchKey, TagInfo};
+use crate::lambda::{ApplyStatus, Lambda, SwitchCaseTag, SwitchKey, TagInfo};
 use crate::lambda::{LamLoc, LamLocTable};
 use tracing::info_span;
 
@@ -283,22 +283,6 @@ fn cmj_export_arity_to_external(info: CmjExportArity) -> ExternalArityInfo {
     }
 }
 
-pub(crate) enum LambdaIdGenerator {
-    Owned(IdGenerator),
-    Shared(Arc<IdGenerator>),
-}
-
-impl std::ops::Deref for LambdaIdGenerator {
-    type Target = IdGenerator;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Owned(generator) => generator,
-            Self::Shared(generator) => generator,
-        }
-    }
-}
-
 struct SavedFunctionScope {
     switch_depth: i32,
     loop_stack: Vec<Option<String>>,
@@ -310,7 +294,7 @@ struct SavedFunctionScope {
 
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
-    pub(crate) id_gen: LambdaIdGenerator,
+    pub(crate) id_gen: IdGenerator,
     /// `Js_output.output_finished` of each `Lifthenelse` compiled in a
     /// return continuation, keyed by its `then` branch: only the
     /// `return e ? a : b` arm sets it (lam_compile.ml:1514-1518).
@@ -437,7 +421,7 @@ impl LambdaCompiler {
     pub fn new() -> Self {
         const STANDALONE_START_STAMP: i32 = 1 << 24;
         Self::with_generator_and_options(
-            LambdaIdGenerator::Owned(IdGenerator::with_start_stamp(STANDALONE_START_STAMP)),
+            IdGenerator::with_start_stamp(STANDALONE_START_STAMP),
             None,
             false,
             true,
@@ -446,7 +430,7 @@ impl LambdaCompiler {
     }
 
     fn with_generator_and_options(
-        id_gen: LambdaIdGenerator,
+        id_gen: IdGenerator,
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
         check_div_by_zero: bool,
@@ -482,22 +466,6 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn with_shared_generator_and_options(
-        id_gen: Arc<IdGenerator>,
-        module_path_resolver: Option<ModulePathResolver>,
-        jsx_preserve: bool,
-        check_div_by_zero: bool,
-        cross_module_inline: bool,
-    ) -> Self {
-        Self::with_generator_and_options(
-            LambdaIdGenerator::Shared(id_gen),
-            module_path_resolver,
-            jsx_preserve,
-            check_div_by_zero,
-            cross_module_inline,
-        )
-    }
-
     /// Create a compiler with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<ModulePathResolver>) -> Self {
         Self::with_module_path_resolver_and_jsx_preserve(module_path_resolver, false)
@@ -519,7 +487,7 @@ impl LambdaCompiler {
         cross_module_inline: bool,
     ) -> Self {
         Self::with_generator_and_options(
-            LambdaIdGenerator::Owned(IdGenerator::new()),
+            IdGenerator::new(),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
@@ -1207,7 +1175,7 @@ impl LambdaCompiler {
         if let Some(Lambda::Lfunction(f)) =
             self.resolve_cmj_module_field_lambda(&module, &field_name)
             && f.params.len() == a.list_len(args)
-            && crate::lambda::lam_analysis::lfunction_can_be_inlined(&f)
+            && lam_analysis::attr_can_be_inlined(&f.attr)
         {
             // OCaml compiler/core/lam_compile.ml:275-290 inlines closed
             // `persistent_closed_lambda` functions from `.cmj` during
@@ -3154,24 +3122,6 @@ impl LambdaCompiler {
         // `else { return undefined; }` for top-level single-If bodies,
         // matching OCaml's `function_body` rule (js_dump.ml:1612-1618).
         None
-    }
-
-    fn js_block_is_simple_unit_return_tail(&self, block: &Block) -> bool {
-        let Some((last, prefix)) = block.split_last() else {
-            return false;
-        };
-        matches!(
-            last,
-            Statement {
-                desc: StatementDesc::Return(Expression {
-                    desc: ExpressionDesc::Undefined { .. },
-                    ..
-                }),
-                ..
-            }
-        ) && prefix
-            .iter()
-            .all(|stmt| matches!(stmt.desc, StatementDesc::Exp(_)))
     }
 
     fn handler_returns_unit_undefined(
@@ -7169,7 +7119,7 @@ fn collect_cmj_export_lambdas_from_simplified_lambda(
                 crate::lambda::lam_closure_arena::is_closed(a, value)
             }
             _ => {
-                lam_analysis::size(a, value) < crate::lambda::lam_analysis::SMALL_INLINE_SIZE
+                lam_analysis::size(a, value) < lam_analysis::SMALL_INLINE_SIZE
                     && crate::lambda::lam_closure_arena::free_variables_with_stats(
                         a,
                         &Default::default(),

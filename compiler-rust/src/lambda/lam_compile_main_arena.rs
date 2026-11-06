@@ -15,12 +15,12 @@ use crate::lambda::lam_beta_reduce_arena::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_compile_context::RecFlag;
 use crate::lambda::lam_pass_alpha_conversion_arena::alpha_conversion;
-use crate::lambda::lam_pass_collect::ExternalArityResolver;
+use crate::lambda::lam_pass_collect_arena::ExternalArityResolver;
 use crate::lambda::lam_pass_collect_arena::{collect_info_with_external_arity, get_arity};
 use crate::lambda::lam_pass_deep_flatten_arena::deep_flatten;
 use crate::lambda::lam_pass_exits_arena::simplify_exits;
 use crate::lambda::lam_pass_lets_dce_arena::simplify_lets;
-use crate::lambda::lam_pass_remove_alias::ExternalInlineResolver;
+use crate::lambda::lam_pass_remove_alias_arena::ExternalInlineResolver;
 use crate::lambda::lam_pass_remove_alias_arena::simplify_alias;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_stats::{Element, IdKind, LamStats};
@@ -68,6 +68,21 @@ pub fn duplicate_export_name(a: &LamArena, lam: Lam) -> Option<String> {
         .rev()
         .find(|id| !seen.insert(id.name().to_string()))
         .map(|id| id.name().to_string())
+}
+
+/// Flat export name for a hoisted function path: each `\"quoted"` segment is
+/// unquoted and the segments are joined with `$`.
+pub(crate) fn hoisted_export_name(path: &[String]) -> String {
+    path.iter()
+        .map(|part| {
+            if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+                &part[2..part.len() - 1]
+            } else {
+                part.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("$")
 }
 
 /// lam_compile_main.ml:148-200, then `Lam_coercion.handle_exports`.
@@ -267,7 +282,7 @@ pub fn add_hoisted_function_aliases(s: &mut Simplified, hoisted: &[HoistedFuncti
         let id = s
             .meta
             .id_gen
-            .create(&crate::lambda::lam_compile_main::hoisted_export_name(
+            .create(&hoisted_export_name(
                 &item.path,
             ));
         let mut access = a.var(*top_id);

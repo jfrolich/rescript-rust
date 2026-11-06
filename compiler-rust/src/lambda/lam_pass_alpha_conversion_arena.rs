@@ -7,7 +7,7 @@ use crate::lambda::arena::{Lam, LamArena, LamList, Node};
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_pass_collect::ExternalArityResolver;
+use crate::lambda::lam_pass_collect_arena::ExternalArityResolver;
 use crate::lambda::lam_pass_collect_arena::get_arity_with_external_arity;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_stats::LamStats;

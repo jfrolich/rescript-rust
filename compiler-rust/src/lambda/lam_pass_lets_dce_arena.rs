@@ -9,9 +9,66 @@ use crate::lambda::lam_analysis_arena::{lfunction_can_be_inlined, no_side_effect
 use crate::lambda::lam_beta_reduce_arena::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_pass_count::{OccurrenceTable, UsedInfo};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_util_arena::refine_let_original;
+
+/// Equivalent of OCaml's `Lam_pass_count.used_info` (lam_pass_count.ml:15-23).
+/// `Default` is OCaml's `dummy_info` (lam_pass_count.ml:30).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UsedInfo {
+    /// Number of references to the binding.
+    pub times: u32,
+    /// True when at least one reference appears under a lambda or loop body
+    /// (lam_pass_count.ml:17-22).
+    pub captured: bool,
+}
+
+/// Equivalent of OCaml's `absorb_info` (lam_pass_count.ml:33-37). Adds `y`'s
+/// count into `x` and propagates the captured flag.
+fn absorb_info(x: &mut UsedInfo, y: UsedInfo) {
+    x.times = x.times.saturating_add(y.times);
+    if y.captured {
+        x.captured = true;
+    }
+}
+
+/// Occurrence table mirroring OCaml's `Hash_ident.t` of mutable `used_info`
+/// records (lam_pass_count.ml:25-26). Each binding owns a slot in `values`;
+/// `entries` maps an ident to the slot of its most recent binding, so a
+/// rebinding gets a fresh slot while outer scopes keep pointing at theirs.
+#[derive(Default)]
+pub(crate) struct OccurrenceTable {
+    pub(crate) entries: HashMap<Ident, usize>,
+    pub(crate) values: Vec<UsedInfo>,
+}
+
+impl OccurrenceTable {
+    /// The info of the latest binding of `id`, or the default
+    /// (lam_pass_count.ml:30).
+    pub(crate) fn get(&self, id: &Ident) -> UsedInfo {
+        self.entries
+            .get(id)
+            .map(|index| self.values[*index])
+            .unwrap_or_default()
+    }
+
+    /// Allocate a fresh slot for `id` (lam_pass_count.ml:69-73).
+    pub(crate) fn bind(&mut self, id: &Ident) -> usize {
+        let index = self.values.len();
+        self.values.push(UsedInfo::default());
+        self.entries.insert(*id, index);
+        index
+    }
+
+    pub(crate) fn used(&self, id: &Ident) -> bool {
+        self.get(id).times > 0
+    }
+
+    /// `absorb_info` (lam_pass_count.ml:33-37) applied to a slot.
+    pub(crate) fn absorb(&mut self, index: usize, other: UsedInfo) {
+        absorb_info(&mut self.values[index], other);
+    }
+}
 
 /// Bindings in scope, pointing at their slots of the occurrence table
 /// (`local_tbl = used_info Map_ident.t`, lam_pass_count.ml:28).

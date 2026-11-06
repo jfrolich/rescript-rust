@@ -1,13 +1,243 @@
 //! `Lam_analysis` over the Lambda arena: side effects, size, and inlining
 //! profitability.
 
+use crate::binary_ast::ppx::{
+    JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
+};
 use crate::ident::Ident;
 use crate::lambda::arena::{FuncId, Lam, LamArena, Node, View};
-use crate::lambda::lam_analysis::{SMALL_INLINE_SIZE, is_pure_primitive, size_constant};
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{InlineAttribute, TagInfo};
+
+/// Check if a primitive operation is pure (no side effects).
+pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Constant>) -> bool {
+    match prim {
+        Primitive::Pidentity | Primitive::Pignore => true,
+        // Division can raise division by zero.
+        Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
+            second_constant.is_some_and(not_zero_constant)
+        }
+        // lam_analysis.ml: raises on a negative exponent, so pure only when
+        // the exponent is a nonnegative constant.
+        Primitive::Ppowbigint => {
+            matches!(second_constant, Some(Constant::BigInt { negative: false, .. }))
+        }
+
+        // Creation and type checking primitives
+        Primitive::PcreateExtension(_)
+        | Primitive::PextensionSlotEq
+        | Primitive::Ptypeof
+        | Primitive::PisNull
+        | Primitive::PisNotNone
+        | Primitive::Psome
+        | Primitive::PsomeNotNest
+        | Primitive::PisUndefined
+        | Primitive::PisNullUndefined
+        | Primitive::PnullToOpt
+        | Primitive::PnullUndefinedToOpt
+        | Primitive::PjsObjectCreate(_)
+        | Primitive::Pimport(_) => true,
+
+        // Block operations
+        Primitive::Pmakeblock(_, _)
+        | Primitive::Pfield(_, _)
+        | Primitive::PvalFromOption
+        | Primitive::PvalFromOptionNotNest
+        | Primitive::Pduprecord
+        | Primitive::PrecordRest(_) => true,
+
+        // Object primitives
+        Primitive::Pobjcomp(_)
+        | Primitive::Pobjorder
+        | Primitive::Pobjmin
+        | Primitive::Pobjmax
+        | Primitive::Pobjtag
+        | Primitive::Pobjsize => true,
+
+        // Boolean primitives
+        Primitive::Psequand
+        | Primitive::Psequor
+        | Primitive::Pnot
+        | Primitive::Pboolcomp(_)
+        | Primitive::Pboolorder
+        | Primitive::Pboolmin
+        | Primitive::Pboolmax => true,
+
+        // Integer primitives
+        Primitive::Pnegint
+        | Primitive::Paddint
+        | Primitive::Psubint
+        | Primitive::Pmulint
+        | Primitive::Ppowint
+        | Primitive::Pnotint
+        | Primitive::Pandint
+        | Primitive::Porint
+        | Primitive::Pxorint
+        | Primitive::Plslint
+        | Primitive::Plsrint
+        | Primitive::Pasrint
+        | Primitive::Pintcomp(_)
+        | Primitive::Pintorder
+        | Primitive::Pintmin
+        | Primitive::Pintmax => true,
+
+        // Float primitives
+        Primitive::Pintoffloat
+        | Primitive::Pfloatofint
+        | Primitive::Pnegfloat
+        | Primitive::Paddfloat
+        | Primitive::Psubfloat
+        | Primitive::Pmulfloat
+        | Primitive::Ppowfloat
+        | Primitive::Pdivfloat
+        | Primitive::Pmodfloat
+        | Primitive::Pfloatcomp(_)
+        | Primitive::Pjscomp(_)
+        | Primitive::Pfloatorder
+        | Primitive::Pfloatmin
+        | Primitive::Pfloatmax => true,
+
+        // BigInt primitives
+        Primitive::Pnegbigint
+        | Primitive::Paddbigint
+        | Primitive::Psubbigint
+        | Primitive::Pmulbigint
+        | Primitive::Pnotbigint
+        | Primitive::Pandbigint
+        | Primitive::Porbigint
+        | Primitive::Pxorbigint
+        | Primitive::Plslbigint
+        | Primitive::Pasrbigint
+        | Primitive::Pbigintcomp(_)
+        | Primitive::Pbigintorder
+        | Primitive::Pbigintmin
+        | Primitive::Pbigintmax => true,
+
+        // String primitives
+        Primitive::Pstringlength
+        | Primitive::Pstringcomp(_)
+        | Primitive::Pstringorder
+        | Primitive::Pstringmin
+        | Primitive::Pstringmax => true,
+
+        // Array primitives (read-only)
+        Primitive::Pmakearray
+        | Primitive::Parraylength
+        | Primitive::Parrayrefu => true,
+
+        // List and dict primitives
+        Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
+
+        // Type testing primitives
+        Primitive::Pisint | Primitive::PisPolyVarBlock => true,
+
+        // Offset and misc
+        Primitive::Pstringadd
+        | Primitive::Ptemplate(_)
+        | Primitive::PfnArity
+        | Primitive::Phash
+        | Primitive::PhashMixstring
+        | Primitive::PhashMixint
+        | Primitive::PhashFinalmix => true,
+
+        // Raw JS code - check if it's a pure expression
+        Primitive::PrawJsCode(info) => raw_js_is_pure(info),
+
+        // Impure primitives
+        Primitive::PtaggedTemplate(_)
+        | Primitive::PjsApply
+        | Primitive::PjsCall { .. }
+        | Primitive::PinitMod
+        | Primitive::PupdateMod
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
+        | Primitive::Pdebugger
+        | Primitive::PjsFnMethod
+        | Primitive::Pawait
+        | Primitive::Parraysets
+        | Primitive::Parraysetu
+        | Primitive::Praise
+        | Primitive::Psetfield(_, _)
+        // Bounds-checked reads throw when the index is out of range.
+        | Primitive::Parrayrefs
+        | Primitive::Pstringrefs
+        | Primitive::Pstringrefu => false,
+    }
+}
+
+/// Small inline size threshold.
+pub const SMALL_INLINE_SIZE: i32 = 5;
+
+/// Exit inline size threshold (for static raise handlers).
+pub const EXIT_INLINE_SIZE: i32 = 7;
+
+/// Compute the size of a constant.
+pub(crate) fn size_constant(c: &Constant) -> i32 {
+    match c {
+        Constant::Int { .. }
+        | Constant::Constructor(_)
+        | Constant::NativeInt { .. }
+        | Constant::Char(_)
+        | Constant::Float(_)
+        | Constant::BigInt { .. }
+        | Constant::Pointer(_)
+        | Constant::JsNull
+        | Constant::JsUndefined { .. }
+        | Constant::ModuleAlias
+        | Constant::JsTrue
+        | Constant::JsFalse => 1,
+
+        Constant::String(_) => 1,
+        Constant::ImmString(_) => 1,
+
+        Constant::Some(inner) => size_constant(inner),
+
+        Constant::Block {
+            tag_info, elements, ..
+        } => {
+            let missing_fields = match &**tag_info {
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
+                    .logical_field_count()
+                    .saturating_sub(elements.len()),
+                _ => 0,
+            };
+            missing_fields as i32 + elements.iter().map(size_constant).sum::<i32>()
+        }
+    }
+}
+
+/// `Lam_analysis.lfunction_can_be_inlined` on a function's attributes.
+/// Check if a constant is definitely not zero.
+/// Used in side effect analysis to determine safe division.
+fn not_zero_constant(c: &Constant) -> bool {
+    match c {
+        Constant::Int { i, .. } => *i != 0,
+        Constant::NativeInt { i, .. } => *i != 0,
+        Constant::BigInt { value, .. } => value != "0",
+        _ => false,
+    }
+}
+
+fn raw_js_is_pure(info: &crate::lambda::lam_primitive::JsRawInfo) -> bool {
+    if info.is_stmt {
+        matches!(
+            classify_js_stmt(&info.code),
+            JsStmtClassification::JsStmtComment
+        )
+    } else {
+        matches!(
+            classify_js_exp(&info.code),
+            JsExpClassification::JsFunction { .. } | JsExpClassification::JsLiteral { .. }
+        )
+    }
+}
+
+/// `Lam_analysis.lfunction_can_be_inlined` on a function's attributes.
+pub fn attr_can_be_inlined(attr: &crate::lambda::FunctionAttribute) -> bool {
+    !attr.async_ && attr.directive.is_none()
+}
 
 /// `Lam_analysis.no_side_effects`.
 pub fn no_side_effects(a: &LamArena, lam: Lam) -> bool {
@@ -149,8 +379,7 @@ pub fn args_all_const(a: &LamArena, args: &[Lam]) -> bool {
 
 /// `Lam_analysis.lfunction_can_be_inlined`.
 pub fn lfunction_can_be_inlined(a: &LamArena, func: FuncId) -> bool {
-    let attr = &a.func_payload(func).attr;
-    !attr.async_ && attr.directive.is_none()
+    attr_can_be_inlined(&a.func_payload(func).attr)
 }
 
 /// `Lam_analysis.ok_to_inline_fun_when_app`.

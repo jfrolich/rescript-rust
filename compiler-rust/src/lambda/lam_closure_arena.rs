@@ -5,7 +5,118 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis_arena::no_side_effects;
-use crate::lambda::lam_closure::{BoundIdents, Position, StatsMap, VarStats, param_map_of_list};
+
+/// High penalty for loop usage (variables used in loops can't be safely inlined).
+const LOOP_USE: i32 = 100;
+
+/// Variable usage statistics.
+///
+/// Tracks how a variable is used within an expression, which helps
+/// determine if it's safe to inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarStats {
+    /// Whether all usages are in "top" position (safe for substitution).
+    ///
+    /// A variable is in top position if it appears before any side effects.
+    /// For example, in `x + (print("hi"); y)`, `x` is in top position but
+    /// `y` is not (because `print` has side effects).
+    pub top: bool,
+
+    /// Number of times the variable is used.
+    pub times: i32,
+}
+
+impl VarStats {
+    /// Create fresh statistics (unused, top position).
+    pub fn fresh() -> Self {
+        VarStats {
+            top: true,
+            times: 0,
+        }
+    }
+
+    /// Create "sink" statistics for variables in loops.
+    pub fn sink() -> Self {
+        VarStats {
+            top: false,
+            times: LOOP_USE,
+        }
+    }
+
+    /// Check if variable is used zero or one time in top position.
+    ///
+    /// Variables matching this pattern are safe to inline regardless
+    /// of whether they're pure.
+    pub fn top_and_used_zero_or_one(&self) -> bool {
+        self.top && (self.times == 0 || self.times == 1)
+    }
+
+    /// Update statistics based on position.
+    pub fn update(&mut self, pos: Position) {
+        match pos {
+            Position::Begin => {
+                self.times += 1;
+            }
+            Position::NotBegin => {
+                self.top = false;
+                self.times += 1;
+            }
+            Position::Sink => {
+                self.top = false;
+                self.times = LOOP_USE;
+            }
+        }
+    }
+}
+
+/// Position within an expression for tracking side effect boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    /// At the beginning (before any side effects).
+    Begin,
+    /// Not at the beginning (after some side effects).
+    NotBegin,
+    /// In a loop or other sink position (unsafe for substitution).
+    Sink,
+}
+
+/// Type alias for variable statistics map.
+pub type StatsMap = HashMap<Ident, VarStats>;
+
+/// Identifiers bound while walking a closure body: the borrowed export set
+/// plus the locals introduced so far. OCaml threads the immutable export set
+/// and extends it persistently; borrowing it here avoids cloning the whole
+/// export set on every analysis.
+pub(crate) struct BoundIdents<'a> {
+    exports: &'a HashSet<Ident>,
+    local: HashSet<Ident>,
+}
+
+impl<'a> BoundIdents<'a> {
+    pub(crate) fn new(exports: &'a HashSet<Ident>) -> Self {
+        Self {
+            exports,
+            local: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn contains(&self, id: &Ident) -> bool {
+        self.local.contains(id) || self.exports.contains(id)
+    }
+
+    pub(crate) fn insert(&mut self, id: Ident) {
+        self.local.insert(id);
+    }
+
+    pub(crate) fn extend(&mut self, ids: impl IntoIterator<Item = Ident>) {
+        self.local.extend(ids);
+    }
+}
+
+/// Create a parameter statistics map from a list of identifiers.
+pub fn param_map_of_list(params: &[Ident]) -> StatsMap {
+    params.iter().map(|p| (*p, VarStats::fresh())).collect()
+}
 
 fn after_lam(a: &LamArena, pos: Position, lam: Lam) -> Position {
     if pos != Position::Begin || no_side_effects(a, lam) {

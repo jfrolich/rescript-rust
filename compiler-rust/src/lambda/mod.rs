@@ -30,12 +30,9 @@ pub mod js_pass_record_rest;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
-pub mod lam_analysis;
 pub mod lam_analysis_arena;
 pub mod lam_arity;
-pub mod lam_beta_reduce;
 pub mod lam_beta_reduce_arena;
-pub mod lam_closure;
 pub mod lam_closure_arena;
 pub mod lam_coercion;
 pub mod lam_compat;
@@ -43,43 +40,28 @@ pub mod lam_compile;
 pub mod lam_compile_const;
 pub mod lam_compile_context;
 pub mod lam_compile_external;
-pub mod lam_compile_main;
 pub mod lam_compile_main_arena;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
 pub mod lam_loc;
 pub mod lam_constant;
-pub mod lam_eta_conversion;
-pub mod lam_exit_code;
-pub mod lam_free_variables;
 pub mod lam_hash_ident;
-pub mod lam_hit;
 pub mod lam_hit_arena;
-pub mod lam_pass_alpha_conversion;
 pub mod lam_pass_alpha_conversion_arena;
 pub mod lam_pass_collapse_var_aliases;
-pub mod lam_pass_collect;
 pub mod lam_pass_collect_arena;
-pub mod lam_pass_count;
-pub mod lam_pass_deep_flatten;
 pub mod lam_pass_deep_flatten_arena;
-pub mod lam_pass_exits;
 pub mod lam_pass_exits_arena;
 pub mod lam_pass_guard_raises;
 pub mod lam_pass_guard_raises_arena;
-pub mod lam_pass_lets_dce;
 pub mod lam_pass_lets_dce_arena;
-pub mod lam_pass_remove_alias;
 pub mod lam_pass_remove_alias_arena;
-pub mod lam_pass_sroa;
 pub mod lam_pass_sroa_arena;
 pub mod lam_primitive;
 pub mod lam_print;
 pub mod lam_stats;
-pub mod lam_subst;
 pub mod lam_subst_arena;
 pub mod lam_tag_info;
-pub mod lam_util;
 pub mod lam_util_arena;
 pub mod lambda_traverse;
 pub mod printlambda;
@@ -460,34 +442,6 @@ pub struct Apply {
     pub ap_info: ApInfo,
     /// Was this transformed from JSX?
     pub ap_transformed_jsx: bool,
-}
-
-/// Transform the lambda in `boxed` and store the result in the same
-/// allocation, so passes that rebuild the tree do not free and reallocate
-/// every child box.
-#[inline]
-pub(crate) fn map_box(mut boxed: Box<Lambda>, f: impl FnOnce(Lambda) -> Lambda) -> Box<Lambda> {
-    let inner = std::mem::replace(&mut *boxed, Lambda::Lbreak);
-    *boxed = f(inner);
-    boxed
-}
-
-/// Rebuild an `Lprim` with mapped arguments, reusing its boxed payload.
-/// Applies the same constant folding as [`Lambda::prim`].
-pub(crate) fn map_prim_args(mut info: Box<PrimInfo>, f: impl FnMut(Lambda) -> Lambda) -> Lambda {
-    let args = std::mem::take(&mut info.args);
-    info.args = args.into_iter().map(f).collect();
-    Lambda::prim_boxed(info)
-}
-
-/// Rebuild an `Lfunction` with a mapped body, reusing its boxed payload.
-pub(crate) fn map_function_body(
-    mut func: Box<LFunction>,
-    f: impl FnOnce(Lambda) -> Lambda,
-) -> Lambda {
-    let body = std::mem::replace(&mut *func.body, Lambda::Lbreak);
-    *func.body = f(body);
-    Lambda::Lfunction(func)
 }
 
 /// Lambda IR expression

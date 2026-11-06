@@ -8,9 +8,12 @@ use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::{
     BoxedNullable, ExternalArityInfo, ExternalArityTable, RecFlag,
 };
-use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_stats::{Element, IdKind, IdentTable, LamStats};
+
+/// Rust counterpart to `Lam_compile_env.query_external_id_info` for
+/// `Lam_arity_analysis.get_arity` (compiler/core/lam_arity_analysis.ml:43-71).
+pub type ExternalArityResolver<'a> = dyn FnMut(&Ident, &str) -> Option<ExternalArityInfo> + 'a;
 
 /// `Lam_util.element_of_lambda` (lam_util.ml:188-196).
 pub(crate) fn element_of_lambda(a: &LamArena, lam: Lam) -> Element {

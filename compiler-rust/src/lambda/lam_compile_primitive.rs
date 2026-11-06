@@ -20,8 +20,8 @@ use crate::js_ir::{BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement
 use crate::lambda::arena::{Lam, LamArena, LamList, PrimId, View};
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::{Lambda, TagInfo};
 use crate::lambda::LamLoc;
+use crate::lambda::TagInfo;
 
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(

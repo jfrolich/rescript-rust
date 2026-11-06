@@ -22,8 +22,8 @@ use crate::lambda::lam_primitive::{
     Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
-use crate::lambda::{Lambda, TagInfo};
 use crate::lambda::LamLoc;
+use crate::lambda::TagInfo;
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,

@@ -6,7 +6,7 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis_arena::no_side_effects;
-use crate::lambda::lam_closure::StatsMap;
+use crate::lambda::lam_closure_arena::StatsMap;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_hash_ident::reference_fold_order;
 use crate::lambda::lam_pass_collect_arena::kind_of_lambda_block;

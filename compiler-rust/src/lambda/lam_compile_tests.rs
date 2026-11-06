@@ -2900,7 +2900,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     );
 
     let simplified =
-        crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(&lam, false);
+        simplify_tree_for_js_backend(&lam);
     let mut direct_compiler = LambdaCompiler::new();
     let direct_body =
         direct_compiler.compile_return_block_tree(extract_first_function_body(&simplified));
@@ -4968,7 +4968,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
         ),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
+    let simplified = simplify_tree_for_js_backend(&lam);
     let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = format!(
         "{}\n{}",
@@ -5070,7 +5070,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
         ),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
+    let simplified = simplify_tree_for_js_backend(&lam);
     let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = print_expression(&compiled.expr);
     assert_eq!(
@@ -8676,7 +8676,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
     // this fixture with that same generator, as OCaml's Ext_ident.create does.
     assert!(
         compiler.id_gen.current_stamp()
-            >= crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&lam)
+            >= { let mut a = LamArena::new(); let l = a.import(&lam); crate::lambda::lam_beta_reduce_arena::max_ident_stamp_in_lambda(&a, l) }
     );
     let compiled = compiler.compile_expr_tree(&lam);
     let rendered = print_block(&compiled.prelude);
@@ -8738,7 +8738,7 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
         Lambda::var(loop_),
     );
 
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
+    let simplified = simplify_tree_for_js_backend(&lam);
     let compiled = compiler.compile_expr_tree(&simplified);
     let rendered = if compiled.prelude.is_empty() {
         print_expression(&compiled.expr)

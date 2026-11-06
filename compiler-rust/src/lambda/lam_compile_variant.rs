@@ -756,7 +756,6 @@ impl LambdaCompiler {
     /// route null / array values to the default body instead.
     fn untagged_typeof_object_guard(
         &self,
-        a: &LamArena,
         scrut: &Expression,
         typeof_cases: &[(SwitchCaseTag, Lam)],
         runtime_test_cases: &[(&crate::types::VariantBlock, Lam)],
@@ -875,7 +874,6 @@ impl LambdaCompiler {
         // #8251: guard typeof "object" against null / arrays
         if !typeof_cases.is_empty()
             && let Some(guard) = self.untagged_typeof_object_guard(
-                a,
                 &scrut_expr,
                 &typeof_cases,
                 &runtime_test_cases,
@@ -1043,7 +1041,6 @@ impl LambdaCompiler {
         // #8251: guard typeof "object" against null / arrays
         if !typeof_cases.is_empty()
             && let Some(guard) = self.untagged_typeof_object_guard(
-                a,
                 &scrut_expr,
                 &typeof_cases,
                 &runtime_test_cases,
@@ -1236,7 +1233,6 @@ impl LambdaCompiler {
         // #8251: guard typeof "object" against null / arrays
         if !typeof_cases.is_empty()
             && let Some(guard) = self.untagged_typeof_object_guard(
-                a,
                 &scrut_expr,
                 &typeof_cases,
                 &runtime_test_cases,

@@ -6,11 +6,19 @@ use ahash::AHashMap as HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::arena::{IdentSpan, Lam, LamArena, Node};
-use crate::lambda::lam_analysis::EXIT_INLINE_SIZE;
+use crate::lambda::lam_analysis_arena::EXIT_INLINE_SIZE;
 use crate::lambda::lam_analysis_arena::size;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_pass_exits::{Collection, count_exit};
 use crate::lambda::lam_subst_arena::{Subst, subst_lambda};
+
+/// `Lam_exit_count.collection`: occurrence count per exit label
+/// (lam_exit_count.ml:25).
+pub type Collection = HashMap<i32, u32>;
+
+/// `Lam_exit_count.count_exit` (lam_exit_count.ml:28).
+pub fn count_exit(exits: &Collection, i: i32) -> u32 {
+    *exits.get(&i).unwrap_or(&0)
+}
 
 struct CountResult {
     exits: Collection,
