@@ -56,8 +56,10 @@ pub(crate) struct SharedTypeNode {
 pub(crate) struct SharedGraph {
     base: u32,
     nodes: Box<[SharedTypeNode]>,
-    /// The graph's type lists (`TypeRefList`), indexed right after its nodes.
+    /// The graph's type lists (`TypeRefList`), indexed right after its nodes,
+    /// then its arrow parameter lists (`TypeArgList`).
     lists: Box<[TypeExprRef]>,
+    args: Box<[super::type_expr::TypeArg]>,
     layouts: Box<[Layout]>,
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
@@ -105,6 +107,20 @@ pub(crate) fn page_list(
     &graph.lists[start..start + list.len()]
 }
 
+/// The parameters of a shared arrow parameter list.
+#[inline]
+pub(crate) fn page_args(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    list: super::type_expr::TypeArgList,
+) -> &[super::type_expr::TypeArg] {
+    let idx = list.raw_start() & !super::type_expr::SHARED_REF_BITS;
+    let graph = pages[(idx >> PAGE_BITS) as usize]
+        .get()
+        .expect("shared parameter list refers to an unpublished page");
+    let start = (idx - graph.base) as usize - graph.nodes.len() - graph.lists.len();
+    &graph.args[start..start + list.len()]
+}
+
 #[inline]
 pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &SharedTypeNode {
     let graph = pages[(idx >> PAGE_BITS) as usize]
@@ -118,6 +134,7 @@ pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &Shar
 pub(crate) type SharedGraphParts = (
     Vec<(TypeDesc, i32)>,
     Vec<TypeExprRef>,
+    Vec<super::type_expr::TypeArg>,
     Vec<Layout>,
     Vec<crate::location::Location>,
 );
@@ -183,20 +200,24 @@ impl SharedTypePool {
     /// Build and publish one graph. `build` receives the base index and
     /// returns the node descriptors (with levels) and layouts, which must
     /// match the reserved sizes, and the graph's location table.
-    /// Publish a graph of `nodes` type nodes, `list_items` type-list elements
-    /// and `layouts` variant layouts. `build` gets the graph's base index:
-    /// node `i` is `base + i`, and the lists start at `base + nodes`.
+    /// Publish a graph of `nodes` type nodes, `list_items` type-list elements,
+    /// `arg_items` arrow parameters and `layouts` variant layouts. `build`
+    /// gets the graph's base index: node `i` is `base + i`, the type lists
+    /// start at `base + nodes` and the parameter lists follow them.
     pub(crate) fn publish(
         &self,
         nodes: usize,
         list_items: usize,
+        arg_items: usize,
         layouts: usize,
         build: impl FnOnce(u32) -> SharedGraphParts,
     ) -> Option<u32> {
-        let (base, end) = self.reserve(nodes.checked_add(list_items)?, layouts)?;
-        let (descs, lists, built_layouts, locations) = build(base);
+        let indices = nodes.checked_add(list_items)?.checked_add(arg_items)?;
+        let (base, end) = self.reserve(indices, layouts)?;
+        let (descs, lists, args, built_layouts, locations) = build(base);
         assert_eq!(descs.len(), nodes, "shared graph node count changed");
         assert_eq!(lists.len(), list_items, "shared graph list size changed");
+        assert_eq!(args.len(), arg_items, "shared graph parameter count changed");
         assert_eq!(
             built_layouts.len(),
             layouts,
@@ -214,6 +235,7 @@ impl SharedTypePool {
                 })
                 .collect(),
             lists: lists.into_boxed_slice(),
+            args: args.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
             locations: locations.into_boxed_slice(),
         });
@@ -298,7 +320,7 @@ mod tests {
     fn published_graphs_are_readable_from_other_threads() {
         let pool = Arc::new(SharedTypePool::new(u64::MAX));
         let base = pool
-            .publish(3, 0, 0, |_| {
+            .publish(3, 0, 0, 0, |_| {
                 (
                     vec![
                         (TypeDesc::Tnil, 7),
@@ -307,13 +329,14 @@ mod tests {
                     ],
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
                 )
             })
             .unwrap();
         let second = pool
-            .publish(1, 0, 0, |_| {
-                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new(), Vec::new())
+            .publish(1, 0, 0, 0, |_| {
+                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new(), Vec::new(), Vec::new())
             })
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);

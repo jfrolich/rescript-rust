@@ -712,11 +712,12 @@ impl<'a> SigReadContext<'a> {
                 1 => {
                     // Caml1999I024 stores the complete parameter list directly;
                     // keep that allocation shape rather than rebuilding unary nodes.
-                    let args = fields[0]
+                    let args: crate::types::type_expr::TypeArgs = fields[0]
                         .as_list()
                         .iter()
                         .map(|arg| self.read_arg(arg))
                         .collect();
+                    let args = self.ctx.new_type_args(&args);
                     let ret = self.read_type_expr(&fields[1]);
                     TypeDesc::Tarrow { args, ret }
                 }

@@ -60,7 +60,7 @@ pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths
                 }
             }
             TypeDesc::Tarrow { args, ret } => {
-                for arg in args.iter() {
+                for arg in types.type_args(args).iter() {
                     walk(types, arg.typ, paths);
                 }
                 walk(types, *ret, paths);

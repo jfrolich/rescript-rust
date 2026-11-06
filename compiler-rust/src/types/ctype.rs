@@ -874,12 +874,20 @@ fn mcomp_rec(
                 ret: ret2,
             },
         ) if params1.len() == params2.len()
-            && params1.iter().zip(params2.iter()).all(|(a1, a2)| {
-                a1.label().same_label(a2.label())
-                    || !(a1.label().is_optional() || a2.label().is_optional())
-            }) =>
+            && ctx
+                .type_args(params1)
+                .iter()
+                .zip(ctx.type_args(params2).iter())
+                .all(|(a1, a2)| {
+                    a1.label().same_label(a2.label())
+                        || !(a1.label().is_optional() || a2.label().is_optional())
+                }) =>
         {
-            for (a1, a2) in params1.iter().zip(params2.iter()) {
+            for (a1, a2) in ctx
+                .type_args(params1)
+                .iter()
+                .zip(ctx.type_args(params2).iter())
+            {
                 mcomp_rec(ctx, env, state, a1.typ, a2.typ)?;
             }
             mcomp_rec(ctx, env, state, *ret1, *ret2)
@@ -1796,9 +1804,13 @@ fn reaches_quick(
         TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => {
             search(&mut ctx.type_list(args).iter().copied())
         }
-        TypeDesc::Tarrow { args, ret } => {
-            search(&mut args.iter().map(|arg| arg.typ).chain(std::iter::once(*ret)))
-        }
+        TypeDesc::Tarrow { args, ret } => search(
+            &mut ctx
+                .type_args(args)
+                .iter()
+                .map(|arg| arg.typ)
+                .chain(std::iter::once(*ret)),
+        ),
         _ => {
             drop(desc);
             let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
@@ -1872,7 +1884,8 @@ fn surely_univar_free(ctx: &TypeContext, ty: TypeExprRef, budget: &mut u32) -> b
             .iter()
             .all(|arg| surely_univar_free(ctx, *arg, budget)),
         TypeDesc::Tarrow { args, ret } => {
-            args.iter()
+            ctx.type_args(args)
+                .iter()
                 .all(|arg| surely_univar_free(ctx, arg.typ, budget))
                 && surely_univar_free(ctx, *ret, budget)
         }
@@ -2064,7 +2077,7 @@ pub(crate) fn occur_check(
                 }
                 TypeDesc::Ttuple(types) => children.extend(ctx.type_list(types).iter().copied()),
                 TypeDesc::Tarrow { args, ret } => {
-                    children.extend(args.iter().map(|arg| arg.typ));
+                    children.extend(ctx.type_args(args).iter().map(|arg| arg.typ));
                     children.push(*ret);
                 }
                 TypeDesc::Tfield { typ, rest, .. } => children.extend([*typ, *rest]),
@@ -5223,7 +5236,8 @@ impl BuildSubtype<'_, '_> {
                 }
                 let mut visited = visited.to_vec();
                 visited.insert(0, t);
-                let params: Vec<_> = args
+                let params: Vec<_> = ctx
+                    .type_args(args)
                     .iter()
                     .map(|arg| {
                         let (t1, c1) = self.build(&visited, !posi, level, arg.typ);
@@ -5235,7 +5249,7 @@ impl BuildSubtype<'_, '_> {
                 let (t2, c2) = self.build(&visited, posi, level, ret);
                 let c = params.iter().fold(c2, |acc, (_, c1)| acc.max(*c1));
                 if c > SubtypeChange::Unchanged {
-                    let args = params.into_iter().map(|(arg, _)| arg).collect();
+                    let args = ctx.new_type_args_from(params.into_iter().map(|(arg, _)| arg));
                     (ctx.new_type(TypeDesc::Tarrow { args, ret: t2 }), c)
                 } else {
                     (t, SubtypeChange::Unchanged)
@@ -5685,12 +5699,13 @@ fn subtype_rec(
                 ret: ret2,
             },
         ) if args1.len() == args2.len()
-            && args1
+            && ctx
+                .type_args(args1)
                 .iter()
-                .zip(args2)
+                .zip(ctx.type_args(args2).iter())
                 .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
         {
-            for (a1, a2) in args1.iter().zip(args2) {
+            for (a1, a2) in ctx.type_args(args1).iter().zip(ctx.type_args(args2).iter()) {
                 subtype_rec(
                     ctx,
                     env,
@@ -6862,19 +6877,26 @@ fn subst_type(
         } => {
             // Map types in the original order, but only copy owned labels when
             // rebuilding the arrow. A no-op substitution returns its original id.
-            let new_types = arrow_args
+            let new_types = ctx
+                .type_args(arrow_args)
                 .iter()
                 .map(|arg| subst_type(ctx, params, args, arg.typ))
                 .collect::<Vec<_>>();
             let new_ret = subst_type(ctx, params, args, *ret);
-            if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
+            if new_types
+                .iter()
+                .zip(ctx.type_args(arrow_args).iter())
+                .all(|(a, b)| *a == b.typ)
+                && new_ret == *ret
+            {
                 ty
             } else {
-                let new_args = arrow_args
-                    .iter()
-                    .zip(new_types)
-                    .map(|(arg, typ)| super::TypeArg::new(arg.label().clone(), typ))
-                    .collect();
+                let new_args = ctx.new_type_args_from(
+                    ctx.type_args(arrow_args)
+                        .iter()
+                        .zip(new_types)
+                        .map(|(arg, typ)| super::TypeArg::with_label(arg.label(), typ)),
+                );
                 drop(desc);
                 ctx.new_type(TypeDesc::Tarrow {
                     args: new_args,
@@ -7764,11 +7786,15 @@ fn unify_types(
                 ret: ret2,
             },
         ) if args1.len() == args2.len()
-            && args1.iter().zip(args2).all(|(a1, a2)| {
-                a1.label().same_label(a2.label())
-                    || (state.mode == UnifyMode::Pattern
-                        && !(a1.label().is_optional() || a2.label().is_optional()))
-            }) =>
+            && ctx
+                .type_args(args1)
+                .iter()
+                .zip(ctx.type_args(args2).iter())
+                .all(|(a1, a2)| {
+                    a1.label().same_label(a2.label())
+                        || (state.mode == UnifyMode::Pattern
+                            && !(a1.label().is_optional() || a2.label().is_optional()))
+                }) =>
         {
             let original_desc1 = (*desc1).clone();
             let args1 = args1.clone();
@@ -7786,7 +7812,7 @@ fn unify_types(
             // OCaml links t1'→t2 before recursively unifying children.
             link_type(ctx, t1, t2);
             let result = (|| {
-                for (arg1, arg2) in args1.iter().zip(&args2) {
+                for (arg1, arg2) in ctx.type_args(args1).iter().zip(ctx.type_args(args2).iter()) {
                     unify(ctx, state, arg1.typ, arg2.typ)?;
                 }
                 unify(ctx, state, ret1, ret2)
@@ -9611,9 +9637,10 @@ fn moregen(
                 ret: ret2,
             },
         ) if args1.len() == args2.len()
-            && args1
+            && ctx
+                .type_args(args1)
                 .iter()
-                .zip(args2)
+                .zip(ctx.type_args(args2).iter())
                 .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
         {
             let args1 = args1.clone();
@@ -9622,7 +9649,7 @@ fn moregen(
             let ret2 = *ret2;
             drop(desc1);
             drop(desc2);
-            for (arg1, arg2) in args1.iter().zip(&args2) {
+            for (arg1, arg2) in ctx.type_args(args1).iter().zip(ctx.type_args(args2).iter()) {
                 moregen(ctx, inst_nongen, type_pairs, env, arg1.typ, arg2.typ)?;
             }
             moregen(ctx, inst_nongen, type_pairs, env, ret1, ret2)
@@ -10288,7 +10315,7 @@ fn generalize_expansive_rec(
                 args: ctx.type_list(args).to_vec(),
             },
             TypeDesc::Tarrow { args, ret } => Action::Arrow {
-                args: args.iter().map(|arg| arg.typ).collect(),
+                args: ctx.type_args(args).iter().map(|arg| arg.typ).collect(),
                 ret: *ret,
             },
             _ => {
@@ -10799,9 +10826,10 @@ fn equal_type_exprs_without_renaming_rec(
                 ret: right_ret,
             },
         ) if left_args.len() == right_args.len()
-            && left_args
+            && ctx
+                .type_args(left_args)
                 .iter()
-                .zip(right_args)
+                .zip(ctx.type_args(right_args).iter())
                 .all(|(a, b)| a.label().same_label(b.label())) =>
         {
             let left_args = left_args.clone();
@@ -10810,7 +10838,11 @@ fn equal_type_exprs_without_renaming_rec(
             let right_ret = *right_ret;
             drop(left_desc);
             drop(right_desc);
-            for (left, right) in left_args.iter().zip(&right_args) {
+            for (left, right) in ctx
+                .type_args(left_args)
+                .iter()
+                .zip(ctx.type_args(right_args).iter())
+            {
                 equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left.typ, right.typ)?;
             }
             equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_ret, right_ret)
@@ -11191,7 +11223,7 @@ fn compute_variance_rec(
             let args = args.clone();
             let ret = *ret;
             drop(desc);
-            for arg in args {
+            for arg in ctx.type_args(args) {
                 compute_variance_rec(ctx, env, visited, v1, arg.typ, depth + 1);
             }
             compute_variance_rec(ctx, env, visited, vari, ret, depth + 1);
@@ -11335,7 +11367,13 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, 
         let arrow = {
             let desc = ctx.get_desc(expanded);
             if let TypeDesc::Tarrow { args, ret } = &*desc {
-                Some((args.iter().map(|arg| arg.typ).collect::<Vec<_>>(), *ret))
+                Some((
+                    ctx.type_args(args)
+                        .iter()
+                        .map(|arg| arg.typ)
+                        .collect::<Vec<_>>(),
+                    *ret,
+                ))
             } else {
                 None
             }
@@ -11692,21 +11730,18 @@ fn copy_sep_inner(
         TypeDesc::Tvar(_) => TypeDesc::Tvar(None),
         // compiler/ml/btype.ml:422-423 maps every argument type and then ret.
         TypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
-            args: args
-                .into_iter()
-                .map(|mut arg| {
-                    arg.typ = copy_sep_inner(
-                        ctx,
-                        arg.typ,
-                        fixed,
-                        free_univars,
-                        bound,
-                        &visited_for_children,
-                        delayed_copy,
-                    );
-                    arg
-                })
-                .collect(),
+            args: ctx.new_type_args_from(ctx.type_args(args).into_iter().map(|mut arg| {
+                arg.typ = copy_sep_inner(
+                    ctx,
+                    arg.typ,
+                    fixed,
+                    free_univars,
+                    bound,
+                    &visited_for_children,
+                    delayed_copy,
+                );
+                arg
+            })),
             ret: copy_sep_inner(
                 ctx,
                 ret,
@@ -12232,13 +12267,11 @@ pub fn copy_type_deep(
             let args = args.clone();
             let ret = *ret;
             drop(desc);
-            let new_args = args
-                .into_iter()
-                .map(|mut arg| {
+            let new_args =
+                ctx.new_type_args_from(ctx.type_args(args).into_iter().map(|mut arg| {
                     arg.typ = copy_type_deep(ctx, arg.typ, cache);
                     arg
-                })
-                .collect();
+                }));
             let new_ret = copy_type_deep(ctx, ret, cache);
             let new_ty = ctx.new_type(TypeDesc::Tarrow {
                 args: new_args,
@@ -12611,9 +12644,8 @@ fn subst_identity_copy_rec(
                     let args = args.clone();
                     let ret = *ret;
                     drop(desc);
-                    let args = args
-                        .into_iter()
-                        .map(|mut arg| {
+                    let args =
+                        ctx.new_type_args_from(ctx.type_args(args).into_iter().map(|mut arg| {
                             arg.typ = subst_identity_copy_rec(
                                 ctx,
                                 arg.typ,
@@ -12622,8 +12654,7 @@ fn subst_identity_copy_rec(
                                 row_more_markers,
                             );
                             arg
-                        })
-                        .collect();
+                        }));
                     let ret = subst_identity_copy_rec(
                         ctx,
                         ret,
@@ -13151,14 +13182,11 @@ pub(crate) fn copy_type_cached(
             cache.nodes.insert(ty, placeholder);
             let copied_desc = match structural {
                 CopyAction::Arrow { args, ret } => {
-                    let args = args
-                        .iter()
-                        .map(|arg| {
-                            let mut arg = arg.clone();
-                            arg.typ = copy_type_cached(ctx, arg.typ, cache);
-                            arg
-                        })
-                        .collect();
+                    let args = ctx.new_type_args_from(ctx.type_args(args).iter().map(|arg| {
+                        let mut arg = arg.clone();
+                        arg.typ = copy_type_cached(ctx, arg.typ, cache);
+                        arg
+                    }));
                     let ret = copy_type_cached(ctx, ret, cache);
                     TypeDesc::Tarrow { args, ret }
                 }
@@ -13486,12 +13514,12 @@ pub fn split_arrow(ctx: &TypeContext, ty: TypeExprRef) -> Option<(TypeExprRef, T
         _ => return None,
     };
     drop(desc);
-    let arg = args.first()?;
+    let arg = *ctx.type_args(args).first()?;
     let remaining = if args.len() == 1 {
         ret
     } else {
         ctx.new_type(TypeDesc::Tarrow {
-            args: args[1..].to_vec().into(),
+            args: ctx.new_type_args(&ctx.type_args(args)[1..]),
             ret,
         })
     };
@@ -13510,16 +13538,16 @@ pub fn split_arrow_with_label(
         _ => return None,
     };
     drop(desc);
-    let arg = args.first()?;
+    let arg = *ctx.type_args(args).first()?;
     let remaining = if args.len() == 1 {
         ret
     } else {
         ctx.new_type(TypeDesc::Tarrow {
-            args: args[1..].to_vec().into(),
+            args: ctx.new_type_args(&ctx.type_args(args)[1..]),
             ret,
         })
     };
-    Some((arg.label().clone(), arg.typ, remaining))
+    Some((arg.label().to_arg_label(), arg.typ, remaining))
 }
 
 /// Extract the inner type from option<T>, returning T.
@@ -13896,18 +13924,19 @@ fn nondep_type_rec(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            let args = args
+            let args = ctx
+                .type_args(args)
                 .iter()
                 .map(|arg| {
                     Some(super::type_expr::TypeArg::new(
-                        arg.label().clone(),
+                        arg.label().to_arg_label(),
                         nondep_type_rec(ctx, env, mid, arg.typ, cache)?,
                     ))
                 })
                 .collect::<Option<Vec<_>>>()?;
             let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
             TypeDesc::Tarrow {
-                args: args.into(),
+                args: ctx.new_type_args(&args),
                 ret,
             }
         }
@@ -14260,10 +14289,7 @@ mod tests {
             ArgLabel::optional("y", ctx.intern_loc(loc)),
         ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: labels
-                .iter()
-                .map(|l| TypeArg::new(l.clone(), shared))
-                .collect(),
+            args: ctx.new_type_args_from(labels.iter().map(|l| TypeArg::new(l.clone(), shared))),
             ret: shared,
         });
         let unused = ctx.new_generic_var(Some("unused".into()));
@@ -14279,10 +14305,10 @@ mod tests {
             panic!("not arrow")
         };
         assert_eq!(*ret, replacement);
-        for (arg, expected) in args.iter().zip(&labels) {
+        for (arg, expected) in ctx.type_args(args).iter().zip(&labels) {
             assert_eq!(arg.typ, replacement);
-            assert_eq!(arg.label(), expected);
-            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
+            assert_eq!(arg.label().to_arg_label(), *expected);
+            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label().to_arg_label() {
                 assert_eq!(ctx.resolve_loc(l.loc), loc);
             }
         }
@@ -14293,10 +14319,10 @@ mod tests {
         };
         assert_eq!(args.len(), 3);
         assert_ne!(*ret, shared);
-        for (arg, expected) in args.iter().zip(&labels) {
+        for (arg, expected) in ctx.type_args(args).iter().zip(&labels) {
             assert_eq!(arg.typ, *ret);
-            assert_eq!(arg.label(), expected);
-            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
+            assert_eq!(arg.label().to_arg_label(), *expected);
+            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label().to_arg_label() {
                 assert_eq!(ctx.resolve_loc(l.loc), loc);
             }
         }
@@ -14305,7 +14331,7 @@ mod tests {
             panic!("not arrow")
         };
         assert_eq!(*ret, shared);
-        assert!(args.iter().all(|arg| arg.typ == shared));
+        assert!(ctx.type_args(args).iter().all(|arg| arg.typ == shared));
     }
 
     #[test]

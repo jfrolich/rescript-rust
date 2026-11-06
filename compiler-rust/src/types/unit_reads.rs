@@ -75,7 +75,7 @@ impl Collector<'_> {
                     stack.extend(ctx.type_list(args).iter().copied());
                 }
                 TypeDesc::Tarrow { args, ret } => {
-                    stack.extend(args.iter().map(|arg| arg.typ));
+                    stack.extend(ctx.type_args(args).iter().map(|arg| arg.typ));
                     stack.push(*ret);
                 }
                 TypeDesc::Ttuple(types) => stack.extend(ctx.type_list(types).iter().copied()),

@@ -7166,8 +7166,8 @@ impl<'a> RawLambdaConverter<'a> {
             function.exp_type,
         ));
         let arg_type = match &*ctx.get_desc(fn_type) {
-            TypeDesc::Tarrow { args, .. } => match args.as_slice() {
-                [arg] if matches!(arg.label(), ArgLabel::Nolabel) => arg.typ,
+            TypeDesc::Tarrow { args, .. } => match ctx.type_args(args).as_slice() {
+                [arg] if arg.label().is_nolabel() => arg.typ,
                 _ => return false,
             },
             _ => return false,

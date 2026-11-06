@@ -5290,7 +5290,7 @@ fn substitute_type_expr_path(
                 }
             }
             TypeDesc::Tarrow { args, ret } => {
-                work_stack.extend(args.iter().map(|arg| arg.typ));
+                work_stack.extend(ctx.type_args(args).iter().map(|arg| arg.typ));
                 work_stack.push(*ret);
             }
             TypeDesc::Ttuple(types) => {
@@ -5470,7 +5470,9 @@ pub fn type_expr_mentions_path_prefixes(
                         .any(|a| walk(*a, prefixes, ctx, visited))
             }
             TypeDesc::Tarrow { args, ret } => {
-                args.iter().any(|a| walk(a.typ, prefixes, ctx, visited))
+                ctx.type_args(args)
+                    .iter()
+                    .any(|a| walk(a.typ, prefixes, ctx, visited))
                     || walk(*ret, prefixes, ctx, visited)
             }
             TypeDesc::Ttuple(items) => ctx
@@ -5786,7 +5788,7 @@ fn rewrite_type_expr_prefix(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
             }
             rewrite_type_expr_prefix(*ret, old_name, new_prefix, ctx, visited);
@@ -6489,7 +6491,7 @@ fn rewrite_type_expr_by_path_prefix_in(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_expr_by_path_prefix_in(arg.typ, old_prefix, new_prefix, ctx, visited);
             }
             rewrite_type_expr_by_path_prefix_in(*ret, old_prefix, new_prefix, ctx, visited);
@@ -6606,7 +6608,7 @@ fn rewrite_type_expr_by_path_prefixes(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
             }
             rewrite_type_expr_by_path_prefixes(*ret, prefixes, ctx, visited);

@@ -23,7 +23,8 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField,
-    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef, TypeRefList, TypeRefs,
+    RowFieldRef, TypeArg, TypeArgList, TypeArgs, TypeDesc, TypeExpr, TypeExprRef, TypeRefList,
+    TypeRefs,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -2552,6 +2553,56 @@ impl TypeContext {
         self.store.type_list(list)
     }
 
+    /// Allocate an immutable arrow parameter list (same tier rule as
+    /// [`Self::new_type_list`]).
+    pub fn new_type_args(&self, args: &[TypeArg]) -> TypeArgList {
+        if args.is_empty() {
+            return TypeArgList::EMPTY;
+        }
+        if self.in_store_build() {
+            return self.store.alloc_type_args(args);
+        }
+        self.type_lists.alloc_args(args)
+    }
+
+    /// [`Self::new_type_args`] from an iterator.
+    pub fn new_type_args_from(&self, args: impl IntoIterator<Item = TypeArg>) -> TypeArgList {
+        let args: TypeArgs = args.into_iter().collect();
+        self.new_type_args(&args)
+    }
+
+    /// The parameters of an arrow parameter list.
+    #[inline]
+    pub fn type_args(&self, list: impl Into<TypeArgList>) -> TypeArgs {
+        let list = list.into();
+        if list.is_empty() {
+            return TypeArgs::new();
+        }
+        if list.is_store() {
+            return self.store_type_args(list);
+        }
+        self.type_lists.get_args(list)
+    }
+
+    #[inline(never)]
+    fn store_type_args(&self, list: TypeArgList) -> TypeArgs {
+        if list.is_shared() {
+            return TypeArgs::from_slice(super::shared_store::page_args(
+                &self.shared_pages.borrow(),
+                list,
+            ));
+        }
+        self.store.type_args(list)
+    }
+
+    /// [`Self::store_type_list_for`] for arrow parameter lists.
+    fn store_type_args_for(&self, list: TypeArgList) -> TypeArgList {
+        if list.is_empty() || list.is_store() {
+            return list;
+        }
+        self.store.alloc_type_args(&self.type_lists.get_args(list))
+    }
+
     /// A copy of `list` that store descriptors can hold: lists allocated by
     /// this compilation are copied to the worker store (lists are immutable
     /// values, so only the elements' identities matter).
@@ -2608,14 +2659,14 @@ impl TypeContext {
                     args: ret_args,
                     ret,
                 } => {
-                    args.extend(ret_args.iter().cloned());
+                    args.extend(self.type_args(ret_args).iter().copied());
                     *ret
                 }
                 _ => ret_type,
             }
         };
         self.new_type(TypeDesc::Tarrow {
-            args: args.into(),
+            args: self.new_type_args(&args),
             ret,
         })
     }
@@ -4529,6 +4580,7 @@ impl TypeContext {
             | TypeDesc::Tconstr { args: list, .. }
             | TypeDesc::Tpoly { vars: list, .. }
             | TypeDesc::Tpackage { args: list, .. } => *list = self.store_type_list_for(*list),
+            TypeDesc::Tarrow { args, .. } => *args = self.store_type_args_for(*args),
             _ => {}
         }
         desc
@@ -4538,7 +4590,7 @@ impl TypeContext {
         match desc {
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
             TypeDesc::Tarrow { args, ret } => {
-                for arg in args.iter() {
+                for arg in self.type_args(args).iter() {
                     self.check_store_ref(arg.typ);
                     self.check_store_decl_loc(arg.label().loc());
                 }
@@ -5093,12 +5145,13 @@ mod tests {
         let a = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
         let pool = a.store.shared_pool();
         let base = pool
-            .publish(2, 0, 0, |_| {
+            .publish(2, 0, 0, 0, |_| {
                 (
                     vec![
                         (TypeDesc::Tvar(None), GENERIC_LEVEL),
                         (TypeDesc::Tnil, GENERIC_LEVEL),
                     ],
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),

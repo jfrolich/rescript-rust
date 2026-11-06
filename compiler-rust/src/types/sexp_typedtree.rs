@@ -432,9 +432,9 @@ fn sexp_type_expr_body_inline(
             // compiler/ml/sexp_typedtree.ml emits each argument as
             // [arg_label; typ], followed by the return type.
             let mut items = vec![Sexp::atom("Tarrow")];
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 items.push(Sexp::list(vec![
-                    sexp_type_arg_label(arg.label()),
+                    sexp_type_arg_label(&arg.label().to_arg_label()),
                     sexp_type_expr_inline(arena, ctx, state, arg.typ),
                 ]));
             }

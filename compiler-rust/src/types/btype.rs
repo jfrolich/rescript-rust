@@ -299,7 +299,8 @@ where
             TypeDesc::Tvar(_) => Children::None,
             // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
             TypeDesc::Tarrow { args, ret } => {
-                let mut children = args
+                let mut children = ctx
+                    .type_args(args)
                     .iter()
                     .map(|arg| arg.typ)
                     .collect::<smallvec::SmallVec<[TypeExprRef; 8]>>();

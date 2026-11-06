@@ -1520,7 +1520,7 @@ fn rewrite_type_paths_in_place(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args).iter() {
                 rewrite_type_paths_in_place(ctx, arg.typ, sites, visited, rewrite);
             }
             rewrite_type_paths_in_place(ctx, *ret, sites, visited, rewrite);
@@ -2987,19 +2987,26 @@ fn expand_record_spread_label(
                 ret,
             } => {
                 // Preserve substitution order; no-op arrows need no new labels.
-                let new_types = arrow_args
+                let new_types = ctx
+                    .type_args(arrow_args)
                     .iter()
                     .map(|arg| substitute_type_params(ctx, arg.typ, params, args, cache))
                     .collect::<Vec<_>>();
                 let new_ret = substitute_type_params(ctx, *ret, params, args, cache);
-                if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
+                if new_types
+                    .iter()
+                    .zip(ctx.type_args(arrow_args).iter())
+                    .all(|(a, b)| *a == b.typ)
+                    && new_ret == *ret
+                {
                     ty
                 } else {
-                    let new_args = arrow_args
-                        .iter()
-                        .zip(new_types)
-                        .map(|(arg, typ)| crate::types::TypeArg::new(arg.label().clone(), typ))
-                        .collect();
+                    let new_args = ctx.new_type_args_from(
+                        ctx.type_args(arrow_args)
+                            .iter()
+                            .zip(new_types)
+                            .map(|(arg, typ)| crate::types::TypeArg::with_label(arg.label(), typ)),
+                    );
                     with_original_level(
                         ctx,
                         ty,
@@ -6437,10 +6444,14 @@ fn type_exprs_equal_for_abbrev_recursion(
             },
         ) => {
             left_args.len() == right_args.len()
-                && left_args.iter().zip(&right_args).all(|(left, right)| {
-                    arg_labels_equal_for_abbrev_recursion(left.label(), right.label())
-                        && type_exprs_equal_for_abbrev_recursion(ctx, left.typ, right.typ, seen)
-                })
+                && ctx
+                    .type_args(left_args)
+                    .iter()
+                    .zip(ctx.type_args(right_args).iter())
+                    .all(|(left, right)| {
+                        arg_labels_equal_for_abbrev_recursion(left.label(), right.label())
+                            && type_exprs_equal_for_abbrev_recursion(ctx, left.typ, right.typ, seen)
+                    })
                 && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
         }
         (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items)) => {
@@ -6521,23 +6532,10 @@ fn type_exprs_equal_for_abbrev_recursion(
 }
 
 fn arg_labels_equal_for_abbrev_recursion(
-    left: &crate::types::asttypes::ArgLabel,
-    right: &crate::types::asttypes::ArgLabel,
+    left: crate::types::type_expr::TypeArgLabel,
+    right: crate::types::type_expr::TypeArgLabel,
 ) -> bool {
-    match (left, right) {
-        (crate::types::asttypes::ArgLabel::Nolabel, crate::types::asttypes::ArgLabel::Nolabel) => {
-            true
-        }
-        (
-            crate::types::asttypes::ArgLabel::Labelled(left),
-            crate::types::asttypes::ArgLabel::Labelled(right),
-        )
-        | (
-            crate::types::asttypes::ArgLabel::Optional(left),
-            crate::types::asttypes::ArgLabel::Optional(right),
-        ) => left.txt == right.txt,
-        _ => false,
-    }
+    left.same_label(right)
 }
 
 fn type_var_name_for_abbrev_recursion(
@@ -8905,7 +8903,7 @@ fn apply_with_type_constraints_to_module_type(
                 }
             }
             TypeDesc::Tarrow { args, ret } => {
-                for arg in args {
+                for arg in ctx.type_args(args) {
                     rewrite_type_with_substs(ctx, arg.typ, substs, cache, visited);
                 }
                 rewrite_type_with_substs(ctx, ret, substs, cache, visited);
@@ -10546,7 +10544,7 @@ fn rewrite_functor_param_type_paths_in_type(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in ctx.type_args(args) {
                 rewrite_functor_param_type_paths_in_type(
                     arg.typ,
                     param_name,
@@ -13318,7 +13316,7 @@ fn strip_self_module_prefix_in_sig(
                 }
             }
             TypeDesc::Tarrow { args, ret } => {
-                for arg in args {
+                for arg in type_ctx.type_args(args).iter() {
                     rewrite_type(arg.typ, module_id, direct_items, type_ctx, visited);
                 }
                 rewrite_type(*ret, module_id, direct_items, type_ctx, visited);

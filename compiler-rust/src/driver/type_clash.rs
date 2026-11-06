@@ -81,8 +81,9 @@ fn collect_missing_arguments(
 ) -> Option<Vec<(ArgLabel, TypeExprRef)>> {
     let (params, ret) = match &*ctx.borrow_desc(type1) {
         TypeDesc::Tarrow { args, ret } => (
-            args.iter()
-                .map(|a| (a.label().clone(), a.typ))
+            ctx.type_args(args)
+                .iter()
+                .map(|a| (a.label().to_arg_label(), a.typ))
                 .collect::<Vec<_>>(),
             *ret,
         ),

@@ -2122,14 +2122,14 @@ fn find_arity_mismatch(
         if impl_args.len() != sig_args.len() {
             return Some((impl_args.len(), sig_args.len()));
         }
-        if !impl_args
+        if !type_ctx.type_args(impl_args)
             .iter()
-            .zip(&sig_args)
+            .zip(type_ctx.type_args(sig_args).iter())
             .all(|(impl_arg, sig_arg)| impl_arg.label().same_label(sig_arg.label()))
         {
             return None;
         }
-        for (impl_arg, sig_arg) in impl_args.iter().zip(&sig_args) {
+        for (impl_arg, sig_arg) in type_ctx.type_args(impl_args).iter().zip(type_ctx.type_args(sig_args).iter()) {
             if let Some(mismatch) = loop_(type_ctx, env, seen, impl_arg.typ, sig_arg.typ) {
                 return Some(mismatch);
             }
@@ -2710,7 +2710,7 @@ fn rewrite_substituted_type_paths(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
-            for arg in args {
+            for arg in type_ctx.type_args(args).iter() {
                 rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
             }
             rewrite_substituted_type_paths(type_ctx, *ret, subst, seen);
@@ -3907,7 +3907,7 @@ fn type_exprs_equal_for_inclusion_inner(
             },
         ) => {
             impl_args.len() == sig_args.len()
-                && impl_args.iter().zip(sig_args).all(|(impl_arg, sig_arg)| {
+                && type_ctx.type_args(impl_args).iter().zip(type_ctx.type_args(sig_args).iter()).all(|(impl_arg, sig_arg)| {
                     arg_labels_equal(impl_arg.label(), sig_arg.label())
                         && type_exprs_equal_for_inclusion_inner(
                             type_ctx,
@@ -4300,13 +4300,11 @@ fn object_fields_equal_for_inclusion(
         })
 }
 
-fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {
-    match (left, right) {
-        (ArgLabel::Nolabel, ArgLabel::Nolabel) => true,
-        (ArgLabel::Labelled(left), ArgLabel::Labelled(right))
-        | (ArgLabel::Optional(left), ArgLabel::Optional(right)) => left.txt == right.txt,
-        _ => false,
-    }
+fn arg_labels_equal(
+    left: crate::types::type_expr::TypeArgLabel,
+    right: crate::types::type_expr::TypeArgLabel,
+) -> bool {
+    left.same_label(right)
 }
 
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.

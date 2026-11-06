@@ -7458,7 +7458,8 @@ fn escaped_constructor_path_in_type(
             }
             None
         }
-        TypeDesc::Tarrow { args, ret } => args
+        TypeDesc::Tarrow { args, ret } => type_ctx
+            .type_args(args)
             .iter()
             .find_map(|arg| escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen))
             .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen)),
@@ -9868,7 +9869,12 @@ fn collect_expected_function_arguments(
 
         match &*type_ctx.get_desc(repr) {
             TypeDesc::Tarrow { args: params, ret } => {
-                args.extend(params.iter().map(|arg| (arg.label().clone(), arg.typ)));
+                args.extend(
+                    type_ctx
+                        .type_args(params)
+                        .iter()
+                        .map(|arg| (arg.label().to_arg_label(), arg.typ)),
+                );
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -10155,7 +10161,12 @@ fn collect_function_arg_labels(
 
         match &*type_ctx.get_desc(current) {
             TypeDesc::Tarrow { args, ret } => {
-                labels.extend(args.iter().map(|arg| arg.label().clone()));
+                labels.extend(
+                    type_ctx
+                        .type_args(args)
+                        .iter()
+                        .map(|arg| arg.label().to_arg_label()),
+                );
                 current = *ret;
             }
             _ => break,
@@ -12266,7 +12277,7 @@ fn moregen_link(
             let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
-            for (a1, a2) in a1.iter().zip(&a2) {
+            for (a1, a2) in ctx.type_args(a1).iter().zip(ctx.type_args(a2).iter()) {
                 moregen_link(ctx, a1.typ, a2.typ, visited);
             }
             moregen_link(ctx, r1, r2, visited);

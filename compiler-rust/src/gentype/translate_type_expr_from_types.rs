@@ -335,7 +335,7 @@ pub fn translate_arrow_type(
     let mut arg_deps = Vec::new();
     let mut labeled_convertable_types = Vec::with_capacity(args.len());
     for arg in args {
-        let (label, typ) = match arg.label() {
+        let (label, typ) = match &arg.label().to_arg_label() {
             ArgLabel::Nolabel => (Label::Nolabel, arg.typ),
             label => match remove_option(ctx, label, &arg.typ) {
                 Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
@@ -427,9 +427,14 @@ pub fn translateTypeExprFromTypes_(
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
             translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &body)
         }
-        TypeDesc::Tarrow { args, ret } => {
-            translate_arrow_type(ctx, config, type_vars_gen, type_env, &args, &ret)
-        }
+        TypeDesc::Tarrow { args, ret } => translate_arrow_type(
+            ctx,
+            config,
+            type_vars_gen,
+            type_env,
+            &ctx.type_args(args),
+            &ret,
+        ),
         TypeDesc::Ttuple(list_exp) => {
             let inner_types_translation = translateTypeExprsFromTypes_(
                 ctx,

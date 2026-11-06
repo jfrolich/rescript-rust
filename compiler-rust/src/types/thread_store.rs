@@ -401,6 +401,22 @@ impl ThreadTypeStore {
         self.type_lists.alloc(items)
     }
 
+    /// Allocate an arrow parameter list in the worker store.
+    pub(crate) fn alloc_type_args(
+        &self,
+        args: &[super::type_expr::TypeArg],
+    ) -> super::type_expr::TypeArgList {
+        self.type_lists.alloc_args(args)
+    }
+
+    /// The parameters of a worker-store arrow parameter list.
+    pub(crate) fn type_args(
+        &self,
+        list: super::type_expr::TypeArgList,
+    ) -> super::type_expr::TypeArgs {
+        self.type_lists.get_args(list)
+    }
+
     /// The elements of a worker-store type list.
     pub(crate) fn type_list(
         &self,

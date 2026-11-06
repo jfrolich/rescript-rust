@@ -24,6 +24,7 @@
 //! - Variables with level > current_level can be generalized
 
 use super::asttypes::{ArgLabel, Label, PrivateFlag};
+use super::decl_loc::DeclLoc;
 use super::path::Path;
 use crate::parser::longident::Longident;
 use std::cell::{Cell, RefCell};
@@ -207,18 +208,33 @@ impl TypeRefList {
     }
 }
 
-/// Append-only pool of type lists for one storage tier (see [`TypeRefList`]).
-/// `tag` is the tier's tag bits, or-ed into every handle it returns.
+/// Append-only pools of the immutable lists in type descriptors for one
+/// storage tier (see [`TypeRefList`], [`TypeArgList`]). `tag` is the tier's
+/// tag bits, or-ed into every handle it returns.
 #[derive(Default)]
 pub(crate) struct TypeListPool {
     items: std::cell::RefCell<Vec<TypeExprRef>>,
+    args: std::cell::RefCell<Vec<TypeArg>>,
     tag: u32,
+}
+
+/// Append `items` to `pool`, returning the tagged start position.
+fn pool_append<T: Copy>(pool: &std::cell::RefCell<Vec<T>>, items: &[T], tag: u32) -> u32 {
+    let mut pool = pool.borrow_mut();
+    let start = u32::try_from(pool.len()).expect("type list pool exceeds u32::MAX");
+    assert!(
+        start & SHARED_REF_BITS == 0,
+        "type list pool index exceeds the tag range"
+    );
+    pool.extend_from_slice(items);
+    start | tag
 }
 
 impl TypeListPool {
     pub(crate) fn with_tag(tag: u32) -> Self {
         TypeListPool {
             items: Default::default(),
+            args: Default::default(),
             tag,
         }
     }
@@ -228,14 +244,7 @@ impl TypeListPool {
         if items.is_empty() {
             return TypeRefList::EMPTY;
         }
-        let mut pool = self.items.borrow_mut();
-        let start = u32::try_from(pool.len()).expect("type list pool exceeds u32::MAX");
-        assert!(
-            start & SHARED_REF_BITS == 0,
-            "type list pool index exceeds the tag range"
-        );
-        pool.extend_from_slice(items);
-        TypeRefList::from_parts(start | self.tag, items.len())
+        TypeRefList::from_parts(pool_append(&self.items, items, self.tag), items.len())
     }
 
     /// The elements of a list allocated by this pool.
@@ -250,6 +259,21 @@ impl TypeListPool {
     pub(crate) fn get_at(&self, list: TypeRefList, index: usize) -> TypeExprRef {
         assert!(index < list.len(), "type list index out of range");
         self.items.borrow()[(list.raw_start() & !self.tag) as usize + index]
+    }
+
+    /// Append `args` as a new arrow parameter list.
+    pub(crate) fn alloc_args(&self, args: &[TypeArg]) -> TypeArgList {
+        if args.is_empty() {
+            return TypeArgList::EMPTY;
+        }
+        TypeArgList::from_parts(pool_append(&self.args, args, self.tag), args.len())
+    }
+
+    /// The parameters of a list allocated by this pool.
+    #[inline]
+    pub(crate) fn get_args(&self, list: TypeArgList) -> TypeArgs {
+        let start = (list.raw_start() & !self.tag) as usize;
+        TypeArgs::from_slice(&self.args.borrow()[start..start + list.len()])
     }
 }
 
@@ -272,72 +296,75 @@ impl std::fmt::Debug for TypeRefList {
     }
 }
 
-/// Immutable list of arrow parameters (see `TypeRefList`): cloning a
-/// descriptor shares it instead of copying parameters and their labels.
-#[derive(Clone)]
-pub struct TypeArgList(std::sync::Arc<[TypeArg]>);
+/// Immutable list of arrow parameters: a `Copy` handle into the arrow
+/// parameter pool of the owning tier, exactly like [`TypeRefList`]. Read the
+/// parameters with `TypeContext::type_args`.
+#[derive(Clone, Copy)]
+pub struct TypeArgList {
+    start: u32,
+    len: u32,
+}
+
+/// The parameters of a [`TypeArgList`], copied out of its pool.
+pub type TypeArgs = smallvec::SmallVec<[TypeArg; 4]>;
 
 impl TypeArgList {
+    /// The empty list (no pool access).
+    pub const EMPTY: Self = TypeArgList { start: 0, len: 0 };
+
     #[inline]
-    pub fn as_slice(&self) -> &[TypeArg] {
-        &self.0
+    pub(crate) fn from_parts(start: u32, len: usize) -> Self {
+        let len = u32::try_from(len).expect("arrow parameter list too long");
+        if len == 0 {
+            return Self::EMPTY;
+        }
+        TypeArgList { start, len }
+    }
+
+    /// Number of parameters.
+    #[inline]
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the list has no parameters.
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    pub(crate) fn raw_start(self) -> u32 {
+        self.start
+    }
+
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.start & STORE_REF_TAG != 0
+    }
+
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        self.start & SHARED_REF_BITS == SHARED_REF_BITS
+    }
+}
+
+impl From<&TypeArgList> for TypeArgList {
+    #[inline]
+    fn from(list: &TypeArgList) -> Self {
+        *list
     }
 }
 
 impl Default for TypeArgList {
     fn default() -> Self {
-        TypeArgList(std::sync::Arc::from(Vec::new()))
-    }
-}
-
-impl std::ops::Deref for TypeArgList {
-    type Target = [TypeArg];
-
-    #[inline]
-    fn deref(&self) -> &[TypeArg] {
-        &self.0
+        Self::EMPTY
     }
 }
 
 impl std::fmt::Debug for TypeArgList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.0.iter()).finish()
-    }
-}
-
-impl From<Vec<TypeArg>> for TypeArgList {
-    fn from(items: Vec<TypeArg>) -> Self {
-        TypeArgList(std::sync::Arc::from(items))
-    }
-}
-
-impl From<&[TypeArg]> for TypeArgList {
-    fn from(items: &[TypeArg]) -> Self {
-        TypeArgList(std::sync::Arc::from(items))
-    }
-}
-
-impl FromIterator<TypeArg> for TypeArgList {
-    fn from_iter<I: IntoIterator<Item = TypeArg>>(iter: I) -> Self {
-        TypeArgList(iter.into_iter().collect())
-    }
-}
-
-impl<'a> IntoIterator for &'a TypeArgList {
-    type Item = &'a TypeArg;
-    type IntoIter = std::slice::Iter<'a, TypeArg>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
-impl IntoIterator for TypeArgList {
-    type Item = TypeArg;
-    type IntoIter = std::vec::IntoIter<TypeArg>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.to_vec().into_iter()
+        write!(f, "TypeArgList({:#x}, {})", self.start, self.len)
     }
 }
 
@@ -879,44 +906,172 @@ impl Default for TypeExprRefSet {
     }
 }
 
+/// The label of an arrow parameter, as stored in type descriptors.
+///
+/// Intentional Rust performance representation of `Asttypes.arg_label`
+/// (`compiler/ml/asttypes.ml`) inside `Types.Tarrow` (`compiler/ml/types.ml:24`):
+/// the name is interned and the location is a [`DeclLoc`] handle, so the
+/// label is `Copy`. [`TypeArgLabel::to_arg_label`] gives the owned
+/// [`ArgLabel`] with the same text and location.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TypeArgLabel {
+    /// `None` for `Nolabel`.
+    name: Option<crate::name::Name>,
+    optional: bool,
+    loc: DeclLoc,
+}
+
+impl TypeArgLabel {
+    /// `Nolabel`.
+    pub const NOLABEL: Self = TypeArgLabel {
+        name: None,
+        optional: false,
+        loc: DeclLoc::none(),
+    };
+
+    /// The compact form of `label`.
+    pub fn new(label: &ArgLabel) -> Self {
+        match label {
+            ArgLabel::Nolabel => Self::NOLABEL,
+            ArgLabel::Labelled(l) => TypeArgLabel {
+                name: Some(crate::name::Name::new(&l.txt)),
+                optional: false,
+                loc: l.loc,
+            },
+            ArgLabel::Optional(l) => TypeArgLabel {
+                name: Some(crate::name::Name::new(&l.txt)),
+                optional: true,
+                loc: l.loc,
+            },
+        }
+    }
+
+    /// The owned label (same text and location).
+    pub fn to_arg_label(self) -> ArgLabel {
+        match self.name {
+            None => ArgLabel::Nolabel,
+            Some(name) if self.optional => ArgLabel::optional(name.as_str(), self.loc),
+            Some(name) => ArgLabel::labelled(name.as_str(), self.loc),
+        }
+    }
+
+    /// The label name, `None` for `Nolabel` (`ArgLabel::label_name`).
+    #[inline]
+    pub fn label_name(self) -> Option<&'static str> {
+        self.name.map(|name| name.as_str())
+    }
+
+    /// Whether this is `Nolabel`.
+    #[inline]
+    pub fn is_nolabel(self) -> bool {
+        self.name.is_none()
+    }
+
+    /// Whether this is an `Optional` label.
+    #[inline]
+    pub fn is_optional(self) -> bool {
+        self.optional
+    }
+
+    /// Whether this is a `Labelled` label.
+    #[inline]
+    pub fn is_labelled(self) -> bool {
+        self.name.is_some() && !self.optional
+    }
+
+    /// The label's location (`DeclLoc::none()` for `Nolabel`).
+    #[inline]
+    pub fn loc(self) -> DeclLoc {
+        self.loc
+    }
+
+    /// `ArgLabel::same_label`: same kind and name.
+    #[inline]
+    pub fn same_label(self, other: TypeArgLabel) -> bool {
+        self.name == other.name && self.optional == other.optional
+    }
+}
+
+/// The constructor of an [`ArgLabel`], for matching on a [`TypeArgLabel`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArgLabelKind {
+    Nolabel,
+    Labelled,
+    Optional,
+}
+
+impl TypeArgLabel {
+    /// The label's constructor.
+    #[inline]
+    pub fn to_kind(self) -> ArgLabelKind {
+        match (self.name, self.optional) {
+            (None, _) => ArgLabelKind::Nolabel,
+            (Some(_), false) => ArgLabelKind::Labelled,
+            (Some(_), true) => ArgLabelKind::Optional,
+        }
+    }
+}
+
+impl std::fmt::Debug for TypeArgLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.to_arg_label(), f)
+    }
+}
+
 /// An argument in a function type.
 ///
 /// OCaml types.ml:24 and btype.ml:422-423 preserve labels while mapping types.
-/// Keep the common unlabeled case inline; located labels retain owned metadata.
-#[derive(Clone)]
+///
+/// The label's fields are stored flat (see [`TypeArgLabel`]) so the
+/// parameter packs into 24 bytes.
+#[derive(Clone, Copy)]
 pub struct TypeArg {
-    label: Option<Box<ArgLabel>>,
+    name: Option<crate::name::Name>,
+    loc: DeclLoc,
     /// The argument type (physical arena identity).
     pub typ: TypeExprRef,
+    optional: bool,
 }
 
 impl std::fmt::Debug for TypeArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TypeArg")
-            .field("lbl", self.label())
+            .field("lbl", &self.label())
             .field("typ", &self.typ)
             .finish()
     }
 }
 
 impl TypeArg {
-    /// Create a new type argument, allocating only for a located label.
+    /// Create a new type argument.
     pub fn new(lbl: ArgLabel, typ: TypeExprRef) -> Self {
-        let label = match lbl {
-            ArgLabel::Nolabel => None,
-            label => Some(Box::new(label)),
-        };
-        Self { label, typ }
+        Self::with_label(TypeArgLabel::new(&lbl), typ)
     }
 
-    /// Borrow the original label without copying or allocating metadata.
-    pub fn label(&self) -> &ArgLabel {
-        self.label.as_deref().unwrap_or(&ArgLabel::Nolabel)
+    /// Create a new type argument from a compact label.
+    #[inline]
+    pub fn with_label(label: TypeArgLabel, typ: TypeExprRef) -> Self {
+        Self {
+            name: label.name,
+            loc: label.loc,
+            typ,
+            optional: label.optional,
+        }
     }
 
-    /// Create an unlabeled argument without allocating label storage.
+    /// The parameter's label.
+    #[inline]
+    pub fn label(&self) -> TypeArgLabel {
+        TypeArgLabel {
+            name: self.name,
+            optional: self.optional,
+            loc: self.loc,
+        }
+    }
+
+    /// Create an unlabeled argument.
     pub fn unlabeled(typ: TypeExprRef) -> Self {
-        Self { label: None, typ }
+        Self::with_label(TypeArgLabel::NOLABEL, typ)
     }
 }
 
@@ -1280,25 +1435,25 @@ mod tests {
     #[test]
     fn test_type_arg() {
         let arg = TypeArg::unlabeled(TypeExprRef(1));
-        assert!(matches!(arg.label(), ArgLabel::Nolabel));
+        assert!(arg.label().is_nolabel());
+        assert!(matches!(arg.label().to_arg_label(), ArgLabel::Nolabel));
         assert_eq!(arg.typ, TypeExprRef(1));
     }
 
     #[test]
-    fn type_arg_hot_cold_ownership_and_metadata() {
+    fn type_arg_labels_round_trip() {
         use crate::intern::StrIdx;
         use crate::location::{Location, Position};
         if cfg!(target_pointer_width = "64") {
-            assert_eq!(std::mem::size_of::<TypeArg>(), 16);
+            assert_eq!(std::mem::size_of::<TypeArg>(), 24);
         }
         let typ = TypeExprRef(u32::MAX);
         for arg in [
             TypeArg::unlabeled(typ),
             TypeArg::new(ArgLabel::Nolabel, typ),
         ] {
-            assert!(arg.label.is_none());
-            assert!(arg.clone().label.is_none());
-            assert!(matches!(arg.label(), ArgLabel::Nolabel));
+            assert!(arg.label().is_nolabel());
+            assert_eq!(arg.label().to_kind(), ArgLabelKind::Nolabel);
             assert_eq!(arg.typ, typ);
             assert_eq!(
                 format!("{:?}", arg),
@@ -1323,21 +1478,14 @@ mod tests {
                     ArgLabel::labelled(name, ctx.intern_loc(loc))
                 };
                 let expected_debug = format!("TypeArg {{ lbl: {:?}, typ: {:?} }}", label, typ);
-                let arg = TypeArg::new(label, typ);
+                let arg = TypeArg::new(label.clone(), typ);
                 assert_eq!(format!("{:?}", arg), expected_debug);
-                let address = arg.label() as *const ArgLabel;
-                let mut moved = arg;
-                assert_eq!(moved.label() as *const ArgLabel, address);
-                let cloned = moved.clone();
-                assert_ne!(cloned.label() as *const ArgLabel, address);
-                assert_eq!(cloned.typ, typ);
-                let payload = match cloned.label() {
-                    ArgLabel::Labelled(l) if !optional => l,
-                    ArgLabel::Optional(l) if optional => l,
-                    _ => panic!("label kind changed"),
-                };
-                assert_eq!(payload.txt, name);
-                let resolved = ctx.resolve_loc(payload.loc);
+                assert_eq!(arg.label().to_arg_label(), label);
+                assert_eq!(arg.label().is_optional(), optional);
+                assert_eq!(arg.label().label_name(), Some(name));
+                assert!(arg.label().same_label(TypeArgLabel::new(&label)));
+                assert!(!arg.label().same_label(TypeArgLabel::NOLABEL));
+                let resolved = ctx.resolve_loc(arg.label().loc());
                 assert_eq!(resolved.loc_start.file_name, StrIdx(17));
                 assert_eq!(resolved.loc_start.line, 3);
                 assert_eq!(resolved.loc_start.bol, 21);
@@ -1347,21 +1495,6 @@ mod tests {
                 assert_eq!(resolved.loc_end.bol, 44);
                 assert_eq!(resolved.loc_end.cnum, 49);
                 assert_eq!(resolved.loc_ghost, ghost);
-                match moved.label.as_deref_mut().unwrap() {
-                    ArgLabel::Labelled(l) | ArgLabel::Optional(l) => {
-                        assert_ne!(l.txt.as_ptr(), payload.txt.as_ptr());
-                        l.txt.push_str("_changed");
-                        l.loc = crate::types::DeclLoc::none();
-                    }
-                    _ => unreachable!(),
-                }
-                // Replacement drops the original box; the independent clone survives.
-                moved = TypeArg::unlabeled(TypeExprRef(7));
-                assert!(moved.label.is_none());
-                assert_eq!(cloned.label().label_name(), Some(name));
-                drop(moved);
-                assert_eq!(format!("{:?}", cloned), expected_debug);
-                drop(cloned);
             }
         }
     }

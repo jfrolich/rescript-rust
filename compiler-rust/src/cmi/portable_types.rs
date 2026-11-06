@@ -890,9 +890,9 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
         match desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
-                args: args
+                args: self.ctx.type_args(args)
                     .iter()
-                    .map(|arg| (self.portable_label(arg.label()), self.serialize_type(arg.typ)))
+                    .map(|arg| (self.portable_label(&arg.label().to_arg_label()), self.serialize_type(arg.typ)))
                     .collect(),
                 ret: self.serialize_type(*ret),
             },
@@ -1156,6 +1156,7 @@ pub(crate) trait TypeNodeSink {
     fn abbrev_nil(&self) -> AbbrevMemoRef;
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
     fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList;
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList;
     fn new_type_list_from_iter(
         &self,
         items: impl Iterator<Item = TypeExprRef>,
@@ -1198,6 +1199,10 @@ impl TypeNodeSink for TypeContext {
     fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
         TypeContext::new_type_list(self, items)
     }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        TypeContext::new_type_args(self, args)
+    }
 }
 
 impl TypeNodeSink for ThreadTypeStore {
@@ -1211,6 +1216,10 @@ impl TypeNodeSink for ThreadTypeStore {
 
     fn new_type_list(&self, items: &[TypeExprRef]) -> crate::types::type_expr::TypeRefList {
         self.alloc_type_list(items)
+    }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        self.alloc_type_args(args)
     }
 }
 
@@ -1358,6 +1367,9 @@ struct SharedSink<'a> {
     /// nodes), and the elements allocated so far.
     list_base: u32,
     lists: std::cell::RefCell<Vec<TypeExprRef>>,
+    /// The same for arrow parameter lists, which follow the type lists.
+    arg_base: u32,
+    args: std::cell::RefCell<Vec<TypeArg>>,
 }
 
 impl TypeNodeSink for SharedSink<'_> {
@@ -1378,6 +1390,28 @@ impl TypeNodeSink for SharedSink<'_> {
             items.len(),
         )
     }
+
+    fn new_type_args(&self, args: &[TypeArg]) -> crate::types::type_expr::TypeArgList {
+        let mut pool = self.args.borrow_mut();
+        let start = self.arg_base + pool.len() as u32;
+        pool.extend_from_slice(args);
+        crate::types::type_expr::TypeArgList::from_parts(
+            start | crate::types::type_expr::SHARED_REF_BITS,
+            args.len(),
+        )
+    }
+}
+
+/// Number of arrow parameters `internalize_desc` allocates for `graph`.
+fn graph_type_arg_items(graph: &PortableTypeGraph) -> usize {
+    graph
+        .entries
+        .iter()
+        .map(|entry| match &entry.desc {
+            PortableTypeDesc::Tarrow { args, .. } => args.len(),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Number of type-list elements `internalize_desc` allocates for `graph`.
@@ -1409,9 +1443,11 @@ fn internalize_signature_into_shared(
     let mut remap = Vec::new();
     let map = |file| files.map(file);
     let list_items = graph_type_list_items(graph);
+    let arg_items = graph_type_arg_items(graph);
     let base = pool.publish(
         graph.entries.len(),
         list_items,
+        arg_items,
         graph.variant_layouts.len(),
         |base| {
         remap = (0..graph.entries.len())
@@ -1422,6 +1458,8 @@ fn internalize_signature_into_shared(
             current: std::cell::Cell::new(base),
             list_base: base + graph.entries.len() as u32,
             lists: Default::default(),
+            arg_base: base + (graph.entries.len() + list_items) as u32,
+            args: Default::default(),
         };
         let locs = shared_decl_locs(base, &map);
         let mremap = internalize_mutabilities(graph, &sink);
@@ -1442,6 +1480,7 @@ fn internalize_signature_into_shared(
         (
             nodes,
             sink.lists.into_inner(),
+            sink.args.into_inner(),
             graph.variant_layouts.clone(),
             files.locations(locations).collect(),
         )
@@ -1604,10 +1643,13 @@ fn internalize_desc<S: TypeNodeSink>(
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
-            args: args
-                .iter()
-                .map(|(lbl, typ)| TypeArg::new(import_label(lbl, locs), remap[*typ]))
-                .collect(),
+            args: {
+                let args: crate::types::type_expr::TypeArgs = args
+                    .iter()
+                    .map(|(lbl, typ)| TypeArg::new(import_label(lbl, locs), remap[*typ]))
+                    .collect();
+                ctx.new_type_args(&args)
+            },
             ret: remap[*ret],
         },
         PortableTypeDesc::Ttuple(types) => {
@@ -1895,12 +1937,11 @@ mod type_arg_tests {
             ArgLabel::optional("opt", ctx.intern_loc(loc)),
         ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![
+            args: ctx.new_type_args(&[
                 TypeArg::unlabeled(shared),
                 TypeArg::new(labels[1].clone(), shared),
                 TypeArg::new(labels[2].clone(), distinct),
-            ]
-            .into(),
+            ]),
             ret: shared,
         });
         let mut file_names = crate::fast_hash::AHashSet::new();
@@ -1928,12 +1969,13 @@ mod type_arg_tests {
         let TypeDesc::Tarrow { args, ret } = restored else {
             panic!("not arrow")
         };
+        let args = ctx.type_args(args);
         assert_eq!(args[0].typ, ret);
         assert_eq!(args[1].typ, ret);
         assert_ne!(args[2].typ, ret);
-        assert!(matches!(args[0].label(), ArgLabel::Nolabel));
+        assert!(args[0].label().is_nolabel());
         for (arg, expected) in args.iter().zip(&labels).skip(1) {
-            assert!(arg.label().same_label(expected));
+            assert!(arg.label().same_label(crate::types::type_expr::TypeArgLabel::new(expected)));
             assert_eq!(ctx.resolve_loc(arg.label().loc()), loc);
         }
     }

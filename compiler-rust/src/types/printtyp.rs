@@ -485,7 +485,7 @@ impl<'a> Printtyp<'a> {
         match desc {
             TypeDesc::Tvar(_) => self.add_named_var(ty),
             TypeDesc::Tarrow { args, ret } => {
-                for arg in &args {
+                for arg in self.ctx.type_args(&args).iter() {
                     self.mark_loops_rec(visited, arg.typ);
                 }
                 self.mark_loops_rec(visited, ret);
@@ -620,10 +620,12 @@ impl<'a> Printtyp<'a> {
                     OutType::Otyp_var(non_gen, name)
                 }
                 TypeDesc::Tarrow { args, ret } => {
-                    let args = args
+                    let args = self
+                        .ctx
+                        .type_args(args)
                         .iter()
                         .map(|arg| {
-                            let label = arg.label();
+                            let label = arg.label().to_arg_label();
                             let t1 = if matches!(label, ArgLabel::Optional(_)) {
                                 let repr = this.ctx.repr(arg.typ);
                                 let inner = match &*this.ctx.borrow_desc(repr) {
