@@ -224,11 +224,11 @@ pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext, ty: TypeEx
     rec(ctx, ty, &mut seen)
 }
 
-/// Get the unboxed representation of a type, if possible.
-/// For an unboxed variant type with a single constructor and single arg,
-/// returns the arg type (recursively expanded). Returns None for recursive types.
-/// Simplified version of OCaml's Typedecl.get_unboxed_type_representation.
-/// typedecl.ml `get_unboxed_type_representation`, with 100 fuel (PR#7424).
+/// OCaml typedecl.ml `get_unboxed_type_representation` with its fuel of 100
+/// (PR#7424): expand the head; through an unboxed single-field record or
+/// single-constructor variant, continue with the field type applied to the
+/// arguments; stop at any other type, and give up (`None`) on an abstract
+/// type or when the fuel runs out.
 fn get_unboxed_type_representation(
     ctx: &TypeContext,
     env: &Env,

@@ -5,7 +5,6 @@
 //! materializing recursive Lambda between passes. Production remains on the
 //! recursive pipeline until the JS consumer is migrated in M6.
 
-use crate::lambda::LamLoc;
 use std::sync::Arc;
 
 use ahash::{AHashMap, AHashSet};
@@ -23,7 +22,6 @@ use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_pass_collect_indexed::{IndexedElement, IndexedIdKind, get_arity_external};
 use crate::lambda::lam_pass_remove_alias_indexed::IndexedExternalInlineResolver;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{FlatMakePath, Lambda};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1021,8 +1019,9 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
 mod tests {
     use super::*;
     use crate::ident::IdentFlags;
+    use crate::lambda::LamLoc;
     use crate::lambda::lam_constant::Constant;
-    use LamLoc;
+    use crate::lambda::lam_tag_info::TagInfo;
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
