@@ -1,0 +1,38 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m6:5-9:1[0m
+
+   4 [2m│[0m   type aVeryLongTypeNameThatHasTheSameShapeAsAShortOne = {aVeryLongFiel
+     [2m│[0m dNameThatGoesOnAndOnAndOn0: int, aVeryLongFieldNameThatGoesOnAndOnAndOn
+     [2m│[0m 1: int}
+   5 [2m│[0m   let v: string
+   [1;31m6[0m [2m│[0m } = [1;31m{[0m
+   [1;31m7[0m [2m│[0m [1;31m  type aVeryLongTypeNameThatHasTheSameShapeAsAShortOne = {aVeryLongFiel[0m
+     [2m│[0m [1;31mdNameThatGoesOnAndOnAndOn0: int, aVeryLongFieldNameThatGoesOnAndOnAndOn[0m
+     [2m│[0m [1;31m1: int}[0m
+   [1;31m8[0m [2m│[0m [1;31m  let v = 1[0m
+   [1;31m9[0m [2m│[0m [1;31m}[0m
+  10 [2m│[0m 
+
+  Signature mismatch:
+  Modules do not match:
+    {
+  type aVeryLongTypeNameThatHasTheSameShapeAsAShortOne = {
+    aVeryLongFieldNameThatGoesOnAndOnAndOn0: int,
+    aVeryLongFieldNameThatGoesOnAndOnAndOn1: int,
+  }
+  let v: int
+}
+  is not included in
+    {
+  type aVeryLongTypeNameThatHasTheSameShapeAsAShortOne = {
+    aVeryLongFieldNameThatGoesOnAndOnAndOn0: int,
+    aVeryLongFieldNameThatGoesOnAndOnAndOn1: int,
+  }
+  let v: string
+}
+  Values do not match: let v: int is not included in let v: string
+  [36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m5:3-15[0m:
+    Expected declaration
+  [36m/.../fixtures/module_types_long_names_not_elided.res[0m:[2m8:7[0m:
+    Actual declaration

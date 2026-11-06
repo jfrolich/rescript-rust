@@ -1,0 +1,29 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m4:5-6:1[0m
+
+  2 [2m│[0m module N: {
+  3 [2m│[0m   type t<+'a>
+  [1;31m4[0m [2m│[0m } = [1;31m{[0m
+  [1;31m5[0m [2m│[0m [1;31m  type t<'a> = 'a => unit[0m
+  [1;31m6[0m [2m│[0m [1;31m}[0m
+  7 [2m│[0m 
+
+  Signature mismatch:
+  Modules do not match:
+    {
+  type t<'a> = 'a => unit
+}
+  is not included in
+    {
+  type t<+'a>
+}
+  Type declarations do not match:
+    type t<'a> = 'a => unit
+  is not included in
+    type t<+'a>
+  [36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m3:3-13[0m:
+    Expected declaration
+  [36m/.../fixtures/module_types_variance_mismatch_layout.res[0m:[2m5:3-25[0m:
+    Actual declaration
+  Their variances do not agree.

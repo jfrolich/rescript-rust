@@ -196,7 +196,7 @@ impl From<&str> for TypeDeclarationMismatchDetail {
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
     let mut output = String::new();
     output.push_str("  Signature mismatch:\n");
-    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output);
+    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output, &mut false);
     output
 }
 
@@ -206,7 +206,7 @@ pub(crate) fn format_error_without_signature_header(
     error: &IncludeModError,
 ) -> String {
     let mut output = String::new();
-    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output);
+    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output, &mut false);
     output
 }
 
@@ -303,30 +303,38 @@ fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
     }
 }
 
-/// `Module_types` in `include_symptom`, with the elision that stands in for
-/// `is_big` in `report_error`.
+/// `include_err'` in `report_error` (includemod.ml:669-676): an entry that
+/// is not the last one prints only when its symptom is not big; the first big
+/// one prints `...` in place of its context and symptom, later ones nothing.
+/// Returns whether the entry was elided.
+fn elide_big_entry(is_big: impl FnOnce() -> bool, output: &mut String, elided: &mut bool) -> bool {
+    if !is_big() {
+        return false;
+    }
+    if !*elided {
+        output.push_str("  ...\n");
+        *elided = true;
+    }
+    true
+}
+
+/// Whether the `Module_types` entry above `error` is the last of OCaml's
+/// error list: a bare `ModuleTypeMismatch` stands for `Dont_match`, which
+/// contributes only that entry (includemod.ml:186-189).
+fn module_types_entry_is_last(error: &IncludeModError) -> bool {
+    matches!(error, IncludeModError::ModuleTypeMismatch { .. })
+}
+
+/// `Module_types` in `include_symptom` (includemod.ml:566-569).
 fn push_module_types_symptom(
     type_ctx: &TypeContext,
     actual: &ModuleType,
     expected: &ModuleType,
-    error: &IncludeModError,
     output: &mut String,
 ) {
     let actual_text = format_module_type(type_ctx, actual);
     let expected_text = format_module_type(type_ctx, expected);
-    if should_elide_module_mismatch(&actual_text, &expected_text)
-        || should_elide_type_declaration_module_mismatch(error)
-    {
-        output.push_str("  ...\n");
-    } else if is_compact_type_declaration_mismatch(error) {
-        output.push_str("  Modules do not match: ");
-        output.push_str(&actual_text);
-        output.push_str(" is not included in ");
-        output.push_str(&expected_text);
-        output.push('\n');
-    } else {
-        output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
-    }
+    output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
 }
 
 /// `report_error` (includemod.ml:663-676) over Rust's nested error tree: each
@@ -337,23 +345,24 @@ fn format_include_error(
     error: &IncludeModError,
     cxt: &mut Vec<IncludeContext>,
     output: &mut String,
+    elided: &mut bool,
 ) {
     match error {
         IncludeModError::SignatureMismatch(errors) => {
             for error in errors {
-                format_include_error(type_ctx, filename, error, cxt, output);
+                format_include_error(type_ctx, filename, error, cxt, output, elided);
             }
             return;
         }
         IncludeModError::InModule { name, error } => {
             cxt.push(IncludeContext::Module(*name));
-            format_include_error(type_ctx, filename, error, cxt, output);
+            format_include_error(type_ctx, filename, error, cxt, output, elided);
             cxt.pop();
             return;
         }
         IncludeModError::AtModtype { name, error } => {
             cxt.push(IncludeContext::Modtype(*name));
-            format_include_error(type_ctx, filename, error, cxt, output);
+            format_include_error(type_ctx, filename, error, cxt, output, elided);
             cxt.pop();
             return;
         }
@@ -366,12 +375,57 @@ fn format_include_error(
             // `modtypes` on the functor results (includemod.ml:388-396) runs
             // in `Body param :: cxt`.
             cxt.push(IncludeContext::Body(*param));
-            push_include_context(cxt, output);
-            push_module_types_symptom(type_ctx, actual, expected, error, output);
-            if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
-                format_include_error(type_ctx, filename, error, cxt, output);
+            let is_last = module_types_entry_is_last(error);
+            if is_last
+                || !elide_big_entry(
+                    || crate::types::includemod_error_size::module_types_is_big(
+                        type_ctx, actual, expected,
+                    ),
+                    output,
+                    elided,
+                )
+            {
+                push_include_context(cxt, output);
+                push_module_types_symptom(type_ctx, actual, expected, output);
+            }
+            if !is_last {
+                format_include_error(type_ctx, filename, error, cxt, output, elided);
             }
             cxt.pop();
+            return;
+        }
+        IncludeModError::ModuleTypesMismatch {
+            actual,
+            expected,
+            error,
+        } if !module_types_entry_is_last(error)
+            && elide_big_entry(
+                || crate::types::includemod_error_size::module_types_is_big(
+                    type_ctx, actual, expected,
+                ),
+                output,
+                elided,
+            ) =>
+        {
+            format_include_error(type_ctx, filename, error, cxt, output, elided);
+            return;
+        }
+        // `Modtype_infos` always has the reasons of `check_modtype_equiv`
+        // after it (includemod.ml:419).
+        IncludeModError::ModuleTypeDeclarationMismatch {
+            name,
+            actual,
+            expected,
+            error,
+        } if elide_big_entry(
+            || crate::types::includemod_error_size::modtype_infos_is_big(
+                type_ctx, name, actual, expected,
+            ),
+            output,
+            elided,
+        ) =>
+        {
+            format_include_error(type_ctx, filename, error, cxt, output, elided);
             return;
         }
         _ => {}
@@ -387,11 +441,9 @@ fn format_include_error(
             expected,
             error,
         } => {
-            push_module_types_symptom(type_ctx, actual, expected, error, output);
-            // A bare `ModuleTypeMismatch` below stands for `Dont_match`, which
-            // only contributes the `Module_types` entry (includemod.ml:222-229).
-            if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
-                format_include_error(type_ctx, filename, error, cxt, output);
+            push_module_types_symptom(type_ctx, actual, expected, output);
+            if !module_types_entry_is_last(error) {
+                format_include_error(type_ctx, filename, error, cxt, output, elided);
             }
         }
         IncludeModError::UnboundModulePath { path } => {
@@ -615,7 +667,7 @@ fn format_include_error(
             output.push_str("    ");
             output.push_str(&format_modtype_declaration(type_ctx, name, expected));
             output.push('\n');
-            format_include_error(type_ctx, filename, error, cxt, output);
+            format_include_error(type_ctx, filename, error, cxt, output, elided);
         }
         IncludeModError::ModtypePermutation => {
             output.push_str("  Illegal permutation of structure fields\n");
@@ -632,42 +684,11 @@ fn format_include_error(
     }
 }
 
-fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
-    matches!(
-        error,
-        IncludeModError::TypeDeclarationMismatch {
-            detail: TypeDeclarationMismatchDetail::Variance,
-            ..
-        }
-    )
-}
-
 pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
     type_ctx
         .resolve_cmi_longident_component(loc.loc_start.file_name)
         .filter(|name| !name.is_empty() && name != "_none_")
         .unwrap_or_else(|| fallback.to_string())
-}
-
-fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
-    actual.len() + expected.len() >= 120
-}
-
-fn should_elide_type_declaration_module_mismatch(error: &IncludeModError) -> bool {
-    // OCaml includemod.ml:637-655 bounds the structured `Module_types`
-    // symptom, whose declarations still carry @tag attributes even though
-    // Printtyp omits them. `@as` no longer counts: it is decided at typedecl
-    // into `cd_runtime_tag`/`ld_runtime_name` and leaves the attributes.
-    let has_hidden_tag_layout = matches!(
-        error,
-        IncludeModError::TypeDeclarationMismatch {
-            detail: TypeDeclarationMismatchDetail::TagName,
-            ..
-        }
-    );
-    matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
-        && !is_compact_type_declaration_mismatch(error)
-        && has_hidden_tag_layout
 }
 
 /// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
