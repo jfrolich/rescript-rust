@@ -117,6 +117,8 @@ pub struct JsxPreprocessorWarning {
     pub start_pos: crate::location::Position,
     pub end_pos: crate::location::Position,
     pub message: String,
+    /// Reported as warning 3 (`Location.deprecated`) instead of 22.
+    pub deprecated: bool,
 }
 
 /// Fatal JSX PPX diagnostic.
@@ -330,10 +332,20 @@ fn transform_structure_item_multi(
 
     // Handle Pstr_primitive (external) with potential @react.component
     if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
-        if reject_leftover_component_attrs(arena, &vd.pval_attributes, config) {
+        let taken = take_component_with_props_payload(
+            arena,
+            vd.pval_jsx_component.as_deref(),
+            &vd.pval_attributes,
+            warnings,
+        );
+        let (pval_jsx_component, pval_attributes) = match &taken {
+            Some((component, attrs)) => (Some(component), attrs),
+            None => (vd.pval_jsx_component.as_deref(), &vd.pval_attributes),
+        };
+        if reject_leftover_component_attrs(arena, pval_attributes, config) {
             return vec![item];
         }
-        match vd.pval_jsx_component.as_deref().map(|c| &c.pjc_kind) {
+        match pval_jsx_component.map(|c| &c.pjc_kind) {
             None => {}
             Some(JsxComponentKind::WithProps) => {
                 set_fatal_error_with_style(
@@ -404,9 +416,19 @@ fn transform_value_bindings(
     let mut transformed_bindings = vec![];
     let mut new_bindings = vec![];
 
-    for binding in bindings {
-        // jsx_v4.ml map_binding: reject leftover annotations, then dispatch
-        // on the binding's component node.
+    for mut binding in bindings {
+        // jsx_v4.ml map_binding: take a `@react.componentWithProps` payload,
+        // reject leftover annotations, then dispatch on the binding's
+        // component node.
+        if let Some((component, attrs)) = take_component_with_props_payload(
+            arena,
+            binding.pvb_jsx_component.as_deref(),
+            &binding.pvb_attributes,
+            warnings,
+        ) {
+            binding.pvb_jsx_component = Some(Box::new(component));
+            binding.pvb_attributes = attrs;
+        }
         if reject_leftover_component_attrs(arena, &binding.pvb_attributes, config) {
             transformed_bindings.push(binding);
             continue;
@@ -1819,14 +1841,22 @@ fn transform_signature_item_multi(
 
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &item.psig_desc {
-        if reject_leftover_component_attrs(arena, &vd.pval_attributes, config) {
+        let taken = take_component_with_props_payload(
+            arena,
+            vd.pval_jsx_component.as_deref(),
+            &vd.pval_attributes,
+            warnings,
+        );
+        let (pval_jsx_component, pval_attributes) = match &taken {
+            Some((component, attrs)) => (Some(component), attrs),
+            None => (vd.pval_jsx_component.as_deref(), &vd.pval_attributes),
+        };
+        if reject_leftover_component_attrs(arena, pval_attributes, config) {
             return vec![item];
         }
         // `@react.componentWithProps` on a signature item has always been
         // left alone.
-        if let Some(JsxComponentKind::Labelled(_)) =
-            vd.pval_jsx_component.as_deref().map(|c| &c.pjc_kind)
-        {
+        if let Some(JsxComponentKind::Labelled(_)) = pval_jsx_component.map(|c| &c.pjc_kind) {
             return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
         }
     }
@@ -2251,6 +2281,57 @@ fn collect_prop_types_rec(
 // Helper Functions
 // ============================================================================
 
+/// jsx_common.ml `take_component_with_props_payload`: the JSX transform used
+/// to ignore a payload on `@react.componentWithProps`, so code may carry one,
+/// such as `(: props)` copied from `@react.component`. The node cannot hold
+/// it, so the attribute stays for formatting to keep; take it here as the
+/// component, with a deprecation warning, unless the definition already has
+/// one. Returns the taken component and the remaining attributes, or `None`
+/// when the definition stays as it is.
+fn take_component_with_props_payload(
+    arena: &ParseArena,
+    jsx_component: Option<&JsxComponent>,
+    attrs: &Attributes,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
+) -> Option<(JsxComponent, Attributes)> {
+    if jsx_component.is_some() {
+        return None;
+    }
+    for (index, attr) in attrs.iter().enumerate() {
+        let name = arena.get_string(attr.0.txt);
+        let pjc_namespace = match name {
+            "react.componentWithProps" => JsxComponentNamespace::React,
+            "jsx.componentWithProps" => JsxComponentNamespace::Jsx,
+            _ => continue,
+        };
+        if crate::ast_jsx_component::of_attribute(arena, attr).is_some() {
+            continue;
+        }
+        let loc = attr.0.loc;
+        warnings.push(JsxPreprocessorWarning {
+            start_pos: *arena.loc_start(loc),
+            end_pos: *arena.loc_end(loc),
+            message: format!("@{name} takes no payload. The payload has no effect; remove it."),
+            deprecated: true,
+        });
+        let rest = attrs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, attr)| attr.clone())
+            .collect();
+        return Some((
+            JsxComponent {
+                pjc_kind: JsxComponentKind::WithProps,
+                pjc_namespace,
+                pjc_loc: loc,
+            },
+            Attributes::from_vec(rest),
+        ));
+    }
+    None
+}
+
 /// jsx_common.ml `reject_leftover_component_attrs`: `Ast_helper` takes the
 /// first `@react.component`, or failing that the first
 /// `@react.componentWithProps`, into the binding's or description's
@@ -2274,12 +2355,14 @@ fn reject_leftover_component_attrs(
         ) {
             continue;
         }
-        let message = if crate::ast_jsx_component::of_attribute(arena, attr).is_some() {
-            "A definition can have only one JSX component annotation.".to_string()
-        } else if matches!(name, "react.component" | "jsx.component") {
+        // `take_component_with_props_payload` has taken a lone
+        // `@react.componentWithProps` whatever its payload.
+        let message = if matches!(name, "react.component" | "jsx.component")
+            && crate::ast_jsx_component::of_attribute(arena, attr).is_none()
+        {
             format!("@{name} takes no payload, or the props type to share, as in @{name}(: props).")
         } else {
-            format!("@{name} takes no payload.")
+            "A definition can have only one JSX component annotation.".to_string()
         };
         set_fatal_error(config, attr.0.loc, &message);
         return true;
@@ -3054,6 +3137,7 @@ fn extract_args_rec(
                             start_pos: *arena.loc_start(loc),
                             end_pos: *arena.loc_end(loc),
                             message,
+                            deprecated: false,
                         });
                     }
                     args.push(ExtractedArg {

@@ -181,11 +181,21 @@ impl<'a> DependencyCollector<'a> {
     fn add_longident_full(&mut self, lid: &Longident) {
         // Get the root module name (the head of `Longident.flatten`, where an
         // application contributes its functor path).
+        // `second` is the component right after the head when the path is a
+        // plain dotted path (depend.ml `add_path`'s `m :: _`).
         let mut head = lid;
+        let mut second = None;
         let first = loop {
             match head {
                 Longident::Lident(s) => break *s,
-                Longident::Ldot(prefix, _) | Longident::Lapply(prefix, _) => head = prefix,
+                Longident::Ldot(prefix, s) => {
+                    second = Some(*s);
+                    head = prefix;
+                }
+                Longident::Lapply(prefix, _) => {
+                    second = None;
+                    head = prefix;
+                }
             }
         };
         {
@@ -199,9 +209,19 @@ impl<'a> DependencyCollector<'a> {
                 .next()
                 .is_some_and(|c| c.is_ascii_uppercase())
                 && !self.bound_modules.contains(first_str)
-                && !self.deps.contains(first_str)
             {
-                self.deps.insert(first_str.to_string());
+                if !self.deps.contains(first_str) {
+                    self.deps.insert(first_str.to_string());
+                }
+                // depend.ml `add_path`: also record `S.M` for a qualified free
+                // path, so a build system can resolve `M` when `S` is the
+                // module's own namespace.
+                if let Some(second) = second {
+                    let qualified = format!("{}.{}", first_str, self.arena.get_string(second));
+                    if !self.deps.contains(&qualified) {
+                        self.deps.insert(qualified);
+                    }
+                }
             }
         }
 
@@ -1356,15 +1376,17 @@ mod tests {
 
     #[test]
     fn test_nested_module_reference() {
-        // Test: Belt.Array.map extracts "Belt"
+        // Test: Belt.Array.map extracts "Belt" and, like depend.ml
+        // `add_path` for a qualified free path, "Belt.Array".
         let mut arena = ParseArena::default();
         let lid = parse_longident(&mut arena, "Belt.Array.map");
         let expr_idx = make_ident_expr(&mut arena, lid);
         let structure = vec![make_eval_item(expr_idx)];
 
         let deps = extract_structure_deps(&arena, &structure);
-        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.len(), 2);
         assert!(deps.contains("Belt"));
+        assert!(deps.contains("Belt.Array"));
     }
 
     #[test]
@@ -1411,9 +1433,10 @@ mod tests {
         let structure = vec![make_eval_item(e1), make_eval_item(e2), make_eval_item(e3)];
 
         let deps = extract_structure_deps(&arena, &structure);
-        assert_eq!(deps.len(), 3);
+        assert_eq!(deps.len(), 4);
         assert!(deps.contains("Array"));
         assert!(deps.contains("Belt"));
+        assert!(deps.contains("Belt.Array"));
         assert!(deps.contains("Js"));
     }
 

@@ -495,13 +495,18 @@ fn print_jsx_preprocessor_warnings(
     out: &mut impl Write,
 ) {
     for warning in warnings {
+        let (number, message) = if warning.deprecated {
+            (3, format!("deprecated: {}", warning.message))
+        } else {
+            (22, warning.message.clone())
+        };
         print_warning_frame(
             source,
             filename,
-            22,
+            number,
             &warning.start_pos,
             &warning.end_pos,
-            &warning.message,
+            &message,
             out,
         );
     }

@@ -1259,7 +1259,7 @@ fn inline_tailcall_call(
     body: Block,
 ) -> Block {
     let mut bindings = Vec::new();
-    let mut substitution = HashMap::new();
+    let mut substitution = InlineSubstitution::default();
 
     for ((param, arg), immutable) in params
         .iter()
@@ -1269,7 +1269,11 @@ fn inline_tailcall_call(
     {
         if immutable {
             if let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &arg.desc {
-                substitution.insert(param, *id);
+                substitution.vars.insert(param, *id);
+                continue;
+            }
+            if is_substitutable_constant(&arg) {
+                substitution.consts.insert(param, arg);
                 continue;
             }
         }
@@ -1282,7 +1286,7 @@ fn inline_tailcall_call(
         }));
     }
 
-    let body = if substitution.is_empty() {
+    let body = if substitution.vars.is_empty() && substitution.consts.is_empty() {
         body
     } else {
         substitute_inline_block(body, &substitution)
@@ -1291,7 +1295,57 @@ fn inline_tailcall_call(
     bindings.into_iter().chain(body).collect()
 }
 
-fn substitute_inline_block(block: Block, substitution: &HashMap<Ident, Ident>) -> Block {
+/// js_pass_tailcall_inline.ml `substitute_arguments`: `vars` maps a parameter
+/// to the variable argument that replaces it, `consts` to the constant
+/// argument that replaces it. Both apply only to parameters that are never
+/// assigned, so every occurrence of such a parameter is a read.
+#[derive(Clone, Default)]
+struct InlineSubstitution {
+    vars: HashMap<Ident, Ident>,
+    consts: HashMap<Ident, Expression>,
+}
+
+impl InlineSubstitution {
+    fn remove(&mut self, ident: &Ident) {
+        self.vars.remove(ident);
+        self.consts.remove(ident);
+    }
+}
+
+/// js_pass_tailcall_inline.ml `is_substitutable_constant`: constants that are
+/// as cheap to repeat as the variable they replace: they allocate nothing,
+/// have no side effect, and print short.
+fn is_substitutable_constant(expr: &Expression) -> bool {
+    matches!(
+        expr.desc,
+        ExpressionDesc::Number(_)
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Null
+    )
+}
+
+/// js_pass_tailcall_inline.ml `substituted_truth`: the truth value of a
+/// condition that is a parameter replaced by a boolean or integer constant, or
+/// its negation. Only such conditions are decided while substituting: the
+/// substitution is what made them constant.
+fn substituted_truth(consts: &HashMap<Ident, Expression>, expr: &Expression) -> Option<bool> {
+    match &expr.desc {
+        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
+            match consts.get(id).map(|c| &c.desc) {
+                Some(ExpressionDesc::Bool(b)) => Some(*b),
+                Some(ExpressionDesc::Number(crate::js_ir::op::Number::Int { i, .. })) => {
+                    Some(*i != 0)
+                }
+                _ => None,
+            }
+        }
+        ExpressionDesc::JsNot(inner) => substituted_truth(consts, inner).map(|b| !b),
+        _ => None,
+    }
+}
+
+fn substitute_inline_block(block: Block, substitution: &InlineSubstitution) -> Block {
     let mut current_substitution = substitution.clone();
     let mut rewritten = Vec::with_capacity(block.len());
 
@@ -1304,7 +1358,20 @@ fn substitute_inline_block(block: Block, substitution: &HashMap<Ident, Ident>) -
     rewritten
 }
 
-fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Ident>) -> Statement {
+fn substitute_inline_statement(stmt: Statement, substitution: &InlineSubstitution) -> Statement {
+    // A conditional whose condition becomes a constant keeps only the branch
+    // it takes.
+    if let StatementDesc::If(pred, _, _) = &stmt.desc
+        && let Some(truth) = substituted_truth(&substitution.consts, pred)
+    {
+        let StatementDesc::If(_, ifso, ifnot) = stmt.desc else {
+            unreachable!("checked above")
+        };
+        return Statement::block(substitute_inline_block(
+            if truth { ifso } else { ifnot },
+            substitution,
+        ));
+    }
     let Statement {
         source_loc,
         desc,
@@ -1422,10 +1489,31 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
     }
 }
 
-fn substitute_inline_expression(
-    expr: Expression,
-    substitution: &HashMap<Ident, Ident>,
-) -> Expression {
+fn substitute_inline_expression(expr: Expression, substitution: &InlineSubstitution) -> Expression {
+    match &expr.desc {
+        ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
+            if let Some(constant) = substitution.consts.get(id) {
+                return constant.clone();
+            }
+        }
+        ExpressionDesc::Cond(pred, _, _) => {
+            if let Some(truth) = substituted_truth(&substitution.consts, pred) {
+                let ExpressionDesc::Cond(_, ifso, ifnot) = expr.desc else {
+                    unreachable!("checked above")
+                };
+                return substitute_inline_expression(
+                    *if truth { ifso } else { ifnot },
+                    substitution,
+                );
+            }
+        }
+        ExpressionDesc::JsNot(pred) => {
+            if let Some(truth) = substituted_truth(&substitution.consts, pred) {
+                return Expression::bool(!truth);
+            }
+        }
+        _ => {}
+    }
     let Expression {
         source_loc,
         desc,
@@ -1517,7 +1605,7 @@ fn substitute_inline_expression(
             }),
         ),
         ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
-            let id = substitution.get(&id).cloned().unwrap_or(id);
+            let id = substitution.vars.get(&id).cloned().unwrap_or(id);
             ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
         }
         ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
@@ -1602,9 +1690,9 @@ fn substitute_inline_expression(
 }
 
 fn prune_inline_substitution<'a>(
-    substitution: &HashMap<Ident, Ident>,
+    substitution: &InlineSubstitution,
     shadowed: impl IntoIterator<Item = &'a Ident>,
-) -> HashMap<Ident, Ident> {
+) -> InlineSubstitution {
     let mut pruned = substitution.clone();
     for ident in shadowed {
         pruned.remove(ident);
@@ -1612,7 +1700,7 @@ fn prune_inline_substitution<'a>(
     pruned
 }
 
-fn shadow_inline_statement_bindings(stmt: &Statement, substitution: &mut HashMap<Ident, Ident>) {
+fn shadow_inline_statement_bindings(stmt: &Statement, substitution: &mut InlineSubstitution) {
     if let StatementDesc::Variable(VariableDeclaration { ident, .. }) = &stmt.desc {
         substitution.remove(ident);
     }

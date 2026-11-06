@@ -1542,8 +1542,19 @@ fn jsx_preprocessor_warnings_to_ppx(
         .into_iter()
         .map(|warning| ppx::PpxWarning {
             loc: arena.mk_loc_from_positions(&warning.start_pos, &warning.end_pos),
-            warning: crate::diagnostics::Warning::Preprocessor {
-                message: warning.message,
+            // jsx_common.ml reports a deprecated payload through
+            // `Location.deprecated`, everything else as a preprocessor warning.
+            warning: if warning.deprecated {
+                crate::diagnostics::Warning::Deprecated {
+                    message: warning.message,
+                    def_loc: crate::location::Location::none(),
+                    use_loc: crate::location::Location::none(),
+                    can_be_automigrated: false,
+                }
+            } else {
+                crate::diagnostics::Warning::Preprocessor {
+                    message: warning.message,
+                }
             },
         })
         .collect()

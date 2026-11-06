@@ -16,12 +16,10 @@ use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 
 impl LambdaCompiler {
+    /// Keep in sync with `Constant::is_allocating`: a nested none is a new
+    /// optional block.
     pub(crate) fn some_none_depth(cst: &Constant) -> Option<usize> {
-        match cst {
-            Constant::Some(inner) => Self::some_none_depth(inner).map(|depth| depth + 1),
-            Constant::ModuleAlias | Constant::JsUndefined { .. } => Some(0),
-            _ => None,
-        }
+        cst.some_none_depth()
     }
 
     pub(crate) fn nested_some_none(depth: usize, none: Expression) -> Expression {

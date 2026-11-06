@@ -316,7 +316,10 @@ type record_pattern_item =
   | PatField of Parsetree.pattern Parsetree.record_element
   | PatRest of Parsetree.record_pat_rest
 
-type context = OrdinaryExpr | TernaryTrueBranchExpr | WhenExpr
+(* [WhenExpr] is an expression followed by a block, such as a condition or a
+   switch scrutinee. [GuardExpr] is a switch guard, which the case's [=>]
+   follows. *)
+type context = OrdinaryExpr | TernaryTrueBranchExpr | WhenExpr | GuardExpr
 
 (* Extracts type and term parameters from a list of function definition
    parameters, keeping the type parameter groups in source order *)
@@ -2321,11 +2324,13 @@ and parse_operand_expr ~context p =
     (* we need to be careful when we're in a ternary true branch:
        `condition ? ternary-true-branch : false-branch`
        Arrow expressions could be of the form: `async (): int => stuff()`
-       But if we're in a ternary, the `:` of the ternary takes precedence
+       But if we're in a ternary, the `:` of the ternary takes precedence.
+       In a guard, `async(x) =>` is a call followed by the case's `=>`.
     *)
-      when is_es6_arrow_expression
-             ~in_ternary:(context = TernaryTrueBranchExpr)
-             p ->
+      when context != GuardExpr
+           && is_es6_arrow_expression
+                ~in_ternary:(context = TernaryTrueBranchExpr)
+                p ->
       let arrow_attrs = !attrs in
       let () = attrs := [] in
       parse_async_arrow_expression ~arrow_attrs p
@@ -2337,7 +2342,7 @@ and parse_operand_expr ~context p =
     | Switch -> parse_switch_expression p
     | _ ->
       if
-        context != WhenExpr
+        context != WhenExpr && context != GuardExpr
         && is_es6_arrow_expression
              ~in_ternary:(context = TernaryTrueBranchExpr)
              p
@@ -3822,7 +3827,7 @@ and parse_pattern_guard p =
   match Parser.peek p with
   | When | If ->
     Parser.next p;
-    Some (parse_expr ~context:WhenExpr p)
+    Some (parse_expr ~context:GuardExpr p)
   | _ -> None
 
 and parse_pattern_match_case p =

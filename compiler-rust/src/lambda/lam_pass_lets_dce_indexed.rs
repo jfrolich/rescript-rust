@@ -90,7 +90,13 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             let substitute = (info.times == 1 && !info.captured)
                 || (info.times == 1
                     && info.captured
-                    && matches!(store.view(value), NodeView::Const(_) | NodeView::Var(_)))
+                    && match store.view(value) {
+                        // lam_pass_lets_dce.ml: a captured constant moves
+                        // into the closure only when it allocates nothing.
+                        NodeView::Const(c) => !c.is_allocating(),
+                        NodeView::Var(_) => true,
+                        _ => false,
+                    })
                 || small_constant
                 || module_field;
             if substitute {

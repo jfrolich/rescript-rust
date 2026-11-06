@@ -547,9 +547,13 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         Token::Lident(s) if s == "async" => {
             // async arrow function
             // OCaml res_core.ml:2366-2374 runs `is_es6_arrow_expression` with
-            // `async` still the current token.
-            let is_arrow =
-                super::core::is_es6_arrow_expression(p, context == ExprContext::TernaryTrueBranch);
+            // `async` still the current token. In a guard, `async(x) =>` is a
+            // call followed by the case's `=>`.
+            let is_arrow = context != ExprContext::Guard
+                && super::core::is_es6_arrow_expression(
+                    p,
+                    context == ExprContext::TernaryTrueBranch,
+                );
             p.next();
             if is_arrow {
                 // The arrow consumes attrs; its location starts after `async`.
@@ -591,6 +595,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         }
         _ => {
             let is_arrow = context != ExprContext::When
+                && context != ExprContext::Guard
                 && super::core::is_es6_arrow_expression(
                     p,
                     context == ExprContext::TernaryTrueBranch,
@@ -3965,7 +3970,7 @@ fn parse_pattern_match_case(p: &mut Parser<'_>) -> Option<Case> {
     // OCaml `parse_pattern_guard` accepts both `when` and `if`.
     let guard = if matches!(p.token, Token::When | Token::If) {
         p.next();
-        Some(parse_expr_with_context(p, ExprContext::When))
+        Some(parse_expr_with_context(p, ExprContext::Guard))
     } else {
         None
     };

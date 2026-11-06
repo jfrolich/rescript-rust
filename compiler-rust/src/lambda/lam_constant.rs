@@ -185,10 +185,19 @@ impl Constant {
         Constant::JsUndefined { is_unit: false }
     }
 
+    /// lambda.ml `const_some_none_depth`: the number of `Some` around a none,
+    /// as in `Some(Some(None))`, or `None` if this is not a nested none.
+    pub fn some_none_depth(&self) -> Option<usize> {
+        match self {
+            Constant::Some(inner) => inner.some_none_depth().map(|depth| depth + 1),
+            Constant::ModuleAlias | Constant::JsUndefined { .. } => Some(0),
+            _ => None,
+        }
+    }
+
     /// Check if this constant requires allocation at runtime.
     ///
-    /// Direct port of OCaml's `Lam_constant.is_allocating`
-    /// (compiler/frontend/lam_constant.ml:104-111). Note `Const_some inner`
+    /// Direct port of OCaml's `Lambda.const_is_allocating`. Note `Const_some inner`
     /// recurses into `inner`: `Const_some (Const_string "v1")` is
     /// non-allocating because `Const_some` only inserts a JS object wrapper
     /// when the inner already requires one (the JS lowering folds nested
@@ -199,7 +208,10 @@ impl Constant {
     pub fn is_allocating(&self) -> bool {
         match self {
             Constant::Block { .. } => true,
-            Constant::Some(inner) => inner.is_allocating(),
+            // A `Some` around a (nested) none is emitted as a new optional
+            // block (lambda.ml `const_is_allocating`, see
+            // `LambdaCompiler::compile_some_constant`).
+            Constant::Some(inner) => inner.some_none_depth().is_some() || inner.is_allocating(),
             Constant::JsNull
             | Constant::JsUndefined { .. }
             | Constant::JsTrue
@@ -362,6 +374,13 @@ mod tests {
         // `Const_some inner`, so a non-allocating inner makes the whole
         // `Some` non-allocating.
         assert!(!Constant::Some(Box::new(Constant::int(42))).is_allocating());
+        // `Some(None)` is a fresh optional block at run time.
+        assert!(Constant::Some(Box::new(Constant::JsUndefined { is_unit: false })).is_allocating());
+        assert_eq!(
+            Constant::Some(Box::new(Constant::Some(Box::new(Constant::ModuleAlias))))
+                .some_none_depth(),
+            Some(2)
+        );
         assert!(
             Constant::Some(Box::new(Constant::Block {
                 tag_info: Box::new(TagInfo::Tuple),

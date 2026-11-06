@@ -89,6 +89,8 @@ fi
 ./compile/22-worker-store-respects-package-visibility.sh &&
 ./compile/23-interface-mismatch-names-the-resi.sh &&
 ./compile/21-rebuild-dependency-for-package-specs.sh &&
+./compile/22-qualified-own-namespace-dependency.sh &&
+./compile/23-root-source-dir-rebuild.sh &&
 ./compile/24-location-free-retry.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&

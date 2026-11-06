@@ -112,7 +112,14 @@ fn simplif(state: &mut LetsState<'_>, lam: Lambda) -> Mapped {
             let subst_now = (info.times == 1 && !info.captured)
                 || (info.times == 1
                     && info.captured
-                    && matches!(l1.as_ref(), Lambda::Lconst(_) | Lambda::Lvar(_)))
+                    && match l1.as_ref() {
+                        // A captured constant moves into the closure only
+                        // when it allocates nothing: a block would be a new
+                        // one on each call.
+                        Lambda::Lconst(c) => !c.is_allocating(),
+                        Lambda::Lvar(_) => true,
+                        _ => false,
+                    })
                 || small_const
                 || pfield_from_global;
 

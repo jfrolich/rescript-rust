@@ -9106,8 +9106,15 @@ fn print_constructor_declaration2(
         cd.pcd_name.loc,
         arena,
     );
-    let constr_args =
-        print_constructor_arguments(state, &cd.pcd_args, is_dot_dot_dot, true, cmt_tbl, arena);
+    let constr_args = print_constructor_arguments(
+        state,
+        &cd.pcd_args,
+        is_dot_dot_dot,
+        cd.pcd_name.loc,
+        true,
+        cmt_tbl,
+        arena,
+    );
     let gadt = match &cd.pcd_res {
         None => Doc::nil(),
         Some(typ) => Doc::indent(Doc::concat(vec![
@@ -9123,6 +9130,18 @@ fn print_constructor_declaration2(
 }
 
 /// Print record declaration.
+/// `get_field_start_line`: for spread fields (`...`), the type's start line,
+/// because `pld_loc` may include preceding whitespace.
+fn get_field_start_line(ld: &LabelDeclaration, arena: &ParseArena) -> i32 {
+    if arena.get_string(ld.pld_name.txt) == "..." {
+        arena
+            .loc_start(arena.get_core_type(ld.pld_type).ptyp_loc)
+            .line
+    } else {
+        arena.loc_start(ld.pld_loc).line
+    }
+}
+
 fn print_record_declaration(
     state: &PrinterState,
     fields: &[LabelDeclaration],
@@ -9133,15 +9152,7 @@ fn print_record_declaration(
     // Calculate force_break: if the opening brace and first field are on different lines
     let force_break = match (record_loc, fields.first()) {
         (Some(loc), Some(first_field)) => {
-            // For spread fields (...), use the type location instead
-            let field_line = if arena.get_string(first_field.pld_name.txt) == "..." {
-                arena
-                    .loc_start(arena.get_core_type(first_field.pld_type).ptyp_loc)
-                    .line
-            } else {
-                arena.loc_start(first_field.pld_loc).line
-            };
-            arena.loc_start(loc).line < field_line
+            arena.loc_start(loc).line < get_field_start_line(first_field, arena)
         }
         _ => false,
     };
@@ -9238,6 +9249,7 @@ fn print_constructor_arguments(
     state: &PrinterState,
     args: &ConstructorArguments,
     is_dot_dot_dot: bool,
+    name_loc: LocIdx,
     indent: bool,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
@@ -9291,7 +9303,13 @@ fn print_constructor_arguments(
                 Doc::rbrace(),
                 Doc::rparen(),
             ]);
-            Doc::group(if indent { Doc::indent(inner) } else { inner })
+            // Like a record type declaration, keep the inline record multiline
+            // when the first field starts on a later line than the constructor
+            // name.
+            let force_break = fields.first().is_some_and(|first| {
+                arena.loc_end(name_loc).line < get_field_start_line(first, arena)
+            });
+            Doc::breakable_group(if indent { Doc::indent(inner) } else { inner }, force_break)
         }
     }
 }
@@ -9482,7 +9500,15 @@ fn print_extension_constructor(
                 None => Doc::nil(),
             };
             Doc::concat(vec![
-                print_constructor_arguments(state, args, false, false, cmt_tbl, arena),
+                print_constructor_arguments(
+                    state,
+                    args,
+                    false,
+                    ext_constr.pext_name.loc,
+                    false,
+                    cmt_tbl,
+                    arena,
+                ),
                 gadt_doc,
             ])
         }
@@ -9522,7 +9548,15 @@ fn print_exception_def(
                 None => Doc::nil(),
             };
             Doc::concat(vec![
-                print_constructor_arguments(state, args, false, false, cmt_tbl, arena),
+                print_constructor_arguments(
+                    state,
+                    args,
+                    false,
+                    ext_constr.pext_name.loc,
+                    false,
+                    cmt_tbl,
+                    arena,
+                ),
                 gadt_doc,
             ])
         }

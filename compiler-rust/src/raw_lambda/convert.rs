@@ -7388,8 +7388,53 @@ impl<'a> RawLambdaConverter<'a> {
             }))
         }
 
+        // translcore.ml `transl_apply`: a partial application creates a
+        // function. Its callee and arguments are bound outside that function,
+        // so they are evaluated once, where the application is, and an await
+        // in them stays in the enclosing function.
+        fn is_module_path(lam: &RawLambda) -> bool {
+            match lam {
+                RawLambda::Lvar(_) | RawLambda::LglobalModule(_) => true,
+                RawLambda::Lprim(prim) => match (&prim.primitive, prim.args.as_slice()) {
+                    (Primitive::Pfield(_, FieldDbgInfo::Module { .. }), [m]) => is_module_path(m),
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+
+        // A variable, a module's value or a constant that allocates nothing
+        // reads the same on each call, so it stays in place and keeps the
+        // function a known one that can be inlined. A closure, a constant
+        // block or an external value does not.
         fn is_simple(lam: &RawLambda) -> bool {
-            matches!(lam, RawLambda::Lvar(_) | RawLambda::Lconst(_))
+            match lam {
+                RawLambda::Lconst(c) => !c.is_allocating(),
+                _ => is_module_path(lam),
+            }
+        }
+
+        fn protect(
+            conv: &mut RawLambdaConverter<'_>,
+            name: &str,
+            lam: RawLambda,
+            defs: &mut Vec<(Ident, RawLambda)>,
+        ) -> RawLambda {
+            if is_simple(&lam) {
+                lam
+            } else {
+                let id = conv.fresh_ident(name);
+                defs.push((id, lam));
+                RawLambda::var(id)
+            }
+        }
+
+        // OCaml prepends each def to a list and folds it from the head, so
+        // the first protected term (the callee) is the outermost binding.
+        fn bind_protected(defs: Vec<(Ident, RawLambda)>, body: RawLambda) -> RawLambda {
+            defs.into_iter().rev().fold(body, |body, (id, lam)| {
+                RawLambda::let_(LetKind::Strict, id, lam, body)
+            })
         }
 
         fn build_apply(
@@ -7402,19 +7447,6 @@ impl<'a> RawLambdaConverter<'a> {
             match pending.pop_front() {
                 Some((None, optional)) => {
                     let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
-                    let protect =
-                        |conv: &mut RawLambdaConverter<'_>,
-                         name: &str,
-                         lam: RawLambda,
-                         defs: &mut Vec<(Ident, RawLambda)>| {
-                            if is_simple(&lam) {
-                                lam
-                            } else {
-                                let id = conv.fresh_ident(name);
-                                defs.push((id, lam));
-                                RawLambda::var(id)
-                            }
-                        };
 
                     let all_optional = args_rev.iter().all(|(_, is_optional)| *is_optional);
                     let remaining_args = if all_optional {
@@ -7463,9 +7495,7 @@ impl<'a> RawLambdaConverter<'a> {
                             loc,
                         ),
                     };
-                    defs.into_iter().fold(body, |body, (id, lam)| {
-                        RawLambda::let_(LetKind::Strict, id, lam, body)
-                    })
+                    bind_protected(defs, body)
                 }
                 Some((Some(arg), optional)) => {
                     args_rev.insert(0, (arg, optional));
@@ -7483,10 +7513,15 @@ impl<'a> RawLambdaConverter<'a> {
             Some(arity) => {
                 let extra_arity = arity - sargs.len() as i32;
                 let mut none_ids = Vec::new();
+                let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
+                let lam = protect(self, "func", lam, &mut defs);
                 let args = sargs
                     .iter()
                     .map(|arg| match &arg.expression {
-                        Some(expr) => self.convert_expr_raw(expr),
+                        Some(expr) => {
+                            let arg = self.convert_expr_raw(expr);
+                            protect(self, "arg", arg, &mut defs)
+                        }
                         None => {
                             let id = self.fresh_ident("none");
                             none_ids.push(id);
@@ -7500,12 +7535,15 @@ impl<'a> RawLambdaConverter<'a> {
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
                 let body = lapply(self.lam_loc(loc), lam, ap_args);
-                RawLambda::function_(
-                    (none_ids.len() + extra_ids.len()) as i32,
-                    none_ids.into_iter().chain(extra_ids).collect(),
-                    body,
-                    FunctionAttribute::default(),
-                    self.lam_loc(loc),
+                bind_protected(
+                    defs,
+                    RawLambda::function_(
+                        (none_ids.len() + extra_ids.len()) as i32,
+                        none_ids.into_iter().chain(extra_ids).collect(),
+                        body,
+                        FunctionAttribute::default(),
+                        self.lam_loc(loc),
+                    ),
                 )
             }
             None => {

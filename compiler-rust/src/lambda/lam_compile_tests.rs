@@ -5734,12 +5734,15 @@ fn js_tailcall_inline_preserves_shadowed_block_bindings() {
         side_effect: None,
     });
     let rendered = print_block(&deps.program.block);
+    // The constant argument replaces the parameter (js_pass_tailcall_inline.ml
+    // `substitute_arguments`), so no outer `value` is declared; the inner
+    // binding that shadows it must keep its own value.
     assert!(
-        rendered.contains("let value$1 = 1;"),
+        rendered.contains("let value = 1;"),
         "expected the shadowing binding to stay intact after inlining, got:\n{rendered}"
     );
     assert!(
-        rendered.contains("return value$1;"),
+        rendered.contains("return value;"),
         "expected the shadowing binding to stay visible after inlining, got:\n{rendered}"
     );
     assert!(

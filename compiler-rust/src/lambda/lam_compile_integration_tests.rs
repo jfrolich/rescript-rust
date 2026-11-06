@@ -796,7 +796,10 @@ fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml
         output.contains("let l = Stdlib_List.map({")
             && output.contains("function partial(x) {\n  return Stdlib_List.map({")
             && output.contains("let l$1 = Stdlib_List.map({")
-            && output.contains("function partial$1(extra) {\n  return Stdlib_List.map({"),
+            // translcore.ml `transl_apply` binds the allocating list
+            // argument of a partial application once, outside the function.
+            && output.contains("let arg = {hd: 1, tl: {hd: 2, tl: /* [] */0}};")
+            && output.contains("function partial$1(extra) {\n  return Stdlib_List.map(arg, extra);"),
         "expected uncurried_cast to rewrite map call sites back to Stdlib_List.map like OCaml, got:\n{output}"
     );
     assert!(

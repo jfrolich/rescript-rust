@@ -13336,6 +13336,43 @@ fn type_for(
 /// `asyncIterable<'a>` for the await form. The loop var is bound to the
 /// element type in the body env. The whole expression has type `unit`.
 #[allow(clippy::too_many_arguments)]
+/// typecore.ml `unify_exp_types_through_private`: like `unify_exp_types`, but
+/// a private abbreviation such as `Generator.t` also unifies through its
+/// expansion, as an explicit `:>` would. A failure reports the type as
+/// written: the first unification's error.
+fn unify_through_private(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    expected_ty: TypeExprRef,
+) -> Result<(), TypeError> {
+    let unify = |ty| {
+        let mut state = UnifyState::new();
+        state.set_env(env);
+        crate::types::ctype::unify(ctx, &mut state, ty, expected_ty)
+    };
+    let snapshot = ctx.snapshot_type_state();
+    let error = match unify(ty) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    ctx.restore_type_state(snapshot);
+    // Restoring returned to the state before the first attempt; a new
+    // snapshot here is the same point OCaml's `restore` backtracks to.
+    let snapshot = ctx.snapshot_type_state();
+    let expanded = crate::types::ctype::expand_head_opt(ctx, env, ty);
+    if ctx.repr(expanded) == ctx.repr(crate::types::ctype::expand_head(ctx, env, ty)) {
+        return Err(error);
+    }
+    match unify(expanded) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            ctx.restore_type_state(snapshot);
+            Err(error)
+        }
+    }
+}
+
 fn type_for_of(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -13366,8 +13403,23 @@ fn type_for_of(
     // try the `array<ty_elem>` fallback (OCaml accepts raw arrays as a
     // convenience).
     let typed_iterable = if await_kw {
+        // typecore.ml `Pexp_for_await_of`: type the collection, then
+        // `unify_exp_types_through_private` with `asyncIterable<'a>`.
+        let typed = type_exp(tctx, env, iterable_expr, None)?;
         let async_iter_ty = env.type_async_iterable(ctx, ty_elem);
-        type_expect(tctx, env, iterable_expr, async_iter_ty, None)?
+        if let Err(error) = unify_through_private(ctx, env, typed.exp_type, async_iter_ty) {
+            let trace = match error {
+                TypeError::Unify(trace) => trace,
+                _ => vec![(typed.exp_type, async_iter_ty)],
+            };
+            return Err(TypeCoreError::ExprTypeClash {
+                loc: iterable_expr.pexp_loc,
+                trace,
+                context: None,
+                env: Some(tctx.type_ctx.store_typed_env(env)),
+            });
+        }
+        typed
     } else {
         let typed = type_exp(tctx, env, iterable_expr, None)?;
         // OCaml compiler/ml/typecore.ml:3187-3211 snapshots type mutation
@@ -13377,14 +13429,7 @@ fn type_for_of(
         // heads after a failed unify.
         let iterable_snapshot = ctx.snapshot_type_state();
         let iterable_ty = env.type_iterable(ctx, ty_elem);
-        let mut iterable_unify_state = UnifyState::new();
-        iterable_unify_state.set_env(env);
-        match crate::types::ctype::unify(
-            ctx,
-            &mut iterable_unify_state,
-            typed.exp_type,
-            iterable_ty,
-        ) {
+        match unify_through_private(ctx, env, typed.exp_type, iterable_ty) {
             Ok(()) => typed,
             Err(iterable_error) => {
                 ctx.restore_type_state(iterable_snapshot);
@@ -19113,12 +19158,6 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             partial,
             ..
         } => {
-            // Upstream #8343: ReScript partial applications (`foo(args, ...)`)
-            // lower to wrapper functions in codegen, so creating the partial
-            // itself is nonexpansive like an explicit lambda.
-            if *partial {
-                return true;
-            }
             // compiler/ml/typecore.ml:1840-1859: `%component_identity` is an
             // abstract typed coercion and preserves the nonexpansiveness of
             // the component function value supplied to it.
@@ -19136,6 +19175,18 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
                         .as_ref()
                         .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
                 });
+            }
+            // typecore.ml `is_nonexpansive`: a partial application
+            // (`foo(args, ...)`) evaluates its callee and supplied arguments
+            // once, when it is created, and the resulting function shares
+            // them, so it is nonexpansive only when they are.
+            if *partial {
+                return is_nonexpansive_expression(tctx, funct)
+                    && args.iter().all(|arg| {
+                        arg.expression
+                            .as_ref()
+                            .is_none_or(|expr| is_nonexpansive_expression(tctx, expr))
+                    });
             }
             if let Some((first_arg, rest_args)) = args.split_first() {
                 if first_arg.expression.is_none() {

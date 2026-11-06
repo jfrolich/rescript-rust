@@ -631,8 +631,11 @@ pub enum ExprContext {
     Ordinary,
     /// True branch of ternary.
     TernaryTrueBranch,
-    /// When expression in pattern match.
+    /// An expression followed by a block, such as a condition or a switch
+    /// scrutinee (OCaml `WhenExpr`).
     When,
+    /// A switch guard, which the case's `=>` follows (OCaml `GuardExpr`).
+    Guard,
     /// Switch case right-hand side (stop at `|`).
     SwitchCaseRhs,
 }
