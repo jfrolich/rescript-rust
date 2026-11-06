@@ -684,7 +684,10 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
             }
             tt::ExpressionDesc::Texp_record { fields, .. }
             | tt::ExpressionDesc::Texp_record_sparse { fields, .. } => {
-                let items: Vec<RecordItem> = fields
+                let items: Vec<RecordItem> = self
+                    .ctx
+                    .ta
+                    .record_fields(*fields)
                     .iter()
                     .filter_map(|(_, _, def, _)| match def {
                         tt::RecordLabelDefinition::Overridden(lid, _) => Some(RecordItem {

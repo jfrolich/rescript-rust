@@ -17,7 +17,7 @@ use std::num::NonZeroU32;
 
 use crate::parse_arena::ArenaList;
 
-use super::typedtree::Expression;
+use super::typedtree::{ApplyArg, Case, Expression, FunctionParam, RecordField, ValueBinding};
 
 /// Handle of a typed expression in a [`TypedArena`].
 ///
@@ -47,6 +47,17 @@ impl std::fmt::Debug for TExprIdx {
 /// A list of typed expressions (tuple, array and constructor arguments,
 /// template values).
 pub type TExprList = ArenaList<TExprIdx>;
+
+/// The cases of a `match` or `try`.
+pub type TCaseList = ArenaList<Case>;
+/// The bindings of a `let`.
+pub type TVbList = ArenaList<ValueBinding>;
+/// The arguments of an application.
+pub type TArgList = ArenaList<ApplyArg>;
+/// The parameters of a function.
+pub type TParamList = ArenaList<FunctionParam>;
+/// The fields of a record expression.
+pub type TFieldList = ArenaList<RecordField>;
 
 /// One pool of list items. A list is a contiguous range, pushed in one go.
 #[derive(Debug)]
@@ -92,6 +103,38 @@ impl<T> ListPool<T> {
 pub struct TypedArena {
     exprs: Vec<Expression>,
     expr_lists: ListPool<TExprIdx>,
+    cases: ListPool<Case>,
+    value_bindings: ListPool<ValueBinding>,
+    apply_args: ListPool<ApplyArg>,
+    function_params: ListPool<FunctionParam>,
+    record_fields: ListPool<RecordField>,
+}
+
+macro_rules! list_pool_accessors {
+    ($($push:ident, $get:ident, $pool:ident, $item:ty;)*) => {
+        impl TypedArena {
+            $(
+                /// Store a list.
+                pub fn $push(&mut self, items: impl IntoIterator<Item = $item>) -> ArenaList<$item> {
+                    self.$pool.push_iter(items)
+                }
+
+                /// The items of a stored list.
+                #[inline]
+                pub fn $get(&self, list: ArenaList<$item>) -> &[$item] {
+                    self.$pool.get(list)
+                }
+            )*
+        }
+    };
+}
+
+list_pool_accessors! {
+    push_cases, cases, cases, Case;
+    push_value_bindings, value_bindings, value_bindings, ValueBinding;
+    push_apply_args, apply_args, apply_args, ApplyArg;
+    push_function_params, function_params, function_params, FunctionParam;
+    push_record_fields, record_fields, record_fields, RecordField;
 }
 
 impl TypedArena {

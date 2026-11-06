@@ -3062,7 +3062,7 @@ impl<'a> RawLambdaConverter<'a> {
                         ..
                     } => self.convert_record_raw(
                         SrcLoc::from(arg.exp_loc),
-                        fields,
+                        self.ta.record_fields(*fields),
                         *extended_expression,
                         inlined_record_representation(cstr),
                         None,
@@ -3076,8 +3076,12 @@ impl<'a> RawLambdaConverter<'a> {
                         // Debug/captured lambda keeps OCaml's full `lbl_all`
                         // stream; normal JS lowering can compact static
                         // omitted optional None before raw-lambda conversion.
-                        let (record_fields, logical_field_count) =
-                            self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
+                        let (record_fields, logical_field_count) = self
+                            .sparse_record_fields_for_lambda(
+                                all_labels,
+                                self.ta.record_fields(*fields),
+                                *omitted_loc,
+                            );
                         self.convert_record_raw(
                             SrcLoc::from(arg.exp_loc),
                             &record_fields,
@@ -5591,12 +5595,12 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
-                fields.extend(let_bound_idents(bindings));
+                fields.extend(let_bound_idents(self.ta.value_bindings(*bindings)));
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
                 if is_top_level && *rec_flag == crate::parser::ast::RecFlag::Nonrecursive {
-                    for binding in bindings {
+                    for binding in self.ta.value_bindings(*bindings) {
                         match &binding.vb_pat.pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
                             _ if !crate::types::typecore::parmatch_irrefutable(
@@ -5619,7 +5623,12 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw_at_root(*rec_flag, bindings, body, rootpath)
+                self.convert_let_with_body_raw_at_root(
+                    *rec_flag,
+                    self.ta.value_bindings(*bindings),
+                    body,
+                    rootpath,
+                )
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -5846,7 +5855,11 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_constant(cst) => RawLambda::const_(self.convert_constant(cst)),
             ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
                 let body_lam = self.convert_expr_raw(self.ta.expr(*body));
-                self.convert_let_with_body_raw(*rec_flag, bindings, body_lam)
+                self.convert_let_with_body_raw(
+                    *rec_flag,
+                    self.ta.value_bindings(*bindings),
+                    body_lam,
+                )
             }
             ExpressionDesc::Texp_function {
                 params,
@@ -5858,7 +5871,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let inline = self.get_inline_attribute_from(&expr.exp_attributes);
                 self.convert_nary_function_raw(
                     Some(expr),
-                    params,
+                    self.ta.function_params(*params),
                     self.ta.expr(*body),
                     *async_,
                     directive,
@@ -5910,7 +5923,7 @@ impl<'a> RawLambdaConverter<'a> {
                 expr.exp_loc,
                 expr.exp_loc,
                 self.ta.expr(*funct),
-                args,
+                self.ta.apply_args(*args),
                 *partial,
                 *transformed_jsx,
             ),
@@ -5920,7 +5933,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // empty (compiler/ml/translcore.ml:1215-1218). Keep that shared
                 // Ident allocation order; ordinary matches intentionally do
                 // not retain this binder in the resulting lambda.
-                let exn_id = self.name_pattern_ident("exn", exn_cases);
+                let exn_id = self.name_pattern_ident("exn", self.ta.cases(*exn_cases));
                 if !exn_cases.is_empty() {
                     // Match with exception cases: wrap in try-with + static catch.
                     // Matches OCaml's transl_match logic from translcore.ml.
@@ -5929,8 +5942,8 @@ impl<'a> RawLambdaConverter<'a> {
                     self.compile_match_with_exceptions_raw(
                         loc,
                         self.ta.expr(*scrut),
-                        cases,
-                        exn_cases,
+                        self.ta.cases(*cases),
+                        self.ta.cases(*exn_cases),
                         partial,
                         expr,
                         exn_id,
@@ -5938,8 +5951,10 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     // For single-case matches with unboxed constructor patterns,
                     // use the irrefutable path which correctly handles transparent field access.
-                    if cases.len() == 1 && cases[0].c_guard.is_none() {
-                        if let PatternDesc::Tpat_construct(_, cstr, _) = &cases[0].c_lhs.pat_desc {
+                    if cases.len() == 1 && self.ta.cases(*cases)[0].c_guard.is_none() {
+                        if let PatternDesc::Tpat_construct(_, cstr, _) =
+                            &self.ta.cases(*cases)[0].c_lhs.pat_desc
+                        {
                             if matches!(
                                 cstr.cstr_kind,
                                 crate::types::ConstructorKind::Ordinary(reference)
@@ -5947,9 +5962,10 @@ impl<'a> RawLambdaConverter<'a> {
                                         crate::types::VariantConstructorCase::Block(ref block)
                                             if block.is_untagged())
                             ) {
-                                if let Some(result) =
-                                    self.compile_irrefutable_match_raw(self.ta.expr(*scrut), cases)
-                                {
+                                if let Some(result) = self.compile_irrefutable_match_raw(
+                                    self.ta.expr(*scrut),
+                                    self.ta.cases(*cases),
+                                ) {
                                     return result;
                                 }
                             }
@@ -5958,13 +5974,18 @@ impl<'a> RawLambdaConverter<'a> {
                     let partial = *partial;
                     let loc = expr.exp_loc;
                     // Use full matching compiler (ported from OCaml's matching.ml)
-                    self.compile_full_matching(loc, self.ta.expr(*scrut), cases, partial)
+                    self.compile_full_matching(
+                        loc,
+                        self.ta.expr(*scrut),
+                        self.ta.cases(*cases),
+                        partial,
+                    )
                 }
             }
             ExpressionDesc::Texp_try(body, cases) => {
                 let _loc = expr.exp_loc;
-                let exn_id = self.name_pattern_ident("exn", cases);
-                let handler = self.compile_trywith_handler_raw(&exn_id, cases);
+                let exn_id = self.name_pattern_ident("exn", self.ta.cases(*cases));
+                let handler = self.compile_trywith_handler_raw(&exn_id, self.ta.cases(*cases));
                 let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
                 let body_lam = self.convert_expr_raw(self.ta.expr(*body));
                 RawLambda::LtryWith(Box::new(body_lam), exn_id, Box::new(handler))
@@ -6015,7 +6036,7 @@ impl<'a> RawLambdaConverter<'a> {
                 ..
             } => self.convert_record_raw(
                 SrcLoc::from(expr.exp_loc),
-                fields,
+                self.ta.record_fields(*fields),
                 *extended_expression,
                 None,
                 None,
@@ -6026,8 +6047,11 @@ impl<'a> RawLambdaConverter<'a> {
                 omitted_loc,
                 ..
             } => {
-                let (record_fields, logical_field_count) =
-                    self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
+                let (record_fields, logical_field_count) = self.sparse_record_fields_for_lambda(
+                    all_labels,
+                    self.ta.record_fields(*fields),
+                    *omitted_loc,
+                );
                 self.convert_record_raw(
                     SrcLoc::from(expr.exp_loc),
                     &record_fields,
@@ -7747,7 +7771,7 @@ mod tests {
 
         let arg = Expression::new(
             ExpressionDesc::Texp_record {
-                fields: vec![],
+                fields: crate::types::typedtree::TFieldList::EMPTY,
                 extended_expression: None,
                 empty_representation: None,
             },
@@ -7870,8 +7894,9 @@ mod tests {
             EnvRef(0),
             Attributes::new(),
         ));
+        let cases = ta.push_cases([case]);
         ta.push_expr(Expression::new(
-            ExpressionDesc::Texp_try(body, vec![case]),
+            ExpressionDesc::Texp_try(body, cases),
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             EnvRef(0),
@@ -7932,13 +7957,13 @@ mod tests {
         );
         let expr = Expression::new(
             ExpressionDesc::Texp_function {
-                params: vec![FunctionParam {
+                params: typed_arena.push_function_params([FunctionParam {
                     fp_lbl: crate::types::ArgLabel::Nolabel,
                     fp_param: param_id,
                     fp_pat: param_pat,
                     fp_partial: Partial::Total,
                     fp_has_default: false,
-                }],
+                }]),
                 body: typed_arena.push_expr(Expression::new(
                     ExpressionDesc::Texp_constant(TConstant::Int(1)),
                     LocIdx::none(),

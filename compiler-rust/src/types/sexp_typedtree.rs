@@ -920,7 +920,7 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_continue => Sexp::list(vec![Sexp::atom("Texp_continue")]),
         ExpressionDesc::Texp_let(flag, vbs, body) => {
             let mut vb_items = Vec::new();
-            for vb in vbs.iter() {
+            for vb in cx.ta.value_bindings(*vbs).iter() {
                 vb_items.push(sexp_value_binding(arena, ctx, cx, vb));
             }
             Sexp::list(vec![
@@ -936,7 +936,9 @@ fn sexp_expression_desc(
             async_,
         } => {
             // compiler/ml/sexp_typedtree.ml:382-400.
-            let params = params
+            let params = cx
+                .ta
+                .function_params(*params)
                 .iter()
                 .map(|param| {
                     Sexp::list(vec![
@@ -962,7 +964,7 @@ fn sexp_expression_desc(
         } => {
             let funct_sexp = sexp_expression(arena, ctx, cx, *funct);
             let mut arg_items = Vec::new();
-            for arg in args.iter() {
+            for arg in cx.ta.apply_args(*args).iter() {
                 let expr_sexp = match &arg.expression {
                     Some(e) => Sexp::list(vec![
                         Sexp::atom("Some"),
@@ -983,11 +985,11 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_match(e, cases, exn_cases, p) => {
             let e_sexp = sexp_expression(arena, ctx, cx, *e);
             let mut case_items = Vec::new();
-            for c in cases.iter() {
+            for c in cx.ta.cases(*cases).iter() {
                 case_items.push(sexp_case(arena, ctx, cx, c));
             }
             let mut exn_case_items = Vec::new();
-            for c in exn_cases.iter() {
+            for c in cx.ta.cases(*exn_cases).iter() {
                 exn_case_items.push(sexp_case(arena, ctx, cx, c));
             }
             Sexp::list(vec![
@@ -1001,7 +1003,7 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_try(e, cases) => {
             let e_sexp = sexp_expression(arena, ctx, cx, *e);
             let mut case_items = Vec::new();
-            for c in cases.iter() {
+            for c in cx.ta.cases(*cases).iter() {
                 case_items.push(sexp_case(arena, ctx, cx, c));
             }
             Sexp::list(vec![Sexp::atom("Texp_try"), e_sexp, Sexp::list(case_items)])
@@ -1040,7 +1042,7 @@ fn sexp_expression_desc(
             ..
         } => {
             let mut field_items = Vec::new();
-            for (_li, ld, def, opt_flag) in fields.iter() {
+            for (_li, ld, def, opt_flag) in cx.ta.record_fields(*fields).iter() {
                 field_items.push(sexp_record_field(
                     arena,
                     ctx,
@@ -1074,7 +1076,7 @@ fn sexp_expression_desc(
             // full record-field shape for parity output.
             let mut explicit_by_pos: HashMap<usize, &RecordField> =
                 HashMap::with_capacity(fields.len());
-            for field in fields.iter() {
+            for field in cx.ta.record_fields(*fields).iter() {
                 let pos = field.1.lbl_pos;
                 if pos >= 0 {
                     explicit_by_pos.insert(pos as usize, field);
@@ -1931,7 +1933,7 @@ fn sexp_structure_item_desc(
         ]),
         StructureItemDesc::Tstr_value(flag, vbs) => {
             let mut vb_items = Vec::new();
-            for vb in vbs.iter() {
+            for vb in cx.ta.value_bindings(*vbs).iter() {
                 vb_items.push(sexp_value_binding(arena, ctx, cx, vb));
             }
             Sexp::list(vec![

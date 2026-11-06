@@ -173,7 +173,9 @@ pub fn walk_structure_item<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, item: 
             let ta = sub.arena();
             sub.expr(ta.expr(*e))
         }
-        StructureItemDesc::Tstr_value(rec_flag, vbs) => sub.value_bindings(rec_flag, vbs),
+        StructureItemDesc::Tstr_value(rec_flag, vbs) => {
+            sub.value_bindings(rec_flag, sub.arena().value_bindings(*vbs))
+        }
         StructureItemDesc::Tstr_primitive(vd) => sub.value_description(vd),
         StructureItemDesc::Tstr_type(rec_flag, decls) => sub.type_declarations(rec_flag, decls),
         StructureItemDesc::Tstr_typext(te) => sub.type_extension(te),
@@ -304,18 +306,18 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
         | ExpressionDesc::Texp_continue
         | ExpressionDesc::Texp_extension_constructor(..) => {}
         ExpressionDesc::Texp_let(rec_flag, vbs, body) => {
-            sub.value_bindings(rec_flag, vbs);
+            sub.value_bindings(rec_flag, sub.arena().value_bindings(*vbs));
             sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_function { params, body, .. } => {
-            for param in params {
+            for param in ta.function_params(*params) {
                 sub.pat(&param.fp_pat);
             }
             sub.expr(ta.expr(*body));
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             sub.expr(ta.expr(*funct));
-            for arg in args {
+            for arg in ta.apply_args(*args) {
                 if let Some(e) = arg.expression {
                     sub.expr(ta.expr(e));
                 }
@@ -323,12 +325,12 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
         }
         ExpressionDesc::Texp_match(e, cases, exn_cases, _) => {
             sub.expr(ta.expr(*e));
-            sub.cases(cases);
-            sub.cases(exn_cases);
+            sub.cases(ta.cases(*cases));
+            sub.cases(ta.cases(*exn_cases));
         }
         ExpressionDesc::Texp_try(e, cases) => {
             sub.expr(ta.expr(*e));
-            sub.cases(cases);
+            sub.cases(ta.cases(*cases));
         }
         ExpressionDesc::Texp_tuple(es)
         | ExpressionDesc::Texp_construct(_, _, es)
@@ -351,7 +353,7 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
             fields,
             extended_expression,
             ..
-        } => walk_record_fields(sub, fields, *extended_expression),
+        } => walk_record_fields(sub, ta.record_fields(*fields), *extended_expression),
         ExpressionDesc::Texp_field(e, _, _) | ExpressionDesc::Texp_assert(e) => {
             sub.expr(ta.expr(*e))
         }

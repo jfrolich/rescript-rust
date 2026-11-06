@@ -695,7 +695,7 @@ impl Processor<'_> {
         match item {
             tt::StructureItemDesc::Tstr_value(_, bindings) => {
                 let mut items = Vec::new();
-                for binding in bindings {
+                for binding in self.ctx.ta.value_bindings(*bindings) {
                     self.handle_pattern(
                         env,
                         exported,
@@ -704,7 +704,7 @@ impl Processor<'_> {
                         &binding.vb_pat,
                     );
                 }
-                for binding in bindings {
+                for binding in self.ctx.ta.value_bindings(*bindings) {
                     self.scan_let_modules(env, binding.vb_expr);
                 }
                 items
@@ -884,14 +884,14 @@ impl Processor<'_> {
                 self.scan_let_modules(env, *body);
             }
             tt::ExpressionDesc::Texp_let(_, bindings, body) => {
-                for binding in bindings {
+                for binding in self.ctx.ta.value_bindings(*bindings) {
                     self.scan_let_modules(env, binding.vb_expr);
                 }
                 self.scan_let_modules(env, *body);
             }
             tt::ExpressionDesc::Texp_apply { funct, args, .. } => {
                 self.scan_let_modules(env, *funct);
-                for arg in args {
+                for arg in self.ctx.ta.apply_args(*args) {
                     if let Some(e) = arg.expression {
                         self.scan_let_modules(env, e);
                     }
@@ -908,7 +908,7 @@ impl Processor<'_> {
             }
             tt::ExpressionDesc::Texp_match(e, cases, exn_cases, _) => {
                 self.scan_let_modules(env, *e);
-                for case in cases.iter().chain(exn_cases) {
+                for case in ta.cases(*cases).iter().chain(ta.cases(*exn_cases)) {
                     if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }
@@ -918,7 +918,7 @@ impl Processor<'_> {
             tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, *body),
             tt::ExpressionDesc::Texp_try(e, cases) => {
                 self.scan_let_modules(env, *e);
-                for case in cases {
+                for case in self.ctx.ta.cases(*cases) {
                     if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }

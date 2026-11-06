@@ -24,7 +24,9 @@ use crate::parser::ast::{
 };
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
-pub use crate::types::tast_arena::{TExprIdx, TExprList, TypedArena};
+pub use crate::types::tast_arena::{
+    TArgList, TCaseList, TExprIdx, TExprList, TFieldList, TParamList, TVbList, TypedArena,
+};
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
@@ -310,11 +312,11 @@ pub enum ExpressionDesc {
     Texp_constant(Constant),
 
     /// Let binding: `let P = E in E'`.
-    Texp_let(RecFlag, Vec<ValueBinding>, TExprIdx),
+    Texp_let(RecFlag, TVbList, TExprIdx),
 
     /// Function expression. Mirrors `compiler/ml/typedtree.ml`.
     Texp_function {
-        params: Vec<FunctionParam>,
+        params: TParamList,
         body: TExprIdx,
         /// Whether this is an async function.
         async_: bool,
@@ -324,7 +326,7 @@ pub enum ExpressionDesc {
     /// Uses the ApplyArg representation.
     Texp_apply {
         funct: TExprIdx,
-        args: Vec<ApplyArg>,
+        args: TArgList,
         /// Whether this is a partial application.
         partial: bool,
         /// Whether this was transformed from JSX.
@@ -333,10 +335,10 @@ pub enum ExpressionDesc {
 
     /// Match: `switch E { | P1 => E1 | ... }`.
     /// The two case lists are (value cases, exception cases).
-    Texp_match(TExprIdx, Vec<Case>, Vec<Case>, Partial),
+    Texp_match(TExprIdx, TCaseList, TCaseList, Partial),
 
     /// Try: `try E catch { | P1 => E1 | ... }`.
-    Texp_try(TExprIdx, Vec<Case>),
+    Texp_try(TExprIdx, TCaseList),
 
     /// Tuple: `(E1, ..., En)`.
     Texp_tuple(TExprList),
@@ -350,7 +352,7 @@ pub enum ExpressionDesc {
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
     /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
-        fields: Vec<RecordField>,
+        fields: TFieldList,
         /// OCaml `representation` (compiler/ml/typedtree.ml `Texp_record`).
         /// When `fields` is non-empty OCaml takes it from the first label's
         /// `lbl_repres` (compiler/ml/typecore.ml:2767-2771), so Rust derives it
@@ -374,7 +376,7 @@ pub enum ExpressionDesc {
     /// the same external typedtree/lambda/JS behavior and comparable
     /// large-record performance.
     Texp_record_sparse {
-        fields: Vec<RecordField>,
+        fields: TFieldList,
         all_labels: std::sync::Arc<Vec<LabelDescription>>,
         omitted_loc: LocIdx,
         extended_expression: Option<TExprIdx>,
@@ -849,7 +851,7 @@ pub enum StructureItemDesc {
     /// Evaluated expression: `E`.
     Tstr_eval(TExprIdx, Attributes),
     /// Value binding: `let P = E`.
-    Tstr_value(RecFlag, Vec<ValueBinding>),
+    Tstr_value(RecFlag, TVbList),
     /// Primitive declaration: `external f : t = "..."`.
     Tstr_primitive(TypedValueDescription),
     /// Type declaration: `type t = ...`.

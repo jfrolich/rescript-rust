@@ -290,13 +290,14 @@ pub fn from_attributes(
 
 pub fn module_type_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     module_type: &ModuleType,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:183-190.
     match &module_type.mty_desc {
         ModuleTypeDesc::Tmty_signature(signature) => {
-            signature_check_annotation(arena, check_annotation, signature)
+            signature_check_annotation(arena, ta, check_annotation, signature)
         }
         ModuleTypeDesc::Tmty_ident(_, _)
         | ModuleTypeDesc::Tmty_functor(_, _, _, _)
@@ -308,6 +309,7 @@ pub fn module_type_check_annotation(
 
 pub fn module_type_declaration_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     module_type_declaration: &ModuleTypeDeclaration,
 ) -> bool {
@@ -317,22 +319,24 @@ pub fn module_type_declaration_check_annotation(
         &module_type_declaration.mtd_attributes,
     ) || match module_type_declaration.mtd_type.as_ref() {
         None => false,
-        Some(module_type) => module_type_check_annotation(arena, check_annotation, module_type),
+        Some(module_type) => module_type_check_annotation(arena, ta, check_annotation, module_type),
     }
 }
 
 pub fn module_declaration_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     module_declaration: &TypedModuleDeclaration,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:202-205.
     check_annotation(module_declaration.md_loc, &module_declaration.md_attributes)
-        || module_type_check_annotation(arena, check_annotation, &module_declaration.md_type)
+        || module_type_check_annotation(arena, ta, check_annotation, &module_declaration.md_type)
 }
 
 pub fn signature_item_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     signature_item: &TypedSignatureItem,
 ) -> bool {
@@ -347,7 +351,7 @@ pub fn signature_item_check_annotation(
             check_annotation(value_description.val_loc, &value_description.val_attributes)
         }
         TypedSignatureItemDesc::Tsig_module(module_declaration) => {
-            module_declaration_check_annotation(arena, check_annotation, module_declaration)
+            module_declaration_check_annotation(arena, ta, check_annotation, module_declaration)
         }
         TypedSignatureItemDesc::Tsig_attribute(attribute) => {
             let attributes = singleton_attribute(attribute);
@@ -356,6 +360,7 @@ pub fn signature_item_check_annotation(
         TypedSignatureItemDesc::Tsig_modtype(module_type_declaration) => {
             module_type_declaration_check_annotation(
                 arena,
+                ta,
                 check_annotation,
                 module_type_declaration,
             )
@@ -370,17 +375,19 @@ pub fn signature_item_check_annotation(
 
 pub fn signature_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     signature: &TypedSignature,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:228-231.
     signature.sig_items.iter().any(|signature_item| {
-        signature_item_check_annotation(arena, check_annotation, signature_item)
+        signature_item_check_annotation(arena, ta, check_annotation, signature_item)
     })
 }
 
 pub fn structure_item_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     structure_item: &StructureItem,
 ) -> bool {
@@ -391,18 +398,19 @@ pub fn structure_item_check_annotation(
                 check_annotation(type_declaration.typ_loc, &type_declaration.typ_attributes)
             })
         }
-        StructureItemDesc::Tstr_value(_, value_bindings) => value_bindings
+        StructureItemDesc::Tstr_value(_, value_bindings) => ta
+            .value_bindings(*value_bindings)
             .iter()
             .any(|vb| check_annotation(vb.vb_loc, &vb.vb_attributes)),
         StructureItemDesc::Tstr_primitive(value_description) => {
             check_annotation(value_description.val_loc, &value_description.val_attributes)
         }
         StructureItemDesc::Tstr_module(module_binding) => {
-            module_binding_check_annotation(arena, check_annotation, module_binding)
+            module_binding_check_annotation(arena, ta, check_annotation, module_binding)
         }
         StructureItemDesc::Tstr_recmodule(module_bindings) => {
             module_bindings.iter().any(|module_binding| {
-                module_binding_check_annotation(arena, check_annotation, module_binding)
+                module_binding_check_annotation(arena, ta, check_annotation, module_binding)
             })
         }
         StructureItemDesc::Tstr_include(include_declaration) => {
@@ -411,6 +419,7 @@ pub fn structure_item_check_annotation(
                 &include_declaration.incl_attributes,
             ) || module_expr_check_annotation(
                 arena,
+                ta,
                 check_annotation,
                 &include_declaration.incl_mod,
             )
@@ -418,6 +427,7 @@ pub fn structure_item_check_annotation(
         StructureItemDesc::Tstr_modtype(module_type_declaration) => {
             module_type_declaration_check_annotation(
                 arena,
+                ta,
                 check_annotation,
                 module_type_declaration,
             )
@@ -435,19 +445,20 @@ pub fn structure_item_check_annotation(
 
 pub fn module_expr_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     module_expr: &ModuleExpr,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:263-276.
     match &module_expr.mod_desc {
         ModuleExprDesc::Tmod_structure(structure) => {
-            structure_check_annotation(arena, check_annotation, structure)
+            structure_check_annotation(arena, ta, check_annotation, structure)
         }
         ModuleExprDesc::Tmod_constraint(module_expr, _, module_type_constraint, _) => {
-            module_expr_check_annotation(arena, check_annotation, module_expr)
+            module_expr_check_annotation(arena, ta, check_annotation, module_expr)
                 || match module_type_constraint {
                     ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
-                        module_type_check_annotation(arena, check_annotation, module_type)
+                        module_type_check_annotation(arena, ta, check_annotation, module_type)
                     }
                     ModuleTypeConstraint::Tmodtype_implicit => false,
                 }
@@ -461,22 +472,24 @@ pub fn module_expr_check_annotation(
 
 pub fn module_binding_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     module_binding: &crate::types::typedtree::ModuleBinding,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:278-281.
     check_annotation(module_binding.mb_loc, &module_binding.mb_attributes)
-        || module_expr_check_annotation(arena, check_annotation, &module_binding.mb_expr)
+        || module_expr_check_annotation(arena, ta, check_annotation, &module_binding.mb_expr)
 }
 
 pub fn structure_check_annotation(
     arena: &ParseArena,
+    ta: &crate::types::typedtree::TypedArena,
     check_annotation: &impl Fn(LocIdx, &Attributes) -> bool,
     structure: &Structure,
 ) -> bool {
     // Mirrors compiler/gentype/Annotation.ml:283-286.
     structure.str_items.iter().any(|structure_item| {
-        structure_item_check_annotation(arena, check_annotation, structure_item)
+        structure_item_check_annotation(arena, ta, check_annotation, structure_item)
     })
 }
 

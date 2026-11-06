@@ -234,6 +234,7 @@ pub fn typed_artifact_check_annotations(
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::annotation::structure_check_annotation(
                 artifact.arena,
+                artifact.ta,
                 &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
                 structure,
             )
@@ -241,6 +242,7 @@ pub fn typed_artifact_check_annotations(
         TypedArtifactAnnots::Interface(signature) => {
             crate::gentype::annotation::signature_check_annotation(
                 artifact.arena,
+                artifact.ta,
                 &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
                 signature,
             )

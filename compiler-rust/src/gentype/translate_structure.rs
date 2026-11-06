@@ -24,7 +24,7 @@ pub fn addAnnotationsToTypes_(
         ExpressionDesc::Texp_function { params, body, .. } => {
             let mut out = Vec::with_capacity(arg_types.len());
             for (index, ArgType { a_type, .. }) in arg_types.iter().enumerate() {
-                match params.get(index) {
+                match ta.function_params(*params).get(index) {
                     Some(param) => out.push(ArgType {
                         a_name: function_param_name(arena, param),
                         a_type: a_type.clone(),
@@ -344,7 +344,7 @@ pub fn translate_structure_item(
             }
         }
         StructureItemDesc::Tstr_value(_, value_bindings) => crate::gentype::translation::combine(
-            value_bindings
+            ta.value_bindings(*value_bindings)
                 .iter()
                 .map(|value_binding| {
                     translate_value_binding(
@@ -481,7 +481,8 @@ pub fn translate_structure(
     for item in structure.str_items.iter().rev() {
         match &item.str_desc {
             StructureItemDesc::Tstr_value(_, value_bindings) => {
-                let value_bindings = value_bindings
+                let value_bindings = ta
+                    .value_bindings(*value_bindings)
                     .iter()
                     .filter(|binding| match &binding.vb_pat.pat_desc {
                         PatternDesc::Tpat_var(id, _) => seen.insert(id.name().to_string()),

@@ -31,7 +31,7 @@ use crate::types::typecore::{
 use crate::types::typedtree::{
     EnvRef, Expression, IncludeDeclaration, IncludeDescription, ModuleBinding, ModuleCoercion,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure,
-    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
+    StructureItem, StructureItemDesc, TypeExtension, TypedArena, TypedConstructorArguments,
     TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
     TypedTypeDeclaration, TypedTypeKind,
 };
@@ -11403,6 +11403,7 @@ fn extract_functor_result_type<'b>(
                         .ok()
                         .and_then(|typed_arg| {
                             extract_module_type_from_mod_expr_with_ctx(
+                                &tctx.typed,
                                 &typed_arg,
                                 Some(env),
                                 tctx.type_ctx,
@@ -13220,11 +13221,12 @@ pub(crate) fn decl_module_type_from_typed(
 }
 
 pub(crate) fn extract_module_type_from_mod_expr_with_ctx(
+    ta: &TypedArena,
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
     type_ctx: &crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
-    extract_module_type_from_mod_expr_inner(mod_expr, env, Some(type_ctx))
+    extract_module_type_from_mod_expr_inner(ta, mod_expr, env, Some(type_ctx))
 }
 
 fn strip_self_module_prefix_in_sig(
@@ -13725,6 +13727,7 @@ fn localize_raw_unpack_modules_in_structure_sig(
 }
 
 fn extract_module_type_from_mod_expr_inner(
+    ta: &TypedArena,
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
     type_ctx: Option<&crate::types::context::TypeContext>,
@@ -14027,7 +14030,7 @@ fn extract_module_type_from_mod_expr_inner(
                 let current_env = current_env_snapshot.as_ref().or(env);
                 match &item.str_desc {
                     StructureItemDesc::Tstr_value(_, bindings) => {
-                        for vb in bindings {
+                        for vb in ta.value_bindings(*bindings) {
                             extract_sig_values_from_pattern(
                                 &vb.vb_pat,
                                 vb.vb_pat.pat_type,
@@ -14054,6 +14057,7 @@ fn extract_module_type_from_mod_expr_inner(
                         let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
                             .or_else(|| {
                                 extract_module_type_from_mod_expr_inner(
+                                    ta,
                                     &mb.mb_expr,
                                     current_env,
                                     type_ctx,
@@ -14090,6 +14094,7 @@ fn extract_module_type_from_mod_expr_inner(
                             let inner_mty = preserve_structure_module_alias(&mb.mb_expr)
                                 .or_else(|| {
                                     extract_module_type_from_mod_expr_inner(
+                                        ta,
                                         &mb.mb_expr,
                                         current_env,
                                         type_ctx,
@@ -14185,6 +14190,7 @@ fn extract_module_type_from_mod_expr_inner(
                         }
                         if !included {
                             if let Some(inner_mty) = extract_module_type_from_mod_expr_inner(
+                                ta,
                                 &incl.incl_mod,
                                 current_env,
                                 type_ctx,
@@ -14313,7 +14319,7 @@ fn extract_module_type_from_mod_expr_inner(
                 None
             };
 
-            let result_mty = extract_module_type_from_mod_expr_inner(body, body_env, type_ctx)?;
+            let result_mty = extract_module_type_from_mod_expr_inner(ta, body, body_env, type_ctx)?;
             Some(DeclMty::MtyFunctor {
                 param: *param_id,
                 param_type: decl_param_mty.map(Box::new),
@@ -14322,7 +14328,7 @@ fn extract_module_type_from_mod_expr_inner(
         }
         ModuleExprDesc::Tmod_apply(functor, _arg, _) => {
             let extracted_functor_mty =
-                extract_module_type_from_mod_expr_inner(functor, env, type_ctx);
+                extract_module_type_from_mod_expr_inner(ta, functor, env, type_ctx);
             if let Some(functor_mty) = extracted_functor_mty {
                 let resolved_functor_mty = match &functor_mty {
                     DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => env
@@ -14364,7 +14370,8 @@ fn extract_module_type_from_mod_expr_inner(
                     })
                 }
             };
-            constrained.or_else(|| extract_module_type_from_mod_expr_inner(inner, env, type_ctx))
+            constrained
+                .or_else(|| extract_module_type_from_mod_expr_inner(ta, inner, env, type_ctx))
         }
     }
 }
@@ -15560,7 +15567,9 @@ fn wrap_constraint_with_decl_mty<'a>(
     mod_attributes: Attributes,
 ) -> TypeModResult<ModuleExpr> {
     let arg_mty = decl_module_type_from_typed_module_expr_for_constraint_arg(&arg)
-        .or_else(|| extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx))
+        .or_else(|| {
+            extract_module_type_from_mod_expr_with_ctx(&tctx.typed, &arg, Some(env), tctx.type_ctx)
+        })
         .or_else(|| Some(arg.mod_type.clone()))
         .unwrap_or(crate::types::decl::ModuleType::MtySignature(
             std::sync::Arc::new(vec![]),
@@ -16618,7 +16627,10 @@ fn type_structure_item<'a>(
                 push_sig_values_from_env_pattern(&new_env, &vb.vb_pat, &mut sig_items);
             }
 
-            let desc = StructureItemDesc::Tstr_value(*rec_flag, typed_bindings);
+            let desc = StructureItemDesc::Tstr_value(
+                *rec_flag,
+                tctx.typed.push_value_bindings(typed_bindings),
+            );
             Ok((
                 StructureItem {
                     str_desc: desc,

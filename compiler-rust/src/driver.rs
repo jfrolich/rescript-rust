@@ -12129,7 +12129,7 @@ fn moregen_link_structure(
     for item in &structure.str_items {
         match &item.str_desc {
             crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
-                for binding in bindings {
+                for binding in ta.value_bindings(*bindings) {
                     let Some(name) = extract_pat_name(&binding.vb_pat) else {
                         continue;
                     };
@@ -14818,6 +14818,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let gentype_ignore_interface = options.gentype_config.is_some()
         && crate::gentype::annotation::signature_check_annotation(
             arena,
+            &tctx.typed,
             &|_loc, attributes| {
                 crate::gentype::annotation::get_attribute_payload(
                     arena,
