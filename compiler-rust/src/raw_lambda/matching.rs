@@ -13,15 +13,15 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
 use crate::ident::{Ident, IdentFlags};
+use crate::lambda::LamLoc;
 use crate::lambda::LetKind;
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
 use crate::lambda::{Comparison, FieldDbgInfo, Primitive, TagInfo};
-use crate::lambda::LamLoc;
 use crate::location::Location;
-use crate::raw_lambda::loc::LocArena;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
+use crate::raw_lambda::loc::LocArena;
 use crate::raw_lambda::switch::Shared;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
@@ -8448,32 +8448,6 @@ fn resolve_labels_from_type(
         }
     }
 
-    if let crate::types::Path::Pident(ref id) = path {
-        if id.stamp() != 0 {
-            if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
-                if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-                    return Some(build_label_descriptions(labels, repr, decl.type_private));
-                }
-            }
-        }
-    }
-
-    // Try exact type_ctx stores. OCaml's `lbl_all` is already exact
-    // (compiler/ml/typecore.ml:2802); avoid falling back from `A.B.t` to any
-    // same-last-name `t`, which can attach another record's debug labels.
-    if let Some(decl) = ctx_ref.find_type_decl_by_path(&path.name()) {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-    if matches!(path, crate::types::Path::Pident(_))
-        && let Some(decl) = ctx_ref.find_type_decl(path.last())
-    {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-
     // Extension/exception inline records use the constructor path itself
     // (for example `A0`) rather than a parent-type `Pdot`, so reconstruct
     // their full label set from the constructor's synthetic inline record.
@@ -8496,34 +8470,7 @@ fn resolve_labels_from_type(
     // Look up the parent type declaration and find the constructor's inline record
     if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
         // Try to find the parent type declaration
-        let parent_decl = env
-            .lookup_type(parent_path)
-            .ok()
-            .cloned()
-            .or_else(|| {
-                ctx_ref
-                    .find_type_decl_by_path(&parent_path.name())
-                    .map(|d| d.clone())
-            })
-            .or_else(|| {
-                ctx_ref
-                    .find_type_decl(parent_path.last())
-                    .map(|d| d.clone())
-            })
-            .or_else(|| {
-                if let crate::types::Path::Pident(ref id) = **parent_path {
-                    if id.stamp() != 0 {
-                        ctx_ref
-                            .find_type_decl_by_stamp(id.stamp())
-                            .map(|d| d.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            });
-        if let Some(parent_decl) = parent_decl {
+        if let Ok(parent_decl) = env.lookup_type(parent_path) {
             if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
             {
                 for (position, cd) in constrs.iter().enumerate() {
@@ -8600,7 +8547,6 @@ fn extract_row_from_type_with_env(
         }
     }
 
-    // Fall back to stamp/path-based lookup
     extract_row_from_type(ctx_ref, ty)
 }
 
@@ -8608,54 +8554,8 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
     use crate::types::btype;
     use crate::types::type_expr::TypeDesc;
 
-    // Expand through links, Tconstr, and row_more to find the variant row
-    let mut current = ctx_ref.repr(ty);
-    for _ in 0..20 {
-        enum Action {
-            ReturnRow(RowDesc),
-            ExpandConstr(i32, String),
-            Follow(TypeExprRef),
-            Stop,
-        }
-        let action = {
-            let desc = ctx_ref.get_desc(current);
-            match &*desc {
-                TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, row)),
-                TypeDesc::Tconstr { path, .. } => {
-                    let stamp = match path {
-                        crate::types::Path::Pident(id) => id.stamp(),
-                        _ => -1,
-                    };
-                    Action::ExpandConstr(stamp, path.name())
-                }
-                TypeDesc::Tlink(next) => Action::Follow(*next),
-                _ => Action::Stop,
-            }
-        };
-        match action {
-            Action::ReturnRow(row) => return row,
-            Action::ExpandConstr(stamp, path_name) => {
-                if stamp >= 0 {
-                    if let Some(decl) = ctx_ref.find_type_decl_by_stamp(stamp) {
-                        if let Some(manifest) = decl.type_manifest {
-                            current = ctx_ref.repr(manifest);
-                            continue;
-                        }
-                    }
-                }
-                if let Some(decl) = ctx_ref.find_type_decl_by_path(&path_name) {
-                    if let Some(manifest) = decl.type_manifest {
-                        current = ctx_ref.repr(manifest);
-                        continue;
-                    }
-                }
-                break;
-            }
-            Action::Follow(next) => {
-                current = ctx_ref.repr(next);
-            }
-            Action::Stop => break,
-        }
+    if let TypeDesc::Tvariant(row) = &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
+        return btype::row_repr(ctx_ref, row);
     }
 
     // Fallback: empty row

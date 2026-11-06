@@ -1573,9 +1573,6 @@ fn add_gadt_equation(
     };
 
     // Add as a local constraint
-    if let Path::Pident(id) = source_path {
-        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
-    }
     env.add_local_constraint(source_path.clone(), decl);
     // OCaml add_gadt_equation calls cleanup_abbrev after installing the new
     // local constraint so future expansions observe the updated equation.
@@ -1612,8 +1609,7 @@ fn create_reified_constr(
     let name = ctx.next_reified_abstract_name(&prefix);
     let ident = ctx.create_ident(&name);
     let decl = reified_type_decl(newtype_level);
-    env.add_type(ident, decl.clone());
-    ctx.register_type_decl_by_stamp(ident.stamp(), decl);
+    env.add_type(ident, decl);
     let path = Path::Pident(ident);
     let abbrev = ctx.alloc_abbrev(AbbrevMemo::Mnil);
     ctx.alloc_type_at_level(
@@ -2874,7 +2870,7 @@ fn normalize_module_path_through_components(
 /// 3. If it's an alias, load the aliased module
 /// 4. Find type `t` in the resolved module's signature
 ///
-/// Returns the type declaration and caches it in the path store.
+/// Returns the type declaration.
 pub(crate) fn resolve_type_item_through_modules(
     ctx: &TypeContext,
     path: &Path,
@@ -2885,24 +2881,7 @@ pub(crate) fn resolve_type_item_through_modules(
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
-    let path_name = path_root_is_persistent(path).then(|| path.name());
     let counters_enabled = ctx.compiler_counters_enabled();
-    if let Some(path_name) = path_name.as_deref()
-        && let Some(cached) = ctx.find_type_item_by_path(path_name)
-    {
-        if counters_enabled {
-            crate::perf_counters::record_type_item_resolve_cache_hit();
-        }
-        return Some(cached);
-    }
-    if let Some(path_name) = path_name.as_deref()
-        && ctx.is_missing_type_item_by_path(path_name)
-    {
-        if counters_enabled {
-            crate::perf_counters::record_type_item_resolve_missing_cache_hit();
-        }
-        return None;
-    }
 
     let load_paths = ctx.load_paths();
     if load_paths.is_empty() && !ctx.persistent_env_is_in_process() {
@@ -2924,10 +2903,6 @@ pub(crate) fn resolve_type_item_through_modules(
     )
     .unwrap_or_else(|| module_path.clone());
 
-    // Register ALL types in the final signature by stamp for future lookups.
-    // This is important because type manifests may reference sibling types
-    // (e.g., type component<'a> = componentLike<'a, element>), and those
-    // sibling types need to be available for expansion later.
     let mut result = None;
     let mut scanned_items = 0usize;
     let mut type_items = 0usize;
@@ -2939,26 +2914,9 @@ pub(crate) fn resolve_type_item_through_modules(
             if counters_enabled {
                 type_items += 1;
             }
-            let qualified_decl =
-                qualify_type_decl_for_module_access_path(&type_module_path, id, decl);
-            // Register every type by stamp
-            if id.stamp() != 0 {
-                let should_register = {
-                    let existing = ctx.find_type_decl_by_stamp(id.stamp());
-                    existing.as_ref().is_none_or(|d| {
-                        d.type_path.is_none() && path_root_is_persistent(&type_module_path)
-                    })
-                };
-                if should_register {
-                    ctx.register_type_decl_by_stamp(id.stamp(), qualified_decl.clone());
-                }
-            }
             if id.name() == type_name {
-                // Cache the target type in the path store
-                let path_name = path_name.clone().unwrap_or_else(|| path.name());
-                ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
-                ctx.register_type_decl_by_exact_path(path.clone(), qualified_decl.clone());
-                ctx.register_type_item_by_path(&path_name, *id, qualified_decl.clone());
+                let qualified_decl =
+                    qualify_type_decl_for_module_access_path(&type_module_path, id, decl);
                 result = Some((*id, qualified_decl));
             }
         }
@@ -2970,12 +2928,6 @@ pub(crate) fn resolve_type_item_through_modules(
             result.is_some(),
         );
     }
-    if result.is_none()
-        && let Some(path_name) = path_name.as_deref()
-    {
-        ctx.register_missing_type_item_by_path(path_name);
-    }
-
     result
 }
 
@@ -2983,13 +2935,6 @@ pub fn resolve_type_through_modules(
     ctx: &TypeContext,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    if path_root_is_persistent(path) {
-        let path_name = path.name();
-        if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
-            return Some(decl.clone());
-        }
-    }
-
     resolve_type_item_through_modules(ctx, path).map(|(_, decl)| decl)
 }
 
@@ -4150,11 +4095,6 @@ fn try_expand_head_with_mode(
             let path = path.clone();
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
-            // Try stamp-based lookup first (most precise, handles CMI-loaded types)
-            let stamp = match &path {
-                Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
-                _ => None,
-            };
 
             drop(desc);
 
@@ -4369,31 +4309,6 @@ fn try_expand_head_with_mode(
                 }
             }
 
-            // 1a. For local identifiers, try stamp-based declaration lookup.
-            // This preserves OCaml-style local identity paths while still
-            // allowing expansion when env name lookup is unavailable.
-            // Skip if env already found the type as abstract (no manifest).
-            if !forbid_fallback_manifest_expansion
-                && let Path::Pident(id) = &path
-                && !id.is_persistent()
-                && id.stamp() != 0
-                && let Some(stamp_decl) = ctx
-                    .find_type_decl_by_stamp(id.stamp())
-                    .map(|decl| decl.clone())
-            {
-                if let Some(manifest) = stamp_decl.type_manifest {
-                    if can_expand_decl_manifest(&stamp_decl, manifest) {
-                        let params = &stamp_decl.type_params;
-                        if params.len() == args.len() {
-                            let expanded = expand_with_subst(params, manifest);
-                            return Some(expanded);
-                        } else {
-                            forbid_fallback_manifest_expansion = true;
-                        }
-                    }
-                }
-            }
-
             // 1b. For qualified paths, mirror OCaml `find_type` resolution by
             // descending through the current environment's module signatures
             // before consulting global fallbacks. OCaml
@@ -4481,86 +4396,6 @@ fn try_expand_head_with_mode(
                         }
                     } else {
                         forbid_fallback_manifest_expansion = true;
-                    }
-                }
-            }
-
-            // OCaml expand_abbrev_gen only expands through Env.find_type_expansion.
-            // For non-persistent heads, avoid global/path-store fallbacks that can
-            // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
-            // diverge from OCaml's identity/linking behavior.
-            // OCaml expand_abbrev_gen resolves qualified constructors through
-            // Env.find_type_expansion and then Env.normalize_path. Rust's
-            // global declaration store is not an Env lookup boundary and must
-            // not bypass normalize_path's persistent-module force.
-            let allow_global_fallbacks = matches!(&path, Path::Pident(id) if id.is_persistent())
-                && matches!(mode, ExpandHeadMode::General);
-
-            // 2. Try stamp-based global store (for CMI types with non-zero stamps)
-            if allow_global_fallbacks && let Some(stamp) = stamp {
-                if let Some(store_decl) = ctx.find_type_decl_by_stamp(stamp) {
-                    if let Some(manifest) = store_decl.type_manifest {
-                        if !forbid_fallback_manifest_expansion
-                            && can_expand_decl_manifest(&store_decl, manifest)
-                        {
-                            let params = &store_decl.type_params;
-                            if params.len() == args.len() {
-                                let expanded = expand_with_subst(params, manifest);
-                                return Some(expanded);
-                            }
-                        }
-                    }
-                    if matches!(mode, ExpandHeadMode::General)
-                        && let Some(type_path) = store_decl.type_path.as_ref()
-                    {
-                        let persistent_head = path_root_is_persistent(type_path);
-                        if persistent_head
-                            && store_decl.type_params.len() == args.len()
-                            && !type_path.same(&path)
-                        {
-                            let level = ctx.get_level(ty);
-                            let rewritten = ctx.new_type(TypeDesc::Tconstr {
-                                path: type_path.clone(),
-                                args: args.clone(),
-                                abbrev: orig_abbrev,
-                            });
-                            ctx.set_level(rewritten, level);
-                            return Some(rewritten);
-                        }
-                    }
-                }
-            }
-
-            // 3. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
-            if allow_global_fallbacks && matches!(path, Path::Pdot(_, _, _)) {
-                let _path_name = &path.name();
-                // First check cached path store
-                if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
-                    if let Some(manifest) = store_decl.type_manifest {
-                        if !forbid_fallback_manifest_expansion
-                            && can_expand_decl_manifest(&store_decl, manifest)
-                        {
-                            let params = &store_decl.type_params;
-                            if params.len() == args.len() {
-                                let expanded = expand_with_subst(params, manifest);
-                                return Some(expanded);
-                            }
-                        }
-                    }
-                }
-
-                // Not cached — resolve by loading CMI files and walking module signatures
-                if let Some(resolved_decl) = resolve_type_through_modules(ctx, &path) {
-                    if let Some(manifest) = resolved_decl.type_manifest {
-                        if !forbid_fallback_manifest_expansion
-                            && can_expand_decl_manifest(&resolved_decl, manifest)
-                        {
-                            let params = &resolved_decl.type_params;
-                            if params.len() == args.len() {
-                                let expanded = expand_with_subst(params, manifest);
-                                return Some(expanded);
-                            }
-                        }
                     }
                 }
             }
