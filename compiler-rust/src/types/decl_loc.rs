@@ -259,11 +259,36 @@ impl DeclLocs for DeclLocTable {
     }
 }
 
+/// Allocation identities of a location and its two position blocks. The
+/// scope is assigned by the owner of the source allocations, never inferred
+/// from coordinates. Copies retain these keys; equal coordinates alone do
+/// not imply a shared allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LocationIdentity {
+    pub(crate) scope: u64,
+    pub(crate) location: u32,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
+// Provenance-bearing handles use the upper half of the existing table-index
+// bits. Ordinary coordinate-only locations keep their existing direct index
+// and pay for no provenance storage.
+const IDENTITY_INDEX_BIT: usize = 1 << 27;
+
+#[derive(Debug)]
+struct LocationInstance {
+    coordinate: u32,
+    identity: LocationIdentity,
+}
+
 /// Append-only interning table owned by a `TypeContext` or worker store.
 #[derive(Debug, Default)]
 pub(crate) struct OwnedDeclLocs {
     locations: std::cell::RefCell<Vec<Location>>,
     index: std::cell::RefCell<crate::fast_hash::AHashMap<Location, u32>>,
+    instances: std::cell::RefCell<Vec<LocationInstance>>,
+    instance_index: std::cell::RefCell<crate::fast_hash::AHashMap<(u64, u32), u32>>,
 }
 
 impl OwnedDeclLocs {
@@ -275,9 +300,53 @@ impl OwnedDeclLocs {
         }
         let mut locations = self.locations.borrow_mut();
         let index = locations.len();
+        assert!(
+            index < IDENTITY_INDEX_BIT,
+            "declaration coordinate table exhausted"
+        );
         locations.push(loc);
         self.index.borrow_mut().insert(loc, index as u32);
         index
+    }
+
+    /// Keep coordinate interning while distinguishing physical allocations.
+    /// Reusing one source location must also reuse both of its position keys.
+    pub(crate) fn intern_with_identity(&self, loc: Location, identity: LocationIdentity) -> usize {
+        let coordinate = self.intern(loc);
+        let key = (identity.scope, identity.location);
+        if let Some(&index) = self.instance_index.borrow().get(&key) {
+            let instances = self.instances.borrow();
+            let instance = &instances[index as usize];
+            assert_eq!(
+                instance.coordinate as usize, coordinate,
+                "location allocation changed coordinates"
+            );
+            assert_eq!(
+                instance.identity, identity,
+                "location allocation changed position identity"
+            );
+            return IDENTITY_INDEX_BIT | index as usize;
+        }
+        let mut instances = self.instances.borrow_mut();
+        let index = instances.len();
+        assert!(
+            index < IDENTITY_INDEX_BIT,
+            "declaration provenance table exhausted"
+        );
+        instances.push(LocationInstance {
+            coordinate: coordinate as u32,
+            identity,
+        });
+        self.instance_index.borrow_mut().insert(key, index as u32);
+        IDENTITY_INDEX_BIT | index
+    }
+
+    pub(crate) fn identity(&self, index: usize) -> Option<LocationIdentity> {
+        if index & IDENTITY_INDEX_BIT == 0 {
+            None
+        } else {
+            Some(self.instances.borrow()[index & !IDENTITY_INDEX_BIT].identity)
+        }
     }
 
     /// Append a block of locations as is (an imported table), returning the
@@ -286,11 +355,20 @@ impl OwnedDeclLocs {
         let mut locations = self.locations.borrow_mut();
         let base = locations.len();
         locations.extend(locs);
+        assert!(
+            locations.len() <= IDENTITY_INDEX_BIT,
+            "declaration coordinate table exhausted"
+        );
         base
     }
 
     pub(crate) fn get(&self, index: usize) -> Location {
-        self.locations.borrow()[index]
+        let coordinate = if index & IDENTITY_INDEX_BIT == 0 {
+            index
+        } else {
+            self.instances.borrow()[index & !IDENTITY_INDEX_BIT].coordinate as usize
+        };
+        self.locations.borrow()[coordinate]
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -335,6 +413,69 @@ mod tests {
             loc_ghost: ghost,
             origin: LocationOrigin::default(),
         }
+    }
+
+    #[test]
+    fn coordinate_interning_does_not_merge_allocation_identities() {
+        let table = OwnedDeclLocs::default();
+        let loc = located(1, 2, false);
+        let identity = LocationIdentity {
+            scope: 7,
+            location: 3,
+            start: 4,
+            end: 5,
+        };
+        let first = table.intern_with_identity(loc, identity);
+        let copied = table.intern_with_identity(loc, identity);
+        let adjacent = table.intern_with_identity(
+            loc,
+            LocationIdentity {
+                location: 6,
+                start: 5,
+                end: 7,
+                ..identity
+            },
+        );
+        let other_scope = table.intern_with_identity(
+            loc,
+            LocationIdentity {
+                scope: 8,
+                ..identity
+            },
+        );
+        assert_eq!(first, copied);
+        assert_ne!(first, adjacent);
+        assert_ne!(first, other_scope);
+        assert_eq!(table.len(), 1, "all allocations share one coordinate value");
+        assert_eq!(
+            table.identity(first).unwrap().end,
+            table.identity(adjacent).unwrap().start
+        );
+        for index in [first, copied, adjacent, other_scope] {
+            assert_eq!(table.get(index), loc);
+            let handle = DeclLoc::table(DeclLocKind::Local, 1, index);
+            assert_eq!(handle.index(), index);
+        }
+        assert_eq!(table.identity(table.intern(loc)), None);
+    }
+
+    #[test]
+    fn a_location_allocation_cannot_change_its_position_blocks() {
+        let table = OwnedDeclLocs::default();
+        let loc = located(1, 2, false);
+        let identity = LocationIdentity {
+            scope: 7,
+            location: 3,
+            start: 4,
+            end: 5,
+        };
+        table.intern_with_identity(loc, identity);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                table.intern_with_identity(loc, LocationIdentity { end: 9, ..identity })
+            }))
+            .is_err()
+        );
     }
 
     #[test]
