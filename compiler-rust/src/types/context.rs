@@ -4465,6 +4465,7 @@ impl TypeContext {
             TypeDesc::Tarrow { args, ret } => {
                 for arg in args.iter() {
                     self.check_store_ref(arg.typ);
+                    self.check_store_decl_loc(arg.label().loc());
                 }
                 self.check_store_ref(*ret);
             }

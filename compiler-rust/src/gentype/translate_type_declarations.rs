@@ -40,7 +40,7 @@ struct DeclarationAttributeInfo {
 
 pub fn create_export_type_from_type_declaration(
     annotation: crate::gentype::annotation::T,
-    loc: Location,
+    loc: crate::types::DeclLoc,
     name_as: Option<String>,
     opaque: Option<bool>,
     type_: Type,
@@ -274,7 +274,7 @@ fn traslate_declaration_kind_with_attribute_info(
         |translation: crate::gentype::translate_type_expr_from_types::Translation| {
             let export_from_type_declaration = create_export_type_from_type_declaration(
                 annotation,
-                loc,
+                ctx.intern_loc(loc),
                 name_as.clone(),
                 opaque,
                 translation.type_,
@@ -315,7 +315,7 @@ fn traslate_declaration_kind_with_attribute_info(
             }];
             let export_from_type_declaration = create_export_type_from_type_declaration(
                 crate::gentype::annotation::T::GenType,
-                loc,
+                ctx.intern_loc(loc),
                 None,
                 Some(false),
                 ident_with(
@@ -341,7 +341,7 @@ fn traslate_declaration_kind_with_attribute_info(
             import_types: vec![],
             export_from_type_declaration: create_export_type_from_type_declaration(
                 annotation,
-                loc,
+                ctx.intern_loc(loc),
                 name_as,
                 Some(true),
                 unknown(),
@@ -417,7 +417,7 @@ fn traslate_declaration_kind_with_attribute_info(
                 import_types,
                 export_from_type_declaration: create_export_type_from_type_declaration(
                     annotation,
-                    loc,
+                    ctx.intern_loc(loc),
                     name_as,
                     opaque,
                     translation.type_,
@@ -520,7 +520,7 @@ fn traslate_declaration_kind_with_attribute_info(
                 crate::gentype::type_env::add_module_path(type_env, &sanitize_type_name(type_name));
             let export_from_type_declaration = code_item::ExportFromTypeDeclaration {
                 export_type: code_item::ExportType {
-                    loc,
+                    loc: ctx.intern_loc(loc),
                     name_as,
                     opaque,
                     type_: variant_typ,
