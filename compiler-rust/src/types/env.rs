@@ -2554,7 +2554,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     );
     {
         let tvar = ctx.new_generic_var(None);
-        let list_ty = ctx.new_generic_constr(predef::path_list(), vec![tvar]);
+        let list_ty = ctx.new_generic_predef_constr(predef::path_list(), vec![tvar]);
         add_type_with_constrs(
             &mut env,
             predef::ident_list(),
@@ -2587,7 +2587,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     }
     {
         let tvar = ctx.new_generic_var(None);
-        let type_unknown = ctx.new_generic_constr(predef::path_unknown(), vec![]);
+        let type_unknown = ctx.new_generic_predef_constr(predef::path_unknown(), vec![]);
         add_type_with_constrs(
             &mut env,
             predef::ident_unknown(),
@@ -2611,9 +2611,9 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 
     // Standard exception constructors (extension constructors of exn)
     {
-        let exn_ty = ctx.new_generic_constr(predef::path_exn(), vec![]);
-        let string_ty_for_exn = ctx.new_generic_constr(predef::path_string(), vec![]);
-        let int_ty_for_exn = ctx.new_generic_constr(predef::path_int(), vec![]);
+        let exn_ty = ctx.new_generic_predef_constr(predef::path_exn(), vec![]);
+        let string_ty_for_exn = ctx.new_generic_predef_constr(predef::path_string(), vec![]);
+        let int_ty_for_exn = ctx.new_generic_predef_constr(predef::path_int(), vec![]);
 
         let add_exception =
             |env: &mut Env, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
@@ -2668,7 +2668,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
             vec![string_ty_for_exn],
             exn_ty,
         );
-        let unknown_ty_for_exn = ctx.new_generic_constr(predef::path_unknown(), vec![]);
+        let unknown_ty_for_exn = ctx.new_generic_predef_constr(predef::path_unknown(), vec![]);
         add_exception(
             &mut env,
             predef::ident_js_exn(),
@@ -2695,7 +2695,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         &mut env,
         predef::ident_char(),
         TypeDeclaration {
-            type_manifest: Some(ctx.new_generic_constr(predef::path_int(), vec![])),
+            type_manifest: Some(ctx.new_generic_predef_constr(predef::path_int(), vec![])),
             ..decl_abstr(0, true)
         },
         ctx,

@@ -1573,6 +1573,7 @@ fn internalize_desc<S: TypeNodeSink>(
             path: path.clone(),
             args: args.iter().map(|&i| remap[i]).collect(),
             abbrev: ctx.abbrev_nil(),
+            path_block: crate::types::type_expr::PathBlock::OWN,
         },
         PortableTypeDesc::Tobject { fields } => TypeDesc::Tobject {
             fields: remap[*fields],

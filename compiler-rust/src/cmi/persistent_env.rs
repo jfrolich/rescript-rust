@@ -4929,7 +4929,10 @@ fn restore_child_self_manifests_from_parent_scope(
         };
         let manifest = ctx.repr(manifest);
         let desc = ctx.get_desc(manifest).into_desc();
-        let TypeDesc::Tconstr { path, args, abbrev } = desc else {
+        let TypeDesc::Tconstr {
+            path, args, abbrev, ..
+        } = desc
+        else {
             continue;
         };
         let Path::Pident(manifest_id) = &path else {
@@ -4965,6 +4968,7 @@ fn restore_child_self_manifests_from_parent_scope(
                 path: Path::pdot(parent_module_path.clone(), child_id.name()),
                 args,
                 abbrev,
+                path_block: crate::types::type_expr::PathBlock::OWN,
             },
         );
     }

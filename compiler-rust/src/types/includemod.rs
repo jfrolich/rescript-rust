@@ -2706,7 +2706,9 @@ fn rewrite_substituted_type_paths(
 
     let desc = type_ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+        TypeDesc::Tconstr {
+            path, args, abbrev, ..
+        } => {
             for arg in args {
                 rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
             }
@@ -2718,6 +2720,7 @@ fn rewrite_substituted_type_paths(
                         path: new_path,
                         args: args.clone(),
                         abbrev: *abbrev,
+                        path_block: crate::types::type_expr::PathBlock::OWN,
                     },
                 );
             }

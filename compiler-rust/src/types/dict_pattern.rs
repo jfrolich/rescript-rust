@@ -74,8 +74,8 @@ fn keys(pats: &[&Pattern]) -> Vec<String> {
 /// `dict<'a>` per key.
 fn labels_of_keys(ctx: &TypeContext, keys: Vec<String>) -> Vec<LabelDescription> {
     let value = ctx.new_generic_var(None);
-    let lbl_res = ctx.new_generic_constr(predef::path_dict(), vec![value]);
-    let lbl_arg = ctx.new_generic_constr(predef::path_option(), vec![value]);
+    let lbl_res = ctx.new_generic_predef_constr(predef::path_dict(), vec![value]);
+    let lbl_arg = ctx.new_generic_predef_constr(predef::path_option(), vec![value]);
     ctx.alloc_label_array(|lbl_all| {
         keys.into_iter()
             .enumerate()

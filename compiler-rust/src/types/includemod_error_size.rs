@@ -52,8 +52,8 @@ use super::decl::{
     ValueDescription, ValueKind,
 };
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldMutability, MutabilityRef, RowField, RowFieldRef, TypeDesc,
-    TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldMutability, MutabilityRef, PathBlock, PathBlockOwner, RowField,
+    RowFieldRef, TypeDesc, TypeExprRef,
 };
 use super::variant_runtime::{
     Block as VariantBlock, BlockType, ConstructorCase, LayoutRef, LiteralTag, Tag,
@@ -167,9 +167,17 @@ struct ErrorSize<'a> {
     tag_names: HashSet<AttributeKey>,
     /// The static `Rpresent None` of the type checker.
     rpresent_none: bool,
-    /// Parameter types of optional arguments, whose path is `Predef.path_option`.
-    option_wrappers: HashSet<TypeExprRef>,
-    predef_option_path: bool,
+    /// The `Tconstr` path blocks counted (see [`PathBlock`]).
+    path_blocks: HashSet<PathBlockKey>,
+}
+
+/// The identity of the block a `Tconstr` path is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PathBlockKey {
+    /// The path allocated for this type node.
+    Node(TypeExprRef),
+    /// The global `Predef.path_X`, by the stamp of its ident.
+    Predef(i32),
 }
 
 impl<'a> ErrorSize<'a> {
@@ -199,8 +207,7 @@ impl<'a> ErrorSize<'a> {
             attributes: HashSet::default(),
             tag_names: HashSet::default(),
             rpresent_none: false,
-            option_wrappers: HashSet::default(),
-            predef_option_path: false,
+            path_blocks: HashSet::default(),
         }
     }
 
@@ -985,20 +992,32 @@ impl<'a> ErrorSize<'a> {
         }
         self.block(0, 3)?;
         let desc = self.ctx.get_desc(ty).into_desc();
-        self.type_desc(Some(ty), &desc)
+        self.type_desc(ty, &desc)
     }
 
-    /// The path of the `Tconstr` node `node`.
-    fn tconstr_path(&mut self, node: Option<TypeExprRef>, path: &Path) -> Walk {
-        if node.is_some_and(|node| self.option_wrappers.contains(&node)) {
-            if std::mem::replace(&mut self.predef_option_path, true) {
+    /// The path of the `Tconstr` node `node`, counted once per block. The
+    /// `Subst` copy keeps a `Pident` it does not rename and rebuilds the
+    /// others (subst.ml:87-94).
+    fn tconstr_path(&mut self, node: TypeExprRef, path: &Path, block: PathBlock) -> Walk {
+        let kept = match path {
+            Path::Pident(id) => !(self.substituted && self.renamed.contains(&ident_key(id))),
+            _ => !self.substituted,
+        };
+        if kept {
+            let key = match (block.owner(), path) {
+                (PathBlockOwner::Own, _) => PathBlockKey::Node(node),
+                (PathBlockOwner::Of(owner), _) => PathBlockKey::Node(owner),
+                (PathBlockOwner::Predef, Path::Pident(id)) => PathBlockKey::Predef(id.stamp()),
+                (PathBlockOwner::Predef, _) => PathBlockKey::Node(node),
+            };
+            if !self.path_blocks.insert(key) {
                 return Ok(());
             }
         }
         self.path(path)
     }
 
-    fn type_desc(&mut self, node: Option<TypeExprRef>, desc: &TypeDesc) -> Walk {
+    fn type_desc(&mut self, node: TypeExprRef, desc: &TypeDesc) -> Walk {
         match desc {
             TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
                 self.block(0, 1)?;
@@ -1018,10 +1037,6 @@ impl<'a> ErrorSize<'a> {
                         ArgLabel::Optional(label) => {
                             size.block(1, 1)?;
                             size.string_loc(label)?;
-                            // The parameter type is built with the one
-                            // `Predef.path_option` (typetexp.ml:329,
-                            // typecore.ml:377).
-                            size.option_wrappers.insert(size.ctx.repr(arg.typ));
                         }
                     }
                     size.type_expr(arg.typ)
@@ -1032,9 +1047,14 @@ impl<'a> ErrorSize<'a> {
                 self.block(2, 1)?;
                 self.list(tys.as_slice(), |size, ty| size.type_expr(*ty))
             }
-            TypeDesc::Tconstr { path, args, abbrev } => {
+            TypeDesc::Tconstr {
+                path,
+                args,
+                abbrev,
+                path_block,
+            } => {
                 self.block(3, 3)?;
-                self.tconstr_path(node, path)?;
+                self.tconstr_path(node, path, *path_block)?;
                 self.list(args.as_slice(), |size, ty| size.type_expr(*ty))?;
                 self.abbrev_ref(*abbrev)
             }
@@ -1109,10 +1129,15 @@ impl<'a> ErrorSize<'a> {
                 self.block(0, 1)?;
                 self.option_string(name.as_ref())
             }
-            TypeDesc::Tconstr { path, args, .. } => {
+            TypeDesc::Tconstr {
+                path,
+                args,
+                path_block,
+                ..
+            } => {
                 // Tconstr (type_path s p, args, ref Mnil)
                 self.block(3, 3)?;
-                self.tconstr_path(Some(ty), path)?;
+                self.tconstr_path(ty, path, *path_block)?;
                 self.list(args.as_slice(), |size, ty| size.type_expr(*ty))?;
                 self.block(0, 1)
             }
@@ -1147,7 +1172,7 @@ impl<'a> ErrorSize<'a> {
                 })
             }
             // `Btype.copy_type_desc`: the same shape as the original.
-            _ => self.type_desc(Some(ty), &desc),
+            _ => self.type_desc(ty, &desc),
         }
     }
 

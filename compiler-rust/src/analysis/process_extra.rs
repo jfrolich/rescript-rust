@@ -94,6 +94,7 @@ fn extra_for_file(file: &File, types: &crate::types::TypeContext) -> Extra {
                         path,
                         args: Default::default(),
                         abbrev: types.alloc_abbrev_nil(),
+                        path_block: crate::types::type_expr::PathBlock::OWN,
                     });
                     add_loc_item(
                         &mut extra,

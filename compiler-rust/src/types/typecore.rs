@@ -2964,7 +2964,7 @@ fn transl_type_inner(
                 let (typed, mut typ) =
                     transl_type_inner(tctx, env, tctx.arena.get_core_type(source_arg.typ))?;
                 if source_arg.lbl.is_optional() {
-                    typ = ctx.new_constr(crate::types::predef::path_option(), vec![typ]);
+                    typ = ctx.new_predef_constr(crate::types::predef::path_option(), vec![typ]);
                 }
                 let label = convert_arg_label_for_ctx(&source_arg.lbl, tctx.arena, tctx.type_ctx);
                 type_args.push(TypeArg::new(label.clone(), typ));
@@ -4915,7 +4915,8 @@ fn type_pattern_inner(
                 }
             }
             let ty_value = ctx.new_var(None);
-            let ty_option = ctx.new_constr(crate::types::predef::path_option(), vec![ty_value]);
+            let ty_option =
+                ctx.new_predef_constr(crate::types::predef::path_option(), vec![ty_value]);
             let mut typed_entries = Vec::with_capacity(entries.len());
             for entry in entries.iter() {
                 let sarg = if entry.pdp_optional
@@ -4944,7 +4945,7 @@ fn type_pattern_inner(
                     tdp_optional: entry.pdp_optional,
                 });
             }
-            let dict_ty = ctx.new_constr(crate::types::predef::path_dict(), vec![ty_value]);
+            let dict_ty = ctx.new_predef_constr(crate::types::predef::path_dict(), vec![ty_value]);
             unify_pattern_types(tctx, loc, dict_ty, expected_ty)?;
             Ok(Pattern::new(
                 PatternDesc::Tpat_dict(typed_entries),
@@ -8181,7 +8182,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // array constructor at generic level.
             let elem_ty = ctx.new_generic_var(None);
             let array_ty =
-                ctx.new_generic_constr(crate::types::predef::path_array(), vec![elem_ty]);
+                ctx.new_generic_predef_constr(crate::types::predef::path_array(), vec![elem_ty]);
 
             unify_expression_types(tctx, loc, array_ty, expected_ty, None)?;
 
@@ -8215,7 +8216,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         // dict's values, the spreads its type; both built at generic level.
         ED::Pexp_dict(entries) => {
             let dict_type =
-                |ty| ctx.new_generic_constr(crate::types::predef::path_dict(), vec![ty]);
+                |ty| ctx.new_generic_predef_constr(crate::types::predef::path_dict(), vec![ty]);
             let ty = ctx.new_generic_var(None);
             unify_expression_types(tctx, loc, dict_type(ty), expected_ty, None)?;
             let mut typed_entries = Vec::with_capacity(entries.len());
@@ -17666,7 +17667,7 @@ fn type_letexception(
         crate::types::generalize(ctx, ret_ty);
     }
 
-    let exn_ty = ctx.new_generic_constr(crate::types::predef::path_exn(), vec![]);
+    let exn_ty = ctx.new_generic_predef_constr(crate::types::predef::path_exn(), vec![]);
     let exn_path = Path::pident(id);
     let cstr_desc = crate::types::decl::ConstructorDescription {
         cstr_name: name_str.clone(),
@@ -21172,6 +21173,7 @@ where
         Tconstr {
             path: Path,
             args: crate::types::type_expr::TypeRefList,
+            path_block: crate::types::type_expr::PathBlock,
         },
         Tobject {
             fields: TypeExprRef,
@@ -21239,10 +21241,27 @@ where
                 ret: *ret,
             },
             TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
-            TypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
-                path: type_path(path),
-                args: args.clone(),
-            },
+            TypeDesc::Tconstr {
+                path,
+                args,
+                path_block,
+                ..
+            } => {
+                let new_path = type_path(path);
+                // `Subst.type_path` returns an unmapped `Pident` itself
+                // (subst.ml:87-94); a mapped or rebuilt path is another block.
+                let path_block = match (path, &new_path) {
+                    (Path::Pident(id), Path::Pident(new_id)) if id.same(new_id) => {
+                        path_block.copied_from(ty)
+                    }
+                    _ => crate::types::type_expr::PathBlock::OWN,
+                };
+                CopyTypeExprPlan::Tconstr {
+                    path: new_path,
+                    args: args.clone(),
+                    path_block,
+                }
+            }
             TypeDesc::Tobject { fields } => CopyTypeExprPlan::Tobject { fields: *fields },
             TypeDesc::Tfield {
                 name,
@@ -21321,7 +21340,11 @@ where
                     .collect();
                 TypeDesc::Ttuple(copied_items)
             }
-            CopyTypeExprPlan::Tconstr { path, args } => {
+            CopyTypeExprPlan::Tconstr {
+                path,
+                args,
+                path_block,
+            } => {
                 let copied_args = args
                     .iter()
                     .map(|t| copy_lookup_type_expr_with_paths(ctx, *t, cache, type_path))
@@ -21330,6 +21353,7 @@ where
                     path,
                     args: copied_args,
                     abbrev: ctx.alloc_abbrev_nil(),
+                    path_block,
                 }
             }
             CopyTypeExprPlan::Tobject { fields } => TypeDesc::Tobject {
@@ -22203,22 +22227,22 @@ impl Env {
 
     /// Get the array type.
     pub fn type_array(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
-        ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty])
+        ctx.new_predef_constr(crate::types::predef::path_array(), vec![elem_ty])
     }
 
     /// Get the iterable type (upstream #7887).
     pub fn type_iterable(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
-        ctx.new_constr(crate::types::predef::path_iterable(), vec![elem_ty])
+        ctx.new_predef_constr(crate::types::predef::path_iterable(), vec![elem_ty])
     }
 
     /// Get the asyncIterable type (upstream #7887).
     pub fn type_async_iterable(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
-        ctx.new_constr(crate::types::predef::path_async_iterable(), vec![elem_ty])
+        ctx.new_predef_constr(crate::types::predef::path_async_iterable(), vec![elem_ty])
     }
 
     /// Get the option type.
     pub fn type_option(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
-        ctx.new_constr(crate::types::predef::path_option(), vec![elem_ty])
+        ctx.new_predef_constr(crate::types::predef::path_option(), vec![elem_ty])
     }
 
     /// Look up a value by longident. `None` means the value is unbound; the
@@ -23724,7 +23748,9 @@ fn qualify_label_description_paths(
 
         let desc = ctx.get_desc(repr).into_desc();
         match desc {
-            TypeDesc::Tconstr { path, args, abbrev } => {
+            TypeDesc::Tconstr {
+                path, args, abbrev, ..
+            } => {
                 for arg in &args {
                     rewrite_direct_root_type_family_in_place(
                         ctx,
@@ -23749,6 +23775,7 @@ fn qualify_label_description_paths(
                             path: rewritten,
                             args,
                             abbrev,
+                            path_block: crate::types::type_expr::PathBlock::OWN,
                         },
                     );
                 }
@@ -25528,7 +25555,9 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
 
     let desc = ctx.get_desc(repr).into_desc();
     match desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+        TypeDesc::Tconstr {
+            path, args, abbrev, ..
+        } => {
             for arg in &args {
                 qualify_module_local_type_paths_with_alias_lookup_in_place(
                     ctx,
@@ -25701,6 +25730,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                         path: rewritten,
                         args,
                         abbrev,
+                        path_block: crate::types::type_expr::PathBlock::OWN,
                     },
                 );
             }

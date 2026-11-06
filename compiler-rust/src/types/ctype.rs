@@ -1619,6 +1619,7 @@ fn create_reified_constr(
             path,
             args: vec![].into(),
             abbrev,
+            path_block: crate::types::type_expr::PathBlock::OWN,
         },
         level,
     )
@@ -4137,7 +4138,9 @@ fn try_expand_head_with_mode(
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+        TypeDesc::Tconstr {
+            path, args, abbrev, ..
+        } => {
             // OCaml runs check_abbrev_env from expand_abbrev_gen, which is only
             // reached for Tconstr heads (try_expand_once pattern-matches first).
             // Matching that behavior avoids clearing simple_abbrevs on non-constr
@@ -4267,6 +4270,7 @@ fn try_expand_head_with_mode(
                             path: target,
                             args: args.clone(),
                             abbrev: orig_abbrev,
+                            path_block: crate::types::type_expr::PathBlock::OWN,
                         });
                         ctx.set_level(rewritten, level);
                         Some(rewritten)
@@ -4464,6 +4468,7 @@ fn try_expand_head_with_mode(
                                 path: target_path,
                                 args: args.clone(),
                                 abbrev: orig_abbrev,
+                                path_block: crate::types::type_expr::PathBlock::OWN,
                             });
                             ctx.set_level(rewritten, level);
                             return Some(rewritten);
@@ -4521,6 +4526,7 @@ fn try_expand_head_with_mode(
                                 path: type_path.clone(),
                                 args: args.clone(),
                                 abbrev: orig_abbrev,
+                                path_block: crate::types::type_expr::PathBlock::OWN,
                             });
                             ctx.set_level(rewritten, level);
                             return Some(rewritten);
@@ -4583,6 +4589,7 @@ fn try_expand_head_with_mode(
                         path: path_norm,
                         args: args.clone(),
                         abbrev: orig_abbrev,
+                        path_block: crate::types::type_expr::PathBlock::OWN,
                     });
                     ctx.set_level(normalized, level);
                     Some(normalized)
@@ -7605,11 +7612,13 @@ fn unify_types(
                 path: path1,
                 args: args1,
                 abbrev: abbrev1,
+                ..
             },
             TypeDesc::Tconstr {
                 path: path2,
                 args: args2,
                 abbrev: abbrev2,
+                ..
             },
         ) = (&*desc1, &*desc2)
         {
@@ -11658,7 +11667,13 @@ fn copy_sep_inner(
                 })
                 .collect(),
         ),
-        TypeDesc::Tconstr { path, args, .. } => TypeDesc::Tconstr {
+        // `Btype.copy_type_desc` keeps the path.
+        TypeDesc::Tconstr {
+            path,
+            args,
+            path_block,
+            ..
+        } => TypeDesc::Tconstr {
             path,
             args: args
                 .iter()
@@ -11675,6 +11690,7 @@ fn copy_sep_inner(
                 })
                 .collect(),
             abbrev: ctx.alloc_abbrev_nil(),
+            path_block: path_block.copied_from(ty),
         },
         TypeDesc::Tobject { fields } => TypeDesc::Tobject {
             fields: copy_sep_inner(
@@ -12575,7 +12591,18 @@ fn subst_identity_copy_rec(
                         .collect();
                     TypeDesc::Ttuple(types_copy.into())
                 }
-                TypeDesc::Tconstr { path, args, .. } => {
+                TypeDesc::Tconstr {
+                    path,
+                    args,
+                    path_block,
+                    ..
+                } => {
+                    // `Subst.type_path` keeps a `Pident` and rebuilds a
+                    // `Pdot` (subst.ml:87-94).
+                    let subst_path_block = match path {
+                        Path::Pident(_) => path_block.copied_from(ty),
+                        _ => crate::types::type_expr::PathBlock::OWN,
+                    };
                     let path = path.clone();
                     let args = args.clone();
                     drop(desc);
@@ -12595,6 +12622,7 @@ fn subst_identity_copy_rec(
                         path,
                         args: args_copy.into(),
                         abbrev: ctx.alloc_abbrev_nil(),
+                        path_block: subst_path_block,
                     }
                 }
                 TypeDesc::Tobject { fields } => {
@@ -12938,6 +12966,7 @@ pub(crate) fn copy_type_cached(
         Constr {
             path: Path,
             args: super::type_expr::TypeRefList,
+            path_block: super::type_expr::PathBlock,
         },
         Object {
             fields: TypeExprRef,
@@ -13014,9 +13043,15 @@ pub(crate) fn copy_type_cached(
                     ret: *ret,
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
+                TypeDesc::Tconstr {
+                    path,
+                    args,
+                    path_block,
+                    ..
+                } => CopyAction::Constr {
                     path: path.clone(),
                     args: args.clone(),
+                    path_block: *path_block,
                 },
                 TypeDesc::Tobject { fields } => CopyAction::Object { fields: *fields },
                 TypeDesc::Tfield {
@@ -13090,7 +13125,11 @@ pub(crate) fn copy_type_cached(
                         .collect();
                     TypeDesc::Ttuple(types_copy)
                 }
-                CopyAction::Constr { path, args } => {
+                CopyAction::Constr {
+                    path,
+                    args,
+                    path_block,
+                } => {
                     let abbrevs = ctx.current_abbreviations();
                     let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
 
@@ -13133,6 +13172,7 @@ pub(crate) fn copy_type_cached(
                         path,
                         args: args_copy,
                         abbrev: copied_abbrev,
+                        path_block: path_block.copied_from(ty),
                     }
                 }
                 CopyAction::Object { fields } => TypeDesc::Tobject {
@@ -13586,6 +13626,7 @@ fn normalize_type_rec(
                     path: Path::Pdot(m.clone(), crate::name::Name::new(i_prime), *pos),
                     args: args.clone(),
                     abbrev: ctx.alloc_abbrev_nil(),
+                    path_block: crate::types::type_expr::PathBlock::OWN,
                 }
             }
             _ => unreachable!("is_constr_row implies a dotted Tconstr"),
@@ -13717,7 +13758,12 @@ fn nondep_type_rec(
 
     let desc = ctx.get_desc(ty).into_desc();
     let new_desc = match &desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+        TypeDesc::Tconstr {
+            path,
+            args,
+            abbrev,
+            path_block,
+        } => {
             if path.is_free(mid) {
                 let normalized_path = env.normalize_path_prefix(path);
                 if normalized_path != *path && !normalized_path.is_free(mid) {
@@ -13780,7 +13826,7 @@ fn nondep_type_rec(
                     // Fall back to the general expand_head machinery for
                     // aliases that are not directly represented in the local
                     // module signature.
-                    let temp = ctx.new_generic_type(desc.clone());
+                    let temp = ctx.new_generic_type(desc.clone().shared_from(ty));
                     try_expand_head(ctx, env, temp)
                 });
                 match expanded {
@@ -13807,6 +13853,7 @@ fn nondep_type_rec(
                     path: path.clone(),
                     args: new_args.into(),
                     abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
+                    path_block: path_block.copied_from(ty),
                 }
             }
         }
@@ -13973,13 +14020,14 @@ fn unroll_abbrev(
 
     let level = ctx.get_level(ty);
     let desc = ctx.get_desc(ty).into_desc();
-    let unrolled = ctx.new_type(desc);
+    let unrolled = ctx.new_type(desc.shared_from(ty));
     ctx.set_level(unrolled, level);
 
     let constr = ctx.new_type(TypeDesc::Tconstr {
         path: Path::pident(*id),
         args: params.to_vec().into(),
         abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
+        path_block: crate::types::type_expr::PathBlock::OWN,
     });
     ctx.set_level(constr, level);
     link_type(ctx, ty, constr);
@@ -14414,7 +14462,7 @@ mod tests {
         let module_path = Path::pident(module_id);
         let type_path = Path::pdot(module_path, "t".to_string());
 
-        let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
+        let int_ty = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
         env.add_module(
             module_id,
             module_with_t(type_id, manifest_decl(int_ty, Some(type_path.clone()))),
@@ -14429,7 +14477,7 @@ mod tests {
         );
 
         let old_env_id = env.id();
-        let string_ty = ctx.new_constr(crate::types::predef::path_string(), vec![]);
+        let string_ty = ctx.new_predef_constr(crate::types::predef::path_string(), vec![]);
         env.add_module(
             module_id,
             module_with_t(type_id, manifest_decl(string_ty, Some(type_path.clone()))),
@@ -14451,7 +14499,7 @@ mod tests {
         let sibling_id = Ident::create_local("u");
         let type_id = Ident::create_local("t");
 
-        let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
+        let int_ty = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
         let sibling_decl = TypeDeclaration {
             type_params: vec![],
             type_arity: 0,

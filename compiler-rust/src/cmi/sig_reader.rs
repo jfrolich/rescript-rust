@@ -740,6 +740,7 @@ impl<'a> SigReadContext<'a> {
                         path,
                         args: args.into(),
                         abbrev,
+                        path_block: crate::types::type_expr::PathBlock::OWN,
                     }
                 }
                 4 => {

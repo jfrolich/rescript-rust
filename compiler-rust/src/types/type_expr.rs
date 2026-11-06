@@ -341,6 +341,60 @@ impl IntoIterator for TypeArgList {
     }
 }
 
+/// The physical identity of the path a `Tconstr` holds.
+///
+/// OCaml's `Tconstr (p, args, abbrev)` points at a heap block for `p`. A
+/// fresh path (an `Env` lookup, `Pident id` in `Typedecl`) is a block of its
+/// own; a copy of a type node (`Btype.copy_type_desc`, `Ctype.copy`,
+/// `Subst.type_path` on a `Pident`) keeps the block of the node it copies;
+/// `Predef.path_*` are global blocks. Rust paths are values, so the identity
+/// is carried here. It never takes part in type equality: it only feeds
+/// `Includemod.is_big`, which counts each distinct block once
+/// (includemod_error_size.rs).
+///
+/// One `u32`: a [`TypeExprRef`] for a kept block, or a sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PathBlock(u32);
+
+/// Who a [`PathBlock`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathBlockOwner {
+    /// The path allocated for this node.
+    Own,
+    /// The path allocated for another node, kept by a copy.
+    Of(TypeExprRef),
+    /// One of `Predef`'s global paths, identified by its ident.
+    Predef,
+}
+
+impl PathBlock {
+    /// A path allocated for this node.
+    pub const OWN: PathBlock = PathBlock(u32::MAX);
+    /// One of `Predef`'s global paths.
+    pub const PREDEF: PathBlock = PathBlock(u32::MAX - 1);
+
+    /// Whose block this is.
+    #[inline]
+    pub fn owner(self) -> PathBlockOwner {
+        match self {
+            PathBlock::OWN => PathBlockOwner::Own,
+            PathBlock::PREDEF => PathBlockOwner::Predef,
+            PathBlock(node) => PathBlockOwner::Of(TypeExprRef(node)),
+        }
+    }
+
+    /// The block of a copy of `node`, whose own block is `self`.
+    #[inline]
+    pub fn copied_from(self, node: TypeExprRef) -> PathBlock {
+        if self == PathBlock::OWN {
+            debug_assert!(node.0 < PathBlock::PREDEF.0);
+            PathBlock(node.0)
+        } else {
+            self
+        }
+    }
+}
+
 /// Type descriptor - the actual content of a type expression.
 #[derive(Debug, Clone)]
 pub enum TypeDesc {
@@ -369,6 +423,8 @@ pub enum TypeDesc {
         args: TypeRefList,
         /// Abbreviation memo (for expansion caching)
         abbrev: AbbrevMemoRef,
+        /// Which allocation of `path` this node holds (see [`PathBlock`]).
+        path_block: PathBlock,
     },
 
     /// Object type: `{"f1": t1, ..., "fn": tn}` (types.ml `Tobject`). The
@@ -424,6 +480,27 @@ pub enum TypeDesc {
         /// Type arguments
         args: TypeRefList,
     },
+}
+
+impl TypeDesc {
+    /// The descriptor of `node`, for a new node that shares it
+    /// (`newty2 ty.level ty.desc`): a `Tconstr` keeps `node`'s path.
+    pub fn shared_from(self, node: TypeExprRef) -> TypeDesc {
+        match self {
+            TypeDesc::Tconstr {
+                path,
+                args,
+                abbrev,
+                path_block,
+            } => TypeDesc::Tconstr {
+                path,
+                args,
+                abbrev,
+                path_block: path_block.copied_from(node),
+            },
+            desc => desc,
+        }
+    }
 }
 
 /// Top bit distinguishes worker-store indices from compilation-local indices.
@@ -1187,6 +1264,7 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(size_of::<crate::ident::Ident>(), 16);
         assert_eq!(size_of::<Path>(), 24);
+        assert_eq!(size_of::<super::PathBlock>(), 4);
         assert!(size_of::<TypeDesc>() <= 72);
         assert!(size_of::<TypeExpr>() <= 88);
     }

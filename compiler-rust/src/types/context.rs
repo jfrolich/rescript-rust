@@ -22,8 +22,8 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField,
-    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, PathBlock, RowDesc,
+    RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -2560,22 +2560,42 @@ impl TypeContext {
 
     /// Create a type constructor application.
     pub fn new_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
-        let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
-        self.new_type(TypeDesc::Tconstr {
-            path,
-            args: args.into(),
-            abbrev,
-        })
+        self.new_constr_at(self.current_level.get(), path, args, PathBlock::OWN)
     }
 
     /// Create a type constructor at generic level (for type schemes).
     pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
+        self.new_constr_at(GENERIC_LEVEL, path, args, PathBlock::OWN)
+    }
+
+    /// `newconstr Predef.path_X args`: a constructor holding one of
+    /// `Predef`'s global paths (predef.ml:52-86), at the current level.
+    pub fn new_predef_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
+        self.new_constr_at(self.current_level.get(), path, args, PathBlock::PREDEF)
+    }
+
+    /// `newgenty (Tconstr (Predef.path_X, args, ref Mnil))`.
+    pub fn new_generic_predef_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
+        self.new_constr_at(GENERIC_LEVEL, path, args, PathBlock::PREDEF)
+    }
+
+    fn new_constr_at(
+        &self,
+        level: i32,
+        path: Path,
+        args: Vec<TypeExprRef>,
+        path_block: PathBlock,
+    ) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
-        self.new_generic_type(TypeDesc::Tconstr {
-            path,
-            args: args.into(),
-            abbrev,
-        })
+        self.alloc_type(
+            TypeDesc::Tconstr {
+                path,
+                args: args.into(),
+                abbrev,
+                path_block,
+            },
+            level,
+        )
     }
 
     /// Get or create a cached predef singleton helper.
@@ -2583,7 +2603,7 @@ impl TypeContext {
         if let Some(ty) = cache.get() {
             ty
         } else {
-            let ty = self.new_generic_constr(path, vec![]);
+            let ty = self.new_generic_predef_constr(path, vec![]);
             cache.set(Some(ty));
             ty
         }
@@ -2646,7 +2666,8 @@ impl TypeContext {
             (Some(inner), Some(option_ty)) => (inner, option_ty),
             _ => {
                 let inner = self.new_generic_var(None);
-                let option_ty = self.new_generic_constr(super::predef::path_option(), vec![inner]);
+                let option_ty =
+                    self.new_generic_predef_constr(super::predef::path_option(), vec![inner]);
                 self.predef_option_inner.set(Some(inner));
                 self.predef_option_type.set(Some(option_ty));
                 (inner, option_ty)
@@ -5300,6 +5321,7 @@ mod tests {
                 path: int_path.clone(),
                 args: vec![].into(),
                 abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
+                path_block: PathBlock::OWN,
             },
             GENERIC_LEVEL,
         );

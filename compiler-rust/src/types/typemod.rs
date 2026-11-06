@@ -1502,7 +1502,9 @@ fn rewrite_type_paths_in_place(
 
     let desc = ctx.get_desc(ty_ref).into_desc();
     match &desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+        TypeDesc::Tconstr {
+            path, args, abbrev, ..
+        } => {
             if let Some(rewritten) = rewrite(path) {
                 ctx.set_desc(
                     ty_ref,
@@ -1510,6 +1512,7 @@ fn rewrite_type_paths_in_place(
                         path: rewritten,
                         args: args.clone(),
                         abbrev: *abbrev,
+                        path_block: crate::types::type_expr::PathBlock::OWN,
                     },
                 );
             }
@@ -5283,7 +5286,9 @@ fn build_spread_constructor(
                 // to match OCaml's Subst.type_declaration behavior
                 let copied_args: Vec<TypeExprRef> = if is_pdot_source {
                     args.iter()
-                        .map(|&texpr| ctx.new_type(ctx.get_desc(texpr).into_desc()))
+                        .map(|&texpr| {
+                            ctx.new_type(ctx.get_desc(texpr).into_desc().shared_from(texpr))
+                        })
                         .collect()
                 } else {
                     args.clone()
@@ -5324,7 +5329,7 @@ fn build_spread_constructor(
                         let mut normalized = l.clone();
                         let unwrapped = unwrap_poly_type(ctx, l.ld_type);
                         normalized.ld_type = if is_pdot_source {
-                            ctx.new_type(ctx.get_desc(unwrapped).into_desc())
+                            ctx.new_type(ctx.get_desc(unwrapped).into_desc().shared_from(unwrapped))
                         } else {
                             unwrapped
                         };
@@ -13559,7 +13564,9 @@ fn strip_self_module_prefix_in_sig(
 
         let desc = type_ctx.get_desc(ty_ref);
         match &*desc {
-            TypeDesc::Tconstr { path, args, abbrev } => {
+            TypeDesc::Tconstr {
+                path, args, abbrev, ..
+            } => {
                 for arg in args {
                     rewrite_type(*arg, module_id, direct_items, type_ctx, visited);
                 }
@@ -13570,6 +13577,7 @@ fn strip_self_module_prefix_in_sig(
                             path: rewritten,
                             args: args.clone(),
                             abbrev: *abbrev,
+                            path_block: crate::types::type_expr::PathBlock::OWN,
                         },
                     );
                 }
@@ -19339,7 +19347,7 @@ fn type_structure_item<'a>(
                             let (typed_ct, ty_ref) =
                                 transl_type(tctx, env, arena.get_core_type(*ct))?;
                             let expected_exn =
-                                ctx.new_constr(crate::types::predef::path_exn(), vec![]);
+                                ctx.new_predef_constr(crate::types::predef::path_exn(), vec![]);
                             let ret_repr = ctx.repr(ty_ref);
                             let ret_is_exn = matches!(
                                 &*ctx.get_desc(ret_repr),
@@ -19372,13 +19380,13 @@ fn type_structure_item<'a>(
                     let (inst_args, cstr_res) =
                         crate::types::instance_constructor(ctx, &rebind_desc);
                     let (res, ret_type) = if rebind_desc.cstr_generalized {
-                        let res = ctx.new_constr(crate::types::predef::path_exn(), vec![]);
+                        let res = ctx.new_predef_constr(crate::types::predef::path_exn(), vec![]);
                         let ret_type =
-                            Some(ctx.new_constr(crate::types::predef::path_exn(), vec![]));
+                            Some(ctx.new_predef_constr(crate::types::predef::path_exn(), vec![]));
                         (res, ret_type)
                     } else {
                         (
-                            ctx.new_constr(crate::types::predef::path_exn(), vec![]),
+                            ctx.new_predef_constr(crate::types::predef::path_exn(), vec![]),
                             None,
                         )
                     };
@@ -19462,7 +19470,7 @@ fn type_structure_item<'a>(
             // Register the exception constructor in the environment
             let exn_ty = tctx
                 .type_ctx
-                .new_generic_constr(crate::types::predef::path_exn(), vec![]);
+                .new_generic_predef_constr(crate::types::predef::path_exn(), vec![]);
             let exn_path = Path::pident(id);
             let cstr_res = ext_ret_ty.unwrap_or(exn_ty);
             let cstr_existentials =
