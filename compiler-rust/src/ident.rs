@@ -120,6 +120,66 @@ pub struct Ident {
     name: Name,
     stamp: i32,
     flags: IdentFlags,
+    /// Which `Ident.t` block this is, for identifiers decoded from a
+    /// compiled interface (see [`IdentOrigin`]). Never compared, hashed or
+    /// serialized.
+    #[serde(skip)]
+    origin: IdentOrigin,
+}
+
+/// The physical identity of an identifier read from a compiled interface.
+///
+/// OCaml's `Ident.t` is a heap block: an identifier unmarshalled from a
+/// `.cmi` is a block of its own, apart from the compiler's `Predef.ident_*`
+/// or any identifier of the compilation, even with the same stamp and name.
+/// Rust identifiers are values, so a decoded one carries the number of its
+/// marshal block, or of its block in the saved interface a stored graph was
+/// imported from (0 for every other identifier). It only feeds
+/// `Includemod.is_big` (includemod_error_size.rs), which counts each block
+/// once. Three bytes, in the padding after `flags`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct IdentOrigin([u8; 3]);
+
+impl IdentOrigin {
+    /// The largest origin number.
+    pub const MAX: u32 = 0x00FF_FFFF;
+    /// The origins of graphs a compilation imports into its own arena,
+    /// restarting with each compilation.
+    pub const COMPILATION: std::ops::Range<u32> = 1..0x0040_0000;
+    /// The origins of graphs imported into a worker's store, which a
+    /// worker's compilations share for one build.
+    pub const STORE: std::ops::Range<u32> = 0x0040_0000..0x0080_0000;
+    /// The origins of graphs published to the process-wide shared pool for
+    /// one build.
+    pub const SHARED: std::ops::Range<u32> = 0x0080_0000..0x0100_0000;
+
+    /// The origin `next` holds in `range`, advancing it. The ranges keep the
+    /// three importers apart; each wraps around: two blocks of one error
+    /// could then share an origin only if the same stamp and name were
+    /// imported millions of identifier blocks apart, and the error's size
+    /// would then be miscounted, never its meaning.
+    pub fn next_in(range: std::ops::Range<u32>, next: &std::cell::Cell<u32>) -> Self {
+        let origin = next.get();
+        next.set(if origin + 1 == range.end {
+            range.start
+        } else {
+            origin + 1
+        });
+        Self::new(origin)
+    }
+
+    /// The origin numbered `n`.
+    pub fn new(n: u32) -> Self {
+        assert!(n <= Self::MAX, "identifier origins exhausted");
+        let [a, b, c, _] = n.to_le_bytes();
+        Self([a, b, c])
+    }
+
+    /// The number of this origin; 0 for an identifier not decoded.
+    pub fn get(self) -> u32 {
+        let [a, b, c] = self.0;
+        u32::from_le_bytes([a, b, c, 0])
+    }
 }
 
 impl Ident {
@@ -132,6 +192,7 @@ impl Ident {
             name: name.into(),
             stamp,
             flags,
+            origin: IdentOrigin::default(),
         }
     }
 
@@ -145,6 +206,7 @@ impl Ident {
             name: name.into(),
             stamp: 0,
             flags: IdentFlags::GLOBAL,
+            origin: IdentOrigin::default(),
         }
     }
 
@@ -168,6 +230,7 @@ impl Ident {
             name,
             stamp,
             flags: IdentFlags::NONE,
+            origin: IdentOrigin::default(),
         }
     }
 
@@ -281,7 +344,21 @@ impl Ident {
             name: self.name,
             stamp: self.stamp,
             flags: self.flags.with_global(),
+            // `Ident.make_global` sets the flag of the same block.
+            origin: self.origin,
         }
+    }
+
+    /// This identifier as the decoded block numbered by `origin`.
+    #[inline]
+    pub fn with_origin(self, origin: IdentOrigin) -> Self {
+        Self { origin, ..self }
+    }
+
+    /// The block this identifier was decoded from, if any.
+    #[inline]
+    pub fn origin(&self) -> IdentOrigin {
+        self.origin
     }
 
     /// Create a hidden version of this identifier (stamp = -1).
@@ -291,6 +368,7 @@ impl Ident {
             name: self.name,
             stamp: -1,
             flags: self.flags,
+            origin: IdentOrigin::default(),
         }
     }
 
@@ -301,6 +379,7 @@ impl Ident {
             name: self.name,
             stamp,
             flags: self.flags,
+            origin: IdentOrigin::default(),
         }
     }
 
@@ -315,6 +394,7 @@ impl Ident {
             name: self.name,
             stamp,
             flags: self.flags,
+            origin: IdentOrigin::default(),
         }
     }
 }

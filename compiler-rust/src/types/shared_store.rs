@@ -115,9 +115,19 @@ pub(crate) struct SharedTypePool {
     pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
     longident_names: RwLock<HashMap<u32, String>>,
     next_longident_idx: AtomicU32,
+    /// The next origin of an identifier block of a published graph.
+    next_ident_origin: AtomicU32,
 }
 
 impl SharedTypePool {
+    /// An identifier origin for a graph being published.
+    pub(crate) fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
+        use crate::ident::IdentOrigin;
+        let span = IdentOrigin::SHARED.end - IdentOrigin::SHARED.start;
+        let n = self.next_ident_origin.fetch_add(1, Ordering::Relaxed);
+        IdentOrigin::new(IdentOrigin::SHARED.start + n % span)
+    }
+
     fn new(generation: u64) -> Self {
         let pages = (0..MAX_SHARED_INDEX / PAGE_SIZE)
             .map(|_| OnceLock::new())
@@ -129,6 +139,7 @@ impl SharedTypePool {
             pers: Mutex::new(HashMap::new()),
             longident_names: RwLock::new(HashMap::new()),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
+            next_ident_origin: AtomicU32::new(0),
         }
     }
 

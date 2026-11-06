@@ -464,6 +464,8 @@ pub struct TypeContext {
     /// Owned by `Arc` so the context can outlive its caller and live in
     /// thread-local worker storage (where a borrow can't be expressed).
     id_gen: Arc<IdGenerator>,
+    /// The next origin of an identifier block imported by this compilation.
+    next_ident_origin: Cell<u32>,
 
     /// Current generalization level
     current_level: Cell<i32>,
@@ -1130,6 +1132,7 @@ impl TypeContext {
         let shared_pages = store.shared_pool().pages();
         TypeContext {
             id_gen,
+            next_ident_origin: Cell::new(crate::ident::IdentOrigin::COMPILATION.start),
             current_level: Cell::new(0),
             nongen_level: Cell::new(0),
             global_level: Cell::new(1),
@@ -2575,6 +2578,14 @@ impl TypeContext {
     /// Create a type constructor at generic level (for type schemes).
     pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         self.new_constr_at(GENERIC_LEVEL, path, args, PathBlock::OWN)
+    }
+
+    /// The origin of an identifier block decoded from a compiled interface.
+    pub fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
+        crate::ident::IdentOrigin::next_in(
+            crate::ident::IdentOrigin::COMPILATION,
+            &self.next_ident_origin,
+        )
     }
 
     /// The block of a path written into an existing `Tconstr` node.

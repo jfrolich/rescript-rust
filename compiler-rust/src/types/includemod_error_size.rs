@@ -127,12 +127,14 @@ fn position_key(pos: &Position) -> PositionKey {
     }
 }
 
-type IdentKey = (i32, usize);
+/// An `Ident.t` block: its stamp and name, and the marshal block it was
+/// decoded from (0 for an identifier of the compilation).
+type IdentKey = (i32, usize, u32);
 
 type AttributeKey = (String, PositionKey, PositionKey);
 
 fn ident_key(id: &Ident) -> IdentKey {
-    (id.stamp(), id.name().as_ptr() as usize)
+    (id.stamp(), id.name().as_ptr() as usize, id.origin().get())
 }
 
 struct ErrorSize<'a> {

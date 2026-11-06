@@ -52,6 +52,35 @@ pub struct PortableTypeGraph {
     /// Object field mutability cells (subst.ml `for_saving` gives the saved
     /// graph its own cells; fields sharing a cell share an index here).
     pub mutabilities: Vec<crate::types::asttypes::MutableFlag>,
+    /// The physical sharing of the interface OCaml would save for these
+    /// types. Cold, and outside every interface digest.
+    pub identities: PortableIdentities,
+}
+
+/// The physical sharing of a saved interface's types, for
+/// `Includemod.is_big` (includemod_error_size.rs) only.
+///
+/// OCaml saves `Subst.signature` with `for_saving` (subst.ml:132-232) and
+/// the importer unmarshals it, so the importer's blocks are shared exactly as
+/// the saved copy shares them, and none is one of its own: a `Pident` path,
+/// its `Ident.t`, an arrow's `lbl` and a variable's descriptor are those of
+/// the source graph (kept by `type_path`, `copy_type_desc` and `norm`); a
+/// `Pdot` is rebuilt for each copied node; every `Tvar None` is the one
+/// static `tvar_none`. Each kind of block is numbered within the unit.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PortableIdentities {
+    /// For each entry: the path block of a `Tconstr`, the descriptor block of
+    /// a `Tvar` or `Tunivar`, else [`PortableIdentities::NONE`].
+    blocks: Vec<u32>,
+    /// The `Ident.t` blocks of the paths of `Tconstr`, `Tpackage` and row
+    /// name entries, in entry order and, within a path, prefix first.
+    path_idents: Vec<u32>,
+    /// The `lbl` blocks of labelled arrow arguments, in entry order.
+    labels: Vec<u32>,
+}
+
+impl PortableIdentities {
+    const NONE: u32 = u32::MAX;
 }
 
 /// One type expression in portable form.
@@ -742,6 +771,237 @@ pub fn serialize_pers_struct(
     )
 }
 
+/// The blocks of the saved copy of `nodes` (see [`PortableIdentities`]),
+/// numbered in entry order from the identities of the source graph.
+fn saved_identities(ctx: &TypeContext, nodes: &[TypeExprRef]) -> PortableIdentities {
+    use crate::types::type_expr::{PathBlockOwner, VarDescBlock};
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Block {
+        Node(TypeExprRef),
+        Predef(i32),
+        Token(u32),
+        TvarNone,
+        TunivarNone,
+    }
+
+    struct Numbering<K> {
+        numbers: AHashMap<K, u32>,
+    }
+
+    impl<K> Default for Numbering<K> {
+        fn default() -> Self {
+            Numbering {
+                numbers: AHashMap::new(),
+            }
+        }
+    }
+
+    impl<K: std::hash::Hash + Eq> Numbering<K> {
+        fn number(&mut self, key: K) -> u32 {
+            let next = self.numbers.len() as u32;
+            *self.numbers.entry(key).or_insert(next)
+        }
+
+        fn fresh(&mut self, key: K) -> u32 {
+            let next = self.numbers.len() as u32;
+            self.numbers.insert(key, next);
+            next
+        }
+    }
+
+    fn push_idents(path: &Path, idents: &mut Numbering<(i32, usize, u32)>, out: &mut Vec<u32>) {
+        match path {
+            Path::Pident(id) => out.push(idents.number((
+                id.stamp(),
+                id.name().as_ptr() as usize,
+                id.origin().get(),
+            ))),
+            Path::Pdot(prefix, _, _) => push_idents(prefix, idents, out),
+            Path::Papply(functor, argument) => {
+                push_idents(functor, idents, out);
+                push_idents(argument, idents, out);
+            }
+        }
+    }
+
+    let mut ids = PortableIdentities::default();
+    let mut paths = Numbering::<Block>::default();
+    let mut vars = Numbering::<Block>::default();
+    let mut idents = Numbering::default();
+    let mut labels = Numbering::<usize>::default();
+    for &node in nodes {
+        let desc = ctx.get_desc(node);
+        let block = match &*desc {
+            TypeDesc::Tconstr {
+                path, path_block, ..
+            } => {
+                push_idents(path, &mut idents, &mut ids.path_idents);
+                // `type_path` keeps a `Pident` (subst.ml:87-94).
+                match (path, path_block.owner()) {
+                    (Path::Pident(_), PathBlockOwner::Own) => paths.number(Block::Node(node)),
+                    (Path::Pident(_), PathBlockOwner::Of(owner)) => {
+                        paths.number(Block::Node(owner))
+                    }
+                    (Path::Pident(id), PathBlockOwner::Predef) => {
+                        paths.number(Block::Predef(id.stamp()))
+                    }
+                    (Path::Pident(_), PathBlockOwner::Token(token)) => {
+                        paths.number(Block::Token(token))
+                    }
+                    _ => paths.fresh(Block::Node(node)),
+                }
+            }
+            // `norm` (subst.ml:121-126) shares every `Tvar None`; another
+            // descriptor is the source's.
+            TypeDesc::Tvar(None, _) => vars.number(Block::TvarNone),
+            TypeDesc::Tunivar(None, _) => vars.number(Block::TunivarNone),
+            TypeDesc::Tvar(_, block) | TypeDesc::Tunivar(_, block) => match block {
+                VarDescBlock::Of(owner) => vars.number(Block::Node(*owner)),
+                VarDescBlock::Own | VarDescBlock::Static => vars.number(Block::Node(node)),
+            },
+            TypeDesc::Tarrow { args, .. } => {
+                for arg in args.iter() {
+                    if let Some(label) = arg.label_block() {
+                        ids.labels.push(labels.number(label));
+                    }
+                }
+                PortableIdentities::NONE
+            }
+            TypeDesc::Tpackage { path, .. } => {
+                push_idents(path, &mut idents, &mut ids.path_idents);
+                PortableIdentities::NONE
+            }
+            TypeDesc::Tvariant(row) => {
+                if let Some((path, _)) = &row.row_name {
+                    push_idents(path, &mut idents, &mut ids.path_idents);
+                }
+                PortableIdentities::NONE
+            }
+            _ => PortableIdentities::NONE,
+        };
+        ids.blocks.push(block);
+    }
+    ids
+}
+
+/// The importer's side of [`PortableIdentities`]: each saved block becomes
+/// the block of the first node imported with it, each saved identifier a
+/// fresh origin, each saved label one allocation.
+struct ImportedIdentities<'g> {
+    ids: &'g PortableIdentities,
+    idents: usize,
+    labels: usize,
+    path_blocks: AHashMap<u32, TypeExprRef>,
+    var_descs: AHashMap<u32, TypeExprRef>,
+    origins: AHashMap<u32, crate::ident::IdentOrigin>,
+    label_args: AHashMap<u32, TypeArg>,
+}
+
+impl<'g> ImportedIdentities<'g> {
+    fn new(ids: &'g PortableIdentities) -> Self {
+        ImportedIdentities {
+            ids,
+            idents: 0,
+            labels: 0,
+            path_blocks: AHashMap::new(),
+            var_descs: AHashMap::new(),
+            origins: AHashMap::new(),
+            label_args: AHashMap::new(),
+        }
+    }
+
+    /// Whether the graph was saved with its identities (a graph built
+    /// directly, not by `serialize_signature`, has none, and then every
+    /// block is the node's own).
+    fn present(&self) -> bool {
+        !self.ids.blocks.is_empty()
+    }
+
+    fn block_of(
+        numbers: &mut AHashMap<u32, TypeExprRef>,
+        number: u32,
+        node: TypeExprRef,
+    ) -> Option<TypeExprRef> {
+        match numbers.get(&number) {
+            Some(&owner) => Some(owner),
+            None => {
+                numbers.insert(number, node);
+                None
+            }
+        }
+    }
+
+    fn path_block(
+        &mut self,
+        entry: usize,
+        node: TypeExprRef,
+    ) -> crate::types::type_expr::PathBlock {
+        use crate::types::type_expr::PathBlock;
+        if !self.present() {
+            return PathBlock::OWN;
+        }
+        match Self::block_of(&mut self.path_blocks, self.ids.blocks[entry], node) {
+            Some(owner) => PathBlock::OWN.copied_from(owner),
+            None => PathBlock::OWN,
+        }
+    }
+
+    fn var_desc(
+        &mut self,
+        entry: usize,
+        node: TypeExprRef,
+    ) -> crate::types::type_expr::VarDescBlock {
+        use crate::types::type_expr::VarDescBlock;
+        if !self.present() {
+            return VarDescBlock::OWN;
+        }
+        match Self::block_of(&mut self.var_descs, self.ids.blocks[entry], node) {
+            Some(owner) => VarDescBlock::OWN.copied_from(owner),
+            None => VarDescBlock::OWN,
+        }
+    }
+
+    /// `path` with the origins of its saved identifiers.
+    fn path<S: TypeNodeSink>(&mut self, path: &Path, sink: &S) -> Path {
+        if !self.present() {
+            return path.clone();
+        }
+        match path {
+            Path::Pident(id) => {
+                let number = self.ids.path_idents[self.idents];
+                self.idents += 1;
+                let origin = *self
+                    .origins
+                    .entry(number)
+                    .or_insert_with(|| sink.fresh_ident_origin());
+                Path::Pident(id.with_origin(origin))
+            }
+            Path::Pdot(prefix, name, pos) => {
+                Path::Pdot(Arc::new(self.path(prefix, sink)), *name, *pos)
+            }
+            Path::Papply(functor, argument) => {
+                let functor = Arc::new(self.path(functor, sink));
+                Path::Papply(functor, Arc::new(self.path(argument, sink)))
+            }
+        }
+    }
+
+    fn arg(&mut self, label: &ArgLabel, typ: TypeExprRef, locs: &DeclLocImport<'_>) -> TypeArg {
+        if !self.present() || matches!(label, ArgLabel::Nolabel) {
+            return TypeArg::new(import_label(label, locs), typ);
+        }
+        let number = self.ids.labels[self.labels];
+        self.labels += 1;
+        if let Some(arg) = self.label_args.get(&number) {
+            return arg.with_type(typ);
+        }
+        let arg = TypeArg::new(import_label(label, locs), typ);
+        self.label_args.insert(number, arg.clone());
+        arg
+    }
+}
+
 /// Serialize `sig` with its location table, adding the raw file-name indices
 /// of its locations to `file_names`.
 fn serialize_signature(
@@ -754,10 +1014,12 @@ fn serialize_signature(
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
     ser.remap_signature_locations(&mut sig);
+    let identities = saved_identities(ctx, &ser.nodes);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
         variant_layouts: ser.variant_layouts,
         mutabilities: ser.mutabilities,
+        identities,
     };
     (sig, type_graph, ser.locations)
 }
@@ -766,6 +1028,8 @@ struct TypeGraphSerializer<'a, 'f> {
     ctx: &'a TypeContext,
     arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
+    /// The node of each entry.
+    nodes: Vec<TypeExprRef>,
     cache: AHashMap<TypeExprRef, usize>,
     variant_layouts: Vec<crate::types::VariantLayout>,
     variant_layout_cache: AHashMap<crate::types::VariantLayoutRef, usize>,
@@ -789,6 +1053,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
             ctx,
             arena,
             entries: Vec::new(),
+            nodes: Vec::new(),
             cache: AHashMap::new(),
             variant_layouts: Vec::new(),
             variant_layout_cache: AHashMap::new(),
@@ -875,6 +1140,7 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
         // Allocate placeholder first to handle recursive types.
         let idx = self.entries.len();
         self.cache.insert(r, idx);
+        self.nodes.push(r);
         self.entries.push(PortableTypeEntry {
             desc: PortableTypeDesc::Tvar(None),
             level: 0,
@@ -1164,6 +1430,8 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 pub(crate) trait TypeNodeSink {
     fn abbrev_nil(&self) -> AbbrevMemoRef;
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
+    /// The origin of an identifier block of an imported graph.
+    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin;
     /// A cell for an internalized graph. Store and shared graphs outlive any
     /// one compilation, so they get persistent cells.
     fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
@@ -1188,6 +1456,10 @@ impl TypeNodeSink for TypeContext {
         self.alloc_abbrev_nil()
     }
 
+    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
+        TypeContext::fresh_ident_origin(self)
+    }
+
     fn new_mutability(&self, flag: crate::types::asttypes::MutableFlag) -> MutabilityRef {
         self.alloc_mutability(crate::types::type_expr::FieldMutability::Value(flag))
     }
@@ -1204,6 +1476,10 @@ impl TypeNodeSink for ThreadTypeStore {
 
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
         self.intern_longident_name(name)
+    }
+
+    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
+        ThreadTypeStore::fresh_ident_origin(self)
     }
 }
 
@@ -1318,8 +1594,9 @@ fn internalize_signature_into_store(
         .map(|i| TypeExprRef::from_store_index(base + i))
         .collect();
     let mremap = internalize_mutabilities(graph, store);
+    let mut ids = ImportedIdentities::new(&graph.identities);
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, &remap, &mremap, locs, store);
+        let desc = internalize_desc(&entry.desc, i, &remap, &mremap, locs, &mut ids, store);
         let level = match entry.desc {
             PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
             _ => entry.level,
@@ -1357,6 +1634,10 @@ impl TypeNodeSink for SharedSink<'_> {
     fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
         self.pool.intern_longident_name(name)
     }
+
+    fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
+        self.pool.fresh_ident_origin()
+    }
 }
 
 /// Internalize a graph into the process-wide shared pool. The graph is built
@@ -1381,13 +1662,15 @@ fn internalize_signature_into_shared(
         };
         let locs = shared_decl_locs(base, &map);
         let mremap = internalize_mutabilities(graph, &sink);
+        let mut ids = ImportedIdentities::new(&graph.identities);
         let nodes = graph
             .entries
             .iter()
             .enumerate()
             .map(|(i, entry)| {
                 sink.current.set(base + i as u32);
-                let desc = internalize_desc(&entry.desc, &remap, &mremap, &locs, &sink);
+                let desc =
+                    internalize_desc(&entry.desc, i, &remap, &mremap, &locs, &mut ids, &sink);
                 let level = match entry.desc {
                     PortableTypeDesc::Tlink(_) => GENERIC_LEVEL,
                     _ => entry.level,
@@ -1534,8 +1817,9 @@ fn internalize_signature(
 
     // Phase 2: set descriptors using remapped refs.
     let mremap = internalize_mutabilities(graph, ctx);
+    let mut ids = ImportedIdentities::new(&graph.identities);
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, &remap, &mremap, locs, ctx);
+        let desc = internalize_desc(&entry.desc, i, &remap, &mremap, locs, &mut ids, ctx);
         ctx.set_desc(remap[i], desc);
     }
 
@@ -1553,21 +1837,24 @@ fn internalize_signature(
     sig
 }
 
+/// The descriptor of entry `entry` of a graph, imported as node `node`.
+#[allow(clippy::too_many_arguments)]
 fn internalize_desc<S: TypeNodeSink>(
     desc: &PortableTypeDesc,
+    entry: usize,
     remap: &[TypeExprRef],
     mremap: &[MutabilityRef],
     locs: &DeclLocImport<'_>,
+    ids: &mut ImportedIdentities<'_>,
     ctx: &S,
 ) -> TypeDesc {
+    let node = remap[entry];
     match desc {
-        PortableTypeDesc::Tvar(name) => {
-            TypeDesc::Tvar(name.clone(), crate::types::type_expr::VarDescBlock::OWN)
-        }
+        PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone(), ids.var_desc(entry, node)),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: args
                 .iter()
-                .map(|(lbl, typ)| TypeArg::new(import_label(lbl, locs), remap[*typ]))
+                .map(|(lbl, typ)| ids.arg(lbl, remap[*typ], locs))
                 .collect(),
             ret: remap[*ret],
         },
@@ -1575,10 +1862,10 @@ fn internalize_desc<S: TypeNodeSink>(
             TypeDesc::Ttuple(types.iter().map(|&i| remap[i]).collect())
         }
         PortableTypeDesc::Tconstr { path, args } => TypeDesc::Tconstr {
-            path: path.clone(),
+            path: ids.path(path, ctx),
             args: args.iter().map(|&i| remap[i]).collect(),
             abbrev: ctx.abbrev_nil(),
-            path_block: crate::types::type_expr::PathBlock::OWN,
+            path_block: ids.path_block(entry, node),
         },
         PortableTypeDesc::Tobject { fields } => TypeDesc::Tobject {
             fields: remap[*fields],
@@ -1598,17 +1885,21 @@ fn internalize_desc<S: TypeNodeSink>(
         PortableTypeDesc::Tlink(i) => TypeDesc::Tlink(remap[*i]),
         PortableTypeDesc::Tsubst(i) => TypeDesc::Tsubst(remap[*i]),
         PortableTypeDesc::Tvariant(prd) => {
-            TypeDesc::Tvariant(Box::new(internalize_row_desc(prd, remap, ctx)))
+            let mut row = internalize_row_desc(prd, remap, ctx);
+            if let Some((path, _)) = &mut row.row_name {
+                *path = ids.path(path, ctx);
+            }
+            TypeDesc::Tvariant(Box::new(row))
         }
         PortableTypeDesc::Tunivar(name) => {
-            TypeDesc::Tunivar(name.clone(), crate::types::type_expr::VarDescBlock::OWN)
+            TypeDesc::Tunivar(name.clone(), ids.var_desc(entry, node))
         }
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
             body: remap[*body],
             vars: vars.iter().map(|&i| remap[i]).collect(),
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
-            path: path.clone(),
+            path: ids.path(path, ctx),
             lids: Box::new(
                 lids.iter()
                     .map(|lid| internalize_longident(lid, ctx))
@@ -1836,6 +2127,174 @@ fn remap_module_type_refs(
 }
 
 #[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use crate::types::type_expr::{PathBlockOwner, VarDescBlock};
+
+    /// A saved graph with its entries and identities.
+    fn save(ctx: &TypeContext, roots: &[TypeExprRef]) -> (Vec<usize>, PortableTypeGraph) {
+        let mut file_names = crate::fast_hash::AHashSet::new();
+        let mut ser = TypeGraphSerializer::new(ctx, None, &mut file_names);
+        let indices = roots.iter().map(|&r| ser.serialize_type(r)).collect();
+        let identities = saved_identities(ctx, &ser.nodes);
+        let graph = PortableTypeGraph {
+            entries: std::mem::take(&mut ser.entries),
+            variant_layouts: Vec::new(),
+            mutabilities: Vec::new(),
+            identities,
+        };
+        (indices, graph)
+    }
+
+    /// The nodes of `graph` imported into `ctx`, as `internalize_signature`
+    /// imports them.
+    fn import(ctx: &TypeContext, graph: &PortableTypeGraph) -> Vec<TypeExprRef> {
+        let remap: Vec<_> = graph.entries.iter().map(|_| ctx.new_var(None)).collect();
+        let locs = ctx.import_decl_locs(std::iter::empty(), &|file| file);
+        let mut ids = ImportedIdentities::new(&graph.identities);
+        for (i, entry) in graph.entries.iter().enumerate() {
+            let desc = internalize_desc(&entry.desc, i, &remap, &[], &locs, &mut ids, ctx);
+            ctx.set_desc(remap[i], desc);
+        }
+        remap
+    }
+
+    fn path_of(ctx: &TypeContext, node: TypeExprRef) -> (Path, PathBlockOwner) {
+        match &*ctx.get_desc(node) {
+            TypeDesc::Tconstr {
+                path, path_block, ..
+            } => (path.clone(), path_block.owner()),
+            _ => panic!("not a constructor"),
+        }
+    }
+
+    fn origin_of(path: &Path) -> u32 {
+        match path {
+            Path::Pident(id) => id.origin().get(),
+            _ => panic!("not a Pident"),
+        }
+    }
+
+    /// OCaml saves an interface with `Subst.signature` `for_saving` and the
+    /// importer unmarshals the copy, whose blocks are shared as the source's
+    /// are (subst.ml:87-94, 121-126, btype.ml:511-512) and are none of the
+    /// importer's own.
+    #[test]
+    fn an_imported_graph_shares_the_saved_blocks_and_holds_none_of_the_importers() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let int_a = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
+        let int_b = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
+        let t = Path::Pident(crate::ident::Ident::create_persistent("t"));
+        let own = ctx.new_constr(t.clone(), vec![]);
+        let kept = ctx.new_type(ctx.get_desc(own).clone().shared_from(own));
+        let respelled = ctx.new_constr(t, vec![]);
+        let none_a = ctx.new_var(None);
+        let none_b = ctx.new_var(None);
+        let named = ctx.new_var(Some("a".into()));
+        let named_copy = ctx.new_type(TypeDesc::Tvar(
+            Some("a".into()),
+            VarDescBlock::OWN.copied_from(named),
+        ));
+        let arg = TypeArg::new(ArgLabel::labelled("x", DeclLoc::default()), int_a);
+        let arrow_a = ctx.new_type(TypeDesc::Tarrow {
+            args: vec![arg.clone()].into(),
+            ret: int_a,
+        });
+        let arrow_b = ctx.new_type(TypeDesc::Tarrow {
+            args: vec![arg.with_type(int_b)].into(),
+            ret: int_b,
+        });
+        let other_label = ctx.new_type(TypeDesc::Tarrow {
+            args: vec![TypeArg::new(
+                ArgLabel::labelled("x", DeclLoc::default()),
+                int_a,
+            )]
+            .into(),
+            ret: int_a,
+        });
+        let roots = [
+            int_a,
+            int_b,
+            own,
+            kept,
+            respelled,
+            none_a,
+            none_b,
+            named,
+            named_copy,
+            arrow_a,
+            arrow_b,
+            other_label,
+        ];
+        let (at, graph) = save(&ctx, &roots);
+
+        let importer = TypeContext::new(Arc::new(IdGenerator::new()));
+        let nodes = import(&importer, &graph);
+        let node = |i: usize| nodes[at[i]];
+
+        // The saved predefined `int`: one block, the unit's, not Predef's.
+        let (int_path, int_block) = path_of(&importer, node(0));
+        assert_eq!(int_block, PathBlockOwner::Own);
+        assert_eq!(path_of(&importer, node(1)).1, PathBlockOwner::Of(node(0)));
+        assert_ne!(origin_of(&int_path), 0);
+        assert_eq!(
+            origin_of(&int_path),
+            origin_of(&path_of(&importer, node(1)).0)
+        );
+        // A kept path stays shared; one allocated again does not.
+        assert_eq!(path_of(&importer, node(3)).1, PathBlockOwner::Of(node(2)));
+        assert_eq!(path_of(&importer, node(4)).1, PathBlockOwner::Own);
+        // Every `Tvar None` is the static one; a copied descriptor stays shared.
+        let var_block = |n| match &*importer.get_desc(n) {
+            TypeDesc::Tvar(_, block) => *block,
+            _ => panic!("not a variable"),
+        };
+        assert_eq!(var_block(node(6)), VarDescBlock::Of(node(5)));
+        assert_eq!(var_block(node(7)), VarDescBlock::Own);
+        assert_eq!(var_block(node(8)), VarDescBlock::Of(node(7)));
+        // A label shared by two arrows stays shared; an equal one does not.
+        let label = |n| match &*importer.get_desc(n) {
+            TypeDesc::Tarrow { args, .. } => args[0].label_block().expect("labelled"),
+            _ => panic!("not an arrow"),
+        };
+        assert_eq!(label(node(9)), label(node(10)));
+        assert_ne!(label(node(9)), label(node(11)));
+
+        // A second import holds blocks of its own.
+        let again = import(&importer, &graph);
+        assert_ne!(
+            origin_of(&path_of(&importer, again[at[0]]).0),
+            origin_of(&int_path)
+        );
+        assert_eq!(
+            path_of(&importer, again[at[1]]).1,
+            PathBlockOwner::Of(again[at[0]])
+        );
+    }
+
+    /// The identities describe how the saved graph is laid out in memory,
+    /// not what it means: no interface digest sees them.
+    #[test]
+    fn identities_stay_out_of_the_interface_digest() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let int = ctx.new_predef_constr(crate::types::predef::path_int(), vec![]);
+        let (_, graph) = save(&ctx, &[int, int, ctx.new_var(None)]);
+        assert!(!graph.identities.blocks.is_empty());
+        let without = PortableTypeGraph {
+            identities: PortableIdentities::default(),
+            ..graph.clone()
+        };
+        let digest = |graph: &PortableTypeGraph| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            crate::cmi::digest_ser::Canonical::new(&mut hasher).hash(graph);
+            std::hash::Hasher::finish(&hasher)
+        };
+        assert_eq!(digest(&graph), digest(&without));
+    }
+}
+
+#[cfg(test)]
 mod type_arg_tests {
     use super::*;
     use crate::context::IdGenerator;
@@ -1888,7 +2347,17 @@ mod type_arg_tests {
         let same = |file| file;
         let locs = ctx.import_decl_locs(locations.locations().iter().copied(), &same);
         let remap: Vec<_> = entries.iter().map(|_| ctx.new_var(None)).collect();
-        let restored = internalize_desc(&entries[index].desc, &remap, &[], &locs, &ctx);
+        let none = PortableIdentities::default();
+        let mut ids = ImportedIdentities::new(&none);
+        let restored = internalize_desc(
+            &entries[index].desc,
+            index,
+            &remap,
+            &[],
+            &locs,
+            &mut ids,
+            &ctx,
+        );
         let TypeDesc::Tarrow { args, ret } = restored else {
             panic!("not arrow")
         };

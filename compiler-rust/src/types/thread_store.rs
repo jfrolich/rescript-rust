@@ -142,6 +142,9 @@ pub(crate) struct ThreadTypeStore {
     /// path written into an existing node. Kept here so tokens are unique
     /// among every node one worker's compilations can reach.
     next_path_block_token: Cell<u32>,
+    /// The next [`IdentOrigin`](crate::ident::IdentOrigin) for an identifier
+    /// block decoded from a compiled interface (0 is "not decoded").
+    next_ident_origin: Cell<u32>,
     /// Internalized dependency signatures keyed by the identity of the
     /// portable struct they were built from (`compiler/ml/env.ml:669-678`:
     /// one `persistent_structures` entry per read unit).
@@ -193,6 +196,14 @@ pub(crate) struct ThreadTypeStore {
 }
 
 impl ThreadTypeStore {
+    /// An identifier origin no other decoded block holds.
+    pub(crate) fn fresh_ident_origin(&self) -> crate::ident::IdentOrigin {
+        crate::ident::IdentOrigin::next_in(
+            crate::ident::IdentOrigin::STORE,
+            &self.next_ident_origin,
+        )
+    }
+
     /// A path block no other node holds.
     pub(crate) fn fresh_path_block(&self) -> crate::types::type_expr::PathBlock {
         let token = self.next_path_block_token.get();
@@ -210,6 +221,7 @@ impl ThreadTypeStore {
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             next_path_block_token: Cell::new(0),
+            next_ident_origin: Cell::new(crate::ident::IdentOrigin::STORE.start),
             pers: RefCell::new(HashMap::new()),
             shared_signatures: RefCell::new(HashSet::new()),
             type_decl_arcs: RefCell::new(HashMap::new()),

@@ -1,0 +1,20 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/module_types_values_read_from_an_interface_hold_its_identifiers_at_401_words.res[0m:[2m6:5-11:1[0m
+
+   4 [2m│[0m module M: {
+   5 [2m│[0m   let v: string
+   [1;31m6[0m [2m│[0m } = [1;31m{[0m
+   [1;31m7[0m [2m│[0m [1;31m  let a = Int.toString[0m
+   [2m.[0m [2m│[0m [2m...[0m
+  [1;31m10[0m [2m│[0m [1;31m  let v = 1[0m
+  [1;31m11[0m [2m│[0m [1;31m}[0m
+  12 [2m│[0m 
+
+  Signature mismatch:
+  ...
+  Values do not match: let v: int is not included in let v: string
+  [36m/.../fixtures/module_types_values_read_from_an_interface_hold_its_identifiers_at_401_words.res[0m:[2m5:3-15[0m:
+    Expected declaration
+  [36m/.../fixtures/module_types_values_read_from_an_interface_hold_its_identifiers_at_401_words.res[0m:[2m10:7[0m:
+    Actual declaration
