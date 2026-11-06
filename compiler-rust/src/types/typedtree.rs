@@ -351,8 +351,10 @@ pub enum ExpressionDesc {
     /// The two case lists are (value cases, exception cases).
     Texp_match(Box<Expression>, Vec<Case>, Vec<Case>, Partial),
 
-    /// Try: `try E catch { | P1 => E1 | ... }`.
-    Texp_try(Box<Expression>, Vec<Case>),
+    /// Try: `try E catch { | P1 => E1 | ... } finally E_fin`. The case list is
+    /// empty when there is no catch, and then there is always a finally
+    /// expression (typedtree.mli `Texp_try`).
+    Texp_try(Box<Expression>, Vec<Case>, Option<Box<Expression>>),
 
     /// Tuple: `(E1, ..., En)`.
     Texp_tuple(Vec<Expression>),

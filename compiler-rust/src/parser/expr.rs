@@ -4223,29 +4223,73 @@ fn normalize_for_of_pattern(
     }
 }
 
-/// Parse a try expression.
+/// Parse a try expression (res_core.ml `parse_try_expression`).
 fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Try);
 
     let body = parse_expr_with_context(p, ExprContext::When);
-    // "catch" is not a keyword, but OCaml uses `Parser.expect Res_token.catch p`
-    // where `Res_token.catch = Lident "catch"`. This produces "Did you forget a `catch` here?"
-    p.expect(Token::Lident(Cow::Owned("catch".to_string())));
-    p.expect(Token::Lbrace);
-
-    let cases = parse_pattern_matching(p);
-
-    p.expect(Token::Rbrace);
+    // "catch" and "finally" are not keywords: OCaml compares with
+    // `Res_token.catch = Lident "catch"` and `Res_token.finally = Lident "finally"`.
+    // `Parser.expect Res_token.catch p` produces "Did you forget a `catch` here?".
+    let (cases, finally) = if is_finally_token(p) {
+        (Vec::new(), Some(parse_finally_block(p)))
+    } else {
+        p.expect(Token::Lident(Cow::Owned("catch".to_string())));
+        p.expect(Token::Lbrace);
+        let cases = parse_pattern_matching(p);
+        p.expect(Token::Rbrace);
+        // After a catch, `finally` only starts a finally block when a brace
+        // follows, so a statement after the try can still use a `finally`
+        // identifier.
+        let finally = if is_finally_token(p) && peek2_is_lbrace(p) {
+            Some(parse_finally_block(p))
+        } else {
+            None
+        };
+        (cases, finally)
+    };
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
     Expression {
         pexp_desc: {
             let b_idx = p.arena_mut().push_expr(body);
-            ExpressionDesc::Pexp_try((b_idx, p.arena_mut().push_case_list(&cases)))
+            let cases = p.arena_mut().push_case_list(&cases);
+            let finally = finally.map(|e| p.arena_mut().push_expr(e));
+            ExpressionDesc::Pexp_try((b_idx, cases, finally))
         },
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
+    }
+}
+
+fn is_finally_token(p: &Parser<'_>) -> bool {
+    matches!(&p.token, Token::Lident(name) if name.as_ref() == "finally")
+}
+
+/// res_core.ml `Parser.peek2 p = Lbrace`.
+fn peek2_is_lbrace(p: &mut Parser<'_>) -> bool {
+    p.lookahead(|p| {
+        p.next();
+        p.token == Token::Lbrace
+    })
+}
+
+/// res_core.ml `parse_finally_block`.
+fn parse_finally_block(p: &mut Parser<'_>) -> Expression {
+    if !peek2_is_lbrace(p) {
+        p.err(DiagnosticCategory::Message(
+            "A `finally` block needs braces: `finally { ... }`".to_string(),
+        ));
+    }
+    p.next();
+    if p.token == Token::Lbrace {
+        p.next();
+        let finally = parse_expr_block(p);
+        p.expect(Token::Rbrace);
+        finally
+    } else {
+        parse_expr(p)
     }
 }
 

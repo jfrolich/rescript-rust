@@ -430,6 +430,7 @@ pub fn for_each_loc_mut(lam: &mut Lambda, f: &mut impl FnMut(&mut LamLoc)) {
         }
         Lambda::LstaticCatch(e1, _, e2)
         | Lambda::LtryWith(e1, _, e2)
+        | Lambda::LtryFinally(e1, e2)
         | Lambda::Lsequence(e1, e2)
         | Lambda::Lwhile(e1, e2)
         | Lambda::Lfor_of(_, e1, e2)

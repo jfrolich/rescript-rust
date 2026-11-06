@@ -245,6 +245,11 @@ fn simplify(
             let body = simplify(store, metadata, id_gen, external, body);
             append_rebuilt(store, NodeSnapshot::TryWith(body, id, handler))
         }
+        NodeSnapshot::TryFinally(body, finally) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            let finally = simplify(store, metadata, id_gen, external, finally);
+            append_rebuilt(store, NodeSnapshot::TryFinally(body, finally))
+        }
         NodeSnapshot::IfThenElse(condition, then_node, else_node) => {
             let else_node = simplify(store, metadata, id_gen, external, else_node);
             let then_node = simplify(store, metadata, id_gen, external, then_node);

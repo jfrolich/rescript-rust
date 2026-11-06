@@ -27,6 +27,13 @@ pub enum BinOp {
     Gt,
     /// Greater than or equal (>=)
     Ge,
+    /// `<`, `<=`, `>`, `>=` for operands that may be NaN (js_op.ml
+    /// `Float_lt`...), so that negating them can't swap the operator:
+    /// `!(a < b)` is not `a >= b` when `a` or `b` is NaN.
+    FloatLt,
+    FloatLe,
+    FloatGt,
+    FloatGe,
     /// Bitwise not (~)
     Bnot,
     /// Bitwise or (|)
@@ -66,10 +73,10 @@ impl BinOp {
             BinOp::And => "&&",
             BinOp::EqEqEq => "===",
             BinOp::NotEqEq => "!==",
-            BinOp::Lt => "<",
-            BinOp::Le => "<=",
-            BinOp::Gt => ">",
-            BinOp::Ge => ">=",
+            BinOp::Lt | BinOp::FloatLt => "<",
+            BinOp::Le | BinOp::FloatLe => "<=",
+            BinOp::Gt | BinOp::FloatGt => ">",
+            BinOp::Ge | BinOp::FloatGe => ">=",
             BinOp::Bnot => "~",
             BinOp::Bor => "|",
             BinOp::Bxor => "^",

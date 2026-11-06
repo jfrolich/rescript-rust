@@ -4571,6 +4571,23 @@ fn compare_definition_constructors(
                     expected_constructor.cd_id.name()
                 ));
             }
+        } else if let (
+            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
+                expected_block,
+            )),
+            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
+                actual_block,
+            )),
+        ) = (&expected_layout.constructors[idx], &actual_layout.constructors[idx])
+            && expected_block.tag.literal != actual_block.tag.literal
+        {
+            // includecore.ml `compare_variants`: a tagged case with a payload
+            // carries its tag in the object; an untagged one is its payload,
+            // whatever its `@as`.
+            return Some(format!(
+                "The internal representations for case {} are not equal.",
+                expected_constructor.cd_id.name()
+            ));
         }
     }
 
@@ -5435,6 +5452,35 @@ fn check_duplicate_constructor_declarations(
     Ok(())
 }
 
+/// typedecl.ml `transl_declaration`: `@unboxed` applies to the whole
+/// variant, so a constructor cannot have its own.
+fn check_unboxed_on_constructors(
+    arena: &ParseArena,
+    constructors: &[crate::parser::ast::ConstructorDeclaration],
+) -> TypeModResult<()> {
+    for constructor in constructors {
+        let Some((attr_name, _)) = constructor
+            .pcd_attributes
+            .iter()
+            .find(|(name, _)| arena.get_string(name.txt) == "unboxed")
+        else {
+            continue;
+        };
+        return Err(ast_untagged_variant_error(
+            arena.to_location(attr_name.loc),
+            AstUntaggedVariantError::UnboxedOnConstructor {
+                constructor: arena.get_string(constructor.pcd_name.txt).to_string(),
+                single_field_record: matches!(
+                    &constructor.pcd_args,
+                    crate::parser::ast::ConstructorArguments::Pcstr_record(labels)
+                        if labels.len() == 1
+                ),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// `Record_runtime.check_duplicated_labels` (record_runtime.ml), run by
 /// `Typedecl.transl_labels` (typedecl.ml:209-213). A runtime name clashes
 /// with any earlier declared or runtime name.
@@ -5767,6 +5813,13 @@ pub enum AstUntaggedVariantError {
         /// Runtime value shared by the constructor tag and inline field.
         runtime_value: String,
     },
+    /// `@unboxed` on a constructor rather than on its type.
+    UnboxedOnConstructor {
+        /// Constructor source name.
+        constructor: String,
+        /// Whether the constructor's payload is an inline record with one field.
+        single_field_record: bool,
+    },
 }
 
 impl AstUntaggedVariantError {
@@ -5792,6 +5845,20 @@ impl AstUntaggedVariantError {
             } => format!(
                 "Constructor \"{constructor_name}\": the @tag name \"{runtime_value}\" conflicts with the runtime value of inline record field \"{field_name}\". Use a different @tag name or rename the field."
             ),
+            AstUntaggedVariantError::UnboxedOnConstructor {
+                constructor,
+                single_field_record,
+            } => {
+                let mut message = format!(
+                    "@unboxed applies to a whole variant: write it on the type, as in `@unboxed type t = ...`, instead of on constructor {constructor}."
+                );
+                if *single_field_record {
+                    message.push_str(&format!(
+                        " For a constructor whose payload is an inline record with one field, `@unboxed type t = {constructor}({{...}})` makes the value that field. To keep the record object, give the record type a name: `@unboxed type t = {constructor}(r)`."
+                    ));
+                }
+                message
+            }
         }
     }
 }
@@ -5995,12 +6062,15 @@ fn get_untagged_block_type_from_type(
     }
 }
 
+/// variant_layout.ml `get_block`: a block is untagged exactly when its type
+/// is `@unboxed` (`configuration.unboxed`).
 fn get_untagged_constructor_block_type(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     constructor: &crate::types::decl::ConstructorDeclaration,
+    unboxed: bool,
 ) -> TypeModResult<Option<UntaggedVariantBlockType>> {
-    if !has_decl_attr(&constructor.cd_attributes, "unboxed") {
+    if !unboxed {
         return Ok(None);
     }
 
@@ -6135,7 +6205,8 @@ fn check_variant_well_formed(
         ) {
             consts.push((constructor.cd_loc, name, tag));
         } else {
-            let block_type = get_untagged_constructor_block_type(ctx, env, constructor)?;
+            let block_type =
+                get_untagged_constructor_block_type(ctx, env, constructor, is_untagged_def)?;
             blocks.push((constructor.cd_loc, name, tag, block_type));
         }
     }
@@ -6332,7 +6403,8 @@ fn derive_variant_layout(
         } else {
             // variant_layout.ml `get_block`.
             let tag_name = process_variant_tag_name(ctx, &constructor.cd_attributes)?;
-            let block = match get_untagged_constructor_block_type(ctx, env, constructor)? {
+            let unboxed = has_decl_attr(&decl.type_attributes, "unboxed");
+            let block = match get_untagged_constructor_block_type(ctx, env, constructor, unboxed)? {
                 Some(block_type) => crate::types::VariantBlock::Untagged {
                     tag,
                     block_type: canonical_variant_block_type(block_type),
@@ -12279,6 +12351,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         decl.ptype_loc,
                                         cstrs,
                                     )?;
+                                    check_unboxed_on_constructors(arena, cstrs)?;
                                     let mut constructors = Vec::with_capacity(cstrs.len());
                                     for cstr in cstrs {
                                         let cstr_name = arena.get_string(cstr.pcd_name.txt);
@@ -17331,15 +17404,12 @@ fn type_structure_item<'a>(
                         vec![],
                     ),
                     crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
-                        // OCaml copies @unboxed and @tag attributes from the type decl
-                        // to each constructor (copy_tag_attr_from_decl in typedecl.ml)
+                        // OCaml copies the @tag attributes of the type decl to
+                        // each constructor (copy_tag_attr_from_decl in typedecl.ml)
                         let tag_attrs: Vec<_> = decl
                             .ptype_attributes
                             .iter()
-                            .filter(|attr| {
-                                let name = arena.get_string(attr.0.txt);
-                                name == "unboxed" || name == "tag"
-                            })
+                            .filter(|attr| arena.get_string(attr.0.txt) == "tag")
                             .cloned()
                             .collect();
 
@@ -17355,6 +17425,7 @@ fn type_structure_item<'a>(
                         // spreads before transl_declaration checks for duplicate
                         // constructors (typedecl.ml:461-467).
                         check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
+                        check_unboxed_on_constructors(arena, cstrs)?;
 
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
@@ -20700,15 +20771,15 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         .take()
                         .expect("variant spread sources resolved before the group");
                     check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
+                    check_unboxed_on_constructors(arena, cstrs)?;
                     let mut internal_cstrs = Vec::with_capacity(cstrs.len());
                     let mut typed_tree_cstrs = Vec::with_capacity(cstrs.len());
+                    // typedecl.ml `copy_tag_attr_from_decl`: only the @tag
+                    // attributes of the type decl are copied to constructors.
                     let tag_attrs: Vec<_> = decl
                         .ptype_attributes
                         .iter()
-                        .filter(|attr| {
-                            let name = arena.get_string(attr.0.txt);
-                            name == "unboxed" || name == "tag"
-                        })
+                        .filter(|attr| arena.get_string(attr.0.txt) == "tag")
                         .cloned()
                         .collect();
 

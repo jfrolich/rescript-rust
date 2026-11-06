@@ -121,7 +121,7 @@ fn count(result: &mut CountResult, lam: &Lambda) {
             }
         }
         // lam_exit_count.ml:82-84
-        Lambda::LtryWith(l1, _, l2) => {
+        Lambda::LtryWith(l1, _, l2) | Lambda::LtryFinally(l1, l2) => {
             count(result, l1);
             count(result, l2);
         }
@@ -224,7 +224,7 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
         Lambda::Lfor(_, _, _, _, _) => false,
         // lam_pass_exits.ml after #7887: for_of / for_await_of bind a variable, so false.
         Lambda::Lfor_of(_, _, _) | Lambda::Lfor_await_of(_, _, _) => false,
-        Lambda::LtryWith(_, _, _) => false,
+        Lambda::LtryWith(_, _, _) | Lambda::LtryFinally(_, _) => false,
         Lambda::Llet(_, _, _, _) => false,
         Lambda::Lletrec(decl, body) => decl.is_empty() && no_bounded_variables(body),
         // OCaml `Lam_pass_exits.no_bounded_variables` after #8348:

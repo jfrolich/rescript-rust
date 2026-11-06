@@ -410,7 +410,9 @@ mod tests {
                         .is_some_and(|lam| has_binding(lam, target))
             }
             Lambda::LstaticRaise(_, args) => args.iter().any(|arg| has_binding(arg, target)),
-            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            Lambda::LstaticCatch(body, _, handler)
+            | Lambda::LtryWith(body, _, handler)
+            | Lambda::LtryFinally(body, handler) => {
                 has_binding(body, target) || has_binding(handler, target)
             }
             Lambda::LifThenElse(cond, then_, else_) => {

@@ -35,7 +35,9 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::Lvar(id) => hit_var(fv, id),
             Lambda::Lassign(id, e) => hit_var(fv, id) || hit(fv, e),
             Lambda::LstaticCatch(e1, _, e2) => hit(fv, e1) || hit(fv, e2),
-            Lambda::LtryWith(e1, _, e2) => hit(fv, e1) || hit(fv, e2),
+            Lambda::LtryWith(e1, _, e2) | Lambda::LtryFinally(e1, e2) => {
+                hit(fv, e1) || hit(fv, e2)
+            }
             Lambda::Lfunction(__func0) => {
                 let LFunction { body, .. } = __func0.as_ref();
                 hit(fv, body)

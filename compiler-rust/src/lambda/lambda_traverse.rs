@@ -37,7 +37,9 @@ pub fn shallow_exists(lam: &Lambda, f: &mut impl FnMut(&Lambda) -> bool) -> bool
             f(arg) || cases.iter().any(|(_, e)| f(e)) || default.as_deref().is_some_and(&mut *f)
         }
         Lambda::LstaticRaise(_, args) => args.iter().any(&mut *f),
-        Lambda::LstaticCatch(e1, _, e2) | Lambda::LtryWith(e1, _, e2) => f(e1) || f(e2),
+        Lambda::LstaticCatch(e1, _, e2)
+        | Lambda::LtryWith(e1, _, e2)
+        | Lambda::LtryFinally(e1, e2) => f(e1) || f(e2),
         Lambda::LifThenElse(e1, e2, e3) => f(e1) || f(e2) || f(e3),
         Lambda::Lsequence(e1, e2) | Lambda::Lwhile(e1, e2) => f(e1) || f(e2),
         Lambda::Lfor(_, e1, e2, _, e3) => f(e1) || f(e2) || f(e3),
@@ -161,7 +163,7 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             let c2 = map_in(hd, f);
             c1 || c2
         }
-        Lambda::LtryWith(b, _, h) => {
+        Lambda::LtryWith(b, _, h) | Lambda::LtryFinally(b, h) => {
             let c1 = map_in(b, f);
             let c2 = map_in(h, f);
             c1 || c2

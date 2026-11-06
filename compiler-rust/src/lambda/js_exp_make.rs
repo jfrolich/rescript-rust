@@ -167,6 +167,19 @@ pub(crate) fn comparison_to_binop(cmp: Comparison) -> BinOp {
     }
 }
 
+/// lam_compile_util.ml `jsop_of_float_comp`: for operands that may be NaN,
+/// see `BinOp::FloatLt`.
+pub(crate) fn comparison_to_float_binop(cmp: Comparison) -> BinOp {
+    match cmp {
+        Comparison::Eq => BinOp::EqEqEq,
+        Comparison::Neq => BinOp::NotEqEq,
+        Comparison::Lt => BinOp::FloatLt,
+        Comparison::Le => BinOp::FloatLe,
+        Comparison::Gt => BinOp::FloatGt,
+        Comparison::Ge => BinOp::FloatGe,
+    }
+}
+
 pub(crate) fn comparison_to_runtime_member(cmp: Comparison) -> &'static str {
     match cmp {
         Comparison::Eq => "equal",

@@ -1743,21 +1743,25 @@ fn print_expression_inner<W: Write>(
             }
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = *inner;
+            let (ref body, ref cases, ref finally) = *inner;
             if use_parens {
                 f.string("(");
             }
-            // OCaml: @[<0>@[<hv2>try@ %a@]@ @[<0>with%a@]@]
+            // OCaml: @[<0>@[<hv2>try@ %a@]@ @[<0>with%a@]%a@], or without
+            // cases @[<0>@[<hv2>try@ %a@]%a@], the last %a printing the
+            // finally block as @ @[<hv2>finally@ %a@].
             f.open_box(BoxKind::Box, 0);
             f.open_box(BoxKind::HV, 2);
             f.string("try");
             f.space(); // @ break between try and body
             print_expression(f, arena, arena.get_expr(*body));
             f.close_box();
+            let cases = arena.case_list(*cases);
+            if !cases.is_empty() {
             f.space(); // @ break between try-box and with-box
             f.open_box(BoxKind::Box, 0);
             f.string("with");
-            for case in arena.case_list(*cases) {
+            for case in cases {
                 f.space();
                 f.string("| ");
                 f.open_box(BoxKind::Box, 2);
@@ -1774,6 +1778,15 @@ fn print_expression_inner<W: Write>(
                 f.close_box();
             }
             f.close_box();
+            }
+            if let Some(finally) = finally {
+                f.space();
+                f.open_box(BoxKind::HV, 2);
+                f.string("finally");
+                f.space();
+                print_expression(f, arena, arena.get_expr(*finally));
+                f.close_box();
+            }
             f.close_box();
             if use_parens {
                 f.string(")");

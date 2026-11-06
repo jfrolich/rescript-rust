@@ -813,6 +813,12 @@ pub enum TypeCoreError {
     /// Continue outside a directly enclosing loop body.
     ContinueOutsideLoop { loc: LocIdx },
 
+    /// Break that would leave a `finally` block.
+    BreakOutOfFinally { loc: LocIdx },
+
+    /// Continue that would leave a `finally` block.
+    ContinueOutOfFinally { loc: LocIdx },
+
     /// Literal overflow.
     LiteralOverflow { loc: LocIdx, ty: String },
 
@@ -1276,6 +1282,9 @@ pub struct TypeCheckContext<'a> {
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
     pub loop_depth: usize,
+    /// Whether the innermost loop or function boundary is a finally block,
+    /// which break and continue must not leave (typecore.ml `in_finally`).
+    pub in_finally: bool,
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
@@ -1445,6 +1454,7 @@ impl<'a> TypeCheckContext<'a> {
             generated_pattern_labels: Vec::new(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
+            in_finally: false,
             used_variables: HashMap::new(),
             used_variable_locs: HashMap::new(),
             univars: Vec::new(),
@@ -2077,6 +2087,23 @@ impl<'a> TypeCheckContext<'a> {
     pub fn longident_to_string(&self, lid: &Longident) -> String {
         self.arena.longident_to_string(lid)
     }
+}
+
+/// typecore.ml `with_control_flow_boundary ~in_finally`: the code inside
+/// starts without enclosing loops.
+fn with_control_flow_boundary<T>(
+    tctx: &mut TypeCheckContext<'_>,
+    in_finally: bool,
+    f: impl FnOnce(&mut TypeCheckContext<'_>) -> TypeCoreResult<T>,
+) -> TypeCoreResult<T> {
+    let saved_loop_depth = tctx.loop_depth;
+    let saved_in_finally = tctx.in_finally;
+    tctx.loop_depth = 0;
+    tctx.in_finally = in_finally;
+    let result = f(tctx);
+    tctx.loop_depth = saved_loop_depth;
+    tctx.in_finally = saved_in_finally;
+    result
 }
 
 fn with_loop_depth<T>(
@@ -7860,7 +7887,11 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_break => {
             if tctx.loop_depth == 0 {
-                return Err(TypeCoreError::BreakOutsideLoop { loc });
+                return Err(if tctx.in_finally {
+                    TypeCoreError::BreakOutOfFinally { loc }
+                } else {
+                    TypeCoreError::BreakOutsideLoop { loc }
+                });
             }
             let unit_ty = env.type_unit(ctx);
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
@@ -7876,7 +7907,11 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_continue => {
             if tctx.loop_depth == 0 {
-                return Err(TypeCoreError::ContinueOutsideLoop { loc });
+                return Err(if tctx.in_finally {
+                    TypeCoreError::ContinueOutOfFinally { loc }
+                } else {
+                    TypeCoreError::ContinueOutsideLoop { loc }
+                });
             }
             let unit_ty = env.type_unit(ctx);
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
@@ -8360,7 +8395,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_try(inner) => {
-            let (ref body_idx, ref handlers) = *inner;
+            let (ref body_idx, ref handlers, ref finally) = *inner;
             // Try expression
             let body = tctx.arena.get_expr(*body_idx);
             type_try(
@@ -8369,6 +8404,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 loc,
                 body,
                 tctx.arena.case_list(*handlers),
+                finally.map(|finally| tctx.arena.get_expr(finally)),
                 expected_ty,
                 &expr.pexp_attributes,
             )
@@ -10674,9 +10710,12 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
             collect_case_expression_ident_heads(cases, ids);
             collect_case_expression_ident_heads(exn_cases, ids);
         }
-        ExpressionDesc::Texp_try(scrutinee, cases) => {
+        ExpressionDesc::Texp_try(scrutinee, cases, finally) => {
             collect_expression_ident_heads(scrutinee, ids);
             collect_case_expression_ident_heads(cases, ids);
+            if let Some(finally) = finally {
+                collect_expression_ident_heads(finally, ids);
+            }
         }
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
             for item in items {
@@ -11978,14 +12017,25 @@ fn collect_lident_idents_in_expression(
                 collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
             }
         }
-        ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            for case in arena.case_list(inner.1).iter() {
+        ED::Pexp_match((scrutinee, cases)) | ED::Pexp_try((scrutinee, cases, None)) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*scrutinee), out);
+            for case in arena.case_list(*cases).iter() {
                 if let Some(guard) = case.pc_guard {
                     collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
                 }
                 collect_lident_idents_in_expression(arena, arena.get_expr(case.pc_rhs), out);
             }
+        }
+        // typecore.ml `iter_expression`: `expr e; List.iter case pel; Option.iter expr finally`.
+        ED::Pexp_try((body, cases, Some(finally))) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
+            for case in arena.case_list(*cases).iter() {
+                if let Some(guard) = case.pc_guard {
+                    collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
+                }
+                collect_lident_idents_in_expression(arena, arena.get_expr(case.pc_rhs), out);
+            }
+            collect_lident_idents_in_expression(arena, arena.get_expr(*finally), out);
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => {
             for item in arena.expr_list(*items).iter() {
@@ -12478,6 +12528,7 @@ fn type_try(
     loc: LocIdx,
     body: &ParsedExpression,
     handlers: &[crate::parser::ast::Case],
+    finally: Option<&ParsedExpression>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
@@ -12525,11 +12576,21 @@ fn type_try(
         false,
     )?;
 
+    // JavaScript runs the finally block after the body or catch has already
+    // decided how the try is left, so a break or continue there would cancel
+    // a pending exception or result (typecore.ml Pexp_try).
+    let typed_finally = match finally {
+        Some(finally) => Some(Box::new(with_control_flow_boundary(tctx, true, |tctx| {
+            type_statement(tctx, env, finally)
+        })?)),
+        None => None,
+    };
+
     // Keep sharing: use typed_body.exp_type instead of expected_ty
     // (matches OCaml: exp_type = body.exp_type)
     let result_ty = typed_body.exp_type;
     Ok(Expression::new(
-        ExpressionDesc::Texp_try(Box::new(typed_body), typed_handlers),
+        ExpressionDesc::Texp_try(Box::new(typed_body), typed_handlers, typed_finally),
         loc,
         result_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -12960,8 +13021,12 @@ fn type_function_nary(
     let mut typed_patterns = Vec::with_capacity(params.len());
     let mut unpacks = Vec::new();
     let mut default_lets = Vec::new();
+    // typecore.ml `with_reset_control_flow`: a function body starts without
+    // enclosing loops, outside any finally block.
     let saved_loop_depth = tctx.loop_depth;
+    let saved_in_finally = tctx.in_finally;
     tctx.loop_depth = 0;
+    tctx.in_finally = false;
     for ((param, default_binding), typ) in
         params_bindings.iter().zip(parameter_types.iter().copied())
     {
@@ -13187,6 +13252,7 @@ fn type_function_nary(
         }),
     );
     tctx.loop_depth = saved_loop_depth;
+    tctx.in_finally = saved_in_finally;
     Ok(Expression::new(
         ExpressionDesc::Texp_function {
             params: typed_params,
@@ -19445,7 +19511,7 @@ fn type_approx_for_rec_let(
             }
         }
         ED::Pexp_try(inner) => {
-            let (expr, _) = &*inner;
+            let (expr, _, _) = &*inner;
             type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
         }
         ED::Pexp_tuple(items) => {
@@ -19633,9 +19699,12 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                     .chain(exn_cases.iter())
                     .any(|case| typed_case_uses_ident(case, target))
         }
-        ExpressionDesc::Texp_try(body, cases) => {
+        ExpressionDesc::Texp_try(body, cases, finally) => {
             typed_expression_uses_ident(body, target)
                 || cases.iter().any(|case| typed_case_uses_ident(case, target))
+                || finally
+                    .as_deref()
+                    .is_some_and(|finally| typed_expression_uses_ident(finally, target))
         }
         ExpressionDesc::Texp_tuple(items)
         | ExpressionDesc::Texp_array(items)
@@ -20024,7 +20093,7 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
         | ExpressionDesc::Texp_object_set(_, _, _)
         | ExpressionDesc::Texp_field(_, _, _)
         | ExpressionDesc::Texp_assert(_)
-        | ExpressionDesc::Texp_try(_, _)
+        | ExpressionDesc::Texp_try(_, _, _)
         | ExpressionDesc::Texp_tagged_template { .. }
         | ExpressionDesc::Texp_template { .. } => RecExpressionClass::Dynamic,
     }
@@ -20396,11 +20465,16 @@ fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse 
         }
         ExpressionDesc::Texp_letexception(_, body) => rec_expression(ctx, env, body),
         ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(ctx, env, module_expr),
-        ExpressionDesc::Texp_try(body, cases) => {
+        ExpressionDesc::Texp_try(body, cases, finally) => {
             let cases_use = cases.iter().fold(RecUse::default(), |use_, case| {
                 rec_use_join(use_, rec_expression(ctx, env, &case.c_rhs))
             });
-            rec_use_join(rec_expression(ctx, env, body), cases_use)
+            // rec_check.ml: the finally block's value is discarded.
+            let finally_use = match finally {
+                None => RecUse::default(),
+                Some(finally) => rec_use_discard(rec_expression(ctx, env, finally)),
+            };
+            rec_use_join(rec_use_join(rec_expression(ctx, env, body), cases_use), finally_use)
         }
         ExpressionDesc::Texp_function { body, .. } => rec_use_delay(rec_expression(ctx, env, body)),
     }

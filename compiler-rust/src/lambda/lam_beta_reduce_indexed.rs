@@ -218,6 +218,12 @@ fn rewrite_bounded(
             let handler = rewrite_bounded(store, map, diagnostics, handler, id_gen);
             append_rebuilt(store, NodeSnapshot::TryWith(body, id, handler))
         }
+        // lam_bounded_vars.ml: `let l1 = aux l1 in let l2 = aux l2 in try_finally l1 l2`.
+        NodeSnapshot::TryFinally(body, finally) => {
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
+            let finally = rewrite_bounded(store, map, diagnostics, finally, id_gen);
+            append_rebuilt(store, NodeSnapshot::TryFinally(body, finally))
+        }
         NodeSnapshot::For(id, from, to, direction, body) => {
             let id = rebind(store, map, diagnostics, id_gen, &id);
             // Preserve `lam_bounded_vars.ml`'s two traversals of `l1`.

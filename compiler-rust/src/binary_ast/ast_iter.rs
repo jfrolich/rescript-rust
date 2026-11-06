@@ -463,11 +463,20 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 v.expr(arena, *arg);
             }
         }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = &*inner;
+        ExpressionDesc::Pexp_match((scrutinee, cases)) => {
             v.expr(arena, *scrutinee);
             for (index, case) in arena.case_list(*cases).iter().enumerate() {
                 v.case(arena, idx, index, case);
+            }
+        }
+        // ast_iterator.ml: `sub.expr sub e; sub.cases sub pel; iter_opt (sub.expr sub) finally`.
+        ExpressionDesc::Pexp_try((body, cases, finally)) => {
+            v.expr(arena, *body);
+            for (index, case) in arena.case_list(*cases).iter().enumerate() {
+                v.case(arena, idx, index, case);
+            }
+            if let Some(finally) = finally {
+                v.expr(arena, *finally);
             }
         }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {

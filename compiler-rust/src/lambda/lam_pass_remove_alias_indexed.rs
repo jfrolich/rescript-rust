@@ -244,6 +244,18 @@ impl Simplifier<'_> {
                 };
                 match self.meta.ident_tbl.get(&id) {
                     Some(IndexedIdKind::OptionalBlock(value, _)) => *value,
+                    // `v` bound to `Some(l)`: unwrapping gives back `l`,
+                    // whether or not it was nested. Only substitute forms
+                    // that are safe to repeat.
+                    Some(IndexedIdKind::NormalOptional(value))
+                        if match self.store.view(*value) {
+                            NodeView::Var(_) => true,
+                            NodeView::Const(c) => !c.is_allocating(),
+                            _ => false,
+                        } =>
+                    {
+                        *value
+                    }
                     _ if matches!(p, Primitive::PvalFromOptionNotNest) => args[0],
                     _ => append_rebuilt(self.store, NodeSnapshot::Prim(p, args, loc)),
                 }
@@ -395,6 +407,11 @@ impl Simplifier<'_> {
                 let a = self.simpl(a);
                 let b = self.simpl(b);
                 NodeSnapshot::TryWith(a, id, b)
+            }
+            NodeSnapshot::TryFinally(a, b) => {
+                let a = self.simpl(a);
+                let b = self.simpl(b);
+                NodeSnapshot::TryFinally(a, b)
             }
             NodeSnapshot::Sequence(a, b) => {
                 let a = self.simpl(a);

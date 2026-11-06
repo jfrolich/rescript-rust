@@ -3555,7 +3555,15 @@ fn op_precedence(op: BinOp) -> (u8, u8, u8) {
         BinOp::Bxor => (6, 6, 6),
         BinOp::Band => (7, 7, 7),
         BinOp::EqEqEq | BinOp::NotEqEq => (8, 8, 9),
-        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::InstanceOf => (9, 9, 10),
+        BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::FloatLt
+        | BinOp::FloatLe
+        | BinOp::FloatGt
+        | BinOp::FloatGe
+        | BinOp::InstanceOf => (9, 9, 10),
         BinOp::Lsl | BinOp::Lsr | BinOp::Asr => (10, 10, 11),
         BinOp::Plus | BinOp::Minus => (11, 11, 12),
         BinOp::Mul | BinOp::Div | BinOp::Mod => (12, 12, 13),

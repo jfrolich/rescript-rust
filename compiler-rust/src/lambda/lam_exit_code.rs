@@ -52,7 +52,9 @@ where
                     || default.as_deref().is_some_and(|l| aux(l, exits))
             }
             Lambda::LstaticCatch(e1, _, e2) => aux(e1, exits) || aux(e2, exits),
-            Lambda::LtryWith(e1, _, e2) => aux(e1, exits) || aux(e2, exits),
+            Lambda::LtryWith(e1, _, e2) | Lambda::LtryFinally(e1, e2) => {
+                aux(e1, exits) || aux(e2, exits)
+            }
             Lambda::LifThenElse(e1, e2, e3) => aux(e1, exits) || aux(e2, exits) || aux(e3, exits),
             Lambda::Lsequence(e1, e2) => aux(e1, exits) || aux(e2, exits),
             Lambda::Lwhile(e1, e2) => aux(e1, exits) || aux(e2, exits),

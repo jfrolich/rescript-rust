@@ -949,10 +949,19 @@ impl<'a> Checker<'a> {
             | ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_break
             | ExpressionDesc::Pexp_continue => Ok(()),
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (scrutinee, cases) = &*inner;
+            ExpressionDesc::Pexp_match((scrutinee, cases)) => {
                 self.cases(&self.arena.case_list(*cases).to_vec())?;
                 self.expr(*scrutinee)
+            }
+            // ast_mapper.ml `try_ ~loc ~attrs ?finally:(map_opt (sub.expr sub) finally)
+            // (sub.expr sub e) (sub.cases sub pel)`, arguments evaluated right to left.
+            ExpressionDesc::Pexp_try((body, cases, finally)) => {
+                self.cases(&self.arena.case_list(*cases).to_vec())?;
+                self.expr(*body)?;
+                match finally {
+                    Some(finally) => self.expr(*finally),
+                    None => Ok(()),
+                }
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
                 for item in self.arena.expr_list(*items).to_vec().iter() {

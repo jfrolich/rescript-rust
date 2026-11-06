@@ -1455,11 +1455,12 @@ pub fn print_expression(
         }
         // Try expression
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref expr_idx, ref cases) = *inner;
+            let (ref expr_idx, ref cases, ref finally) = *inner;
             print_try_expression(
                 state,
                 arena.get_expr(*expr_idx),
                 arena.case_list(*cases),
+                finally.map(|e| arena.get_expr(e)),
                 cmt_tbl,
                 arena,
             )
@@ -7498,10 +7499,12 @@ fn print_match_expression(
 }
 
 /// Print try expression.
+/// res_printer.ml `Pexp_try (expr, cases, finally)` in `print_expression`.
 fn print_try_expression(
     state: &PrinterState,
     expr: &Expression,
     cases: &[Case],
+    finally: Option<&Expression>,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
@@ -7513,13 +7516,22 @@ fn print_try_expression(
             ParenKind::Nothing => doc,
         }
     };
-    let cases_block = print_cases_with_braces(state, cases, cmt_tbl, arena);
-    Doc::concat(vec![
-        Doc::text("try "),
-        body,
-        Doc::text(" catch "),
-        cases_block,
-    ])
+    let catch_doc = if cases.is_empty() {
+        Doc::nil()
+    } else {
+        Doc::concat(vec![
+            Doc::text(" catch "),
+            print_cases_with_braces(state, cases, cmt_tbl, arena),
+        ])
+    };
+    let finally_doc = match finally {
+        None => Doc::nil(),
+        Some(finally) => Doc::concat(vec![
+            Doc::text(" finally "),
+            print_expression_block(state, true, finally, cmt_tbl, arena),
+        ]),
+    };
+    Doc::concat(vec![Doc::text("try "), body, catch_doc, finally_doc])
 }
 
 /// Check if a pattern needs parentheses in a case context.

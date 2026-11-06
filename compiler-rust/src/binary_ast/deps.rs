@@ -569,13 +569,20 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*value);
                 }
             }
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref expr, ref cases) = *inner;
-                // expr is ExprIdx
-                let expr = *expr;
-                self.add_expr_idx(expr);
+            ExpressionDesc::Pexp_match((expr, cases)) => {
+                self.add_expr_idx(*expr);
                 for case in self.arena.case_list(*cases) {
                     self.add_case(case);
+                }
+            }
+            // depend.ml: `add_expr bv e; add_cases bv pel; add_opt add_expr bv finally`.
+            ExpressionDesc::Pexp_try((expr, cases, finally)) => {
+                self.add_expr_idx(*expr);
+                for case in self.arena.case_list(*cases) {
+                    self.add_case(case);
+                }
+                if let Some(finally) = finally {
+                    self.add_expr_idx(*finally);
                 }
             }
             ExpressionDesc::Pexp_tuple(exprs) | ExpressionDesc::Pexp_array(exprs) => {

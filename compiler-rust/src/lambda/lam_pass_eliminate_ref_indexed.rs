@@ -150,6 +150,11 @@ pub(crate) fn eliminate_ref(
                 NodeSnapshot::TryWith(body, id, handler),
             ))
         }
+        NodeSnapshot::TryFinally(body, finally) => {
+            let body = eliminate_ref(store, target, body)?;
+            let finally = eliminate_ref(store, target, finally)?;
+            Ok(append_rebuilt(store, NodeSnapshot::TryFinally(body, finally)))
+        }
         NodeSnapshot::IfThenElse(condition, then_node, else_node) => {
             let else_node = eliminate_ref(store, target, else_node)?;
             let then_node = eliminate_ref(store, target, then_node)?;

@@ -1342,6 +1342,17 @@ impl<'a> Mapper<'a> {
                 let attr = self.mk_for_of_attr("_res.for_await_of", expr.pexp_loc, *iterable_idx);
                 attrs.insert(0, attr);
             }
+            // ast_mapper_to0.ml Pexp_try: the finally expression travels in a
+            // `_res.finally` attribute located at the finally expression.
+            current::ExpressionDesc::Pexp_try((_, _, Some(finally_idx))) => {
+                let finally_loc = self.arena.get_expr(*finally_idx).pexp_loc;
+                let attr = self.mk_for_of_attr(
+                    crate::binary_ast::mapper_from0::FINALLY_ATTR_NAME,
+                    finally_loc,
+                    *finally_idx,
+                );
+                attrs.insert(0, attr);
+            }
             _ => {}
         }
         // ast_mapper_to0.ml Pexp_ternary: an if-then-else carrying the
@@ -1485,8 +1496,9 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    /// Build the `_res.for_of` / `_res.for_await_of` attribute used to encode
-    /// `for ... of` / `for await ... of` in the legacy parsetree0 format.
+    /// Build the `_res.for_of` / `_res.for_await_of` / `_res.finally`
+    /// attribute used to encode `for ... of` / `for await ... of` and a try's
+    /// finally block in the legacy parsetree0 format: `PPat (Pat.any (), Some e)`.
     fn mk_for_of_attr(
         &mut self,
         name: &str,
@@ -1623,7 +1635,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_try(inner) => {
-                let (ref e_idx, ref cases) = *inner;
+                let (ref e_idx, ref cases, _) = *inner;
                 pt0::ExpressionDesc::Try(
                     Box::new(self.map_expr_idx(*e_idx)),
                     self.arena

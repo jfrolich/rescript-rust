@@ -503,6 +503,12 @@ pub enum Lambda {
     /// Try-with exception handling
     LtryWith(Box<Lambda>, Ident, Box<Lambda>),
 
+    /// `Ltryfinally (body, finally)` (lambda.mli): evaluates `body`, then
+    /// `finally` however `body` is left (normally, by an exception, or by
+    /// break/continue/return), and has the value of `body`. A try with both
+    /// catch and finally is an `LtryFinally` around an `LtryWith`.
+    LtryFinally(Box<Lambda>, Box<Lambda>),
+
     /// If-then-else
     LifThenElse(Box<Lambda>, Box<Lambda>, Box<Lambda>),
 
@@ -1038,6 +1044,11 @@ impl Lambda {
     /// Create a try-with block
     pub fn try_(body: Lambda, exn: Ident, handler: Lambda) -> Self {
         Lambda::LtryWith(Box::new(body), exn, Box::new(handler))
+    }
+
+    /// lambda.ml `try_finally`.
+    pub fn try_finally(body: Lambda, finally: Lambda) -> Self {
+        Lambda::LtryFinally(Box::new(body), Box::new(finally))
     }
 
     /// Create an assignment

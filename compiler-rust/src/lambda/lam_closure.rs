@@ -251,7 +251,7 @@ pub fn free_variables_with_stats(
                 iter(handler, Position::Sink, fv, local_set);
             }
 
-            Lambda::LtryWith(body, _exn, handler) => {
+            Lambda::LtryWith(body, _, handler) | Lambda::LtryFinally(body, handler) => {
                 iter(body, pos, fv, local_set);
                 iter(handler, Position::Sink, fv, local_set);
             }

@@ -287,6 +287,12 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             let body = simplify(store, state, body);
             append_rebuilt(store, NodeSnapshot::TryWith(body, id, handler))
         }
+        // lambda_traverse.ml `shallow_map_sharing`: `let b' = f b and fin' = f fin`.
+        NodeSnapshot::TryFinally(body, finally) => {
+            let body = simplify(store, state, body);
+            let finally = simplify(store, state, finally);
+            append_rebuilt(store, NodeSnapshot::TryFinally(body, finally))
+        }
         NodeSnapshot::IfThenElse(condition, then_node, else_node) => {
             let else_node = simplify(store, state, else_node);
             let then_node = simplify(store, state, then_node);

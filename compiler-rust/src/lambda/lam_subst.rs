@@ -140,6 +140,11 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             Box::new(subst_aux(s, handler)),
         ),
 
+        Lambda::LtryFinally(body, finally) => Lambda::LtryFinally(
+            Box::new(subst_aux(s, body)),
+            Box::new(subst_aux(s, finally)),
+        ),
+
         Lambda::LifThenElse(cond, then_, else_) => Lambda::LifThenElse(
             Box::new(subst_aux(s, cond)),
             Box::new(subst_aux(s, then_)),

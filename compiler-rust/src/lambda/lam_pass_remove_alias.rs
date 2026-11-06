@@ -290,6 +290,13 @@ impl<'a> Simplifier<'a> {
                 };
                 match self.ident_tbl.get(v).cloned() {
                     Some(IdKind::OptionalBlock(l, _)) => (l, true),
+                    // `v` bound to `Some(l)`: unwrapping gives back `l`,
+                    // whether or not it was nested. Only substitute forms
+                    // that are safe to repeat.
+                    Some(IdKind::NormalOptional(l @ Lambda::Lvar(_))) => (l, true),
+                    Some(IdKind::NormalOptional(Lambda::Lconst(c))) if !c.is_allocating() => {
+                        (Lambda::Lconst(c), true)
+                    }
                     _ if matches!(prim.primitive, Primitive::PvalFromOptionNotNest) => {
                         let PrimInfo { mut args, .. } = *prim;
                         (args.pop().expect("checked one optional arg"), true)

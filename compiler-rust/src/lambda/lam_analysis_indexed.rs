@@ -51,7 +51,9 @@ pub(crate) fn hit_variables(store: &IndexedLambda, targets: &[Ident], node: Node
                     || cases.iter().any(|(_, node)| hit(store, targets, *node))
                     || default.is_some_and(|node| hit(store, targets, node))
             }
-            NodeView::StaticCatch(body, _, _, handler) | NodeView::TryWith(body, _, handler) => {
+            NodeView::StaticCatch(body, _, _, handler)
+            | NodeView::TryWith(body, _, handler)
+            | NodeView::TryFinally(body, handler) => {
                 hit(store, targets, body) || hit(store, targets, handler)
             }
             NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => {
@@ -89,7 +91,7 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
         NodeView::Let(_, _, value, body) => {
             no_side_effects(store, value) && no_side_effects(store, body)
         }
-        NodeView::TryWith(body, _, handler) => {
+        NodeView::TryWith(body, _, handler) | NodeView::TryFinally(body, handler) => {
             no_side_effects(store, body) && no_side_effects(store, handler)
         }
         NodeView::IfThenElse(a, b, c) => {
@@ -249,7 +251,7 @@ pub(crate) fn is_closed_with_map(
                 local.extend(params.iter().cloned());
                 iter(store, handler, Position::Sink, stats, local);
             }
-            NodeView::TryWith(body, _, handler) => {
+            NodeView::TryWith(body, _, handler) | NodeView::TryFinally(body, handler) => {
                 iter(store, body, position, stats, local);
                 iter(store, handler, Position::Sink, stats, local);
             }

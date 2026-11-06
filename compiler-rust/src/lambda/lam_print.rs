@@ -408,6 +408,14 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, ")")
         }
 
+        Lambda::LtryFinally(body, finally) => {
+            write!(f, "(try ")?;
+            format_lambda(body, f)?;
+            write!(f, " finally ")?;
+            format_lambda(finally, f)?;
+            write!(f, ")")
+        }
+
         Lambda::LtryWith(body, exn, handler) => {
             write!(f, "(try ")?;
             format_lambda(body, f)?;

@@ -5,7 +5,7 @@
 
 use super::js_exp_make::{ocaml_typeof_expr, raw_typeof_comparison};
 use super::js_stmt_make::{block_terminates, strict_single_return_expr};
-use super::lam_coercion::push_s_exp;
+use super::lam_coercion::push_s_if_empty;
 use super::lam_compile::{
     Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, trailing_return_expression,
 };
@@ -590,6 +590,37 @@ impl LambdaCompiler {
         }
     }
 
+    /// lam_compile.ml `a_literal_reaches_an_arm`: a literal handled by the
+    /// default would otherwise pass the check of a payload arm of its kind.
+    fn untagged_literal_reaches_an_arm(&self, switch: &LambdaSwitch) -> bool {
+        let SwitchDispatch::Variant(facts) = &switch.sw_dispatch else {
+            return false;
+        };
+        let arm_types: Vec<&VariantBlockType> = switch
+            .sw_blocks
+            .iter()
+            .filter_map(|(key, _)| match key {
+                SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
+                    block.block_type()
+                }
+                SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
+            })
+            .collect();
+        facts.literal_tags.iter().any(|literal| {
+            arm_types.iter().any(|block_type| {
+                use crate::types::VariantLiteralTag as L;
+                matches!(
+                    (literal, block_type),
+                    (L::String(_), VariantBlockType::String)
+                        | (L::Int(_) | L::Float(_), VariantBlockType::Int | VariantBlockType::Float)
+                        | (L::BigInt(_), VariantBlockType::Bigint)
+                        | (L::Bool(_), VariantBlockType::Boolean)
+                        | (_, VariantBlockType::Unknown)
+                )
+            })
+        })
+    }
+
     fn variant_tag_name(&self, switch: &LambdaSwitch) -> String {
         match &switch.sw_dispatch {
             SwitchDispatch::Variant(facts) => facts.tag_name.clone(),
@@ -686,34 +717,28 @@ impl LambdaCompiler {
         if !has_object_typeof {
             return None;
         }
-        let clauses_have_array_case = runtime_test_cases.iter().any(|(case, _)| {
-            matches!(
-                case.block_type(),
-                Some(VariantBlockType::Instance(
-                    crate::types::VariantInstance::Array
-                ))
-            )
-        });
-        let type_has_array_case = all_block_types.iter().any(|t| {
-            matches!(
-                t,
-                VariantBlockType::Instance(crate::types::VariantInstance::Array)
-            )
-        });
+        // Null, and the instance cases without an arm of their own, fall
+        // through to the default (lam_compile.ml `compile_untagged_cases`).
         let needs_null_guard = has_null_case;
-        let needs_array_guard = type_has_array_case && !clauses_have_array_case;
-
-        let null_check = || self.is_null_expr(scrut.clone());
-        let array_check = || {
-            self.builtin_untagged_instance_test(scrut.clone(), crate::types::VariantInstance::Array)
-        };
-
-        match (needs_null_guard, needs_array_guard) {
-            (true, true) => Some(Expression::bin(BinOp::Or, null_check(), array_check())),
-            (true, false) => Some(null_check()),
-            (false, true) => Some(array_check()),
-            (false, false) => None,
-        }
+        let unmatched_instances = all_block_types.iter().filter_map(|block_type| match block_type {
+            VariantBlockType::Instance(instance)
+                if !runtime_test_cases.iter().any(|(case, _)| {
+                    matches!(case.block_type(), Some(VariantBlockType::Instance(i)) if i == instance)
+                }) =>
+            {
+                Some(*instance)
+            }
+            _ => None,
+        });
+        let guards = needs_null_guard
+            .then(|| self.is_null_expr(scrut.clone()))
+            .into_iter()
+            .chain(
+                unmatched_instances
+                    .map(|instance| self.builtin_untagged_instance_test(scrut.clone(), instance)),
+            );
+        // `List.fold_left E.or_ first rest`.
+        guards.reduce(|acc, guard| Expression::bin(BinOp::Or, acc, guard))
     }
 
     fn compile_untagged_block_switch_assignment_statements(
@@ -1239,7 +1264,10 @@ impl LambdaCompiler {
         scrut_expr: Expression,
         switch: &LambdaSwitch,
     ) -> Block {
-        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(switch) {
+        if switch.sw_consts.is_empty()
+            && self.untagged_literal_and_block_defaults_match(switch)
+            && !self.untagged_literal_reaches_an_arm(switch)
+        {
             let has_null_case = self.has_null_literal(switch);
             return self.compile_untagged_block_switch_assignment_statements(
                 result,
@@ -1323,7 +1351,10 @@ impl LambdaCompiler {
         scrut_expr: Expression,
         switch: &LambdaSwitch,
     ) -> Block {
-        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(switch) {
+        if switch.sw_consts.is_empty()
+            && self.untagged_literal_and_block_defaults_match(switch)
+            && !self.untagged_literal_reaches_an_arm(switch)
+        {
             let has_null_case = self.has_null_literal(switch);
             return self.compile_untagged_block_switch_return_statements(
                 scrut_expr,
@@ -1401,7 +1432,10 @@ impl LambdaCompiler {
         scrut_expr: Expression,
         switch: &LambdaSwitch,
     ) -> Block {
-        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(switch) {
+        if switch.sw_consts.is_empty()
+            && self.untagged_literal_and_block_defaults_match(switch)
+            && !self.untagged_literal_reaches_an_arm(switch)
+        {
             let has_null_case = self.has_null_literal(switch);
             return self.compile_untagged_block_switch_effect_statements(
                 scrut_expr,
@@ -1666,12 +1700,12 @@ impl LambdaCompiler {
     ) -> Block {
         if then_block.is_empty() {
             if else_block.is_empty() {
-                // OCaml's `S.if_ cond [] []` collapses to `S.exp cond`
-                // (js_stmt_make.ml:242 + 45-53). Preserves bare comparisons
-                // like `tmp === null;` that come from a switch where every
-                // dispatched arm falls through to the same continuation.
+                // OCaml's `S.if_ cond [] []` keeps only a condition with side
+                // effects (js_stmt_make.ml `if_`), so a switch where every
+                // dispatched arm falls through to the same continuation
+                // leaves no bare comparison like `tmp === null;`.
                 let mut block = vec![];
-                push_s_exp(&mut block, cond);
+                push_s_if_empty(&mut block, cond);
                 block
             } else {
                 vec![Statement::if_(Expression::not(cond), else_block, vec![])]
@@ -1914,7 +1948,7 @@ impl LambdaCompiler {
                 {
                     let test_expr = self.switch_case_test(test, &cases[0].0);
                     let mut prefix = vec![];
-                    push_s_exp(&mut prefix, test_expr);
+                    push_s_if_empty(&mut prefix, test_expr);
                     prefix.extend(body);
                     return prefix;
                 }
@@ -1932,9 +1966,8 @@ impl LambdaCompiler {
             }
             // Body compiles to empty (e.g. all dispatched cases are
             // fallthrough static raises). Fall through to the regular
-            // dispatch path so OCaml's `S.if_ cond [] []` -> `S.exp cond`
-            // rule (js_stmt_make.ml:242 + 45-53) preserves bare comparisons
-            // like `tmp === null;`.
+            // dispatch path, which applies OCaml's `S.if_ cond [] []` rule
+            // (js_stmt_make.ml `if_`).
         }
 
         if allow_small {

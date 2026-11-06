@@ -306,6 +306,7 @@ pub(crate) enum LambdaInputView<'a> {
     StaticRaise(i32, LambdaInputs<'a>),
     StaticCatch(LambdaInput<'a>, i32, &'a [Ident], LambdaInput<'a>),
     TryWith(LambdaInput<'a>, &'a Ident, LambdaInput<'a>),
+    TryFinally(LambdaInput<'a>, LambdaInput<'a>),
     IfThenElse(LambdaInput<'a>, LambdaInput<'a>, LambdaInput<'a>),
     Sequence(LambdaInput<'a>, LambdaInput<'a>),
     Break,
@@ -390,6 +391,9 @@ impl<'a> LambdaInput<'a> {
                     id,
                     LambdaInput::Recursive(h),
                 ),
+                Lambda::LtryFinally(b, f) => {
+                    LambdaInputView::TryFinally(LambdaInput::Recursive(b), LambdaInput::Recursive(f))
+                }
                 Lambda::LifThenElse(a, b, c) => LambdaInputView::IfThenElse(
                     LambdaInput::Recursive(a),
                     LambdaInput::Recursive(b),
@@ -494,6 +498,10 @@ impl<'a> LambdaInput<'a> {
                     Self::Indexed { store, node: b },
                     id,
                     Self::Indexed { store, node: h },
+                ),
+                NodeView::TryFinally(b, f) => LambdaInputView::TryFinally(
+                    Self::Indexed { store, node: b },
+                    Self::Indexed { store, node: f },
                 ),
                 NodeView::IfThenElse(a, b, c) => LambdaInputView::IfThenElse(
                     Self::Indexed { store, node: a },

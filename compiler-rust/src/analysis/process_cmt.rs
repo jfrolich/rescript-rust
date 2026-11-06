@@ -919,13 +919,16 @@ impl Processor<'_> {
                 }
             }
             tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, body),
-            tt::ExpressionDesc::Texp_try(e, cases) => {
+            tt::ExpressionDesc::Texp_try(e, cases, finally) => {
                 self.scan_let_modules(env, e);
                 for case in cases {
                     if let Some(g) = &case.c_guard {
                         self.scan_let_modules(env, g);
                     }
                     self.scan_let_modules(env, &case.c_rhs);
+                }
+                if let Some(finally) = finally {
+                    self.scan_let_modules(env, finally);
                 }
             }
             tt::ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {

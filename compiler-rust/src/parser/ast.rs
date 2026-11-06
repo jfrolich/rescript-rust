@@ -830,8 +830,10 @@ pub enum ExpressionDesc {
     Pexp_apply(PexpApply),
     /// Match: `switch E { | P1 => E1 | ... }`.
     Pexp_match((ExprIdx, CaseList)),
-    /// Try: `try E { | P1 => E1 | ... }`.
-    Pexp_try((ExprIdx, CaseList)),
+    /// Try: `try E catch { | P1 => E1 | ... } finally { E_fin }`. The case
+    /// list is empty when there is no catch, and then there is always a
+    /// finally expression (parsetree.ml `Pexp_try`).
+    Pexp_try((ExprIdx, CaseList, Option<ExprIdx>)),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(ExprList),
     /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument

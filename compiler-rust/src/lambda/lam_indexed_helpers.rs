@@ -655,6 +655,9 @@ pub(crate) fn map_children(
         NodeSnapshot::TryWith(body, id, handler) => {
             NodeSnapshot::TryWith(map(store, body), id, map(store, handler))
         }
+        NodeSnapshot::TryFinally(body, finally) => {
+            NodeSnapshot::TryFinally(map(store, body), map(store, finally))
+        }
         NodeSnapshot::IfThenElse(a, b, c) => {
             NodeSnapshot::IfThenElse(map(store, a), map(store, b), map(store, c))
         }

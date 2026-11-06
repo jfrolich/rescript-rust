@@ -5095,14 +5095,24 @@ impl<'a> LocCloner<'a> {
                 }
                 *args = self.arena.push_apply_args(&new_args);
             }
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref mut expr, ref mut cases) = *inner;
+            ExpressionDesc::Pexp_match((expr, cases)) => {
                 self.expression_idx(expr);
                 let mut new_cases = self.arena.case_list(*cases).to_vec();
                 for case in new_cases.iter_mut() {
                     self.case(case);
                 }
                 *cases = self.arena.push_case_list(&new_cases);
+            }
+            ExpressionDesc::Pexp_try((expr, cases, finally)) => {
+                self.expression_idx(expr);
+                let mut new_cases = self.arena.case_list(*cases).to_vec();
+                for case in new_cases.iter_mut() {
+                    self.case(case);
+                }
+                *cases = self.arena.push_case_list(&new_cases);
+                if let Some(finally) = finally {
+                    self.expression_idx(finally);
+                }
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
                 // The copy gets its own list; the original keeps its own.

@@ -137,7 +137,7 @@ pub(crate) fn count_exits(store: &IndexedLambda, root: NodeId) -> ExitCounts {
                     count(store, *body, counts);
                 }
             }
-            NodeView::TryWith(body, _, handler) => {
+            NodeView::TryWith(body, _, handler) | NodeView::TryFinally(body, handler) => {
                 count(store, body, counts);
                 count(store, handler, counts);
             }
@@ -221,6 +221,7 @@ pub(crate) fn no_bounded_variables(store: &IndexedLambda, node: NodeId) -> bool 
         }
         NodeView::Let(_, _, _, _)
         | NodeView::TryWith(_, _, _)
+        | NodeView::TryFinally(_, _)
         | NodeView::For(_, _, _, _, _)
         | NodeView::ForOf(_, _, _)
         | NodeView::ForAwaitOf(_, _, _) => false,

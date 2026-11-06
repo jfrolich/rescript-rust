@@ -307,6 +307,8 @@ where
         }
         NodeView::StaticCatch(_, _, _, handler) => get_arity_impl(arena, table, handler, lookup),
         NodeView::TryWith(body, _, handler) => all_arities(arena, table, [body, handler], lookup),
+        // lam_arity_analysis.ml: `Ltryfinally (body, _) -> get_arity meta body`
+        NodeView::TryFinally(body, _) => get_arity_impl(arena, table, body, lookup),
         NodeView::IfThenElse(_, then_node, else_node) => {
             all_arities(arena, table, [then_node, else_node], lookup)
         }
@@ -462,6 +464,7 @@ pub(crate) fn indexed_size_upto(arena: &IndexedLambda, node: NodeId, limit: i32)
                 | NodeView::StringSwitch(_, _, _)
                 | NodeView::StaticCatch(_, _, _, _)
                 | NodeView::TryWith(_, _, _)
+                | NodeView::TryFinally(_, _)
                 | NodeView::While(_, _)
                 | NodeView::For(_, _, _, _, _)
                 | NodeView::ForOf(_, _, _)
@@ -641,7 +644,9 @@ fn collect(
                 collect(arena, meta, default, resolver);
             }
         }
-        NodeView::StaticCatch(body, _, _, handler) | NodeView::TryWith(body, _, handler) => {
+        NodeView::StaticCatch(body, _, _, handler)
+        | NodeView::TryWith(body, _, handler)
+        | NodeView::TryFinally(body, handler) => {
             collect(arena, meta, body, resolver);
             collect(arena, meta, handler, resolver);
         }
@@ -876,7 +881,9 @@ mod tests {
                     tree_collect_order(arg, out);
                 }
             }
-            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            Lambda::LstaticCatch(body, _, handler)
+            | Lambda::LtryWith(body, _, handler)
+            | Lambda::LtryFinally(body, handler) => {
                 tree_collect_order(body, out);
                 tree_collect_order(handler, out);
             }

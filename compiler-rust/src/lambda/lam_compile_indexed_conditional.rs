@@ -108,7 +108,10 @@ impl IndexedJsConsumer<'_> {
                         let else_effect = remove_pure_subexpression(value(else_probe));
                         match (then_effect, else_effect) {
                             (None, None) => {
-                                block.push(Statement::exp(predicate));
+                                // `S.if_ e []` (lam_compile.ml `compile_ifthenelse`).
+                                crate::lambda::lam_coercion::push_s_if_empty(
+                                    &mut block, predicate,
+                                );
                                 Output::make(block)
                             }
                             (Some(then_), Some(else_)) => Output {

@@ -78,6 +78,7 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
 
         // Try-with is pure if both body and handler are pure
         Lambda::LtryWith(body, _, handler) => no_side_effects(body) && no_side_effects(handler),
+        Lambda::LtryFinally(body, finally) => no_side_effects(body) && no_side_effects(finally),
 
         // If-then-else is pure if all branches are pure
         Lambda::LifThenElse(a, b, c) => {
@@ -429,6 +430,7 @@ impl SizeCounter {
             | Lambda::LstringSwitch(_, _, _)
             | Lambda::LstaticCatch(_, _, _)
             | Lambda::LtryWith(_, _, _)
+            | Lambda::LtryFinally(_, _)
             | Lambda::Lwhile(_, _)
             | Lambda::Lfor(_, _, _, _, _)
             | Lambda::Lfor_of(_, _, _)

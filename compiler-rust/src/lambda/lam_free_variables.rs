@@ -59,6 +59,11 @@ fn collect_free_variables(lam: &Lambda, fv: &mut IdentSet) {
             fv.remove(exn);
         }
 
+        Lambda::LtryFinally(body, finally) => {
+            collect_free_variables(body, fv);
+            collect_free_variables(finally, fv);
+        }
+
         Lambda::Lfunction(func) => {
             collect_free_variables(&func.body, fv);
             // Remove bound parameters

@@ -165,7 +165,8 @@ pub(crate) fn collect_occurs(store: &mut IndexedLambda, root: NodeId) -> Occurre
                 }
             }
             NodeSnapshot::StaticCatch(body, _, _, handler)
-            | NodeSnapshot::TryWith(body, _, handler) => {
+            | NodeSnapshot::TryWith(body, _, handler)
+            | NodeSnapshot::TryFinally(body, handler) => {
                 count(store, occ, local, body);
                 count(store, occ, local, handler);
             }

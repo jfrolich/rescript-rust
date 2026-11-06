@@ -63,7 +63,7 @@ use super::lam_coercion::{
     can_reuse_existing_undefined_export_binding, collect_declared_idents, extract_toplevel_exports,
     insert_rebound_export_before_equivalent_later_binding,
     keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
-    max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
+    max_ident_stamp_in_expression, push_effect_expression, push_s_exp, push_s_if_empty,
     resolve_declared_same_name_self_alias_target, resolve_export_aliases,
     reusable_same_name_export_binding,
 };
@@ -854,7 +854,9 @@ impl LambdaCompiler {
                 Lambda::Llet(_, _, value, body) => find(value).or_else(|| find(body)),
                 Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => find(body),
                 Lambda::LifThenElse(_, then_, _) => find(then_),
-                Lambda::LstaticCatch(body, _, _) | Lambda::LtryWith(body, _, _) => find(body),
+                Lambda::LstaticCatch(body, _, _)
+                | Lambda::LtryWith(body, _, _)
+                | Lambda::LtryFinally(body, _) => find(body),
                 Lambda::LstringSwitch(_, cases, default) => cases
                     .first()
                     .and_then(|(_, body)| find(body))
@@ -1443,6 +1445,27 @@ impl LambdaCompiler {
         Statement::new(StatementDesc::Try(body, Some((*exn, handler)), None))
     }
 
+    /// lam_compile.ml `compile_try` for `Ltryfinally`: an `Ltryfinally`
+    /// around an `Ltrywith` is one JS `try`/`catch`/`finally`. `compile`
+    /// compiles the body in the try's continuation; with a finally block the
+    /// catch handler gets the body's context, since it is not in tail position
+    /// either. The finally block is compiled in `EffectCall Not_tail`.
+    fn compile_try_finally(
+        &mut self,
+        body: &Lambda,
+        finally: &Lambda,
+        mut compile: impl FnMut(&mut Self, &Lambda) -> Block,
+    ) -> Statement {
+        let (body, catch) = match body {
+            Lambda::LtryWith(body, exn, handler) => (body.as_ref(), Some((exn, handler.as_ref()))),
+            body => (body, None),
+        };
+        let body_block = compile(self, body);
+        let catch = catch.map(|(exn, handler)| (*exn, compile(self, handler)));
+        let finally_block = self.compile_effect_block(finally);
+        Statement::new(StatementDesc::Try(body_block, catch, Some(finally_block)))
+    }
+
     fn collect_record_spread_overrides<'a>(
         copy_id: &Ident,
         lam: &'a Lambda,
@@ -1763,6 +1786,22 @@ impl LambdaCompiler {
                 let body_block = self.compile_assign_to_target_block(&result, body);
                 let handler_block = self.compile_assign_to_target_block(&result, handler);
                 prelude.push(self.try_statement(body_block, exn, handler_block));
+                Compiled {
+                    prelude,
+                    expr: Expression::var(result),
+                }
+            }
+            Lambda::LtryFinally(body, finally) => {
+                let result = self.fresh_tmp_ident();
+                let mut prelude = vec![Statement::variable(VariableDeclaration {
+                    ident: result,
+                    value: None,
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                })];
+                prelude.push(self.compile_try_finally(body, finally, |this, lam| {
+                    this.compile_assign_to_target_block(&result, lam)
+                }));
                 Compiled {
                     prelude,
                     expr: Expression::var(result),
@@ -2501,6 +2540,20 @@ impl LambdaCompiler {
                     self.try_statement(body_block, exn, handler_block),
                 ]
             }
+            Lambda::LtryFinally(body, finally) => {
+                let try_statement = self.compile_try_finally(body, finally, |this, lam| {
+                    this.compile_assign_to_target_block(id, lam)
+                });
+                vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: *id,
+                        value: None,
+                        property: kind,
+                        ident_info: IdentInfo::default(),
+                    }),
+                    try_statement,
+                ]
+            }
             Lambda::Lsequence(first, second) => {
                 // OCaml compiler/core/lam_compile.ml:1862-1869 compiles an
                 // `Llet` RHS with continuation `Declare(kind, id)`. Its
@@ -2657,6 +2710,9 @@ impl LambdaCompiler {
                 let body_block = self.compile_effect_block(body);
                 let handler_block = self.compile_effect_block(handler);
                 vec![self.try_statement(body_block, exn, handler_block)]
+            }
+            Lambda::LtryFinally(body, finally) => {
+                vec![self.compile_try_finally(body, finally, |this, lam| this.compile_effect_block(lam))]
             }
             Lambda::Lswitch(scrut, switch) => self.compile_switch_effect_block(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
@@ -3062,6 +3118,11 @@ impl LambdaCompiler {
                 let handler_block = self.compile_return_block(handler);
                 vec![self.try_statement(body_block, exn, handler_block)]
             }
+            Lambda::LtryFinally(body, finally) => {
+                vec![self.compile_try_finally(body, finally, |this, lam| {
+                    this.with_try_body_context(|this| this.compile_return_block(lam))
+                })]
+            }
             Lambda::Lswitch(scrut, switch) => self.compile_switch_return_block(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
                 self.compile_string_switch_return_block(scrut, cases, default.as_deref())
@@ -3131,7 +3192,7 @@ impl LambdaCompiler {
                 self.lambda_is_trivial_unit_undefined(body)
                     && self.lambda_is_trivial_unit_undefined(handler)
             }
-            Lambda::LtryWith(body, _, handler) => {
+            Lambda::LtryWith(body, _, handler) | Lambda::LtryFinally(body, handler) => {
                 self.lambda_is_trivial_unit_undefined(body)
                     && self.lambda_is_trivial_unit_undefined(handler)
             }
@@ -3154,10 +3215,9 @@ impl LambdaCompiler {
         if then_is_trivial_unit && else_is_trivial_unit {
             let cond_compiled = self.compile_expr(cond);
             let mut block = cond_compiled.prelude;
-            // OCaml's `S.if_ cond [] []` reduces to `S.exp cond`
-            // (js_stmt_make.ml:242 + 45-53), which keeps pure comparisons like
-            // `tmp === null` as a bare `Exp` statement.
-            push_s_exp(&mut block, cond_compiled.expr);
+            // OCaml's `S.if_ cond [] []` keeps only a condition with side
+            // effects (js_stmt_make.ml `if_`).
+            push_s_if_empty(&mut block, cond_compiled.expr);
             return Some(block);
         }
 
@@ -3841,6 +3901,9 @@ impl LambdaCompiler {
                 let handler_block = self.compile_tail_loop_return_block(handler, tail_loop);
                 vec![self.try_statement(body_block, exn, handler_block)]
             }
+            Lambda::LtryFinally(body, finally) => {
+                vec![self.compile_try_finally(body, finally, |this, lam| this.compile_return_block(lam))]
+            }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_tail_loop_switch_return_block(scrut, switch, tail_loop)
             }
@@ -4206,6 +4269,9 @@ impl LambdaCompiler {
                 let handler_block = self.compile_effect_block(handler);
                 compiled_from_effect_block(vec![self.try_statement(body_block, exn, handler_block)])
             }
+            Lambda::LtryFinally(body, finally) => compiled_from_effect_block(vec![
+                self.compile_try_finally(body, finally, |this, lam| this.compile_effect_block(lam)),
+            ]),
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
@@ -4298,10 +4364,8 @@ impl LambdaCompiler {
                 remove_pure_subexpression(else_compiled.expr.clone()),
             ) {
                 (None, None) => {
-                    // OCaml's `S.if_ cond [] []` collapses to `S.exp cond`
-                    // (js_stmt_make.ml:242 + 45-53). Preserve non-Number/
-                    // Undefined pure expressions like `tmp === null;`.
-                    push_s_exp(&mut block, cond_expr);
+                    // OCaml's `S.if_ cond []` (lam_compile.ml `compile_ifthenelse`).
+                    push_s_if_empty(&mut block, cond_expr);
                     return block;
                 }
                 (Some(then_expr), Some(else_expr)) => {
@@ -4531,6 +4595,7 @@ impl LambdaCompiler {
             | Lambda::LstringSwitch(_, _, _)
             | Lambda::LstaticCatch(_, _, _)
             | Lambda::LtryWith(_, _, _)
+            | Lambda::LtryFinally(_, _)
             | Lambda::Lwhile(_, _)
             | Lambda::Lfor(_, _, _, _, _)
             | Lambda::Lfor_of(_, _, _)
@@ -4879,6 +4944,11 @@ impl LambdaCompiler {
                 let body_block = self.compile_assign_to_target_block(result, body);
                 let handler_block = self.compile_assign_to_target_block(result, handler);
                 vec![self.try_statement(body_block, exn, handler_block)]
+            }
+            Lambda::LtryFinally(body, finally) => {
+                vec![self.compile_try_finally(body, finally, |this, lam| {
+                    this.compile_assign_to_target_block(result, lam)
+                })]
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_assignment_block(result, cond, then_, else_)
@@ -5312,15 +5382,11 @@ impl LambdaCompiler {
             let (mut block, scrut_expr) =
                 self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
             let dispatch =
-                self.compile_untagged_variant_switch_effect_statements(scrut_expr.clone(), switch);
-            if dispatch.is_empty() {
-                // OCaml's switch compilation collapses an empty dispatch to
-                // `S.exp scrut` (via js_output.ml + js_stmt_make.ml:45-53),
-                // preserving bare comparisons like `tmp === null;`.
-                push_s_exp(&mut block, scrut_expr);
-            } else {
-                block.extend(dispatch);
-            }
+                self.compile_untagged_variant_switch_effect_statements(scrut_expr, switch);
+            // lam_compile.ml `compile_general_cases`: the dispatch is built
+            // from `S.if_`s, which keep a condition only when it has side
+            // effects (js_stmt_make.ml `if_`).
+            block.extend(dispatch);
             return block;
         }
 
@@ -5333,14 +5399,10 @@ impl LambdaCompiler {
                 (scrut_compiled.prelude, scrut_compiled.expr)
             };
             let dispatch =
-                self.compile_named_variant_switch_effect_statements(scrut_expr.clone(), switch);
-            if dispatch.is_empty() {
-                // OCaml's switch collapses to `S.exp scrut` when the whole
-                // dispatch is unit (js_stmt_make.ml:45-53) — keeps bare
-                // comparisons as `Exp` statements.
-                push_s_exp(&mut block, scrut_expr);
-                return block;
-            }
+                self.compile_named_variant_switch_effect_statements(scrut_expr, switch);
+            // lam_compile.ml `compile_general_cases`: the dispatch is built
+            // from `S.if_`s, which keep a condition only when it has side
+            // effects (js_stmt_make.ml `if_`).
             block.extend(dispatch);
             return block;
         }
@@ -5429,13 +5491,10 @@ impl LambdaCompiler {
             default,
             false,
         ) {
-            if small.is_empty() {
-                // OCaml collapses an all-empty switch to `S.exp scrut`
-                // (js_stmt_make.ml:45-53), preserving bare pure expressions.
-                push_s_exp(&mut block, scrut_compiled.expr);
-            } else {
-                block.extend(small);
-            }
+            // lam_compile.ml `compile_general_cases`: the small shapes are
+            // `S.if_`s, which keep a condition only when it has side effects
+            // (js_stmt_make.ml `if_`), or a single branch.
+            block.extend(small);
             return block;
         }
 
@@ -5779,7 +5838,7 @@ impl LambdaCompiler {
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler)
             }
-            Lambda::LtryWith(body, _, handler) => {
+            Lambda::LtryWith(body, _, handler) | Lambda::LtryFinally(body, handler) => {
                 self.return_handler_requires_explicit_staticcatch_jump(body)
                     || self.return_handler_requires_explicit_staticcatch_jump(handler)
             }
@@ -5936,7 +5995,7 @@ impl LambdaCompiler {
                         .any(|arg| self.lambda_requires_explicit_staticcatch_jump(arg))
             }
             Lambda::LstaticCatch(_, (_, _), _) => true,
-            Lambda::LtryWith(body, _, handler) => {
+            Lambda::LtryWith(body, _, handler) | Lambda::LtryFinally(body, handler) => {
                 self.lambda_requires_explicit_staticcatch_jump(body)
                     || self.lambda_requires_explicit_staticcatch_jump(handler)
             }
@@ -6795,6 +6854,9 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
             function_has_self_tailcall(tail_targets, body)
                 || function_has_self_tailcall(tail_targets, handler)
         }
+        // lam_compile.ml `compile_try`: with a finally block neither the body
+        // nor the catch handler is in tail position.
+        Lambda::LtryFinally(_, _) => false,
         Lambda::LtryWith(_, _, handler) => {
             // OCaml `compile_trywith` changes only the try body's tail type to
             // `Tail_in_try`; the handler keeps the original `Tail_with_name`
@@ -7417,7 +7479,9 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
                 collect_modules_from_lambda(arg, seen);
             }
         }
-        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+        Lambda::LstaticCatch(body, _, handler)
+        | Lambda::LtryWith(body, _, handler)
+        | Lambda::LtryFinally(body, handler) => {
             collect_modules_from_lambda(body, seen);
             collect_modules_from_lambda(handler, seen);
         }
@@ -7640,7 +7704,9 @@ fn lambda_contains_static_raise(lam: &Lambda) -> bool {
                 || default.as_deref().is_some_and(lambda_contains_static_raise)
         }
         Lambda::LstaticRaise(_, _) => true,
-        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => {
+        Lambda::LstaticCatch(body, (_, _), handler)
+        | Lambda::LtryWith(body, _, handler)
+        | Lambda::LtryFinally(body, handler) => {
             lambda_contains_static_raise(body) || lambda_contains_static_raise(handler)
         }
         Lambda::Lsequence(first, second) => {
@@ -7712,7 +7778,9 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
                 || default.as_deref().is_some_and(lambda_has_exit)
         }
         Lambda::LstaticRaise(_, _) => true,
-        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => {
+        Lambda::LstaticCatch(body, (_, _), handler)
+        | Lambda::LtryWith(body, _, handler)
+        | Lambda::LtryFinally(body, handler) => {
             lambda_has_exit(body) || lambda_has_exit(handler)
         }
         Lambda::Lsequence(first, second) => lambda_has_exit(first) || lambda_has_exit(second),
@@ -7787,7 +7855,8 @@ fn return_output_is_compound_like_ocaml(
         | Lambda::Lswitch(_, _)
         | Lambda::LstringSwitch(_, _, _)
         | Lambda::LstaticCatch(_, _, _)
-        | Lambda::LtryWith(_, _, _) => return_block_has_multi_test_guard_chain(compiled_body),
+        | Lambda::LtryWith(_, _, _)
+        | Lambda::LtryFinally(_, _) => return_block_has_multi_test_guard_chain(compiled_body),
         _ => false,
     }
 }
@@ -7814,7 +7883,10 @@ fn return_output_finished_like_ocaml(
         // compile_switch (lam_compile.ml:822) and compile_stringswitch return
         // `Js_output.make` without `~output_finished`, and so does the
         // `S.try_` built for `Ltrywith`.
-        Lambda::Lswitch(_, _) | Lambda::LstringSwitch(_, _, _) | Lambda::LtryWith(_, _, _) => {
+        Lambda::Lswitch(_, _)
+        | Lambda::LstringSwitch(_, _, _)
+        | Lambda::LtryWith(_, _, _)
+        | Lambda::LtryFinally(_, _) => {
             Some(false)
         }
         Lambda::LstaticCatch(body, (label, bindings), handler) => {
@@ -7908,7 +7980,7 @@ fn lambda_contains_staticcatch(lam: &Lambda) -> bool {
         }
         Lambda::LstaticRaise(_, _) => false,
         Lambda::LstaticCatch(_, (_, _), _) => true,
-        Lambda::LtryWith(body, _, handler) => {
+        Lambda::LtryWith(body, _, handler) | Lambda::LtryFinally(body, handler) => {
             lambda_contains_staticcatch(body) || lambda_contains_staticcatch(handler)
         }
         Lambda::Lsequence(first, second) => {
@@ -7985,7 +8057,9 @@ fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize)
                     .is_some_and(|body| lambda_contains_static_raise_to_label(body, label, arity))
         }
         Lambda::LstaticRaise(raise_label, args) => *raise_label == label && args.len() == arity,
-        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => {
+        Lambda::LstaticCatch(body, (_, _), handler)
+        | Lambda::LtryWith(body, _, handler)
+        | Lambda::LtryFinally(body, handler) => {
             lambda_contains_static_raise_to_label(body, label, arity)
                 || lambda_contains_static_raise_to_label(handler, label, arity)
         }
@@ -8144,7 +8218,9 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
                 add_count(count, lambda_static_raise_count_to_label(arg, label, arity))
             })
         }
-        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => {
+        Lambda::LstaticCatch(body, (_, _), handler)
+        | Lambda::LtryWith(body, _, handler)
+        | Lambda::LtryFinally(body, handler) => {
             add_count(
                 lambda_static_raise_count_to_label(body, label, arity),
                 lambda_static_raise_count_to_label(handler, label, arity),
@@ -8237,7 +8313,9 @@ fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool
                     .is_some_and(|body| lambda_contains_static_raise_to_other_label(body, label))
         }
         Lambda::LstaticRaise(raise_label, _) => *raise_label != label,
-        Lambda::LstaticCatch(body, (_, _), handler) | Lambda::LtryWith(body, _, handler) => {
+        Lambda::LstaticCatch(body, (_, _), handler)
+        | Lambda::LtryWith(body, _, handler)
+        | Lambda::LtryFinally(body, handler) => {
             lambda_contains_static_raise_to_other_label(body, label)
                 || lambda_contains_static_raise_to_other_label(handler, label)
         }

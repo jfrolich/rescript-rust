@@ -68,6 +68,11 @@ impl LoweringContext {
                 Lambda::static_catch(lowered_body, i, ids, lowered_handler)
             }
             RawLambda::LtryWith(body, id, handler) => self.lower_try_with(*body, id, *handler),
+            RawLambda::LtryFinally(body, finally) => {
+                let lowered_body = self.lower_lambda(*body);
+                let lowered_finally = self.lower_lambda(*finally);
+                Lambda::try_finally(lowered_body, lowered_finally)
+            }
             RawLambda::LifThenElse(cond, then_, else_) => {
                 let lowered_else = self.lower_lambda(*else_);
                 let lowered_then = self.lower_lambda(*then_);
@@ -368,6 +373,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
         }
         RawLambda::LstaticCatch(body, (_, _), handler)
         | RawLambda::LtryWith(body, _, handler)
+        | RawLambda::LtryFinally(body, handler)
         | RawLambda::Lsequence(body, handler)
         | RawLambda::Lwhile(body, handler) => {
             collect_exported_idents(body, exports);
@@ -849,9 +855,9 @@ pub(crate) fn exception_id_destructed_raw(lam: &RawLambda, exn: &Ident) -> bool 
         RawLambda::Lprim(info) => info.args.iter().any(hit),
         RawLambda::Lvar(id) => id.same(exn),
         RawLambda::Lassign(id, expr) => id.same(exn) || hit(expr),
-        RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
-            hit(body) || hit(handler)
-        }
+        RawLambda::LstaticCatch(body, _, handler)
+        | RawLambda::LtryWith(body, _, handler)
+        | RawLambda::LtryFinally(body, handler) => hit(body) || hit(handler),
         RawLambda::Lfunction(func) => hit(&func.body),
         RawLambda::Llet(_, _, arg, body) => hit(arg) || hit(body),
         RawLambda::Lletrec(bindings, body) => hit(body) || bindings.iter().any(|(_, lam)| hit(lam)),
@@ -962,6 +968,10 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                 visit_ident(max_stamp, id);
                 visit_raw(max_stamp, body);
                 visit_raw(max_stamp, handler);
+            }
+            RawLambda::LtryFinally(body, finally) => {
+                visit_raw(max_stamp, body);
+                visit_raw(max_stamp, finally);
             }
             RawLambda::LifThenElse(cond, then_, else_) => {
                 visit_raw(max_stamp, cond);

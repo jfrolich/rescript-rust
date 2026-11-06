@@ -53,8 +53,7 @@ pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> b
 
 pub(crate) fn type_cannot_contain_undefined(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     ctx.typeopt_answer(env.id(), ty, TYPEOPT_CANNOT_CONTAIN_UNDEFINED, || {
-        let mut seen = HashSet::new();
-        type_cannot_contain_undefined_rec(ctx, env, ty, &mut seen)
+        type_cannot_contain_undefined_rec(ctx, env, ty, &[])
     })
 }
 
@@ -63,16 +62,15 @@ const TYPEOPT_BUILTIN_OBJECT: u8 = 1;
 const TYPEOPT_BASE_UNIT: u8 = 2;
 const TYPEOPT_BASE_BOOL: u8 = 3;
 
+/// typeopt.ml `cannot_contain_undefined ~visiting`: `visiting` holds the
+/// variant declarations the walk is in.
 fn type_cannot_contain_undefined_rec(
     ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
+    visiting: &[Path],
 ) -> bool {
     let ty = scrape_ty(ctx, env, ty);
-    if !seen.insert(ty) {
-        return false;
-    }
 
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, .. } => match type_is_builtin_path_but_option(path) {
@@ -93,7 +91,15 @@ fn type_cannot_contain_undefined_rec(
                     {
                         false
                     }
+                    // A value reaches `undefined` through finitely many
+                    // unboxed payloads, so the cases met again add none:
+                    // whether the variant can be `undefined` is decided by
+                    // its other cases.
+                    TypeKind::TypeVariant(_, _) if visiting.iter().any(|p| p.same(path)) => true,
                     TypeKind::TypeVariant(cdecls, _) => {
+                        let visiting: Vec<Path> =
+                            std::iter::once(path.clone()).chain(visiting.iter().cloned()).collect();
+                        let visiting = visiting.as_slice();
                         let mut check_case = |cd: &crate::types::ConstructorDeclaration,
                                               case: Option<
                             &crate::types::VariantConstructorCase,
@@ -125,7 +131,7 @@ fn type_cannot_contain_undefined_rec(
                                             [arg] => {
                                                 type_is_builtin_object(ctx, env, *arg)
                                                     || type_cannot_contain_undefined_rec(
-                                                        ctx, env, *arg, seen,
+                                                        ctx, env, *arg, visiting,
                                                     )
                                             }
                                             [] => true,
@@ -140,7 +146,7 @@ fn type_cannot_contain_undefined_rec(
                                                         ctx,
                                                         env,
                                                         label.ld_type,
-                                                        seen,
+                                                        visiting,
                                                     )
                                             }
                                             [] | [_, _, ..] => true,

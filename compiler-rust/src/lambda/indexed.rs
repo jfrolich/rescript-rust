@@ -69,6 +69,8 @@ pub(crate) enum IndexedNode {
     StaticRaise(u32),
     StaticCatch(u32),
     TryWith(u32),
+    /// Index into `binaries`: `(body, finally)`.
+    TryFinally(u32),
     IfThenElse(u32),
     Sequence(u32),
     Break,
@@ -145,6 +147,7 @@ pub(crate) enum NodeView<'a> {
     StaticRaise(i32, &'a [NodeId]),
     StaticCatch(NodeId, i32, &'a [Ident], NodeId),
     TryWith(NodeId, &'a Ident, NodeId),
+    TryFinally(NodeId, NodeId),
     IfThenElse(NodeId, NodeId, NodeId),
     Sequence(NodeId, NodeId),
     Break,
@@ -181,6 +184,7 @@ pub(crate) enum NodeSnapshot {
     StaticRaise(i32, Vec<NodeId>),
     StaticCatch(NodeId, i32, Vec<Ident>, NodeId),
     TryWith(NodeId, Ident, NodeId),
+    TryFinally(NodeId, NodeId),
     IfThenElse(NodeId, NodeId, NodeId),
     Sequence(NodeId, NodeId),
     Break,
@@ -335,6 +339,10 @@ impl IndexedLambda {
                 let p = &self.try_withs[i as usize];
                 NodeView::TryWith(p.0, &p.1, p.2)
             }
+            IndexedNode::TryFinally(i) => {
+                let p = &self.binaries[i as usize];
+                NodeView::TryFinally(p.0, p.1)
+            }
             IndexedNode::IfThenElse(i) => {
                 let p = &self.ternaries[i as usize];
                 NodeView::IfThenElse(p.0, p.1, p.2)
@@ -456,6 +464,10 @@ impl IndexedLambda {
                 *ident,
                 Box::new(self.materialize_node(handler)),
             ),
+            NodeView::TryFinally(body, finally) => Lambda::LtryFinally(
+                Box::new(self.materialize_node(body)),
+                Box::new(self.materialize_node(finally)),
+            ),
             NodeView::IfThenElse(a, b, c) => Lambda::LifThenElse(
                 Box::new(self.materialize_node(a)),
                 Box::new(self.materialize_node(b)),
@@ -535,6 +547,7 @@ impl IndexedLambda {
                 NodeSnapshot::StaticCatch(body, exit, params.to_vec(), handler)
             }
             NodeView::TryWith(body, id, handler) => NodeSnapshot::TryWith(body, *id, handler),
+            NodeView::TryFinally(body, finally) => NodeSnapshot::TryFinally(body, finally),
             NodeView::IfThenElse(a, b, c) => NodeSnapshot::IfThenElse(a, b, c),
             NodeView::Sequence(a, b) => NodeSnapshot::Sequence(a, b),
             NodeView::Break => NodeSnapshot::Break,
@@ -643,6 +656,9 @@ impl IndexedLambda {
             NodeSnapshot::TryWith(body, id, handler) => {
                 payload_node!(try_withs, TryWithPayload(body, id, handler), TryWith)
             }
+            NodeSnapshot::TryFinally(body, finally) => {
+                payload_node!(binaries, BinaryPayload(body, finally), TryFinally)
+            }
             NodeSnapshot::IfThenElse(a, b, c) => {
                 payload_node!(ternaries, TernaryPayload(a, b, c), IfThenElse)
             }
@@ -715,7 +731,7 @@ impl IndexedLambda {
             }
             IndexedNode::TryWith(_) => std::mem::size_of::<TryWithPayload>(),
             IndexedNode::IfThenElse(_) => std::mem::size_of::<TernaryPayload>(),
-            IndexedNode::Sequence(_) | IndexedNode::While(_) => {
+            IndexedNode::Sequence(_) | IndexedNode::While(_) | IndexedNode::TryFinally(_) => {
                 std::mem::size_of::<BinaryPayload>()
             }
             IndexedNode::Break | IndexedNode::Continue => 0,
@@ -785,7 +801,8 @@ impl IndexedLambda {
                     }
                 }
                 NodeView::StaticCatch(body, _, _, handler)
-                | NodeView::TryWith(body, _, handler) => {
+                | NodeView::TryWith(body, _, handler)
+                | NodeView::TryFinally(body, handler) => {
                     child(body);
                     child(handler);
                 }
@@ -973,6 +990,11 @@ impl IndexedLambda {
                 let body = self.lower(*body);
                 let handler = self.lower(*handler);
                 payload_node!(try_withs, TryWithPayload(body, id, handler), TryWith)
+            }
+            Lambda::LtryFinally(body, finally) => {
+                let body = self.lower(*body);
+                let finally = self.lower(*finally);
+                payload_node!(binaries, BinaryPayload(body, finally), TryFinally)
             }
             Lambda::LifThenElse(a, b, c) => {
                 let a = self.lower(*a);
@@ -1212,7 +1234,8 @@ impl IndexedLambdaContext {
                     }
                 }
                 NodeView::StaticCatch(body, _, _, handler)
-                | NodeView::TryWith(body, _, handler) => {
+                | NodeView::TryWith(body, _, handler)
+                | NodeView::TryFinally(body, handler) => {
                     child(body);
                     child(handler);
                 }

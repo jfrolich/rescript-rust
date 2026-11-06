@@ -723,6 +723,11 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             ident(exn),
             lambda(handler, with_locs),
         ]),
+        Lambda::LtryFinally(body, finally) => Sexp::list(vec![
+            Sexp::atom("Ltryfinally"),
+            lambda(body, with_locs),
+            lambda(finally, with_locs),
+        ]),
         Lambda::LifThenElse(cond, then_, else_) => Sexp::list(vec![
             Sexp::atom("Lifthenelse"),
             lambda(cond, with_locs),
@@ -929,6 +934,11 @@ fn indexed_lambda(
             child(body),
             ident(exn),
             child(handler),
+        ]),
+        NodeView::TryFinally(body, finally) => Sexp::list(vec![
+            Sexp::atom("Ltryfinally"),
+            child(body),
+            child(finally),
         ]),
         NodeView::IfThenElse(cond, then_, else_) => Sexp::list(vec![
             Sexp::atom("Lifthenelse"),

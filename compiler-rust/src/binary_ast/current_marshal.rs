@@ -1592,8 +1592,8 @@ impl Marshal for ExpressionDesc {
                 }
             }
             ExpressionDesc::Pexp_try(inner) => {
-                let (ref e, ref cases) = *inner;
-                w.write_block_header(7, 2);
+                let (ref e, ref cases, ref finally) = *inner;
+                w.write_block_header(7, 3);
                 e.marshal(w);
                 if let Some(owner) = w.current_expr_idx() {
                     w.enter_case_owner(owner);
@@ -1602,6 +1602,7 @@ impl Marshal for ExpressionDesc {
                 } else {
                     cases.marshal(w);
                 }
+                finally.marshal(w);
             }
             ExpressionDesc::Pexp_tuple(exprs) => {
                 w.write_block_header(8, 1);

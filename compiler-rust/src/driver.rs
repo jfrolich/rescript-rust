@@ -154,14 +154,22 @@ fn expression_has_string_literal(
                     expression_has_string_literal(arena.get_expr(*arg), value, arena)
                 })
         }
-        ED::Pexp_match(inner) | ED::Pexp_try(inner) => {
-            let (scrutinee, cases) = &*inner;
+        ED::Pexp_match((scrutinee, cases)) | ED::Pexp_try((scrutinee, cases, None)) => {
             expression_has_string_literal(arena.get_expr(*scrutinee), value, arena)
                 || arena.case_list(*cases).iter().any(|case| {
                     case.pc_guard.as_ref().is_some_and(|g| {
                         expression_has_string_literal(arena.get_expr(*g), value, arena)
                     }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
                 })
+        }
+        ED::Pexp_try((body, cases, Some(finally))) => {
+            expression_has_string_literal(arena.get_expr(*body), value, arena)
+                || arena.case_list(*cases).iter().any(|case| {
+                    case.pc_guard.as_ref().is_some_and(|g| {
+                        expression_has_string_literal(arena.get_expr(*g), value, arena)
+                    }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
+                })
+                || expression_has_string_literal(arena.get_expr(*finally), value, arena)
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => arena
             .expr_list(*items)
@@ -1945,15 +1953,23 @@ fn invalid_enabled_let_unwrap_in_expr(
                     .iter()
                     .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
             }),
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            invalid_enabled_let_unwrap_in_expr(inner.0, arena).or_else(|| {
-                arena.case_list(inner.1).iter().find_map(|case| {
+        ExpressionDesc::Pexp_match((scrutinee, cases)) => invalid_enabled_let_unwrap_in_expr(*scrutinee, arena)
+            .or_else(|| {
+                arena.case_list(*cases).iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
+                        .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
+                })
+            }),
+        ExpressionDesc::Pexp_try((body, cases, finally)) => invalid_enabled_let_unwrap_in_expr(*body, arena)
+            .or_else(|| {
+                arena.case_list(*cases).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
                         .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
                 })
             })
-        }
+            .or_else(|| finally.and_then(|finally| invalid_enabled_let_unwrap_in_expr(finally, arena))),
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
             .expr_list(*items)
             .iter()
@@ -2128,15 +2144,23 @@ fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<
                     .iter()
                     .find_map(|(_, arg)| disabled_let_unwrap_loc_in_expr(*arg, arena))
             }),
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            disabled_let_unwrap_loc_in_expr(inner.0, arena).or_else(|| {
-                arena.case_list(inner.1).iter().find_map(|case| {
+        ExpressionDesc::Pexp_match((scrutinee, cases)) => disabled_let_unwrap_loc_in_expr(*scrutinee, arena)
+            .or_else(|| {
+                arena.case_list(*cases).iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
+                        .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
+                })
+            }),
+        ExpressionDesc::Pexp_try((body, cases, finally)) => disabled_let_unwrap_loc_in_expr(*body, arena)
+            .or_else(|| {
+                arena.case_list(*cases).iter().find_map(|case| {
                     case.pc_guard
                         .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
                         .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
                 })
             })
-        }
+            .or_else(|| finally.and_then(|finally| disabled_let_unwrap_loc_in_expr(finally, arena))),
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
             .expr_list(*items)
             .iter()
@@ -2472,6 +2496,32 @@ fn type_mod_error_to_anyhow_styled(
                     filename,
                     *loc,
                     "`continue` can only be used inside a loop body.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::BreakOutOfFinally { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "`break` cannot leave a `finally` block. Only a loop inside the block can be \
+                 broken out of.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::ContinueOutOfFinally { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "`continue` cannot leave a `finally` block. Only a loop inside the block can \
+                     be continued.",
                 ),
                 2,
             )

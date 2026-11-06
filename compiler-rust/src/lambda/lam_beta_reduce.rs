@@ -620,6 +620,12 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 Box::new(rewrite_bounded_vars(substitution, handler, id_gen)),
             )
         }
+        // lam_bounded_vars.ml: `let l1 = aux l1 in let l2 = aux l2 in try_finally l1 l2`.
+        Lambda::LtryFinally(body, finally) => {
+            let body = rewrite_bounded_vars(substitution, body, id_gen);
+            let finally = rewrite_bounded_vars(substitution, finally, id_gen);
+            Lambda::try_finally(body, finally)
+        }
         Lambda::LtryWith(body, exn, handler) => {
             let body = rewrite_bounded_vars(substitution, body, id_gen);
             let exn = rebind(exn, substitution, id_gen);
@@ -743,6 +749,9 @@ pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
             .stamp()
             .max(max_ident_stamp_in_lambda(body))
             .max(max_ident_stamp_in_lambda(handler)),
+        Lambda::LtryFinally(body, finally) => {
+            max_ident_stamp_in_lambda(body).max(max_ident_stamp_in_lambda(finally))
+        }
         Lambda::LifThenElse(cond, then_, else_) => max_ident_stamp_in_lambda(cond)
             .max(max_ident_stamp_in_lambda(then_))
             .max(max_ident_stamp_in_lambda(else_)),

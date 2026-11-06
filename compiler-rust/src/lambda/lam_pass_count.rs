@@ -299,7 +299,7 @@ pub(crate) fn collect_occurs(lam: &Lambda) -> OccurrenceTable {
             }
 
             // Ltrywith (lam_pass_count.ml:179-181).
-            Lambda::LtryWith(l1, _, l2) => {
+            Lambda::LtryWith(l1, _, l2) | Lambda::LtryFinally(l1, l2) => {
                 count(occ, bv, l1);
                 count(occ, bv, l2);
             }

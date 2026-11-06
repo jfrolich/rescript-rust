@@ -3125,8 +3125,8 @@ impl ParseArena {
             .copied()
             .flatten()
             .or_else(|| match &self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (_, cases) = &*inner;
+                ExpressionDesc::Pexp_match((_, cases))
+                | ExpressionDesc::Pexp_try((_, cases, _)) => {
                     self.case_list(*cases)
                         .get(case_index)
                         .and_then(|case| case.pc_guard)

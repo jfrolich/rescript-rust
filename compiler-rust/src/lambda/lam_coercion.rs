@@ -541,6 +541,19 @@ pub(crate) fn push_effect_expression(block: &mut Block, expr: Expression) {
 /// all-empty switch collapses. `push_effect_expression` is more aggressive and
 /// strips every side-effect-free expression, which matches OCaml's
 /// `output_of_expression` (js_output.ml:42-52) but not `S.exp`.
+/// js_stmt_make.ml `S.if_ cond []` with both branches empty: a constant
+/// condition leaves an empty block, and so does one without side effects;
+/// only a condition with side effects is kept, as `S.exp cond`. An empty
+/// block adds nothing to the output.
+pub(crate) fn push_s_if_empty(block: &mut Block, cond: Expression) {
+    if matches!(cond.desc, ExpressionDesc::Bool(_))
+        || crate::js_ir::expression_has_no_side_effects(&cond)
+    {
+        return;
+    }
+    push_s_exp(block, cond);
+}
+
 pub(crate) fn push_s_exp(block: &mut Block, expr: Expression) {
     let source_loc = expr.source_loc.clone();
     match expr.desc {

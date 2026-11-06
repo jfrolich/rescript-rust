@@ -6,7 +6,8 @@
 use super::js_exp_make::{
     bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
     both_string_literals, compare_bigint_literals, compare_bool_literals, compare_string_literals,
-    comparison_to_binop, comparison_to_runtime_member, compile_int_equality,
+    comparison_to_binop, comparison_to_float_binop, comparison_to_runtime_member,
+    compile_int_equality,
     compile_nullish_strict_comparison, compile_raw_comparison, int_bnot, int_expr, int_literal,
     int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr, int32_minus, int32_mul,
     int32_pow, is_nullish_literal, is_optional_block, is_type_object_expr, is_zero_int,
@@ -276,8 +277,20 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Pintcomp(cmp) | Pfloatcomp(cmp) => self.compile_int_comparison(
+            Pintcomp(cmp) => self.compile_int_comparison(
                 *cmp,
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
+            // js_exp_make.ml `float_comp`: equality as `int_comp`; an
+            // ordering keeps the NaN-aware operator.
+            Pfloatcomp(cmp @ (Comparison::Eq | Comparison::Neq)) => self.compile_int_comparison(
+                *cmp,
+                take_arg(&mut compiled_args, 0),
+                take_arg(&mut compiled_args, 1),
+            ),
+            Pfloatcomp(cmp) => Expression::bin(
+                comparison_to_float_binop(*cmp),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
@@ -286,8 +299,10 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Pjscomp(cmp) => compile_raw_comparison(
-                *cmp,
+            // js_exp_make.ml `js_comp`: the operands may be of any type, so
+            // they may be NaN.
+            Pjscomp(cmp) => Expression::bin(
+                comparison_to_float_binop(*cmp),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
@@ -319,7 +334,8 @@ impl LambdaCompiler {
             Pboolmin => self.compile_typed_min_max(
                 "Primitive_bool",
                 "min",
-                Comparison::Lt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bool_literals,
@@ -327,7 +343,8 @@ impl LambdaCompiler {
             Pboolmax => self.compile_typed_min_max(
                 "Primitive_bool",
                 "max",
-                Comparison::Gt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bool_literals,
@@ -336,7 +353,8 @@ impl LambdaCompiler {
             Pintmin => self.compile_typed_min_max(
                 "Primitive_int",
                 "min",
-                Comparison::Lt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_int_literals,
@@ -344,7 +362,8 @@ impl LambdaCompiler {
             Pintmax => self.compile_typed_min_max(
                 "Primitive_int",
                 "max",
-                Comparison::Gt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_int_literals,
@@ -353,7 +372,8 @@ impl LambdaCompiler {
             Pfloatmin => self.compile_typed_min_max(
                 "Primitive_float",
                 "min",
-                Comparison::Lt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_float_literals,
@@ -361,7 +381,8 @@ impl LambdaCompiler {
             Pfloatmax => self.compile_typed_min_max(
                 "Primitive_float",
                 "max",
-                Comparison::Gt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_float_literals,
@@ -370,7 +391,8 @@ impl LambdaCompiler {
             Pbigintmin => self.compile_typed_min_max(
                 "Primitive_bigint",
                 "min",
-                Comparison::Lt,
+                // `E.bigint_comp`
+                comparison_to_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
@@ -378,7 +400,8 @@ impl LambdaCompiler {
             Pbigintmax => self.compile_typed_min_max(
                 "Primitive_bigint",
                 "max",
-                Comparison::Gt,
+                // `E.bigint_comp`
+                comparison_to_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
@@ -387,7 +410,8 @@ impl LambdaCompiler {
             Pstringmin => self.compile_typed_min_max(
                 "Primitive_string",
                 "min",
-                Comparison::Lt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_string_literals,
@@ -395,7 +419,8 @@ impl LambdaCompiler {
             Pstringmax => self.compile_typed_min_max(
                 "Primitive_string",
                 "max",
-                Comparison::Gt,
+                // `E.js_comp`
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_string_literals,
@@ -908,14 +933,14 @@ impl LambdaCompiler {
         &self,
         module_name: &str,
         member: &str,
-        compare: Comparison,
+        compare: BinOp,
         left: Expression,
         right: Expression,
         literal_fast_path: fn(&Expression, &Expression) -> bool,
     ) -> Expression {
         if literal_fast_path(&left, &right) {
             Expression::cond(
-                Expression::bin(comparison_to_binop(compare), left.clone(), right.clone()),
+                Expression::bin(compare, left.clone(), right.clone()),
                 left,
                 right,
             )

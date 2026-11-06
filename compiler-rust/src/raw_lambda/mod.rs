@@ -110,6 +110,10 @@ pub enum RawLambda {
     LstaticCatch(Box<RawLambda>, (i32, Vec<Ident>), Box<RawLambda>),
     /// Try-with exception handling.
     LtryWith(Box<RawLambda>, Ident, Box<RawLambda>),
+    /// `Ltryfinally (body, finally)` (lambda.mli): evaluates `body`, then
+    /// `finally` however `body` is left, with the value of `body`. A try with
+    /// both catch and finally is an `LtryFinally` around an `LtryWith`.
+    LtryFinally(Box<RawLambda>, Box<RawLambda>),
     /// If-then-else.
     LifThenElse(Box<RawLambda>, Box<RawLambda>, Box<RawLambda>),
     /// Sequence of expressions.
@@ -200,7 +204,9 @@ impl RawLambda {
                 }
             }
             RawLambda::LstaticRaise(_, args) => args.iter_mut().for_each(&mut *f),
-            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+            RawLambda::LstaticCatch(body, _, handler)
+            | RawLambda::LtryWith(body, _, handler)
+            | RawLambda::LtryFinally(body, handler) => {
                 f(body);
                 f(handler);
             }
@@ -266,7 +272,9 @@ impl RawLambda {
                 }
             }
             RawLambda::LstaticRaise(_, args) => args.iter().for_each(&mut *f),
-            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+            RawLambda::LstaticCatch(body, _, handler)
+            | RawLambda::LtryWith(body, _, handler)
+            | RawLambda::LtryFinally(body, handler) => {
                 f(body);
                 f(handler);
             }
@@ -516,6 +524,10 @@ impl RawLambda {
                 exn,
                 Box::new(RawLambda::from_lowered(*handler)),
             ),
+            Lambda::LtryFinally(body, finally) => RawLambda::LtryFinally(
+                Box::new(RawLambda::from_lowered(*body)),
+                Box::new(RawLambda::from_lowered(*finally)),
+            ),
             Lambda::LifThenElse(cond, then_, else_) => RawLambda::LifThenElse(
                 Box::new(RawLambda::from_lowered(*cond)),
                 Box::new(RawLambda::from_lowered(*then_)),
@@ -634,6 +646,10 @@ impl RawLambda {
                 Box::new(body.into_lowered()),
                 exn,
                 Box::new(handler.into_lowered()),
+            ),
+            RawLambda::LtryFinally(body, finally) => Lambda::LtryFinally(
+                Box::new(body.into_lowered()),
+                Box::new(finally.into_lowered()),
             ),
             RawLambda::LifThenElse(cond, then_, else_) => Lambda::LifThenElse(
                 Box::new(cond.into_lowered()),
@@ -813,6 +829,10 @@ pub(crate) fn collect_free_variables<S: FreeVarSet>(lam: &RawLambda, fv: &mut S)
             collect(body, fv);
             collect(handler, fv);
             fv.discard(exn);
+        }
+        RawLambda::LtryFinally(body, finally) => {
+            collect(body, fv);
+            collect(finally, fv);
         }
         RawLambda::LifThenElse(cond, ifso, ifnot) => {
             collect(cond, fv);

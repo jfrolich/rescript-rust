@@ -662,11 +662,17 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = *inner;
+            let (ref body, ref cases, ref finally) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_try"),
                 expression(arena.get_expr(*body), arena),
                 Sexp::list(map_empty_with_arena(arena.case_list(*cases), arena, case)),
+                match finally {
+                    None => Sexp::atom("None"),
+                    Some(e) => {
+                        Sexp::list(vec![Sexp::atom("Some"), expression(arena.get_expr(*e), arena)])
+                    }
+                },
             ])
         }
         ExpressionDesc::Pexp_tuple(exprs) => Sexp::list(vec![

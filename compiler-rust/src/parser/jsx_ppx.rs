@@ -4097,7 +4097,7 @@ fn transform_expression(
             ))
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (body, cases) = inner;
+            let (body, cases, finally) = inner;
             let body_expr = arena.get_expr(body).clone();
             let transformed_body = transform_expression(body_expr, config, arena);
             let transformed_cases = arena
@@ -4106,9 +4106,15 @@ fn transform_expression(
                 .into_iter()
                 .map(|case| transform_case(case, config, arena))
                 .collect::<Vec<_>>();
+            let transformed_finally = finally.map(|finally| {
+                let finally_expr = arena.get_expr(finally).clone();
+                let transformed = transform_expression(finally_expr, config, arena);
+                arena.push_expr(transformed)
+            });
             ExpressionDesc::Pexp_try((
                 arena.push_expr(transformed_body),
                 arena.push_case_list(&transformed_cases),
+                transformed_finally,
             ))
         }
         ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
@@ -5109,12 +5115,21 @@ fn expression_may_change(expr: &Expression, arena: &ParseArena, memo: &mut Vec<u
                     .iter()
                     .any(|(_, arg)| child(*arg, memo))
         }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            child(inner.0, memo)
-                || arena.case_list(inner.1).iter().any(|case| {
+        ExpressionDesc::Pexp_match((scrutinee, cases))
+        | ExpressionDesc::Pexp_try((scrutinee, cases, None)) => {
+            child(*scrutinee, memo)
+                || arena.case_list(*cases).iter().any(|case| {
                     case.pc_guard.is_some_and(|guard| child(guard, memo))
                         || child(case.pc_rhs, memo)
                 })
+        }
+        ExpressionDesc::Pexp_try((body, cases, Some(finally))) => {
+            child(*body, memo)
+                || arena.case_list(*cases).iter().any(|case| {
+                    case.pc_guard.is_some_and(|guard| child(guard, memo))
+                        || child(case.pc_rhs, memo)
+                })
+                || child(*finally, memo)
         }
         ExpressionDesc::Pexp_template(template) => {
             template.values.iter().any(|item| child(*item, memo))

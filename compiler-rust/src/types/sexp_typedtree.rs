@@ -1001,13 +1001,26 @@ fn sexp_expression_desc(
                 sexp_partial(p),
             ])
         }
-        ExpressionDesc::Texp_try(e, cases) => {
+        ExpressionDesc::Texp_try(e, cases, finally) => {
+            // Match OCaml eval order: e, cases, finally
             let e_sexp = sexp_expression(arena, ctx, with_locs, e);
             let mut case_items = Vec::new();
             for c in cases.iter() {
                 case_items.push(sexp_case(arena, ctx, with_locs, c));
             }
-            Sexp::list(vec![Sexp::atom("Texp_try"), e_sexp, Sexp::list(case_items)])
+            let finally_sexp = match finally {
+                None => Sexp::atom("None"),
+                Some(e) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_expression(arena, ctx, with_locs, e),
+                ]),
+            };
+            Sexp::list(vec![
+                Sexp::atom("Texp_try"),
+                e_sexp,
+                Sexp::list(case_items),
+                finally_sexp,
+            ])
         }
         ExpressionDesc::Texp_tuple(exprs) => {
             let mut items = vec![Sexp::atom("Texp_tuple")];

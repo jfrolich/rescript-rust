@@ -238,6 +238,10 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
             exn,
             Box::new(raw_subst_idents_owned(subst, *handler)),
         ),
+        RawLambda::LtryFinally(body, finally) => RawLambda::LtryFinally(
+            Box::new(raw_subst_idents_owned(subst, *body)),
+            Box::new(raw_subst_idents_owned(subst, *finally)),
+        ),
         RawLambda::LifThenElse(cond, ifso, ifnot) => RawLambda::LifThenElse(
             Box::new(raw_subst_idents_owned(subst, *cond)),
             Box::new(raw_subst_idents_owned(subst, *ifso)),
@@ -938,7 +942,9 @@ impl<'a> RawLambdaConverter<'a> {
                     self.note_possible_required_modules_in_raw_lambda(arg);
                 }
             }
-            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+            RawLambda::LstaticCatch(body, _, handler)
+            | RawLambda::LtryWith(body, _, handler)
+            | RawLambda::LtryFinally(body, handler) => {
                 self.note_possible_required_modules_in_raw_lambda(body);
                 self.note_possible_required_modules_in_raw_lambda(handler);
             }
@@ -5679,13 +5685,26 @@ impl<'a> RawLambdaConverter<'a> {
                     self.compile_full_matching(loc, scrut, cases, partial)
                 }
             }
-            ExpressionDesc::Texp_try(body, cases) => {
-                let _loc = expr.exp_loc;
-                let exn_id = self.name_pattern_ident("exn", cases);
-                let handler = self.compile_trywith_handler_raw(&exn_id, cases);
-                let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
+            // translcore.ml `Texp_try (body, pat_expr_list, finally)`: the
+            // body first, then the catch handler when there are cases, then
+            // the finally block around both.
+            ExpressionDesc::Texp_try(body, cases, finally) => {
                 let body_lam = self.convert_expr_raw(body);
-                RawLambda::LtryWith(Box::new(body_lam), exn_id, Box::new(handler))
+                let body_lam = if cases.is_empty() {
+                    body_lam
+                } else {
+                    let exn_id = self.name_pattern_ident("exn", cases);
+                    let handler = self.compile_trywith_handler_raw(&exn_id, cases);
+                    let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
+                    RawLambda::LtryWith(Box::new(body_lam), exn_id, Box::new(handler))
+                };
+                match finally {
+                    None => body_lam,
+                    Some(finally) => {
+                        let finally_lam = self.convert_expr_raw(finally);
+                        RawLambda::LtryFinally(Box::new(body_lam), Box::new(finally_lam))
+                    }
+                }
             }
             ExpressionDesc::Texp_tuple(items) => {
                 let elems = items
@@ -7589,6 +7608,7 @@ mod tests {
                     Attributes::new(),
                 )),
                 vec![case],
+                None,
             ),
             LocIdx::none(),
             crate::types::TypeExprRef(0),

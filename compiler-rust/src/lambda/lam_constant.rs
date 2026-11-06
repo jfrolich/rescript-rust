@@ -191,6 +191,12 @@ impl Constant {
         match self {
             Constant::Some(inner) => inner.some_none_depth().map(|depth| depth + 1),
             Constant::ModuleAlias | Constant::JsUndefined { .. } => Some(0),
+            // A constructor represented by `undefined`, `@as(undefined)`.
+            Constant::Constructor(tag)
+                if matches!(tag.literal, Some(crate::types::VariantLiteralTag::Undefined)) =>
+            {
+                Some(0)
+            }
             _ => None,
         }
     }

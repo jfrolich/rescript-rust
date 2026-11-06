@@ -315,9 +315,12 @@ pub fn walk_expr<I: TastIterator + ?Sized>(sub: &mut I, e: &Expression) {
             sub.cases(cases);
             sub.cases(exn_cases);
         }
-        ExpressionDesc::Texp_try(e, cases) => {
+        ExpressionDesc::Texp_try(e, cases, finally) => {
             sub.expr(e);
             sub.cases(cases);
+            if let Some(finally) = finally {
+                sub.expr(finally);
+            }
         }
         ExpressionDesc::Texp_tuple(es)
         | ExpressionDesc::Texp_construct(_, _, es)

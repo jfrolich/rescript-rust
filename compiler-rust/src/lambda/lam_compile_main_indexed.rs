@@ -477,6 +477,10 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
                 visit(store, handler, free);
                 set_remove(free, id);
             }
+            NodeView::TryFinally(body, finally) => {
+                visit(store, body, free);
+                visit(store, finally, free);
+            }
             NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => {
                 visit(store, a, free);
                 visit(store, b, free);
@@ -829,7 +833,9 @@ fn collect_required_modules(
                     visit(store, n, modules);
                 }
             }
-            NodeView::StaticCatch(body, _, _, handler) | NodeView::TryWith(body, _, handler) => {
+            NodeView::StaticCatch(body, _, _, handler)
+            | NodeView::TryWith(body, _, handler)
+            | NodeView::TryFinally(body, handler) => {
                 visit(store, body, modules);
                 visit(store, handler, modules);
             }

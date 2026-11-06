@@ -24,7 +24,7 @@ use crate::parser::ast::Attributes;
 use crate::raw_lambda::loc::LocArena;
 use crate::raw_lambda::switch::Shared;
 use crate::raw_lambda::typeopt::{
-    constructor_has_optional_shape, has_untagged, type_cannot_contain_undefined,
+    constructor_has_optional_shape, constructor_payload_is_unboxed, type_cannot_contain_undefined,
     type_cannot_contain_undefined_no_env,
 };
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch, RawPrimInfo};
@@ -1915,6 +1915,11 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                     Box::new(e2_norm),
                 ))
             }
+            RawLambda::LtryFinally(e1, e2) => {
+                let e1_norm = tr_rec(env, e1, count, next_id)?;
+                let e2_norm = tr_rec(env, e2, count, next_id)?;
+                Some(RawLambda::LtryFinally(Box::new(e1_norm), Box::new(e2_norm)))
+            }
             RawLambda::LifThenElse(cond, ifso, ifnot) => {
                 let cond_norm = tr_rec(env, cond, count, next_id)?;
                 let ifso_norm = tr_rec(env, ifso, count, next_id)?;
@@ -2182,6 +2187,14 @@ impl MakeKeyWriter {
                     write_ident_key(out, var);
                 }
                 out.push_str("]),");
+                self.write_raw(e2, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::LtryFinally(e1, e2) => {
+                out.push_str("LtryFinally(");
+                self.write_raw(e1, out)?;
+                out.push(',');
                 self.write_raw(e2, out)?;
                 out.push(')');
                 Some(())
@@ -5045,8 +5058,11 @@ fn make_constr_matching<'p>(
         Some(((arg, _mut), _)) => {
             let argl = args.tail(1);
             let cstr = pat_as_constr(p);
-            let untagged = has_untagged(&cstr.cstr_attributes);
-            let newargs = if cstr.cstr_inlined.is_some() || (untagged && !cstr.cstr_args.is_empty())
+            // matching.ml: `Datarepr.constructor_payload_is_unboxed cstr`, read
+            // from the variant's layout.
+            let payload_is_unboxed = constructor_payload_is_unboxed(ctx_ref, cstr);
+            let newargs = if cstr.cstr_inlined.is_some()
+                || (payload_is_unboxed && !cstr.cstr_args.is_empty())
             {
                 let mut result = vec![(arg.clone(), LetKind::Alias)];
                 result.extend(argl.iter().cloned());

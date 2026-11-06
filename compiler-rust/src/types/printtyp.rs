@@ -1150,9 +1150,16 @@ impl<'a> Printtyp<'a> {
     ) -> OutConstructor {
         use crate::types::decl::ConstructorArguments;
         let name = cd.cd_id.name().to_string();
-        let nullary =
-            matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty());
-        let repr = if !nullary {
+        // The `@as` of a nullary case or of a tagged case with a payload sets
+        // its runtime tag; an untagged case is its payload.
+        let tagged = matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty())
+            || matches!(
+                layout.and_then(|layout| layout.constructors.get(position)),
+                Some(crate::types::VariantConstructorCase::Block(
+                    crate::types::VariantBlock::Tagged(_)
+                ))
+            );
+        let repr = if !tagged {
             None
         } else {
             let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
@@ -3586,7 +3593,7 @@ fn print_variant_configuration_issue<W: std::io::Write>(
                 ppf.str("- Variant ");
                 info(ppf, &name.name());
                 ppf.str(" is ");
-                error_tag(ppf, if unboxed { "not " } else { "" });
+                error_tag(ppf, if unboxed { "" } else { "not " });
                 ppf.str("unboxed.");
             }
             ppf.cut();

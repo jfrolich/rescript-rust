@@ -19,6 +19,7 @@ fn exists_var(p: &mut impl FnMut(&Ident) -> bool, l: &RawLambda) -> bool {
         RawLambda::Lassign(id, e) => p(id) || exists_var(p, e),
         RawLambda::LstaticCatch(e1, _, e2)
         | RawLambda::LtryWith(e1, _, e2)
+        | RawLambda::LtryFinally(e1, e2)
         | RawLambda::Lsequence(e1, e2)
         | RawLambda::Lwhile(e1, e2)
         | RawLambda::Lfor_of(_, e1, e2)

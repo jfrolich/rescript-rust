@@ -548,6 +548,19 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
+        // printlambda.ml: "@[<2>(try@ %a@;<1 -1>finally@ %a)@]"
+        RawLambda::LtryFinally(body, finally) => {
+            f.open_box(BoxKind::Box, 2);
+            f.string("(try");
+            f.space();
+            lam(f, body, None);
+            f.break_(1, -1);
+            f.string("finally");
+            f.space();
+            lam(f, finally, None);
+            f.string(")");
+            f.close_box();
+        }
         RawLambda::LtryWith(body, param, handler) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(try");

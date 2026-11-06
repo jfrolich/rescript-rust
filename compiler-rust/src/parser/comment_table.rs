@@ -732,6 +732,32 @@ pub fn walk_signature(
     walk_list(&nodes, t, comments, arena);
 }
 
+/// Walks the scrutinee of a switch or the body of a try, and returns the
+/// comments after it (res_comments_table.ml `walk_switch_or_try_head`).
+fn walk_switch_or_try_head(
+    expr_idx: ExprIdx,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) -> Vec<Comment> {
+    // Safety: arena is append-only, expression won't be invalidated
+    let expr = arena.get_expr(expr_idx).clone();
+    let (before, inside, after) = partition_by_loc(comments, expr.pexp_loc, arena);
+    let after = if is_block_expr(arena, &expr) {
+        let (after_expr, rest) = partition_adjacent_trailing(expr.pexp_loc, after, arena);
+        let combined: Vec<Comment> = before.into_iter().chain(inside).chain(after_expr).collect();
+        walk_expression(&expr, t, combined, arena);
+        rest
+    } else {
+        t.attach_leading(expr.pexp_loc, before, arena);
+        walk_expression(&expr, t, inside, arena);
+        after
+    };
+    let (after_expr, rest) = partition_adjacent_trailing(expr.pexp_loc, after, arena);
+    t.attach_trailing(expr.pexp_loc, after_expr, arena);
+    rest
+}
+
 /// Walk a list of nodes.
 fn walk_list(
     nodes: &[Node<'_>],
@@ -2248,31 +2274,45 @@ fn walk_expression(
             walk_module_expr(&mod_expr, t, inside, arena);
             t.attach_trailing(mod_expr.pmod_loc, after, arena);
         }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (ref match_expr_idx, ref cases) = *inner;
-            // Safety: arena is append-only, expression won't be invalidated
-            let match_expr = arena.get_expr(*match_expr_idx).clone();
-            let (before, inside, after) = partition_by_loc(comments, match_expr.pexp_loc, arena);
-
-            let after = if is_block_expr(arena, &match_expr) {
-                let (after_expr, rest) =
-                    partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
-                let combined: Vec<Comment> =
-                    before.into_iter().chain(inside).chain(after_expr).collect();
-                walk_expression(&match_expr, t, combined, arena);
-                rest
-            } else {
-                t.attach_leading(match_expr.pexp_loc, before, arena);
-                walk_expression(&match_expr, t, inside, arena);
-                after
-            };
-
-            let (after_expr, rest) = partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
-            t.attach_trailing(match_expr.pexp_loc, after_expr, arena);
-
+        ExpressionDesc::Pexp_match((match_expr_idx, cases))
+        | ExpressionDesc::Pexp_try((match_expr_idx, cases, None)) => {
+            let rest = walk_switch_or_try_head(*match_expr_idx, t, comments, arena);
             let cases = arena.case_list(*cases).to_vec();
             let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
             walk_list(&nodes, t, rest, arena);
+        }
+        ExpressionDesc::Pexp_try((try_expr_idx, cases, Some(finally_idx))) => {
+            // Safety: arena is append-only, expression won't be invalidated
+            let finally = arena.get_expr(*finally_idx).clone();
+            let (before_finally, inside, after) =
+                partition_by_loc(comments, finally.pexp_loc, arena);
+            let rest = walk_switch_or_try_head(*try_expr_idx, t, before_finally, arena);
+            // The finally location starts at its first expression, so comments
+            // between the cases and that expression lead the finally block.
+            let cases = arena.case_list(*cases).to_vec();
+            let rest = match (cases.first(), cases.last()) {
+                (Some(first), Some(last)) => {
+                    let mut cases_loc = arena.to_location(arena.get_pat(first.pc_lhs).ppat_loc);
+                    cases_loc.loc_end = arena.to_location(arena.get_expr(last.pc_rhs).pexp_loc).loc_end;
+                    let cases_loc = arena.from_location(&cases_loc);
+                    let (before, inside, after) = partition_by_loc(rest, cases_loc, arena);
+                    let (after_cases, rest) = partition_adjacent_trailing(cases_loc, after, arena);
+                    let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
+                    let combined: Vec<Comment> =
+                        before.into_iter().chain(inside).chain(after_cases).collect();
+                    walk_list(&nodes, t, combined, arena);
+                    rest
+                }
+                _ => rest,
+            };
+            t.attach_leading(finally.pexp_loc, rest, arena);
+            if is_block_expr(arena, &finally) {
+                let combined: Vec<Comment> = inside.into_iter().chain(after).collect();
+                walk_expression(&finally, t, combined, arena);
+            } else {
+                walk_expression(&finally, t, inside, arena);
+                t.attach_trailing(finally.pexp_loc, after, arena);
+            }
         }
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply { ref funct, .. } = *inner;

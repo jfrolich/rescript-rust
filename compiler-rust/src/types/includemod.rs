@@ -650,7 +650,7 @@ pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Lo
 }
 
 fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
-    actual.len() + expected.len() > 120
+    actual.len() + expected.len() >= 120
 }
 
 fn should_elide_type_declaration_module_mismatch(error: &IncludeModError) -> bool {
@@ -3728,6 +3728,25 @@ fn compare_variant_declarations(
             };
             impl_tag != sig_tag
         } {
+            return Some(format!(
+                "The internal representations for case {} are not equal.",
+                impl_constructor.cd_id.name()
+            ));
+        }
+        // includecore.ml `compare_variants`: a tagged case with a payload
+        // carries its tag in the object; an untagged one is its payload,
+        // whatever its `@as`.
+        if !constructor_is_nullary(impl_constructor)
+            && let (
+                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
+                    impl_block,
+                )),
+                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock::Tagged(
+                    sig_block,
+                )),
+            ) = (&impl_layout.constructors[index], &sig_layout.constructors[index])
+            && impl_block.tag.literal != sig_block.tag.literal
+        {
             return Some(format!(
                 "The internal representations for case {} are not equal.",
                 impl_constructor.cd_id.name()

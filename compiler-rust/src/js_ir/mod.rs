@@ -2216,7 +2216,12 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
     }
 }
 
-fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statement {
+fn simplify_if_statement(cond: Expression, mut then_: Block, mut else_: Block) -> Statement {
+    // js_stmt_make.ml `if_`: an empty block, such as a dropped condition of a
+    // nested `if`, leaves its branch empty.
+    let is_not_empty = |stmt: &Statement| !matches!(&stmt.desc, StatementDesc::Block(b) if b.is_empty());
+    then_.retain(is_not_empty);
+    else_.retain(is_not_empty);
     match cond.desc {
         ExpressionDesc::Bool(value) => {
             return Statement::block(if value { then_ } else { else_ });
@@ -2229,7 +2234,13 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
 
     if then_.is_empty() {
         if else_.is_empty() {
-            return Statement::exp(cond);
+            // Both branches are empty: only a condition with side effects
+            // needs to be kept.
+            return if expression_has_no_side_effects(&cond) {
+                Statement::block(vec![])
+            } else {
+                Statement::exp(cond)
+            };
         }
         return simplify_if_statement(negate_condition(cond), else_, vec![]);
     }
@@ -2749,7 +2760,12 @@ fn simplify_typeof_and_literal_and(
 
     if type_name == "boolean" {
         if let ExpressionDesc::Bool(value) = literal.desc {
-            return Some(Expression::bool(!value));
+            // A boolean other than `b` is `!b` (js_exp_make.ml `simplify_and_`).
+            return Some(raw_bin_expression(
+                BinOp::EqEqEq,
+                Expression::new(ExpressionDesc::Var(other_vident.clone())),
+                Expression::bool(!value),
+            ));
         }
     }
 
@@ -4061,7 +4077,7 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_keeps_explicit_empty_else_block_when_pure_branch_drops_like_ocaml() {
+    fn test_if_statement_drops_empty_else_block_when_pure_branch_drops_like_ocaml() {
         let stmt = Statement::if_(
             Expression::var(Ident::create_local("cond")),
             vec![Statement::exp(Expression::call(
@@ -4072,16 +4088,12 @@ mod tests {
             vec![Statement::exp(Expression::undefined(false))],
         );
 
+        // js_stmt_make.ml `if_` filters the empty block a dropped pure
+        // statement leaves, so the else branch is empty.
         let StatementDesc::If(_, _, else_block) = &stmt.desc else {
-            panic!("expected the dropped pure branch to stay as an explicit empty else");
+            panic!("expected the if to keep its effectful then branch");
         };
-        assert!(matches!(
-            else_block.as_slice(),
-            [Statement {
-                desc: StatementDesc::Block(inner),
-                ..
-            }] if inner.is_empty()
-        ));
+        assert!(else_block.is_empty());
     }
 
     #[test]

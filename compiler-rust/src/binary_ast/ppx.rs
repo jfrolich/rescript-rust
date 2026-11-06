@@ -8130,11 +8130,20 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = *inner;
+            let (ref body, ref cases, ref finally) = *inner;
             let body_expr = arena.get_expr(*body).clone();
             let rw_body = rewrite_expression(&body_expr, arena);
             let rw_cases = rewrite_cases(&arena.case_list(*cases).to_vec(), arena);
-            ExpressionDesc::Pexp_try((arena.push_expr(rw_body), arena.push_case_list(&rw_cases)))
+            let rw_finally = finally.map(|finally| {
+                let finally_expr = arena.get_expr(finally).clone();
+                let rw = rewrite_expression(&finally_expr, arena);
+                arena.push_expr(rw)
+            });
+            ExpressionDesc::Pexp_try((
+                arena.push_expr(rw_body),
+                arena.push_case_list(&rw_cases),
+                rw_finally,
+            ))
         }
 
         ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({

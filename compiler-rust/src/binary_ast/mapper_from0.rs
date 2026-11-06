@@ -162,6 +162,8 @@ fn remove_arity_attribute(
 
 const FOR_OF_ATTR_NAME: &str = "_res.for_of";
 const FOR_AWAIT_OF_ATTR_NAME: &str = "_res.for_await_of";
+/// ast_mapper_from0.ml / ast_mapper_to0.ml `finally_attr_name`.
+pub(crate) const FINALLY_ATTR_NAME: &str = "_res.finally";
 
 fn extract_for_of_iterable(attrs: &[pt0::Attribute]) -> Option<&pt0::Expression> {
     extract_for_of_iterable_with_name(attrs, FOR_OF_ATTR_NAME)
@@ -2050,9 +2052,35 @@ impl<'a> Mapper<'a> {
                 current::ExpressionDesc::Pexp_match((e_idx, self.arena.push_case_list(&cases)))
             }
             pt0::ExpressionDesc::Try(e, cases) => {
+                // ast_mapper_from0.ml: the finally expression travels in a
+                // `_res.finally` attribute of the mapped attributes.
+                let finally = attrs.iter().find_map(|(name, payload)| match payload {
+                    current::Payload::PPat(inner)
+                        if self.arena.get_string(name.txt) == FINALLY_ATTR_NAME =>
+                    {
+                        inner.1
+                    }
+                    _ => None,
+                });
+                if attrs
+                    .iter()
+                    .any(|(name, _)| self.arena.get_string(name.txt) == FINALLY_ATTR_NAME)
+                {
+                    attrs = current::Attributes::from_vec(
+                        attrs
+                            .iter()
+                            .filter(|(name, _)| self.arena.get_string(name.txt) != FINALLY_ATTR_NAME)
+                            .cloned()
+                            .collect(),
+                    );
+                }
                 let e_idx = self.push_expr(e);
                 let cases: Vec<_> = cases.iter().map(|c| self.map_case(c)).collect();
-                current::ExpressionDesc::Pexp_try((e_idx, self.arena.push_case_list(&cases)))
+                current::ExpressionDesc::Pexp_try((
+                    e_idx,
+                    self.arena.push_case_list(&cases),
+                    finally,
+                ))
             }
             pt0::ExpressionDesc::Tuple(el) => current::ExpressionDesc::Pexp_tuple({
                 let items: Vec<_> = el.iter().map(|e| self.push_expr(e)).collect();

@@ -1385,23 +1385,42 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     // `S.block` (compiler/core/js_pass_flatten.ml:48-53).
                     Statement::block(block)
                 }
-                ExpressionDesc::Cond(test, consequent, alternate) => Statement {
-                    // js_pass_flatten.ml:54-61 / 79-86 take the condition
-                    // expression's `source_loc`.
-                    source_loc: expr_loc,
+                ExpressionDesc::Cond(test, consequent, alternate) => {
                     // OCaml keeps the conditional predicate untouched here;
                     // only the consequent/alternate are re-entered as
-                    // statements (compiler/core/js_pass_flatten.ml:54-61).
+                    // statements (compiler/core/js_pass_flatten.ml).
                     // Re-flattening `test` eagerly expands nested callback
                     // bodies inside large conditions before later passes see
-                    // the same shape OCaml preserves.
-                    desc: StatementDesc::If(
-                        *test,
-                        vec![flatten_statement(Statement::exp(*consequent))],
-                        vec![flatten_statement(Statement::exp(*alternate))],
-                    ),
-                    comment,
-                },
+                    // the same shape OCaml preserves. A branch whose value is
+                    // pure leaves nothing to run.
+                    let branch = |e: Expression| {
+                        if crate::js_ir::expression_has_no_side_effects(&e) {
+                            vec![]
+                        } else {
+                            vec![flatten_statement(Statement::exp(e))]
+                        }
+                    };
+                    let ifso = branch(*consequent);
+                    let ifnot = branch(*alternate);
+                    let desc = match (ifso.is_empty(), ifnot.is_empty()) {
+                        (true, true) => {
+                            if crate::js_ir::expression_has_no_side_effects(&test) {
+                                StatementDesc::Block(vec![])
+                            } else {
+                                StatementDesc::Exp(*test)
+                            }
+                        }
+                        (true, false) => StatementDesc::If(Expression::not(*test), ifnot, vec![]),
+                        (false, _) => StatementDesc::If(*test, ifso, ifnot),
+                    };
+                    Statement {
+                        // js_pass_flatten.ml takes the condition expression's
+                        // `source_loc`.
+                        source_loc: expr_loc,
+                        desc,
+                        comment,
+                    }
+                }
                 ExpressionDesc::Bin(BinOp::Eq, target, value) => {
                     if matches!(value.desc, ExpressionDesc::Seq(_, _)) {
                         let mut exprs = Vec::new();

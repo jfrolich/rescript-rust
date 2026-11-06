@@ -258,6 +258,9 @@ impl<'a, 'r> Alpha<'a, 'r> {
             // lam_pass_alpha_conversion.ml:116
             Lambda::LtryWith(l1, v, l2) => Lambda::try_(self.simpl(l1), *v, self.simpl(l2)),
 
+            // lambda_traverse.ml `shallow_map_sharing`: `let b' = f b and fin' = f fin`.
+            Lambda::LtryFinally(l1, l2) => Lambda::try_finally(self.simpl(l1), self.simpl(l2)),
+
             // lam_pass_alpha_conversion.ml:117
             Lambda::LifThenElse(l1, l2, l3) => {
                 Lambda::if_(self.simpl(l1), self.simpl(l2), self.simpl(l3))
@@ -363,6 +366,10 @@ impl<'a, 'r> Alpha<'a, 'r> {
             Lambda::LtryWith(l1, v, l2) => Lambda::LtryWith(
                 map_box(l1, |inner| self.simpl_owned(inner)),
                 v,
+                map_box(l2, |inner| self.simpl_owned(inner)),
+            ),
+            Lambda::LtryFinally(l1, l2) => Lambda::LtryFinally(
+                map_box(l1, |inner| self.simpl_owned(inner)),
                 map_box(l2, |inner| self.simpl_owned(inner)),
             ),
             Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(

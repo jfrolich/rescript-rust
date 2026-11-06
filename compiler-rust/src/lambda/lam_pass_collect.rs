@@ -311,6 +311,8 @@ where
         }
         // lam_arity_analysis.ml:128
         Lambda::LtryWith(l1, _, l2) => all_lambdas(ident_tbl, &[l1, l2], lookup_external_arity),
+        // lam_arity_analysis.ml: `Ltryfinally (body, _) -> get_arity meta body`
+        Lambda::LtryFinally(body, _) => get_arity_impl(ident_tbl, body, lookup_external_arity),
         // lam_arity_analysis.ml:129
         Lambda::LifThenElse(_, l2, l3) => all_lambdas(ident_tbl, &[l2, l3], lookup_external_arity),
         // lam_arity_analysis.ml:130
@@ -669,7 +671,7 @@ fn collect_with_external(
             collect_with_external(meta, l2, resolver);
         }
         // lam_pass_collect.ml:130-132
-        Lambda::LtryWith(l1, _, l2) => {
+        Lambda::LtryWith(l1, _, l2) | Lambda::LtryFinally(l1, l2) => {
             collect_with_external(meta, l1, resolver);
             collect_with_external(meta, l2, resolver);
         }
