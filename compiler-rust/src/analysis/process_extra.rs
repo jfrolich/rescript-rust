@@ -605,7 +605,7 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                     loc: self.loc(vd.val_name.loc),
                 };
                 let declared = attrs::new_declared(
-                    vd.val_desc.ctyp_type,
+                    self.ctx.ta.core_type(vd.val_desc).ctyp_type,
                     self.loc(vd.val_loc),
                     name.clone(),
                     stamp,
@@ -620,7 +620,7 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                     name.loc,
                     LocType::Typed(
                         name.txt,
-                        vd.val_desc.ctyp_type,
+                        self.ctx.ta.core_type(vd.val_desc).ctyp_type,
                         LocKind::Definition(stamp, Tip::Value),
                     ),
                 );

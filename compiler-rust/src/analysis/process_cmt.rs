@@ -353,13 +353,20 @@ impl Processor<'_> {
         let typ_type = Arc::new(td.typ_type.clone());
         let kind = match &td.typ_kind {
             tt::TypedTypeKind::Ttype_abstract => match &td.typ_manifest {
-                Some(manifest) => match &manifest.ctyp_desc {
-                    tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => TypeKind::Abstract(Some(
-                        (path.clone(), args.iter().map(|t| t.ctyp_type).collect()),
-                    )),
-                    tt::TypedCoreTypeDesc::Ttyp_tuple(items) => {
-                        TypeKind::Tuple(items.iter().map(|t| t.ctyp_type).collect())
+                Some(manifest) => match &self.ctx.ta.core_type(*manifest).ctyp_desc {
+                    tt::TypedCoreTypeDesc::Ttyp_constr(path, _, args) => {
+                        TypeKind::Abstract(Some((
+                            path.clone(),
+                            self.ctx.ta.core_types(*args).map(|t| t.ctyp_type).collect(),
+                        )))
                     }
+                    tt::TypedCoreTypeDesc::Ttyp_tuple(items) => TypeKind::Tuple(
+                        self.ctx
+                            .ta
+                            .core_types(*items)
+                            .map(|t| t.ctyp_type)
+                            .collect(),
+                    ),
                     _ => TypeKind::Abstract(None),
                 },
                 None => TypeKind::Abstract(None),
@@ -379,7 +386,9 @@ impl Processor<'_> {
                             args: match &cd.cd_args {
                                 tt::TypedConstructorArguments::Cstr_tuple(args) => {
                                     ConstructorArgs::Args(
-                                        args.iter()
+                                        self.ctx
+                                            .ta
+                                            .core_types(*args)
                                             .map(|t| (t.ctyp_type, self.ctx.loc(t.ctyp_loc)))
                                             .collect(),
                                     )
@@ -396,7 +405,7 @@ impl Processor<'_> {
                                                     fname: Located::mknoloc(
                                                         f.ld_id.name().to_string(),
                                                     ),
-                                                    typ: f.ld_type.ctyp_type,
+                                                    typ: self.ctx.ta.core_type(f.ld_type).ctyp_type,
                                                     optional: f.ld_optional,
                                                     docstring: attrs_to_docstring(f_attributes),
                                                     deprecated: attrs::find_deprecated_attribute(
@@ -408,7 +417,10 @@ impl Processor<'_> {
                                     )
                                 }
                             },
-                            res: cd.cd_res.as_ref().map(|t| t.ctyp_type),
+                            res: cd
+                                .cd_res
+                                .as_ref()
+                                .map(|t| self.ctx.ta.core_type(*t).ctyp_type),
                             type_decl: (td.typ_name.txt.clone(), typ_type.clone()),
                             docstring: attrs_to_docstring(cd_attributes),
                         };
@@ -434,7 +446,7 @@ impl Processor<'_> {
                         Field {
                             stamp: f.ld_id.binding_time(),
                             fname: self.ctx.located(&f.ld_name),
-                            typ: f.ld_type.ctyp_type,
+                            typ: self.ctx.ta.core_type(f.ld_type).ctyp_type,
                             optional: f.ld_optional,
                             docstring: attrs_to_docstring(f_attributes),
                             deprecated: attrs::find_deprecated_attribute(f_attributes),
@@ -531,7 +543,7 @@ impl Processor<'_> {
                     Loc::of_idx(self.ctx.arena, vd.val_loc),
                     vd.val_id.binding_time(),
                     env,
-                    vd.val_desc.ctyp_type,
+                    self.ctx.ta.core_type(vd.val_desc).ctyp_type,
                     Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
@@ -769,7 +781,7 @@ impl Processor<'_> {
                     Loc::of_idx(self.ctx.arena, vd.val_loc),
                     vd.val_id.binding_time(),
                     env,
-                    vd.val_desc.ctyp_type,
+                    self.ctx.ta.core_type(vd.val_desc).ctyp_type,
                     Attrs::Parsed(vd.val_attributes.as_slice(), self.ctx.arena),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),

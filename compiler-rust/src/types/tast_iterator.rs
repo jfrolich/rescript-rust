@@ -50,7 +50,7 @@ pub trait TastIterator<'t> {
     }
     fn package_type(&mut self, pack: &PackageType) {
         for (_, t) in &pack.pack_fields {
-            self.typ(t);
+            self.typ(self.arena().core_type(*t));
         }
     }
     fn pat(&mut self, p: &Pattern) {
@@ -59,16 +59,18 @@ pub trait TastIterator<'t> {
     fn row_field(&mut self, rf: &RowFieldType) {
         match &rf.rf_desc {
             RowFieldDesc::Rtag(_, _, types) => {
-                for t in types {
+                for t in self.arena().core_types(*types) {
                     self.typ(t);
                 }
             }
-            RowFieldDesc::Rinherit(t) => self.typ(t),
+            RowFieldDesc::Rinherit(t) => self.typ(self.arena().core_type(*t)),
         }
     }
     fn object_field(&mut self, of: &ObjectField) {
         match &of.of_desc {
-            ObjectFieldDesc::OTtag(_, t) | ObjectFieldDesc::OTinherit(t) => self.typ(t),
+            ObjectFieldDesc::OTtag(_, t) | ObjectFieldDesc::OTinherit(t) => {
+                self.typ(self.arena().core_type(*t))
+            }
         }
     }
     fn signature(&mut self, s: &TypedSignature) {
@@ -100,7 +102,7 @@ pub trait TastIterator<'t> {
     }
     fn type_extension(&mut self, te: &TypeExtension) {
         for (t, _) in &te.tyext_params {
-            self.typ(t);
+            self.typ(self.arena().core_type(*t));
         }
         for c in &te.tyext_constructors {
             self.extension_constructor(c);
@@ -113,24 +115,24 @@ pub trait TastIterator<'t> {
                 for cd in cds {
                     match &cd.cd_args {
                         TypedConstructorArguments::Cstr_tuple(types) => {
-                            for t in types {
+                            for t in self.arena().core_types(*types) {
                                 self.typ(t);
                             }
                         }
                         TypedConstructorArguments::Cstr_record(lds) => {
                             for ld in lds {
-                                self.typ(&ld.ld_type);
+                                self.typ(self.arena().core_type(ld.ld_type));
                             }
                         }
                     }
                     if let Some(res) = &cd.cd_res {
-                        self.typ(res);
+                        self.typ(self.arena().core_type(*res));
                     }
                 }
             }
             TypedTypeKind::Ttype_record(lds) => {
                 for ld in lds {
-                    self.typ(&ld.ld_type);
+                    self.typ(self.arena().core_type(ld.ld_type));
                 }
             }
         }
@@ -146,7 +148,7 @@ pub trait TastIterator<'t> {
         }
     }
     fn value_description(&mut self, vd: &TypedValueDescription) {
-        self.typ(&vd.val_desc)
+        self.typ(self.arena().core_type(vd.val_desc))
     }
     fn with_constraint(&mut self, wc: &WithConstraint) {
         match wc {
@@ -200,13 +202,13 @@ fn walk_constructor_args<'t, I: TastIterator<'t> + ?Sized>(
 ) {
     match args {
         ConstructorArgument::Cstr_tuple(types) => {
-            for t in types {
+            for t in sub.arena().core_types(*types) {
                 sub.typ(t);
             }
         }
         ConstructorArgument::Cstr_record(lds) => {
             for ld in lds {
-                sub.typ(&ld.ld_type);
+                sub.typ(sub.arena().core_type(ld.ld_type));
             }
         }
     }
@@ -217,15 +219,15 @@ pub fn walk_type_declaration<'t, I: TastIterator<'t> + ?Sized>(
     td: &TypedTypeDeclaration,
 ) {
     for (c1, c2, _) in &td.typ_cstrs {
-        sub.typ(c1);
-        sub.typ(c2);
+        sub.typ(sub.arena().core_type(*c1));
+        sub.typ(sub.arena().core_type(*c2));
     }
     sub.type_kind(&td.typ_kind);
     if let Some(m) = &td.typ_manifest {
-        sub.typ(m);
+        sub.typ(sub.arena().core_type(*m));
     }
     for (c, _) in &td.typ_params {
-        sub.typ(c);
+        sub.typ(sub.arena().core_type(*c));
     }
 }
 
@@ -237,7 +239,7 @@ pub fn walk_extension_constructor<'t, I: TastIterator<'t> + ?Sized>(
         ExtensionConstructorKind::Text_decl(args, res) => {
             walk_constructor_args(sub, args);
             if let Some(res) = res {
-                sub.typ(res);
+                sub.typ(sub.arena().core_type(*res));
             }
         }
         ExtensionConstructorKind::Text_rebind(..) => {}
@@ -247,7 +249,7 @@ pub fn walk_extension_constructor<'t, I: TastIterator<'t> + ?Sized>(
 pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
     for (extra, _, _) in p.pat_extra.iter() {
         if let PatExtra::Tpat_constraint(ct) = extra {
-            sub.typ(ct);
+            sub.typ(sub.arena().core_type(*ct));
         }
     }
     match &p.pat_desc {
@@ -296,7 +298,9 @@ fn walk_record_fields<'t, I: TastIterator<'t> + ?Sized>(
 pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) {
     for (extra, _, _) in e.exp_extra.iter() {
         match extra {
-            ExpExtra::Texp_constraint(ct) | ExpExtra::Texp_coerce { target: ct, .. } => sub.typ(ct),
+            ExpExtra::Texp_constraint(ct) | ExpExtra::Texp_coerce { target: ct, .. } => {
+                sub.typ(sub.arena().core_type(*ct))
+            }
             ExpExtra::Texp_open(..) | ExpExtra::Texp_newtype(_) => {}
         }
     }
@@ -489,12 +493,12 @@ pub fn walk_typ<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, t: &TypedCoreType
         TypedCoreTypeDesc::Ttyp_var(_) => {}
         TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
             for arg in args {
-                sub.typ(&arg.typ);
+                sub.typ(sub.arena().core_type(arg.typ));
             }
-            sub.typ(ret);
+            sub.typ(sub.arena().core_type(*ret));
         }
         TypedCoreTypeDesc::Ttyp_tuple(types) | TypedCoreTypeDesc::Ttyp_constr(_, _, types) => {
-            for t in types {
+            for t in sub.arena().core_types(*types) {
                 sub.typ(t);
             }
         }
@@ -503,7 +507,9 @@ pub fn walk_typ<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, t: &TypedCoreType
                 sub.object_field(f);
             }
         }
-        TypedCoreTypeDesc::Ttyp_alias(ct, _) | TypedCoreTypeDesc::Ttyp_poly(_, ct) => sub.typ(ct),
+        TypedCoreTypeDesc::Ttyp_alias(ct, _) | TypedCoreTypeDesc::Ttyp_poly(_, ct) => {
+            sub.typ(sub.arena().core_type(*ct))
+        }
         TypedCoreTypeDesc::Ttyp_variant(fields, _, _) => {
             for f in fields {
                 sub.row_field(f);

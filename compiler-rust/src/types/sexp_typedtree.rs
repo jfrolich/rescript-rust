@@ -632,7 +632,7 @@ fn sexp_pat_extra(
         PatExtra::Tpat_constraint(ct) => {
             let mut items = vec![
                 Sexp::atom("Tpat_constraint"),
-                sexp_core_type(arena, ctx, cx, ct),
+                sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
             ];
             items.extend(loc_sexp);
             items.push(attrs_sexp);
@@ -814,7 +814,7 @@ fn sexp_exp_extra(
         ExpExtra::Texp_constraint(ct) => {
             let mut items = vec![
                 Sexp::atom("Texp_constraint"),
-                sexp_core_type(arena, ctx, cx, ct),
+                sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
             ];
             items.extend(loc_sexp);
             items.push(attrs_sexp);
@@ -829,7 +829,7 @@ fn sexp_exp_extra(
                 Sexp::atom("source"),
                 sexp_type_expr(arena, ctx, *source_type),
             ]);
-            let ct_sexp = sexp_core_type(arena, ctx, cx, target);
+            let ct_sexp = sexp_core_type(arena, ctx, cx, cx.ta.core_type(*target));
             let target_sexp = Sexp::list(vec![
                 Sexp::atom("target"),
                 sexp_type_expr(arena, ctx, *target_type),
@@ -1361,22 +1361,22 @@ fn sexp_core_type_desc(
                 items.push(Sexp::list(vec![
                     sexp_type_arg_label(&arg.lbl),
                     sexp_attributes(arena, cx, &arg.attrs),
-                    sexp_core_type(arena, ctx, cx, &arg.typ),
+                    sexp_core_type(arena, ctx, cx, cx.ta.core_type(arg.typ)),
                 ]));
             }
-            items.push(sexp_core_type(arena, ctx, cx, ret));
+            items.push(sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ret)));
             Sexp::list(items)
         }
         TypedCoreTypeDesc::Ttyp_tuple(types) => {
             let mut items = vec![Sexp::atom("Ttyp_tuple")];
-            for t in types.iter() {
+            for t in cx.ta.core_types(*types) {
                 items.push(sexp_core_type(arena, ctx, cx, t));
             }
             Sexp::list(items)
         }
         TypedCoreTypeDesc::Ttyp_constr(p, _, args) => {
             let mut arg_items = Vec::new();
-            for t in args.iter() {
+            for t in cx.ta.core_types(*args) {
                 arg_items.push(sexp_core_type(arena, ctx, cx, t));
             }
             Sexp::list(vec![
@@ -1398,7 +1398,7 @@ fn sexp_core_type_desc(
         }
         TypedCoreTypeDesc::Ttyp_alias(ct, s) => Sexp::list(vec![
             Sexp::atom("Ttyp_alias"),
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
             string(s),
         ]),
         TypedCoreTypeDesc::Ttyp_variant(fields, flag, labels) => {
@@ -1419,14 +1419,14 @@ fn sexp_core_type_desc(
         TypedCoreTypeDesc::Ttyp_poly(vars, ct) => Sexp::list(vec![
             Sexp::atom("Ttyp_poly"),
             Sexp::list(vars.iter().map(|s| string(s)).collect()),
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
         ]),
         TypedCoreTypeDesc::Ttyp_package(pkg) => {
             let mut field_items = Vec::new();
             for (li, ct) in pkg.pack_fields.iter() {
                 field_items.push(Sexp::list(vec![
                     sexp_longident_idx(arena, ctx, li.txt),
-                    sexp_core_type(arena, ctx, cx, ct),
+                    sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
                 ]));
             }
             Sexp::list(vec![
@@ -1450,11 +1450,11 @@ fn sexp_object_field(
             Sexp::atom("OTtag"),
             string(&name.txt),
             sexp_attributes(arena, cx, &field.of_attributes),
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
         ]),
         ObjectFieldDesc::OTinherit(ct) => Sexp::list(vec![
             Sexp::atom("OTinherit"),
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
         ]),
     }
 }
@@ -1469,7 +1469,7 @@ fn sexp_row_field_type(
     match &field.rf_desc {
         RowFieldDesc::Rtag(name, constant, args) => {
             let mut arg_items = Vec::new();
-            for ct in args.iter() {
+            for ct in cx.ta.core_types(*args) {
                 arg_items.push(sexp_core_type(arena, ctx, cx, ct));
             }
             Sexp::list(vec![
@@ -1482,7 +1482,7 @@ fn sexp_row_field_type(
         }
         RowFieldDesc::Rinherit(ct) => Sexp::list(vec![
             Sexp::atom("Tinherit"),
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
         ]),
     }
 }
@@ -1622,7 +1622,7 @@ fn sexp_typed_type_declaration(
     let mut param_items = Vec::new();
     for (ct, v) in td.typ_params.iter() {
         param_items.push(Sexp::list(vec![
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
             sexp_variance(v),
         ]));
     }
@@ -1633,8 +1633,8 @@ fn sexp_typed_type_declaration(
     let mut cstr_items = Vec::new();
     for (ct1, ct2, _loc) in td.typ_cstrs.iter() {
         cstr_items.push(Sexp::list(vec![
-            sexp_core_type(arena, ctx, cx, ct1),
-            sexp_core_type(arena, ctx, cx, ct2),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct1)),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct2)),
         ]));
     }
     items.push(Sexp::list(vec![
@@ -1651,7 +1651,10 @@ fn sexp_typed_type_declaration(
     ]));
     let manifest_sexp = match &td.typ_manifest {
         None => Sexp::atom("None"),
-        Some(ct) => Sexp::list(vec![Sexp::atom("Some"), sexp_core_type(arena, ctx, cx, ct)]),
+        Some(ct) => Sexp::list(vec![
+            Sexp::atom("Some"),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
+        ]),
     };
     items.push(Sexp::list(vec![Sexp::atom("manifest"), manifest_sexp]));
     items.push(sexp_attributes(arena, cx, &td.typ_attributes));
@@ -1704,7 +1707,10 @@ fn sexp_typed_constructor_decl(
     items.push(sexp_typed_constructor_args(arena, ctx, cx, &cd.cd_args));
     let res_sexp = match &cd.cd_res {
         None => Sexp::atom("None"),
-        Some(ct) => Sexp::list(vec![Sexp::atom("Some"), sexp_core_type(arena, ctx, cx, ct)]),
+        Some(ct) => Sexp::list(vec![
+            Sexp::atom("Some"),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
+        ]),
     };
     items.push(res_sexp);
     items.push(sexp_attributes(arena, cx, &cd.cd_attributes));
@@ -1720,7 +1726,7 @@ fn sexp_typed_constructor_args(
     match args {
         TypedConstructorArguments::Cstr_tuple(types) => {
             let mut items = vec![Sexp::atom("Cstr_tuple")];
-            for ct in types.iter() {
+            for ct in cx.ta.core_types(*types) {
                 items.push(sexp_core_type(arena, ctx, cx, ct));
             }
             Sexp::list(items)
@@ -1758,7 +1764,7 @@ fn sexp_typed_label_decl(
     } else {
         "required"
     }));
-    items.push(sexp_core_type(arena, ctx, cx, &ld.ld_type));
+    items.push(sexp_core_type(arena, ctx, cx, cx.ta.core_type(ld.ld_type)));
     items.push(sexp_attributes(arena, cx, &ld.ld_attributes));
     Sexp::list(items)
 }
@@ -1773,7 +1779,7 @@ fn sexp_type_extension(
     let mut param_items = Vec::new();
     for (ct, v) in te.tyext_params.iter() {
         param_items.push(Sexp::list(vec![
-            sexp_core_type(arena, ctx, cx, ct),
+            sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
             sexp_variance(v),
         ]));
     }
@@ -1814,9 +1820,10 @@ fn sexp_extension_constructor(
             let args_sexp = sexp_constructor_argument(arena, ctx, cx, args);
             let ret_sexp = match ret {
                 None => Sexp::atom("None"),
-                Some(ct) => {
-                    Sexp::list(vec![Sexp::atom("Some"), sexp_core_type(arena, ctx, cx, ct)])
-                }
+                Some(ct) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_core_type(arena, ctx, cx, cx.ta.core_type(*ct)),
+                ]),
             };
             Sexp::list(vec![Sexp::atom("Text_decl"), args_sexp, ret_sexp])
         }
@@ -1846,7 +1853,7 @@ fn sexp_constructor_argument(
     match arg {
         ConstructorArgument::Cstr_tuple(cts) => {
             let mut items = vec![Sexp::atom("Cstr_tuple")];
-            for ct in cts.iter() {
+            for ct in cx.ta.core_types(*cts) {
                 items.push(sexp_core_type(arena, ctx, cx, ct));
             }
             Sexp::list(items)
@@ -1884,7 +1891,7 @@ fn sexp_label_declaration(
     } else {
         "required"
     }));
-    items.push(sexp_core_type(arena, ctx, cx, &ld.ld_type));
+    items.push(sexp_core_type(arena, ctx, cx, cx.ta.core_type(ld.ld_type)));
     items.push(sexp_attributes(arena, cx, &ld.ld_attributes));
     Sexp::list(items)
 }
@@ -2336,7 +2343,7 @@ fn sexp_value_description(
         string(&vd.val_name.txt),
     ];
     items.extend(loc_sexp);
-    items.push(sexp_core_type(arena, ctx, cx, &vd.val_desc));
+    items.push(sexp_core_type(arena, ctx, cx, cx.ta.core_type(vd.val_desc)));
     items.push(Sexp::list(
         std::iter::once(Sexp::atom("prim"))
             .chain(

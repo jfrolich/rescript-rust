@@ -335,6 +335,7 @@ pub fn translate_structure_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
+                        ta,
                         ctx,
                         arena,
                         config,
@@ -365,6 +366,7 @@ pub fn translate_structure_item(
         ),
         StructureItemDesc::Tstr_primitive(value_description) => {
             crate::gentype::translation::translate_primitive(
+                ta,
                 ctx,
                 arena,
                 config,

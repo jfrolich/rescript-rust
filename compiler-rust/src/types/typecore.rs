@@ -2903,7 +2903,7 @@ fn transl_type_inner(
                 typed_args.push(ArrowArg {
                     attrs: source_arg.attrs,
                     lbl: label,
-                    typ: Box::new(typed),
+                    typ: tctx.typed.push_core_type(typed),
                 });
             }
             let (typed_ret, ret) =
@@ -2914,7 +2914,10 @@ fn transl_type_inner(
             });
             Ok((
                 TypedCoreType {
-                    ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(typed_args, Box::new(typed_ret)),
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(
+                        typed_args,
+                        tctx.typed.push_core_type(typed_ret),
+                    ),
                     ctyp_type: arrow,
                     ctyp_env: EnvRef(0),
                     ctyp_loc: loc,
@@ -2938,7 +2941,7 @@ fn transl_type_inner(
             let tuple_ty = ctx.new_tuple(type_refs);
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_tuple(typed_types),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_tuple(tctx.typed.push_core_types(typed_types)),
                 ctyp_type: tuple_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -3046,7 +3049,11 @@ fn transl_type_inner(
             }
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(path, *lid, typed_args),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                    path,
+                    *lid,
+                    tctx.typed.push_core_types(typed_args),
+                ),
                 ctyp_type: constr_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -3139,7 +3146,10 @@ fn transl_type_inner(
             };
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(Box::new(inner_ctyp), name_str),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(
+                    tctx.typed.push_core_type(inner_ctyp),
+                    name_str,
+                ),
                 ctyp_type: alias_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -3238,7 +3248,10 @@ fn transl_type_inner(
                 })?;
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(var_names, Box::new(body_ctyp)),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                    var_names,
+                    tctx.typed.push_core_type(body_ctyp),
+                ),
                 ctyp_type: poly_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
@@ -3336,7 +3349,7 @@ fn transl_type_inner(
                                 let poly_ctyp = TypedCoreType {
                                     ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
                                         vec![],
-                                        Box::new(inner_ctyp),
+                                        tctx.typed.push_core_type(inner_ctyp),
                                     ),
                                     ctyp_type: poly_ty,
                                     ctyp_env: EnvRef(0),
@@ -3366,7 +3379,7 @@ fn transl_type_inner(
                                     txt: field_name,
                                     loc: label.loc,
                                 },
-                                poly_ctyp,
+                                tctx.typed.push_core_type(poly_ctyp),
                             ),
                             of_loc: label.loc,
                             of_attributes: attrs.clone(),
@@ -3451,7 +3464,7 @@ fn transl_type_inner(
                         }
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTinherit(
-                                inherit_ctyp,
+                                tctx.typed.push_core_type(inherit_ctyp),
                             ),
                             of_loc: inherit_ct.ptyp_loc,
                             of_attributes: Attributes::new(),
@@ -3630,7 +3643,7 @@ fn transl_type_inner(
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rtag(
                                 typed_label,
                                 *constant,
-                                typed_args,
+                                tctx.typed.push_core_types(typed_args),
                             ),
                             rf_loc: label.loc,
                             rf_attributes: attrs.clone(),
@@ -3719,7 +3732,9 @@ fn transl_type_inner(
                             )?;
                         }
                         typed_rows.push(crate::types::typedtree::RowFieldType {
-                            rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
+                            rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(
+                                tctx.typed.push_core_type(inherit_ctyp),
+                            ),
                             rf_loc: inherit_ct.ptyp_loc,
                             rf_attributes: Attributes::new(),
                         });
@@ -3892,7 +3907,10 @@ fn transl_type_inner(
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_package(crate::types::typedtree::PackageType {
                     pack_path,
-                    pack_fields: typed_fields,
+                    pack_fields: typed_fields
+                        .into_iter()
+                        .map(|(l, ct)| (l, tctx.typed.push_core_type(ct)))
+                        .collect(),
                 }),
                 ctyp_type: package_ty,
                 ctyp_env: EnvRef(0),
@@ -7121,7 +7139,7 @@ fn type_pattern_constraint(
 
     // OCaml uses inner pattern attributes for Tpat_constraint extra.
     let constraint_extra = (
-        crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
+        crate::types::typedtree::PatExtra::Tpat_constraint(tctx.typed.push_core_type(typed_ctype)),
         loc,
         inner_pat.ppat_attributes.clone(),
     );
@@ -7229,7 +7247,9 @@ fn type_pattern_constraint_poly_var(
             // OCaml: pat_desc = Tpat_var(id, name); pat_type = ty (the Tpoly type)
             // pat_extra = [(Tpat_constraint cty, loc, sp.ppat_attributes)]
             let constraint_extra = (
-                crate::types::typedtree::PatExtra::Tpat_constraint(typed_ctype),
+                crate::types::typedtree::PatExtra::Tpat_constraint(
+                    tctx.typed.push_core_type(typed_ctype),
+                ),
                 loc,
                 pat.ppat_attributes.clone(),
             );
@@ -16566,7 +16586,7 @@ fn type_constraint(
     result.exp_type = result_ty;
     let mut extras = Vec::with_capacity(result.exp_extra.len() + 1);
     extras.push((
-        crate::types::typedtree::ExpExtra::Texp_constraint(typed_ctype),
+        crate::types::typedtree::ExpExtra::Texp_constraint(tctx.typed.push_core_type(typed_ctype)),
         loc,
         attributes.to_vec().into(),
     ));
@@ -16680,7 +16700,7 @@ fn type_coerce(
         typed_inner,
         crate::types::typedtree::ExpExtra::Texp_coerce {
             source_type,
-            target: to_typed_ctype,
+            target: tctx.typed.push_core_type(to_typed_ctype),
             target_type,
         },
         loc,
@@ -17313,7 +17333,9 @@ fn type_letexception(
                         typed.push(typed_ct);
                     }
                     (
-                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(typed),
+                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(
+                            tctx.typed.push_core_types(typed),
+                        ),
                         crate::types::ConstructorArguments::CstrTuple(arg_ty_refs.clone()),
                         arg_ty_refs.clone(),
                         None,
@@ -17330,7 +17352,7 @@ fn type_letexception(
                         let poly_typed_ct = crate::types::typedtree::TypedCoreType {
                             ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
                                 vec![],
-                                Box::new(typed_ct.clone()),
+                                tctx.typed.push_core_type(typed_ct.clone()),
                             ),
                             ctyp_type: poly_ty_ref,
                             ctyp_env: typed_ct.ctyp_env,
@@ -17349,7 +17371,7 @@ fn type_letexception(
                             ),
                             ld_mutable: label.pld_mutable,
                             ld_optional: label.pld_optional,
-                            ld_type: poly_typed_ct,
+                            ld_type: tctx.typed.push_core_type(poly_typed_ct),
                             ld_loc: label.pld_loc,
                             ld_attributes: label.pld_attributes.clone(),
                         });
@@ -17418,7 +17440,9 @@ fn type_letexception(
             )
         }
         crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
+            crate::types::typedtree::ConstructorArgument::Cstr_tuple(
+                tctx.typed.push_core_types(vec![]),
+            ),
             None,
             crate::types::ConstructorArguments::CstrTuple(vec![]),
             vec![],
@@ -17497,7 +17521,8 @@ fn type_letexception(
             ext_is_exception: true,
         },
         ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-            typed_args, typed_ret,
+            typed_args,
+            typed_ret.map(|ct| tctx.typed.push_core_type(ct)),
         ),
         ext_loc: ext_constr.pext_loc,
         ext_attributes: ext_constr.pext_attributes.clone(),

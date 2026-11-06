@@ -7,6 +7,7 @@ use crate::types::typedtree::{
 };
 
 pub fn translate_signature_value(
+    ta: &crate::types::typedtree::TypedArena,
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -22,7 +23,7 @@ pub fn translate_signature_value(
             value_description.val_id.name()
         ));
     }
-    let type_expr = value_description.val_desc.ctyp_type;
+    let type_expr = ta.core_type(value_description.val_desc).ctyp_type;
     match crate::gentype::annotation::from_attributes(
         arena,
         config,
@@ -176,6 +177,7 @@ pub fn translate_signature_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
+                        ta,
                         ctx,
                         arena,
                         config,
@@ -195,6 +197,7 @@ pub fn translate_signature_item(
             );
             if value_description.val_prim.is_some() || is_import {
                 crate::gentype::translation::translate_primitive(
+                    ta,
                     ctx,
                     arena,
                     config,
@@ -208,6 +211,7 @@ pub fn translate_signature_item(
                     crate::gentype::runtime::new_module_item(value_description.val_id.name());
                 crate::gentype::type_env::update_module_item(module_item, type_env);
                 translate_signature_value(
+                    ta,
                     ctx,
                     arena,
                     config,

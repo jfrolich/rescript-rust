@@ -25,8 +25,8 @@ use crate::parser::ast::{
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
 pub use crate::types::tast_arena::{
-    TArgList, TCaseList, TExprIdx, TExprList, TFieldList, TModExprIdx, TModTypeIdx, TParamList,
-    TVbList, TypedArena,
+    TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExprIdx, TExprList, TFieldList, TModExprIdx,
+    TModTypeIdx, TParamList, TVbList, TypedArena,
 };
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
@@ -197,7 +197,7 @@ pub struct Pattern {
 #[derive(Debug, Clone)]
 pub enum PatExtra {
     /// Type constraint: `P : T`.
-    Tpat_constraint(TypedCoreType),
+    Tpat_constraint(TCoreTypeIdx),
     /// Type pattern: `#tconst`.
     Tpat_type(Path, Loc<LidentIdx>),
     /// Unpack pattern: `(module P)`.
@@ -287,14 +287,14 @@ pub struct Expression {
 #[derive(Debug, Clone)]
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
-    Texp_constraint(TypedCoreType),
+    Texp_constraint(TCoreTypeIdx),
     /// Coercion: `(E :> T)`. `target` is T as written; `source_type` is the
     /// inferred type of E and `target_type` the type of T, both
     /// head-expanded so a consumer without a typing environment can still
     /// relate them.
     Texp_coerce {
         source_type: TypeExprRef,
-        target: TypedCoreType,
+        target: TCoreTypeIdx,
         target_type: TypeExprRef,
     },
     /// Open: `let open M in E`.
@@ -576,7 +576,7 @@ pub struct ArrowArg {
     /// Argument label.
     pub lbl: TypeArgLabel,
     /// Argument type (boxed to prevent infinite size).
-    pub typ: Box<TypedCoreType>,
+    pub typ: TCoreTypeIdx,
 }
 
 /// Typed core type description.
@@ -586,17 +586,17 @@ pub enum TypedCoreTypeDesc {
     Ttyp_var(Option<String>),
     /// N-ary arrow type. Mirrors `compiler/ml/typedtree.ml`:
     /// `Ttyp_arrow of Parsetree.arg list * core_type`.
-    Ttyp_arrow(Vec<ArrowArg>, Box<TypedCoreType>),
+    Ttyp_arrow(Vec<ArrowArg>, TCoreTypeIdx),
     /// Tuple type: `(T1, ..., Tn)`.
-    Ttyp_tuple(Vec<TypedCoreType>),
+    Ttyp_tuple(TCoreTypeList),
     /// Type constructor: `t`, `M.t`, `('a, 'b) t`.
-    Ttyp_constr(Path, Loc<LidentIdx>, Vec<TypedCoreType>),
+    Ttyp_constr(Path, Loc<LidentIdx>, TCoreTypeList),
     /// Object type: `< m1: T1; ...; mn: Tn >`.
     Ttyp_object(Vec<ObjectField>, ClosedFlag),
     /// Polymorphic type: `'a 'b. T`.
-    Ttyp_poly(Vec<String>, Box<TypedCoreType>),
+    Ttyp_poly(Vec<String>, TCoreTypeIdx),
     /// Type alias: `T as 'a`.
-    Ttyp_alias(Box<TypedCoreType>, String),
+    Ttyp_alias(TCoreTypeIdx, String),
     /// Variant type: `[< `A | `B ]`.
     Ttyp_variant(Vec<RowFieldType>, ClosedFlag, Option<Vec<String>>),
     /// Package type: `(module MT)`.
@@ -618,9 +618,9 @@ pub struct ObjectField {
 #[derive(Debug, Clone)]
 pub enum ObjectFieldDesc {
     /// Named field.
-    OTtag(Loc<String>, TypedCoreType),
+    OTtag(Loc<String>, TCoreTypeIdx),
     /// Inherited type.
-    OTinherit(TypedCoreType),
+    OTinherit(TCoreTypeIdx),
 }
 
 /// A row field type (for polymorphic variants).
@@ -638,9 +638,9 @@ pub struct RowFieldType {
 #[derive(Debug, Clone)]
 pub enum RowFieldDesc {
     /// Tag: `` `A `` or `` `A of T ``.
-    Rtag(Loc<String>, bool, Vec<TypedCoreType>),
+    Rtag(Loc<String>, bool, TCoreTypeList),
     /// Inherit: `T`.
-    Rinherit(TypedCoreType),
+    Rinherit(TCoreTypeIdx),
 }
 
 /// A package type constraint.
@@ -649,7 +649,7 @@ pub struct PackageType {
     /// Module type path.
     pub pack_path: Path,
     /// Type constraints.
-    pub pack_fields: Vec<(Loc<LidentIdx>, TypedCoreType)>,
+    pub pack_fields: Vec<(Loc<LidentIdx>, TCoreTypeIdx)>,
 }
 
 // ============================================================================
@@ -887,17 +887,17 @@ pub struct TypedTypeDeclaration {
     /// Type name with location.
     pub typ_name: Loc<String>,
     /// Type parameters with variance.
-    pub typ_params: Vec<(TypedCoreType, Variance)>,
+    pub typ_params: Vec<(TCoreTypeIdx, Variance)>,
     /// Internal type declaration for the environment.
     pub typ_type: InternalTypeDeclaration,
     /// Type constraints.
-    pub typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)>,
+    pub typ_cstrs: Vec<(TCoreTypeIdx, TCoreTypeIdx, LocIdx)>,
     /// Type kind.
     pub typ_kind: TypedTypeKind,
     /// Private flag.
     pub typ_private: PrivateFlag,
     /// Manifest type (for type aliases).
-    pub typ_manifest: Option<TypedCoreType>,
+    pub typ_manifest: Option<TCoreTypeIdx>,
     /// Location.
     pub typ_loc: LocIdx,
     /// Attributes.
@@ -929,7 +929,7 @@ pub struct TypedConstructorDeclaration {
     /// Constructor arguments.
     pub cd_args: TypedConstructorArguments,
     /// Result type (for GADTs).
-    pub cd_res: Option<TypedCoreType>,
+    pub cd_res: Option<TCoreTypeIdx>,
     /// Location.
     pub cd_loc: LocIdx,
     /// Attributes.
@@ -940,7 +940,7 @@ pub struct TypedConstructorDeclaration {
 #[derive(Debug, Clone)]
 pub enum TypedConstructorArguments {
     /// Tuple arguments.
-    Cstr_tuple(Vec<TypedCoreType>),
+    Cstr_tuple(TCoreTypeList),
     /// Record arguments.
     Cstr_record(Vec<TypedLabelDeclaration>),
 }
@@ -959,7 +959,7 @@ pub struct TypedLabelDeclaration {
     /// Whether the label is optional.
     pub ld_optional: bool,
     /// Label type.
-    pub ld_type: TypedCoreType,
+    pub ld_type: TCoreTypeIdx,
     /// Location.
     pub ld_loc: LocIdx,
     /// Attributes.
@@ -978,7 +978,7 @@ pub struct TypeExtension {
     /// Extended type path.
     pub tyext_path: Path,
     /// Type parameters.
-    pub tyext_params: Vec<(TypedCoreType, Variance)>,
+    pub tyext_params: Vec<(TCoreTypeIdx, Variance)>,
     /// Extension constructors.
     pub tyext_constructors: Vec<ExtensionConstructor>,
     /// Private flag.
@@ -1055,7 +1055,7 @@ pub struct TypedValueDescription {
     /// Name with location.
     pub val_name: Loc<String>,
     /// Typed core type (the annotated type).
-    pub val_desc: TypedCoreType,
+    pub val_desc: TCoreTypeIdx,
     /// Primitive names.
     pub val_prim: Option<crate::parser::ast::PrimitiveRepr>,
     /// `val_val.val_kind` (compiler/ml/typedtree.mli `value_description`):
@@ -1089,7 +1089,7 @@ pub struct ExtensionConstructor {
 #[derive(Debug, Clone)]
 pub enum ExtensionConstructorKind {
     /// Declaration with argument types and optional result type.
-    Text_decl(ConstructorArgument, Option<TypedCoreType>),
+    Text_decl(ConstructorArgument, Option<TCoreTypeIdx>),
     /// Rebind to another constructor.
     Text_rebind(Path, Loc<LidentIdx>),
 }
@@ -1098,7 +1098,7 @@ pub enum ExtensionConstructorKind {
 #[derive(Debug, Clone)]
 pub enum ConstructorArgument {
     /// Tuple arguments.
-    Cstr_tuple(Vec<TypedCoreType>),
+    Cstr_tuple(TCoreTypeList),
     /// Record arguments.
     Cstr_record(Vec<LabelDeclaration>),
 }
@@ -1117,7 +1117,7 @@ pub struct LabelDeclaration {
     /// Whether the label is optional.
     pub ld_optional: bool,
     /// Label type.
-    pub ld_type: TypedCoreType,
+    pub ld_type: TCoreTypeIdx,
     /// Location.
     pub ld_loc: LocIdx,
     /// Attributes.

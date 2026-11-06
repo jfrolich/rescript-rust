@@ -18,7 +18,8 @@ use std::num::NonZeroU32;
 use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
-    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, ModuleType, RecordField, ValueBinding,
+    ApplyArg, Case, Expression, FunctionParam, ModuleExpr, ModuleType, RecordField, TypedCoreType,
+    ValueBinding,
 };
 
 macro_rules! arena_handle {
@@ -54,6 +55,14 @@ arena_handle!(
     /// Handle of a typed module type in a [`TypedArena`].
     TModTypeIdx
 );
+
+arena_handle!(
+    /// Handle of a typed core type (a type annotation) in a [`TypedArena`].
+    TCoreTypeIdx
+);
+
+/// A list of typed core types (tuple and constructor arguments).
+pub type TCoreTypeList = ArenaList<TCoreTypeIdx>;
 
 /// Handle of a typed expression in a [`TypedArena`].
 ///
@@ -164,6 +173,8 @@ pub struct TypedArena {
     expr_lists: ListPool<TExprIdx>,
     module_exprs: Vec<ModuleExpr>,
     module_types: Vec<ModuleType>,
+    core_types: Vec<TypedCoreType>,
+    core_type_lists: ListPool<TCoreTypeIdx>,
     cases: ListPool<Case>,
     value_bindings: ListPool<ValueBinding>,
     apply_args: ListPool<ApplyArg>,
@@ -282,6 +293,51 @@ impl TypedArena {
     #[inline]
     pub fn module_type(&self, idx: TModTypeIdx) -> &ModuleType {
         &self.module_types[idx.index()]
+    }
+
+    /// Store a core type.
+    #[inline]
+    pub fn push_core_type(&mut self, t: TypedCoreType) -> TCoreTypeIdx {
+        let idx = TCoreTypeIdx::from_index(self.core_types.len());
+        self.core_types.push(t);
+        idx
+    }
+
+    /// A core type by handle.
+    #[inline]
+    pub fn core_type(&self, idx: TCoreTypeIdx) -> &TypedCoreType {
+        &self.core_types[idx.index()]
+    }
+
+    /// Store each core type, then the list of their handles.
+    pub fn push_core_types(
+        &mut self,
+        types: impl IntoIterator<Item = TypedCoreType>,
+    ) -> TCoreTypeList {
+        let handles: smallvec::SmallVec<[TCoreTypeIdx; 8]> =
+            types.into_iter().map(|t| self.push_core_type(t)).collect();
+        self.core_type_lists.push_iter(handles)
+    }
+
+    /// Store a list of core type handles.
+    pub fn push_core_type_list(&mut self, items: &[TCoreTypeIdx]) -> TCoreTypeList {
+        self.core_type_lists.push_iter(items.iter().copied())
+    }
+
+    /// The handles of a core type list.
+    #[inline]
+    pub fn core_type_list(&self, list: TCoreTypeList) -> &[TCoreTypeIdx] {
+        self.core_type_lists.get(list)
+    }
+
+    /// The core types of a list.
+    pub fn core_types(
+        &self,
+        list: TCoreTypeList,
+    ) -> impl ExactSizeIterator<Item = &TypedCoreType> + '_ {
+        self.core_type_list(list)
+            .iter()
+            .map(|&idx| self.core_type(idx))
     }
 
     /// Number of stored expressions.
