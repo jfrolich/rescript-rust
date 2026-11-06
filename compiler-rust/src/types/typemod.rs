@@ -508,7 +508,7 @@ fn rebind_constructor_arguments(
     if let Some(inlined) = &desc.cstr_inlined {
         let tl = match inst_args {
             [arg] => match &*ctx.get_desc(ctx.repr(*arg)) {
-                crate::types::TypeDesc::Tconstr { args, .. } => args.to_vec(),
+                crate::types::TypeDesc::Tconstr { args, .. } => ctx.type_list(args).to_vec(),
                 _ => Vec::new(),
             },
             _ => Vec::new(),
@@ -1515,7 +1515,7 @@ fn rewrite_type_paths_in_place(
                     },
                 );
             }
-            for arg in args {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
@@ -1526,7 +1526,7 @@ fn rewrite_type_paths_in_place(
             rewrite_type_paths_in_place(ctx, *ret, sites, visited, rewrite);
         }
         TypeDesc::Ttuple(types) => {
-            for ty in types {
+            for ty in ctx.type_list(types).iter() {
                 rewrite_type_paths_in_place(ctx, *ty, sites, visited, rewrite);
             }
         }
@@ -1535,7 +1535,7 @@ fn rewrite_type_paths_in_place(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_type_paths_in_place(ctx, *body, sites, visited, rewrite);
-            for var in vars {
+            for var in ctx.type_list(vars).iter() {
                 rewrite_type_paths_in_place(ctx, *var, sites, visited, rewrite);
             }
         }
@@ -1587,7 +1587,7 @@ fn rewrite_type_paths_in_place(
                     },
                 );
             }
-            for arg in args {
+            for arg in ctx.type_list(args).iter() {
                 rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
             }
         }
@@ -1676,7 +1676,7 @@ fn rewrite_included_type_decl_paths_to_local(
         match self_strengthened_args {
             Some(args) => {
                 visited.insert(manifest);
-                for arg in args {
+                for arg in ctx.type_list(args) {
                     rewrite_included_type_paths_to_local(
                         ctx,
                         arg,
@@ -2860,7 +2860,7 @@ fn extract_concrete_type_decl_for_record_spread(
 
         let decl = find_type_decl_for_path(env, ctx, &path)?;
         if !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
-            return Some((path, args.to_vec(), decl));
+            return Some((path, ctx.type_list(args).to_vec(), decl));
         }
 
         if !seen.insert(path.name()) {
@@ -2965,7 +2965,8 @@ fn expand_record_spread_label(
                 ..
             } => {
                 let mut changed = false;
-                let new_args: Vec<_> = inner_args
+                let new_args: Vec<_> = ctx
+                    .type_list(inner_args)
                     .iter()
                     .map(|arg| {
                         let new_arg = substitute_type_params(ctx, *arg, params, args, cache);
@@ -3011,7 +3012,8 @@ fn expand_record_spread_label(
             }
             crate::types::TypeDesc::Ttuple(items) => {
                 let mut changed = false;
-                let new_items: Vec<_> = items
+                let new_items: Vec<_> = ctx
+                    .type_list(items)
                     .iter()
                     .map(|item| {
                         let new_item = substitute_type_params(ctx, *item, params, args, cache);
@@ -3147,7 +3149,8 @@ fn expand_record_spread_label(
                 } else {
                     let new_body = substitute_type_params(ctx, *body, params, args, cache);
                     let mut changed = new_body != *body;
-                    let new_vars: Vec<_> = vars
+                    let new_vars: Vec<_> = ctx
+                        .type_list(vars)
                         .iter()
                         .map(|var| {
                             let new_var = substitute_type_params(ctx, *var, params, args, cache);
@@ -3170,7 +3173,8 @@ fn expand_record_spread_label(
                 args: pkg_args,
             } => {
                 let mut changed = false;
-                let new_args: Vec<_> = pkg_args
+                let new_args: Vec<_> = ctx
+                    .type_list(pkg_args)
                     .iter()
                     .map(|arg| {
                         let new_arg = substitute_type_params(ctx, *arg, params, args, cache);
@@ -3187,7 +3191,7 @@ fn expand_record_spread_label(
                         ctx.new_type(crate::types::TypeDesc::Tpackage {
                             path: path.clone(),
                             lids: lids.clone(),
-                            args: new_args.into(),
+                            args: ctx.new_type_list(&new_args),
                         }),
                     )
                 } else {
@@ -4090,9 +4094,11 @@ fn check_extension_constructor_variance_requirements(
             let ret_repr = ctx.repr(ret_type);
             match &*ctx.get_desc(ret_repr) {
                 // `let tyl = List.map Ctype.repr tyl` (typedecl.ml:1246).
-                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => {
-                    args.iter().map(|arg| ctx.repr(*arg)).collect()
-                }
+                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => ctx
+                    .type_list(args)
+                    .iter()
+                    .map(|arg| ctx.repr(*arg))
+                    .collect(),
                 _ => ext.ext_type_params.clone(),
             }
         }
@@ -4320,7 +4326,8 @@ fn check_type_decl_variance_requirements(
             else {
                 continue;
             };
-            let free_vars_by_arg: Vec<HashSet<TypeExprRef>> = args
+            let free_vars_by_arg: Vec<HashSet<TypeExprRef>> = ctx
+                .type_list(args)
                 .iter()
                 .map(|arg| {
                     let mut free_vars = HashSet::default();
@@ -4329,7 +4336,7 @@ fn check_type_decl_variance_requirements(
                     free_vars
                 })
                 .collect();
-            for (idx, arg) in args.iter().copied().enumerate() {
+            for (idx, arg) in ctx.type_list(args).iter().copied().enumerate() {
                 let Some((_, parser_variance)) = parsed_decl.ptype_params.get(idx) else {
                     continue;
                 };
@@ -4815,7 +4822,12 @@ fn check_type_declaration_coherence(
         });
     }
 
-    if !type_expr_lists_equal_without_renaming(ctx, env, &manifest_args, &decl.type_params) {
+    if !type_expr_lists_equal_without_renaming(
+        ctx,
+        env,
+        &ctx.type_list(manifest_args),
+        &decl.type_params,
+    ) {
         return Err(TypeModError::DefinitionMismatch {
             loc,
             ty: manifest,
@@ -6432,7 +6444,11 @@ fn type_exprs_equal_for_abbrev_recursion(
                 && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
         }
         (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items)) => {
-            type_expr_lists_equal_for_abbrev_recursion(ctx, &left_items, &right_items)
+            type_expr_lists_equal_for_abbrev_recursion(
+                ctx,
+                &ctx.type_list(left_items),
+                &ctx.type_list(right_items),
+            )
         }
         (
             TypeDesc::Tconstr {
@@ -6447,7 +6463,11 @@ fn type_exprs_equal_for_abbrev_recursion(
             },
         ) => {
             left_path.same(&right_path)
-                && type_expr_lists_equal_for_abbrev_recursion(ctx, &left_args, &right_args)
+                && type_expr_lists_equal_for_abbrev_recursion(
+                    ctx,
+                    &ctx.type_list(left_args),
+                    &ctx.type_list(right_args),
+                )
         }
         (TypeDesc::Tlink(left_next), _) | (TypeDesc::Tsubst(left_next), _) => {
             type_exprs_equal_for_abbrev_recursion(ctx, left_next, right, seen)
@@ -6466,9 +6486,10 @@ fn type_exprs_equal_for_abbrev_recursion(
             },
         ) => {
             left_vars.len() == right_vars.len()
-                && left_vars
+                && ctx
+                    .type_list(left_vars)
                     .iter()
-                    .zip(right_vars.iter())
+                    .zip(ctx.type_list(right_vars).iter())
                     .all(|(left_var, right_var)| {
                         type_exprs_equal_for_abbrev_recursion(ctx, *left_var, *right_var, seen)
                     })
@@ -6488,7 +6509,11 @@ fn type_exprs_equal_for_abbrev_recursion(
         ) => {
             left_path.same(&right_path)
                 && left_lids == right_lids
-                && type_expr_lists_equal_for_abbrev_recursion(ctx, &left_args, &right_args)
+                && type_expr_lists_equal_for_abbrev_recursion(
+                    ctx,
+                    &ctx.type_list(left_args),
+                    &ctx.type_list(right_args),
+                )
         }
         (TypeDesc::Tnil, TypeDesc::Tnil) => true,
         _ => false,
@@ -6581,7 +6606,11 @@ fn check_type_abbrev_recursion_regular(
     match (*ctx.get_desc(ty)).clone() {
         TypeDesc::Tconstr { path, args, .. } => {
             if path.same(target_path) {
-                if !type_expr_lists_equal_for_abbrev_recursion(ctx, expected_args, &args) {
+                if !type_expr_lists_equal_for_abbrev_recursion(
+                    ctx,
+                    expected_args,
+                    &ctx.type_list(args),
+                ) {
                     return Err(TypeModError::ParametersDiffer {
                         loc,
                         path: current_path.clone(),
@@ -6607,9 +6636,12 @@ fn check_type_abbrev_recursion_regular(
                 unify_state.set_env(env);
                 let same_arity = params.len() == args.len();
                 let params_unify = same_arity
-                    && params.iter().zip(args.iter()).all(|(param, arg)| {
-                        crate::types::ctype::unify(ctx, &mut unify_state, *param, *arg).is_ok()
-                    });
+                    && params
+                        .iter()
+                        .zip(ctx.type_list(args).iter())
+                        .all(|(param, arg)| {
+                            crate::types::ctype::unify(ctx, &mut unify_state, *param, *arg).is_ok()
+                        });
                 if !params_unify {
                     return Err(TypeModError::ConstraintFailed {
                         loc,
@@ -6634,7 +6666,7 @@ fn check_type_abbrev_recursion_regular(
                 )?;
             }
 
-            for arg in args {
+            for arg in ctx.type_list(args) {
                 check_type_abbrev_recursion_regular(
                     ctx,
                     env,
@@ -6652,7 +6684,8 @@ fn check_type_abbrev_recursion_regular(
             Ok(())
         }
         TypeDesc::Tpoly { body, vars } => {
-            let (_, body) = crate::types::ctype::instance_poly(ctx, true, false, &vars, body);
+            let (_, body) =
+                crate::types::ctype::instance_poly(ctx, true, false, &ctx.type_list(vars), body);
             check_type_abbrev_recursion_regular(
                 ctx,
                 env,
@@ -7233,7 +7266,11 @@ fn check_constraints_rec(
     let desc = ctx.get_desc(ty).into_desc();
     match desc {
         crate::types::type_expr::TypeDesc::Tconstr { path, args, .. } => {
-            let fresh_args = args.iter().map(|_| ctx.new_var(None)).collect();
+            let fresh_args = ctx
+                .type_list(args)
+                .iter()
+                .map(|_| ctx.new_var(None))
+                .collect();
             let expected = ctx.new_constr(path.clone(), fresh_args);
             let decl = match path.view() {
                 PathView::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
@@ -7259,12 +7296,13 @@ fn check_constraints_rec(
                     expected,
                 });
             }
-            for arg in args {
+            for arg in ctx.type_list(args) {
                 check_constraints_rec(ctx, env, pers_env, loc, visited, arg)?;
             }
         }
         crate::types::type_expr::TypeDesc::Tpoly { body, vars } => {
-            let (_, body) = crate::types::ctype::instance_poly(ctx, false, false, &vars, body);
+            let (_, body) =
+                crate::types::ctype::instance_poly(ctx, false, false, &ctx.type_list(vars), body);
             check_constraints_rec(ctx, env, pers_env, loc, visited, body)?;
         }
         _ => {
@@ -8834,7 +8872,7 @@ fn apply_with_type_constraints_to_module_type(
         let desc = ctx.get_desc(ty).into_desc();
         match desc {
             TypeDesc::Tconstr { path, args, .. } => {
-                for arg in &args {
+                for arg in ctx.type_list(&args).iter() {
                     rewrite_type_with_substs(ctx, *arg, substs, cache, visited);
                 }
 
@@ -8873,7 +8911,7 @@ fn apply_with_type_constraints_to_module_type(
                 rewrite_type_with_substs(ctx, ret, substs, cache, visited);
             }
             TypeDesc::Ttuple(types) | TypeDesc::Tpackage { args: types, .. } => {
-                for inner in types {
+                for inner in ctx.type_list(types) {
                     rewrite_type_with_substs(ctx, inner, substs, cache, visited);
                 }
             }
@@ -8908,7 +8946,7 @@ fn apply_with_type_constraints_to_module_type(
             }
             TypeDesc::Tpoly { body, vars } => {
                 rewrite_type_with_substs(ctx, body, substs, cache, visited);
-                for var in vars {
+                for var in ctx.type_list(vars) {
                     rewrite_type_with_substs(ctx, var, substs, cache, visited);
                 }
             }
@@ -9724,10 +9762,10 @@ fn check_usage_of_path_of_substituted_item(
             let desc = tctx.type_ctx.borrow_desc(ty);
             match &*desc {
                 TypeDesc::Tconstr { path, args, .. } => {
-                    TypeAction::Path(path.clone(), args.to_vec())
+                    TypeAction::Path(path.clone(), tctx.type_ctx.type_list(args).to_vec())
                 }
                 TypeDesc::Tpackage { path, args, .. } => {
-                    TypeAction::Path(path.clone(), args.to_vec())
+                    TypeAction::Path(path.clone(), tctx.type_ctx.type_list(args).to_vec())
                 }
                 TypeDesc::Tobject { fields } => TypeAction::Object(*fields),
                 TypeDesc::Tvariant(row) => TypeAction::Variant(*row.clone()),
@@ -10458,7 +10496,7 @@ fn rewrite_functor_param_type_paths_in_type(
     match desc {
         TypeDesc::Tconstr { path, args, .. } => {
             let has_args = !args.is_empty();
-            for arg in args {
+            for arg in ctx.type_list(args) {
                 rewrite_functor_param_type_paths_in_type(
                     arg,
                     param_name,
@@ -10528,7 +10566,7 @@ fn rewrite_functor_param_type_paths_in_type(
             );
         }
         TypeDesc::Ttuple(types) => {
-            for inner in types {
+            for inner in ctx.type_list(types) {
                 rewrite_functor_param_type_paths_in_type(
                     inner,
                     param_name,
@@ -10625,7 +10663,7 @@ fn rewrite_functor_param_type_paths_in_type(
                 visited,
                 manifest_subst_cache,
             );
-            for var in vars {
+            for var in ctx.type_list(vars) {
                 rewrite_functor_param_type_paths_in_type(
                     var,
                     param_name,
@@ -10637,7 +10675,7 @@ fn rewrite_functor_param_type_paths_in_type(
             }
         }
         TypeDesc::Tpackage { args, .. } => {
-            for arg in args {
+            for arg in ctx.type_list(args) {
                 rewrite_functor_param_type_paths_in_type(
                     arg,
                     param_name,
@@ -11440,7 +11478,7 @@ fn module_type_from_typed_unpack_expr<'a>(
         env,
         &package_path,
         &package_lids,
-        &package_args,
+        &tctx.type_ctx.type_list(package_args),
         arena,
         &mut tctx.persistent_env,
         tctx.type_ctx,
@@ -13265,7 +13303,7 @@ fn strip_self_module_prefix_in_sig(
         let desc = type_ctx.get_desc(ty_ref);
         match &*desc {
             TypeDesc::Tconstr { path, args, abbrev } => {
-                for arg in args {
+                for arg in type_ctx.type_list(args).iter() {
                     rewrite_type(*arg, module_id, direct_items, type_ctx, visited);
                 }
                 if let Some(rewritten) = rewrite_self_path(path, module_id, direct_items) {
@@ -13286,7 +13324,7 @@ fn strip_self_module_prefix_in_sig(
                 rewrite_type(*ret, module_id, direct_items, type_ctx, visited);
             }
             TypeDesc::Ttuple(items) => {
-                for item in items {
+                for item in type_ctx.type_list(items).iter() {
                     rewrite_type(*item, module_id, direct_items, type_ctx, visited);
                 }
             }
@@ -13295,7 +13333,7 @@ fn strip_self_module_prefix_in_sig(
             }
             TypeDesc::Tpoly { body, vars } => {
                 rewrite_type(*body, module_id, direct_items, type_ctx, visited);
-                for var in vars {
+                for var in type_ctx.type_list(vars).iter() {
                     rewrite_type(*var, module_id, direct_items, type_ctx, visited);
                 }
             }
@@ -13324,7 +13362,7 @@ fn strip_self_module_prefix_in_sig(
                 }
             }
             TypeDesc::Tpackage { path, args, lids } => {
-                for arg in args {
+                for arg in type_ctx.type_list(args).iter() {
                     rewrite_type(*arg, module_id, direct_items, type_ctx, visited);
                 }
                 if let Some(rewritten) = rewrite_self_path(path, module_id, direct_items) {
@@ -14696,7 +14734,7 @@ fn find_unbound_type_var_in_typed_core_type_before_closed_decl(
         TypedCoreTypeDesc::Ttyp_poly(_, body) => {
             let mut allowed = allowed.clone();
             if let TypeDesc::Tpoly { vars, .. } = &*ctx.get_desc(ctx.repr(ctyp.ctyp_type)) {
-                allowed.extend(vars.iter().map(|var| ctx.repr(*var)));
+                allowed.extend(ctx.type_list(vars).iter().map(|var| ctx.repr(*var)));
             }
             find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, body, &allowed)
         }
@@ -14733,7 +14771,7 @@ fn find_unbound_type_var_in_typed_core_type(
         TypedCoreTypeDesc::Ttyp_poly(_, body) => {
             let mut allowed = allowed.clone();
             if let TypeDesc::Tpoly { vars, .. } = &*ctx.get_desc(ctx.repr(ctyp.ctyp_type)) {
-                allowed.extend(vars.iter().map(|var| ctx.repr(*var)));
+                allowed.extend(ctx.type_list(vars).iter().map(|var| ctx.repr(*var)));
             }
             find_unbound_type_var_in_typed_core_type(ctx, body, &allowed)
         }
@@ -15472,7 +15510,9 @@ fn type_module_expr_with_alias_inner<'a>(
                 crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
             let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {
                 crate::types::type_expr::TypeDesc::Tpackage { path, lids, args } => {
-                    if args
+                    if tctx
+                        .type_ctx
+                        .type_list(args)
                         .iter()
                         .any(|arg| type_expr_has_free_variables(tctx.type_ctx, *arg))
                     {
@@ -15484,7 +15524,7 @@ fn type_module_expr_with_alias_inner<'a>(
                                 env,
                                 path,
                                 lids,
-                                args,
+                                &tctx.type_ctx.type_list(args),
                                 arena,
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,

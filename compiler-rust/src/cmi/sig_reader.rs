@@ -727,7 +727,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Ttuple(types.into())
+                    TypeDesc::Ttuple(self.ctx.new_type_list(&types))
                 }
                 3 => {
                     // Tconstr(Path.t, type_expr list, abbrev_memo ref)
@@ -741,7 +741,7 @@ impl<'a> SigReadContext<'a> {
 
                     TypeDesc::Tconstr {
                         path,
-                        args: args.into(),
+                        args: self.ctx.new_type_list(&args),
                         abbrev,
                     }
                 }
@@ -796,7 +796,7 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     TypeDesc::Tpoly {
                         body,
-                        vars: vars.into(),
+                        vars: self.ctx.new_type_list(&vars),
                     }
                 }
                 11 => {
@@ -815,7 +815,7 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tpackage {
                         path,
                         lids: Box::new(lids),
-                        args: args.into(),
+                        args: self.ctx.new_type_list(&args),
                     }
                 }
                 _ => {

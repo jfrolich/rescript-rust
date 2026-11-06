@@ -2694,7 +2694,7 @@ fn rewrite_substituted_type_paths(
     let desc = type_ctx.get_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
             }
             let new_path = substitute_type_constructor_path(path, subst);
@@ -2716,7 +2716,7 @@ fn rewrite_substituted_type_paths(
             rewrite_substituted_type_paths(type_ctx, *ret, subst, seen);
         }
         TypeDesc::Ttuple(items) => {
-            for item in items {
+            for item in type_ctx.type_list(items).iter() {
                 rewrite_substituted_type_paths(type_ctx, *item, subst, seen);
             }
         }
@@ -2746,12 +2746,12 @@ fn rewrite_substituted_type_paths(
         }
         TypeDesc::Tpoly { body, vars } => {
             rewrite_substituted_type_paths(type_ctx, *body, subst, seen);
-            for var in vars {
+            for var in type_ctx.type_list(vars).iter() {
                 rewrite_substituted_type_paths(type_ctx, *var, subst, seen);
             }
         }
         TypeDesc::Tpackage { path, args, lids } => {
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
             }
             let new_path = substitute_modtype_path(path, subst);
@@ -3868,9 +3868,9 @@ fn type_exprs_equal_for_inclusion_inner(
         // paths before `expand_head_rigid`. Parameterized constructors must
         // expand first; aliases can expose package types whose comparison has
         // observable Env/Ident allocation side effects.
-        return impl_args
+        return type_ctx.type_list(impl_args)
             .iter()
-            .zip(sig_args.iter())
+            .zip(type_ctx.type_list(sig_args).iter())
             .all(|(impl_arg, sig_arg)| {
                 type_exprs_equal_for_inclusion_inner(
                     type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
@@ -3924,9 +3924,9 @@ fn type_exprs_equal_for_inclusion_inner(
         }
         (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(sig_items)) => {
             impl_items.len() == sig_items.len()
-                && impl_items
+                && type_ctx.type_list(impl_items)
                     .iter()
-                    .zip(sig_items.iter())
+                    .zip(type_ctx.type_list(sig_items).iter())
                     .all(|(impl_item, sig_item)| {
                         type_exprs_equal_for_inclusion_inner(
                             type_ctx, env, param_map, *impl_item, *sig_item, seen,
@@ -3947,9 +3947,9 @@ fn type_exprs_equal_for_inclusion_inner(
         ) => {
             impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
-                && impl_args
+                && type_ctx.type_list(impl_args)
                     .iter()
-                    .zip(sig_args.iter())
+                    .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
                             type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
@@ -4006,9 +4006,9 @@ fn type_exprs_equal_for_inclusion_inner(
             labels_complete
                 && impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
-                && impl_args
+                && type_ctx.type_list(impl_args)
                     .iter()
-                    .zip(sig_args.iter())
+                    .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
                             type_ctx, env, param_map, *impl_arg, *sig_arg, seen,

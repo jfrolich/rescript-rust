@@ -2668,7 +2668,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         // predef.ml:412-423: exactly these exceptions, in this order.
         let loc_tuple = |ctx: &TypeContext| {
             ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(
-                vec![string_ty_for_exn, int_ty_for_exn, int_ty_for_exn].into(),
+                ctx.new_type_list(&[string_ty_for_exn, int_ty_for_exn, int_ty_for_exn]),
             ))
         };
         add_exception(

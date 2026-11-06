@@ -946,7 +946,7 @@ fn print_extra_type_clash_help_by_types(
             ppf.cut();
         } else if type_params.len() == 1
             && p.same(&predef::path_array())
-            && expands_to_jsx(ctx, env, type_params[0], "element")
+            && expands_to_jsx(ctx, env, ctx.type_list_at(type_params, 0), "element")
         {
             let extra = format!(
                 " (for example by using a pipe: ->{}.",

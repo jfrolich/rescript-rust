@@ -4937,7 +4937,7 @@ fn format_unbound_type_declaration_variable_report(
                     labels.iter().map(|l| l.ld_type).collect()
                 }
             };
-            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(tys.into()));
+            let typ_ti = type_ctx.new_generic_type(TypeDesc::Ttuple(type_ctx.new_type_list(&tys)));
             let mut printer = TypeExprPrinter::new(type_ctx);
             printer.reset();
             printer.mark_loops(typ_ti);
@@ -6942,9 +6942,10 @@ fn printtyp_same_path(type_ctx: &TypeContext, t: TypeExprRef, t2: TypeExprRef) -
         ) => {
             p1.same(p2)
                 && a1.len() == a2.len()
-                && a1
+                && type_ctx
+                    .type_list(a1)
                     .iter()
-                    .zip(a2.iter())
+                    .zip(type_ctx.type_list(a2).iter())
                     .all(|(x, y)| type_ctx.repr(*x) == type_ctx.repr(*y))
         }
         _ => false,
@@ -7438,7 +7439,7 @@ fn escaped_constructor_path_in_type(
             if var_level < path.binding_time() {
                 return Some(path.name());
             }
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 if let Some(path) =
                     escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
                 {
@@ -7448,7 +7449,7 @@ fn escaped_constructor_path_in_type(
             None
         }
         TypeDesc::Tpackage { args, .. } | TypeDesc::Ttuple(args) => {
-            for arg in args {
+            for arg in type_ctx.type_list(args).iter() {
                 if let Some(path) =
                     escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
                 {
@@ -8713,7 +8714,7 @@ fn append_jsx_element_type_clash_help(
         TypeDesc::Tconstr { path, args, .. }
             if args.len() == 1 && path.same(&crate::types::predef::path_array()) =>
         {
-            if type_is_jsx_element_named(type_ctx, args[0]) {
+            if type_is_jsx_element_named(type_ctx, type_ctx.type_list_at(args, 0)) {
                 message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert array to a JSX element with ");
                 message.push_str(INFO);
                 message.push_str("React.array");
@@ -8963,7 +8964,12 @@ fn type_alias_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeE
     let manifest = type_decl_manifest_for_path(type_ctx, &path)?;
     let (params, manifest) = manifest;
     let expansion = if params.len() == args.len() {
-        crate::types::ctype::subst_type_params(type_ctx, &params, &args, manifest)
+        crate::types::ctype::subst_type_params(
+            type_ctx,
+            &params,
+            &type_ctx.type_list(args),
+            manifest,
+        )
     } else {
         manifest
     };
@@ -10179,7 +10185,7 @@ fn format_package_type_expr_for_error(
 
     let constraints = lids
         .iter()
-        .zip(args.iter())
+        .zip(type_ctx.type_list(args).iter())
         .map(|(lid, arg)| {
             format!(
                 "type {} = {}",
@@ -12250,7 +12256,7 @@ fn moregen_link(
             let a2 = a2.clone();
             drop(impl_desc);
             drop(iface_desc);
-            for (a, b) in a1.iter().zip(a2.iter()) {
+            for (a, b) in ctx.type_list(a1).iter().zip(ctx.type_list(a2).iter()) {
                 moregen_link(ctx, *a, *b, visited);
             }
         }
@@ -12270,7 +12276,7 @@ fn moregen_link(
             let t2 = t2.clone();
             drop(impl_desc);
             drop(iface_desc);
-            for (a, b) in t1.iter().zip(t2.iter()) {
+            for (a, b) in ctx.type_list(t1).iter().zip(ctx.type_list(t2).iter()) {
                 moregen_link(ctx, *a, *b, visited);
             }
         }

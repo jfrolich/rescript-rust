@@ -36,7 +36,7 @@ pub fn remove_option(
             if matches!(path.view(), PathView::Pident(id) if id.name() == "option")
                 && args.len() == 1 =>
         {
-            Some((lbl.txt.clone(), args[0]))
+            Some((lbl.txt.clone(), ctx.type_list_at(args, 0)))
         }
         (TypeDesc::Tlink(t), _) => remove_option(ctx, label, &t),
         _ => None,
@@ -389,12 +389,20 @@ pub fn translateTypeExprFromTypes_(
             type_: Type::TypeVar(s.to_string()),
         },
         TypeDesc::Tconstr { path, args, .. }
-            if path.name() == "Js.t" && args.len() == 1 && is_js_t_preserved(ctx, &args[0]) =>
+            if path.name() == "Js.t"
+                && args.len() == 1
+                && is_js_t_preserved(ctx, &ctx.type_list_at(args, 0)) =>
         {
             translate_obj_type(ClosedFlag::Closed, vec![])
         }
         TypeDesc::Tconstr { path, args, .. } if path.name() == "Js.t" && args.len() == 1 => {
-            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &args[0])
+            translateTypeExprFromTypes_(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &ctx.type_list_at(args, 0),
+            )
         }
         TypeDesc::Tobject { fields, .. } => {
             let (closed_flag, fields_translations) =
@@ -407,8 +415,13 @@ pub fn translateTypeExprFromTypes_(
             // single argument is Tlink. Rust still needs that exact branch; for
             // now the argument translation follows Tlink through the same
             // TypeContext-backed descriptor reads.
-            let params_translation =
-                translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &args);
+            let params_translation = translateTypeExprsFromTypes_(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &ctx.type_list(args),
+            );
             translate_constr(config, &params_translation, &path, type_env)
         }
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
@@ -418,8 +431,13 @@ pub fn translateTypeExprFromTypes_(
             translate_arrow_type(ctx, config, type_vars_gen, type_env, &args, &ret)
         }
         TypeDesc::Ttuple(list_exp) => {
-            let inner_types_translation =
-                translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &list_exp);
+            let inner_types_translation = translateTypeExprsFromTypes_(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &ctx.type_list(list_exp),
+            );
             Translation {
                 dependencies: inner_types_translation
                     .iter()
@@ -450,7 +468,15 @@ pub fn translateTypeExprFromTypes_(
                 .iter()
                 .map(|lid| longident_to_strings(ctx, lid))
                 .collect::<Vec<_>>();
-            translate_package(ctx, config, type_vars_gen, type_env, &path, &ids, &types)
+            translate_package(
+                ctx,
+                config,
+                type_vars_gen,
+                type_env,
+                &path,
+                &ids,
+                &ctx.type_list(types),
+            )
         }
         TypeDesc::Tfield { .. }
         | TypeDesc::Tnil

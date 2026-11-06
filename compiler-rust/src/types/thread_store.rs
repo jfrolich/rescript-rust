@@ -136,6 +136,7 @@ pub(crate) struct ThreadTypeStore {
     /// to the reading compilation's overlay.
     abbrevs: RefCell<Vec<AbbrevMemo>>,
     row_fields: RefCell<Vec<Option<RowField>>>,
+    type_lists: super::type_expr::TypeListPool,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
     /// Internalized dependency signatures keyed by the identity of the
@@ -195,6 +196,7 @@ impl ThreadTypeStore {
             types: TypeArena::new(),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
+            type_lists: super::type_expr::TypeListPool::with_tag(super::type_expr::STORE_REF_TAG),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             pers: RefCell::new(HashMap::new()),
@@ -392,6 +394,19 @@ impl ThreadTypeStore {
     #[inline]
     pub(crate) fn node(&self, r: TypeExprRef) -> &TypeExpr {
         self.types.get_at(r.store_index())
+    }
+
+    /// Allocate a type list in the worker store.
+    pub(crate) fn alloc_type_list(&self, items: &[TypeExprRef]) -> super::type_expr::TypeRefList {
+        self.type_lists.alloc(items)
+    }
+
+    /// The elements of a worker-store type list.
+    pub(crate) fn type_list(
+        &self,
+        list: super::type_expr::TypeRefList,
+    ) -> super::type_expr::TypeRefs {
+        self.type_lists.get(list)
     }
 
     pub(crate) fn type_count(&self) -> usize {

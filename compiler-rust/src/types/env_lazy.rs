@@ -377,7 +377,7 @@ fn build_type_constructors(
                             // already gone through compiler/ml/subst.ml:303-309.
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
-                            for arg in &args {
+                            for arg in ctx.type_list(&args).iter() {
                                 crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     *arg,
                                     &old_prefix,
@@ -387,7 +387,7 @@ fn build_type_constructors(
                             }
                         }
                     }
-                    ctx.new_generic_constr(type_path.clone(), args.to_vec())
+                    ctx.new_generic_constr(type_path.clone(), ctx.type_list(args).to_vec())
                 }
                 _ => {
                     drop(desc);

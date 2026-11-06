@@ -23,7 +23,7 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField,
-    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef, TypeRefList, TypeRefs,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -509,6 +509,8 @@ pub struct TypeContext {
     /// live only for this compilation. The append-only arena keeps descriptor
     /// borrows valid while another stored node is written.
     store_descs: TypeArena,
+    /// Type lists (`TypeRefList`) allocated by this compilation.
+    type_lists: super::type_expr::TypeListPool,
     store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
     /// Level marking and lowering are also compilation-local, including on
     /// diagnostic exits that do not finish a mark/unmark traversal.
@@ -1144,6 +1146,7 @@ impl TypeContext {
             types: TypeArena::new(),
             store,
             store_descs: TypeArena::new(),
+            type_lists: Default::default(),
             store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
@@ -2488,11 +2491,75 @@ impl TypeContext {
     /// Create a new type expression.
     fn alloc_type(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
         if self.in_store_build() {
+            let desc = self.store_desc_lists(desc);
             self.check_store_desc(&desc);
             return self.store.alloc_type(desc, level);
         }
         let id = self.id_gen.next_type_id();
         self.types.push(TypeExpr::new(desc, level, id))
+    }
+
+    /// Allocate an immutable type list (constructor, package and
+    /// polymorphic-variable arguments, tuple components). During a store
+    /// build it goes to the worker store, like the nodes being built.
+    pub fn new_type_list(&self, items: &[TypeExprRef]) -> TypeRefList {
+        if items.is_empty() {
+            return TypeRefList::EMPTY;
+        }
+        if self.in_store_build() {
+            return self.store.alloc_type_list(items);
+        }
+        self.type_lists.alloc(items)
+    }
+
+    /// [`Self::new_type_list`] from an iterator.
+    pub fn new_type_list_from(&self, items: impl IntoIterator<Item = TypeExprRef>) -> TypeRefList {
+        let items: TypeRefs = items.into_iter().collect();
+        self.new_type_list(&items)
+    }
+
+    /// The elements of a type list.
+    #[inline]
+    pub fn type_list(&self, list: impl Into<TypeRefList>) -> TypeRefs {
+        let list = list.into();
+        if list.is_empty() {
+            return TypeRefs::new();
+        }
+        if list.is_store() {
+            return self.store_type_list(list);
+        }
+        self.type_lists.get(list)
+    }
+
+    /// One element of a type list.
+    #[inline]
+    pub fn type_list_at(&self, list: impl Into<TypeRefList>, index: usize) -> TypeExprRef {
+        let list = list.into();
+        if list.is_store() {
+            return self.store_type_list(list)[index];
+        }
+        self.type_lists.get_at(list, index)
+    }
+
+    #[inline(never)]
+    fn store_type_list(&self, list: TypeRefList) -> TypeRefs {
+        if list.is_shared() {
+            return TypeRefs::from_slice(super::shared_store::page_list(
+                &self.shared_pages.borrow(),
+                list,
+            ));
+        }
+        self.store.type_list(list)
+    }
+
+    /// A copy of `list` that store descriptors can hold: lists allocated by
+    /// this compilation are copied to the worker store (lists are immutable
+    /// values, so only the elements' identities matter).
+    fn store_type_list_for(&self, list: TypeRefList) -> TypeRefList {
+        if list.is_empty() || list.is_store() {
+            return list;
+        }
+        self.store.alloc_type_list(&self.type_lists.get(list))
     }
 
     /// Create a new type at a specific level.
@@ -2560,7 +2627,7 @@ impl TypeContext {
 
     /// Create a tuple type.
     pub fn new_tuple(&self, types: Vec<TypeExprRef>) -> TypeExprRef {
-        self.new_type(TypeDesc::Ttuple(types.into()))
+        self.new_type(TypeDesc::Ttuple(self.new_type_list(&types)))
     }
 
     /// Create a type constructor application.
@@ -2568,7 +2635,7 @@ impl TypeContext {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
         self.new_type(TypeDesc::Tconstr {
             path,
-            args: args.into(),
+            args: self.new_type_list(&args),
             abbrev,
         })
     }
@@ -2578,7 +2645,7 @@ impl TypeContext {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
         self.new_generic_type(TypeDesc::Tconstr {
             path,
-            args: args.into(),
+            args: self.new_type_list(&args),
             abbrev,
         })
     }
@@ -2668,7 +2735,7 @@ impl TypeContext {
     pub fn new_poly(&self, body: TypeExprRef, vars: Vec<TypeExprRef>) -> TypeExprRef {
         self.new_type(TypeDesc::Tpoly {
             body,
-            vars: vars.into(),
+            vars: self.new_type_list(&vars),
         })
     }
 
@@ -2880,6 +2947,7 @@ impl TypeContext {
                 return;
             }
             if self.store_build_owns(r) {
+                let desc = self.store_desc_lists(desc);
                 self.check_store_desc(&desc);
                 self.store.set_desc_backing(r, desc);
                 return;
@@ -4453,6 +4521,19 @@ impl TypeContext {
     }
 
     /// Poison the store build if `desc` refers to compilation-local cells.
+    /// `desc` with its type lists in the worker store (see
+    /// `store_type_list_for`).
+    fn store_desc_lists(&self, mut desc: TypeDesc) -> TypeDesc {
+        match &mut desc {
+            TypeDesc::Ttuple(list)
+            | TypeDesc::Tconstr { args: list, .. }
+            | TypeDesc::Tpoly { vars: list, .. }
+            | TypeDesc::Tpackage { args: list, .. } => *list = self.store_type_list_for(*list),
+            _ => {}
+        }
+        desc
+    }
+
     fn check_store_desc(&self, desc: &TypeDesc) {
         match desc {
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
@@ -4464,12 +4545,12 @@ impl TypeContext {
                 self.check_store_ref(*ret);
             }
             TypeDesc::Ttuple(items) => {
-                for ty in items.iter() {
+                for ty in self.type_list(items).iter() {
                     self.check_store_ref(*ty);
                 }
             }
             TypeDesc::Tconstr { args, abbrev, .. } => {
-                for ty in args.iter() {
+                for ty in self.type_list(args).iter() {
                     self.check_store_ref(*ty);
                 }
                 self.check_store_memo(*abbrev);
@@ -4501,12 +4582,12 @@ impl TypeContext {
             }
             TypeDesc::Tpoly { body, vars } => {
                 self.check_store_ref(*body);
-                for ty in vars.iter() {
+                for ty in self.type_list(vars).iter() {
                     self.check_store_ref(*ty);
                 }
             }
             TypeDesc::Tpackage { args, .. } => {
-                for ty in args.iter() {
+                for ty in self.type_list(args).iter() {
                     self.check_store_ref(*ty);
                 }
             }
@@ -5012,12 +5093,13 @@ mod tests {
         let a = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
         let pool = a.store.shared_pool();
         let base = pool
-            .publish(2, 0, |_| {
+            .publish(2, 0, 0, |_| {
                 (
                     vec![
                         (TypeDesc::Tvar(None), GENERIC_LEVEL),
                         (TypeDesc::Tnil, GENERIC_LEVEL),
                     ],
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                 )
@@ -5057,7 +5139,7 @@ mod tests {
         let builder = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
         let ((ty, binder), piece) = builder.build_in_store(|| {
             let var = builder.new_generic_var(Some("a".into()));
-            let ty = builder.new_generic_type(TypeDesc::Ttuple(vec![var, var].into()));
+            let ty = builder.new_generic_type(TypeDesc::Ttuple(builder.new_type_list(&[var, var])));
             let binder = builder.rename_ident(&Ident::create_persistent("t"));
             (ty, binder)
         });
@@ -5086,8 +5168,8 @@ mod tests {
     fn store_build_reading_local_nodes_is_private() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let local = ctx.new_generic_var(None);
-        let (_, piece) =
-            ctx.build_in_store(|| ctx.new_generic_type(TypeDesc::Ttuple(vec![local].into())));
+        let (_, piece) = ctx
+            .build_in_store(|| ctx.new_generic_type(TypeDesc::Ttuple(ctx.new_type_list(&[local]))));
         assert!(
             piece.is_none(),
             "a build referring to a local node is not shared"
@@ -5285,8 +5367,10 @@ mod tests {
         assert_eq!(ctx.get_level(ty), GENERIC_LEVEL);
         // Writing after rollback cannot reuse a descriptor from the abandoned
         // snapshot (its arena allocation intentionally remains alive).
-        ctx.set_desc(ty, TypeDesc::Ttuple(vec![local].into()));
-        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ref ts) if ts == &[local]));
+        ctx.set_desc(ty, TypeDesc::Ttuple(ctx.new_type_list(&[local])));
+        assert!(
+            matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ts) if ctx.type_list(ts).as_slice() == [local])
+        );
     }
 
     #[test]
@@ -5297,7 +5381,7 @@ mod tests {
         let stored_int = ctx.store.alloc_type(
             TypeDesc::Tconstr {
                 path: int_path.clone(),
-                args: vec![].into(),
+                args: TypeRefList::EMPTY,
                 abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
             },
             GENERIC_LEVEL,

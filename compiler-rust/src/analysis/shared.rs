@@ -55,7 +55,7 @@ pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths
             }
             TypeDesc::Tconstr { path, args, .. } => {
                 add_path(paths, path);
-                for arg in args.iter() {
+                for arg in types.type_list(args).iter() {
                     walk(types, *arg, paths);
                 }
             }
@@ -66,7 +66,7 @@ pub fn find_type_constructors_in(types: &TypeContext, tel: &[TypeExprRef], paths
                 walk(types, *ret, paths);
             }
             TypeDesc::Ttuple(tel) => {
-                for t in tel.iter() {
+                for t in types.type_list(tel).iter() {
                     walk(types, *t, paths);
                 }
             }
@@ -86,7 +86,7 @@ pub fn unwrap_if_option(types: &TypeContext, t: TypeExprRef) -> TypeExprRef {
         TypeDesc::Tconstr { path, args, .. }
             if path.as_pident().is_some_and(|id| id.name() == "option") && args.len() == 1 =>
         {
-            args[0]
+            types.type_list_at(args, 0)
         }
         _ => t,
     }

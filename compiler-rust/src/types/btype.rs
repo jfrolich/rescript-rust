@@ -306,8 +306,12 @@ where
                 children.push(*ret);
                 Children::Many(children)
             }
-            TypeDesc::Ttuple(types) => Children::Many(types.iter().copied().collect()),
-            TypeDesc::Tconstr { args, .. } => Children::Many(args.iter().copied().collect()),
+            TypeDesc::Ttuple(types) => {
+                Children::Many(ctx.type_list(types).iter().copied().collect())
+            }
+            TypeDesc::Tconstr { args, .. } => {
+                Children::Many(ctx.type_list(args).iter().copied().collect())
+            }
             TypeDesc::Tobject { fields } => Children::One(*fields),
             TypeDesc::Tvariant(row) => {
                 let row_clone = row.clone();
@@ -319,8 +323,12 @@ where
             TypeDesc::Tlink(t) => Children::One(*t),
             TypeDesc::Tsubst(t) => Children::One(*t),
             TypeDesc::Tunivar(_) => Children::None,
-            TypeDesc::Tpoly { body, vars } => Children::Poly(*body, vars.iter().copied().collect()),
-            TypeDesc::Tpackage { args, .. } => Children::Many(args.iter().copied().collect()),
+            TypeDesc::Tpoly { body, vars } => {
+                Children::Poly(*body, ctx.type_list(vars).iter().copied().collect())
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                Children::Many(ctx.type_list(args).iter().copied().collect())
+            }
         }
     };
 

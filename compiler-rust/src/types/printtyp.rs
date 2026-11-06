@@ -491,17 +491,17 @@ impl<'a> Printtyp<'a> {
                 self.mark_loops_rec(visited, ret);
             }
             TypeDesc::Ttuple(tyl) => {
-                for t in tyl {
+                for t in self.ctx.type_list(tyl) {
                     self.mark_loops_rec(visited, t);
                 }
             }
             TypeDesc::Tconstr { args, .. } => {
-                for t in args {
+                for t in self.ctx.type_list(args) {
                     self.mark_loops_rec(visited, t);
                 }
             }
             TypeDesc::Tpackage { args, .. } => {
-                for t in args {
+                for t in self.ctx.type_list(args) {
                     self.mark_loops_rec(visited, t);
                 }
             }
@@ -550,7 +550,7 @@ impl<'a> Printtyp<'a> {
             TypeDesc::Tsubst(t) => self.mark_loops_rec(visited, t),
             TypeDesc::Tlink(_) => unreachable!("Printtyp.mark_loops_rec (2)"),
             TypeDesc::Tpoly { body, vars } => {
-                for t in vars {
+                for t in self.ctx.type_list(vars) {
                     self.add_alias(t);
                 }
                 self.mark_loops_rec(visited, body);
@@ -631,7 +631,7 @@ impl<'a> Printtyp<'a> {
                                         if args.len() == 1
                                             && path.same(&crate::types::predef::path_option()) =>
                                     {
-                                        Some(args[0])
+                                        Some(this.ctx.type_list_at(args, 0))
                                     }
                                     _ => None,
                                 };
@@ -652,7 +652,9 @@ impl<'a> Printtyp<'a> {
                         .collect();
                     OutType::Otyp_arrow(args, Box::new(this.tree_of_typexp(sch, *ret)))
                 }
-                TypeDesc::Ttuple(tyl) => OutType::Otyp_tuple(this.tree_of_typlist(sch, tyl)),
+                TypeDesc::Ttuple(tyl) => {
+                    OutType::Otyp_tuple(this.tree_of_typlist(sch, &this.ctx.type_list(tyl)))
+                }
                 TypeDesc::Tconstr { path, .. }
                     if this.find_inlined_type(&path.name()).is_some() =>
                 {
@@ -664,16 +666,22 @@ impl<'a> Printtyp<'a> {
                     let labels = labels.iter().map(|l| this.tree_of_label(l)).collect();
                     OutType::Otyp_record(labels)
                 }
-                TypeDesc::Tconstr { path, args, .. } => {
-                    OutType::Otyp_constr(this.tree_of_path(path), this.tree_of_typlist(sch, args))
-                }
+                TypeDesc::Tconstr { path, args, .. } => OutType::Otyp_constr(
+                    this.tree_of_path(path),
+                    this.tree_of_typlist(sch, &this.ctx.type_list(args)),
+                ),
                 TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, row),
                 TypeDesc::Tobject { fields } => this.tree_of_typobject(sch, *fields),
                 TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty),
                 TypeDesc::Tsubst(t) => this.tree_of_typexp(sch, *t),
                 TypeDesc::Tlink(_) => unreachable!("Printtyp.tree_of_typexp"),
                 TypeDesc::Tpoly { body, vars } => {
-                    let tyl: Vec<TypeExprRef> = vars.iter().map(|t| this.ctx.repr(*t)).collect();
+                    let tyl: Vec<TypeExprRef> = this
+                        .ctx
+                        .type_list(vars)
+                        .iter()
+                        .map(|t| this.ctx.repr(*t))
+                        .collect();
                     if tyl.is_empty() {
                         this.tree_of_typexp(sch, *body)
                     } else {
@@ -695,7 +703,11 @@ impl<'a> Printtyp<'a> {
                         .iter()
                         .map(|li| flatten_longident(this.ctx, li).join("."))
                         .collect();
-                    OutType::Otyp_module(path.name(), n, this.tree_of_typlist(sch, args))
+                    OutType::Otyp_module(
+                        path.name(),
+                        n,
+                        this.tree_of_typlist(sch, &this.ctx.type_list(args)),
+                    )
                 }
             }
         };
@@ -827,7 +839,7 @@ impl<'a> Printtyp<'a> {
             TypeDesc::Tconstr { path, args, .. }
                 if opt && args.len() == 1 && path.same(&crate::types::predef::path_option()) =>
             {
-                args[0]
+                self.ctx.type_list_at(args, 0)
             }
             _ => l.ld_type,
         };
@@ -2522,9 +2534,11 @@ impl<'a> Printtyp<'a> {
             ) => {
                 p1.same(p2)
                     && tl1.len() == tl2.len()
-                    && tl1
+                    && self
+                        .ctx
+                        .type_list(tl1)
                         .iter()
-                        .zip(tl2.iter())
+                        .zip(self.ctx.type_list(tl2).iter())
                         .all(|(a, b)| self.ctx.repr(*a) == self.ctx.repr(*b))
             }
             _ => false,

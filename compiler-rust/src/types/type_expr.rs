@@ -134,141 +134,141 @@ impl PartialOrd for TypeExpr {
     }
 }
 
-/// Number of type references a `TypeRefList` stores without allocating.
-const TYPE_REF_LIST_INLINE: usize = 3;
-
 /// Immutable list of type references in a type descriptor (constructor and
 /// package arguments, tuple components, polymorphic variables).
 ///
 /// Intentional Rust performance representation of the OCaml `type_expr list`
-/// fields in `compiler/ml/types.ml:24-50`. Type-checking code snapshots
-/// descriptors constantly (`TypeContext::get_desc`); short lists are stored
-/// inline and longer ones share one allocation, so snapshots never allocate.
-/// Element order and physical identities are unchanged.
-#[derive(Clone)]
-pub enum TypeRefList {
-    Inline {
-        len: u8,
-        items: [TypeExprRef; TYPE_REF_LIST_INLINE],
-    },
-    Shared(std::sync::Arc<[TypeExprRef]>),
+/// fields in `compiler/ml/types.ml:24-50`: a `Copy` handle to a range of an
+/// append-only list pool, so descriptors hold no heap data. The pool is the
+/// one of the tier that owns the list, chosen by the same tag bits as
+/// [`TypeExprRef`]: the compilation-local [`TypeContext`] pool, the worker
+/// store, or a published shared graph. Read the elements with
+/// `TypeContext::types`. Lists are never mutated, so a handle can be copied
+/// freely; element order and physical identities are unchanged. Handles have
+/// no equality: compare the elements.
+///
+/// [`TypeContext`]: super::context::TypeContext
+#[derive(Clone, Copy)]
+pub struct TypeRefList {
+    start: u32,
+    len: u32,
 }
 
-impl TypeRefList {
-    pub const fn new() -> Self {
-        TypeRefList::Inline {
-            len: 0,
-            items: [TypeExprRef(0); TYPE_REF_LIST_INLINE],
-        }
-    }
+/// The elements of a [`TypeRefList`], copied out of its pool.
+pub type TypeRefs = smallvec::SmallVec<[TypeExprRef; 4]>;
 
-    pub fn from_slice(items: &[TypeExprRef]) -> Self {
-        if items.len() <= TYPE_REF_LIST_INLINE {
-            let mut inline = [TypeExprRef(0); TYPE_REF_LIST_INLINE];
-            inline[..items.len()].copy_from_slice(items);
-            TypeRefList::Inline {
-                len: items.len() as u8,
-                items: inline,
-            }
-        } else {
-            TypeRefList::Shared(std::sync::Arc::from(items))
-        }
+impl TypeRefList {
+    /// The empty list (no pool access).
+    pub const EMPTY: Self = TypeRefList { start: 0, len: 0 };
+
+    /// The empty list.
+    #[inline]
+    pub const fn new() -> Self {
+        Self::EMPTY
     }
 
     #[inline]
-    pub fn as_slice(&self) -> &[TypeExprRef] {
-        match self {
-            TypeRefList::Inline { len, items } => &items[..*len as usize],
-            TypeRefList::Shared(items) => items,
+    pub(crate) fn from_parts(start: u32, len: usize) -> Self {
+        let len = u32::try_from(len).expect("type list too long");
+        if len == 0 {
+            return Self::EMPTY;
         }
+        TypeRefList { start, len }
+    }
+
+    /// Number of elements.
+    #[inline]
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the list has no elements.
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Raw start position, including the tier tag bits.
+    #[inline]
+    pub(crate) fn raw_start(self) -> u32 {
+        self.start
+    }
+
+    /// Whether the list lives outside the compilation.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.start & STORE_REF_TAG != 0
+    }
+
+    /// Whether the list lives in the process-wide shared pool.
+    #[inline]
+    pub(crate) fn is_shared(self) -> bool {
+        self.start & SHARED_REF_BITS == SHARED_REF_BITS
+    }
+}
+
+/// Append-only pool of type lists for one storage tier (see [`TypeRefList`]).
+/// `tag` is the tier's tag bits, or-ed into every handle it returns.
+#[derive(Default)]
+pub(crate) struct TypeListPool {
+    items: std::cell::RefCell<Vec<TypeExprRef>>,
+    tag: u32,
+}
+
+impl TypeListPool {
+    pub(crate) fn with_tag(tag: u32) -> Self {
+        TypeListPool {
+            items: Default::default(),
+            tag,
+        }
+    }
+
+    /// Append `items` as a new list.
+    pub(crate) fn alloc(&self, items: &[TypeExprRef]) -> TypeRefList {
+        if items.is_empty() {
+            return TypeRefList::EMPTY;
+        }
+        let mut pool = self.items.borrow_mut();
+        let start = u32::try_from(pool.len()).expect("type list pool exceeds u32::MAX");
+        assert!(
+            start & SHARED_REF_BITS == 0,
+            "type list pool index exceeds the tag range"
+        );
+        pool.extend_from_slice(items);
+        TypeRefList::from_parts(start | self.tag, items.len())
+    }
+
+    /// The elements of a list allocated by this pool.
+    #[inline]
+    pub(crate) fn get(&self, list: TypeRefList) -> TypeRefs {
+        let start = (list.raw_start() & !self.tag) as usize;
+        TypeRefs::from_slice(&self.items.borrow()[start..start + list.len()])
+    }
+
+    /// One element of a list allocated by this pool.
+    #[inline]
+    pub(crate) fn get_at(&self, list: TypeRefList, index: usize) -> TypeExprRef {
+        assert!(index < list.len(), "type list index out of range");
+        self.items.borrow()[(list.raw_start() & !self.tag) as usize + index]
+    }
+}
+
+impl From<&TypeRefList> for TypeRefList {
+    #[inline]
+    fn from(list: &TypeRefList) -> Self {
+        *list
     }
 }
 
 impl Default for TypeRefList {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::ops::Deref for TypeRefList {
-    type Target = [TypeExprRef];
-
-    #[inline]
-    fn deref(&self) -> &[TypeExprRef] {
-        self.as_slice()
+        Self::EMPTY
     }
 }
 
 impl std::fmt::Debug for TypeRefList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.as_slice()).finish()
-    }
-}
-
-impl PartialEq for TypeRefList {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl Eq for TypeRefList {}
-
-impl<const N: usize> PartialEq<[TypeExprRef; N]> for TypeRefList {
-    fn eq(&self, other: &[TypeExprRef; N]) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl PartialEq<Vec<TypeExprRef>> for TypeRefList {
-    fn eq(&self, other: &Vec<TypeExprRef>) -> bool {
-        self.as_slice() == other.as_slice()
-    }
-}
-
-impl From<Vec<TypeExprRef>> for TypeRefList {
-    fn from(items: Vec<TypeExprRef>) -> Self {
-        if items.len() <= TYPE_REF_LIST_INLINE {
-            Self::from_slice(&items)
-        } else {
-            TypeRefList::Shared(std::sync::Arc::from(items))
-        }
-    }
-}
-
-impl From<&[TypeExprRef]> for TypeRefList {
-    fn from(items: &[TypeExprRef]) -> Self {
-        Self::from_slice(items)
-    }
-}
-
-impl<const N: usize> From<[TypeExprRef; N]> for TypeRefList {
-    fn from(items: [TypeExprRef; N]) -> Self {
-        Self::from_slice(&items)
-    }
-}
-
-impl FromIterator<TypeExprRef> for TypeRefList {
-    fn from_iter<I: IntoIterator<Item = TypeExprRef>>(iter: I) -> Self {
-        let items: smallvec::SmallVec<[TypeExprRef; 8]> = iter.into_iter().collect();
-        Self::from_slice(&items)
-    }
-}
-
-impl<'a> IntoIterator for &'a TypeRefList {
-    type Item = &'a TypeExprRef;
-    type IntoIter = std::slice::Iter<'a, TypeExprRef>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.as_slice().iter()
-    }
-}
-
-impl IntoIterator for TypeRefList {
-    type Item = TypeExprRef;
-    type IntoIter = smallvec::IntoIter<[TypeExprRef; 8]>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        smallvec::SmallVec::<[TypeExprRef; 8]>::from_slice(self.as_slice()).into_iter()
+        write!(f, "TypeRefList({:#x}, {})", self.start, self.len)
     }
 }
 
@@ -1187,8 +1187,9 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(size_of::<crate::ident::Ident>(), 16);
         assert_eq!(size_of::<Path>(), 8);
-        assert!(size_of::<TypeDesc>() <= 48);
-        assert!(size_of::<TypeExpr>() <= 64);
+        assert_eq!(size_of::<TypeRefList>(), 8);
+        assert!(size_of::<TypeDesc>() <= 32);
+        assert!(size_of::<TypeExpr>() <= 48);
     }
 
     #[test]
@@ -1523,7 +1524,7 @@ mod tests {
             }
             items.push(ctx.new_var(None));
         }
-        ctx.set_desc(cycle, TypeDesc::Ttuple(items.clone().into()));
+        ctx.set_desc(cycle, TypeDesc::Ttuple(ctx.new_type_list(&items)));
         let value = ValueDescription {
             val_type: cycle,
             val_kind: ValueKind::ValReg,
@@ -1537,6 +1538,7 @@ mod tests {
         let TypeDesc::Ttuple(actual) = &*desc else {
             panic!("tuple expected")
         };
+        let actual = ctx.type_list(actual);
         assert_eq!(actual[0], shared);
         assert_eq!(actual[1], shared);
         assert_eq!(actual[2], distinct);

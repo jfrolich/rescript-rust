@@ -443,14 +443,14 @@ fn sexp_type_expr_body_inline(
         }
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];
-            for t in types.iter() {
+            for t in ctx.type_list(types).iter() {
                 items.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(items)
         }
         TypeDesc::Tconstr { path, args, .. } => {
             let mut arg_sexps = Vec::new();
-            for t in args.iter() {
+            for t in ctx.type_list(args).iter() {
                 arg_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![
@@ -493,14 +493,14 @@ fn sexp_type_expr_body_inline(
         TypeDesc::Tpoly { body, vars } => {
             let body_sexp = sexp_type_expr_inline(arena, ctx, state, *body);
             let mut var_sexps = Vec::new();
-            for t in vars.iter() {
+            for t in ctx.type_list(vars).iter() {
                 var_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![Sexp::atom("Tpoly"), body_sexp, Sexp::list(var_sexps)])
         }
         TypeDesc::Tpackage { path, lids, args } => {
             let mut arg_sexps = Vec::new();
-            for t in args.iter() {
+            for t in ctx.type_list(args).iter() {
                 arg_sexps.push(sexp_type_expr_inline(arena, ctx, state, *t));
             }
             Sexp::list(vec![

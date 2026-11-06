@@ -56,6 +56,8 @@ pub(crate) struct SharedTypeNode {
 pub(crate) struct SharedGraph {
     base: u32,
     nodes: Box<[SharedTypeNode]>,
+    /// The graph's type lists (`TypeRefList`), indexed right after its nodes.
+    lists: Box<[TypeExprRef]>,
     layouts: Box<[Layout]>,
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
@@ -89,6 +91,20 @@ pub(crate) fn page_location(
 }
 
 /// Resolve shared node `idx` through a page table.
+/// The elements of a shared type list.
+#[inline]
+pub(crate) fn page_list(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    list: super::type_expr::TypeRefList,
+) -> &[TypeExprRef] {
+    let idx = list.raw_start() & !super::type_expr::SHARED_REF_BITS;
+    let graph = pages[(idx >> PAGE_BITS) as usize]
+        .get()
+        .expect("shared type list refers to an unpublished page");
+    let start = (idx - graph.base) as usize - graph.nodes.len();
+    &graph.lists[start..start + list.len()]
+}
+
 #[inline]
 pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &SharedTypeNode {
     let graph = pages[(idx >> PAGE_BITS) as usize]
@@ -101,6 +117,7 @@ pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &Shar
 /// being published.
 pub(crate) type SharedGraphParts = (
     Vec<(TypeDesc, i32)>,
+    Vec<TypeExprRef>,
     Vec<Layout>,
     Vec<crate::location::Location>,
 );
@@ -166,15 +183,20 @@ impl SharedTypePool {
     /// Build and publish one graph. `build` receives the base index and
     /// returns the node descriptors (with levels) and layouts, which must
     /// match the reserved sizes, and the graph's location table.
+    /// Publish a graph of `nodes` type nodes, `list_items` type-list elements
+    /// and `layouts` variant layouts. `build` gets the graph's base index:
+    /// node `i` is `base + i`, and the lists start at `base + nodes`.
     pub(crate) fn publish(
         &self,
         nodes: usize,
+        list_items: usize,
         layouts: usize,
         build: impl FnOnce(u32) -> SharedGraphParts,
     ) -> Option<u32> {
-        let (base, end) = self.reserve(nodes, layouts)?;
-        let (descs, built_layouts, locations) = build(base);
+        let (base, end) = self.reserve(nodes.checked_add(list_items)?, layouts)?;
+        let (descs, lists, built_layouts, locations) = build(base);
         assert_eq!(descs.len(), nodes, "shared graph node count changed");
+        assert_eq!(lists.len(), list_items, "shared graph list size changed");
         assert_eq!(
             built_layouts.len(),
             layouts,
@@ -191,6 +213,7 @@ impl SharedTypePool {
                     id: SHARED_TYPE_ID_BASE + (base as i32) + offset as i32,
                 })
                 .collect(),
+            lists: lists.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
             locations: locations.into_boxed_slice(),
         });
@@ -275,7 +298,7 @@ mod tests {
     fn published_graphs_are_readable_from_other_threads() {
         let pool = Arc::new(SharedTypePool::new(u64::MAX));
         let base = pool
-            .publish(3, 0, |_| {
+            .publish(3, 0, 0, |_| {
                 (
                     vec![
                         (TypeDesc::Tnil, 7),
@@ -283,12 +306,15 @@ mod tests {
                         (TypeDesc::Tnil, 9),
                     ],
                     Vec::new(),
+                    Vec::new(),
                     vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
                 )
             })
             .unwrap();
         let second = pool
-            .publish(1, 0, |_| (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new()))
+            .publish(1, 0, 0, |_| {
+                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new(), Vec::new())
+            })
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);
         assert_ne!(base, second);
