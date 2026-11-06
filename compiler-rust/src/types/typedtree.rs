@@ -40,7 +40,7 @@ pub type Loc<T> = Located<T>;
 /// still see slice/iterator semantics so the external typedtree shape is
 /// unchanged. Do not remove this during parity cleanup unless the replacement
 /// keeps the same OCaml-facing behavior and comparable memory profile.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SparseExtras<T> {
     items: Option<Box<[T]>>,
 }
@@ -140,7 +140,7 @@ impl<'a, T> IntoIterator for &'a SparseExtras<T> {
 // ============================================================================
 
 /// Typed constants (internal representation after parsing).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
     /// Integer constant (matches OCaml's native int, 63-bit on 64-bit systems).
     Int(i64),
@@ -160,7 +160,7 @@ pub enum Constant {
 // ============================================================================
 
 /// Indicates whether a pattern match is exhaustive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Partial {
     /// Match is partial (not all cases covered).
     Partial,
@@ -173,7 +173,7 @@ pub enum Partial {
 // ============================================================================
 
 /// A typed pattern.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Pattern {
     /// Pattern description.
     pub pat_desc: PatternDesc,
@@ -190,7 +190,7 @@ pub struct Pattern {
 }
 
 /// Extra information on a pattern.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PatExtra {
     /// Type constraint: `P : T`.
     Tpat_constraint(TypedCoreType),
@@ -201,7 +201,7 @@ pub enum PatExtra {
 }
 
 /// Pattern description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PatternDesc {
     /// Wildcard: `_`.
     Tpat_any,
@@ -244,7 +244,7 @@ pub enum PatternDesc {
 }
 
 /// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RecordPatternRest {
     /// Identifier bound for the rest value.
     pub rest_ident: Ident,
@@ -263,7 +263,7 @@ pub struct RecordPatternRest {
 // ============================================================================
 
 /// A typed expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Expression {
     /// Expression description.
     pub exp_desc: ExpressionDesc,
@@ -280,7 +280,7 @@ pub struct Expression {
 }
 
 /// Extra information on an expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
     Texp_constraint(TypedCoreType),
@@ -300,7 +300,7 @@ pub enum ExpExtra {
 }
 
 /// Expression description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ExpressionDesc {
     /// Identifier: `x`, `M.x`.
     Texp_ident(Path, Loc<LidentIdx>, Arc<ValueDescription>),
@@ -482,7 +482,7 @@ pub enum ExpressionDesc {
 // DirectionFlag and Arity are re-exported from parser::ast
 
 /// Record label definition in a record expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RecordLabelDefinition {
     /// Label is kept from extended expression.
     Kept(TypeExprRef),
@@ -506,7 +506,7 @@ pub type RecordField = (
 );
 
 /// An argument in a function application.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ApplyArg {
     /// Argument label.
     pub label: TypeArgLabel,
@@ -515,7 +515,7 @@ pub struct ApplyArg {
 }
 
 /// A function parameter. Mirrors `compiler/ml/typedtree.ml`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FunctionParam {
     /// Source argument label.
     pub fp_lbl: TypeArgLabel,
@@ -536,7 +536,7 @@ pub struct FunctionParam {
 // ============================================================================
 
 /// A case in a match expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Case {
     /// Left-hand side pattern.
     pub c_lhs: Pattern,
@@ -547,7 +547,7 @@ pub struct Case {
 }
 
 /// A value binding in a let expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ValueBinding {
     /// Binding pattern.
     pub vb_pat: Pattern,
@@ -564,7 +564,7 @@ pub struct ValueBinding {
 // ============================================================================
 
 /// A typed core type (type expression after type checking).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedCoreType {
     /// Type description.
     pub ctyp_desc: TypedCoreTypeDesc,
@@ -580,7 +580,7 @@ pub struct TypedCoreType {
 
 /// Arrow argument structure for Ttyp_arrow.
 /// Matches OCaml's `arg = {attrs: attributes; lbl: arg_label; typ: core_type}`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ArrowArg {
     /// Attributes on the argument.
     pub attrs: Attributes,
@@ -591,7 +591,7 @@ pub struct ArrowArg {
 }
 
 /// Typed core type description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedCoreTypeDesc {
     /// Type variable: `'a`.
     Ttyp_var(Option<String>),
@@ -615,7 +615,7 @@ pub enum TypedCoreTypeDesc {
 }
 
 /// An object field type.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ObjectField {
     /// Field name or inherit.
     pub of_desc: ObjectFieldDesc,
@@ -626,7 +626,7 @@ pub struct ObjectField {
 }
 
 /// Object field description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ObjectFieldDesc {
     /// Named field.
     OTtag(Loc<String>, TypedCoreType),
@@ -635,7 +635,7 @@ pub enum ObjectFieldDesc {
 }
 
 /// A row field type (for polymorphic variants).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RowFieldType {
     /// Field description.
     pub rf_desc: RowFieldDesc,
@@ -646,7 +646,7 @@ pub struct RowFieldType {
 }
 
 /// Row field description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RowFieldDesc {
     /// Tag: `` `A `` or `` `A of T ``.
     Rtag(Loc<String>, bool, Vec<TypedCoreType>),
@@ -655,7 +655,7 @@ pub enum RowFieldDesc {
 }
 
 /// A package type constraint.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageType {
     /// Module type path.
     pub pack_path: Path,
@@ -668,7 +668,7 @@ pub struct PackageType {
 // ============================================================================
 
 /// A module expression (placeholder).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleExpr {
     /// Module description.
     pub mod_desc: ModuleExprDesc,
@@ -683,7 +683,7 @@ pub struct ModuleExpr {
 }
 
 /// Module expression description (placeholder).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleExprDesc {
     /// Identifier.
     Tmod_ident(Path, Loc<LidentIdx>),
@@ -705,7 +705,7 @@ pub enum ModuleExprDesc {
 }
 
 /// Module type (matches OCaml's `Typedtree.module_type`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleType {
     /// Module type description.
     pub mty_desc: ModuleTypeDesc,
@@ -720,7 +720,7 @@ pub struct ModuleType {
 }
 
 /// Module type description (matches OCaml's `Typedtree.module_type_desc`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleTypeDesc {
     /// Named module type: `S` or `M.S`.
     Tmty_ident(Path, Loc<LidentIdx>),
@@ -737,7 +737,7 @@ pub enum ModuleTypeDesc {
 }
 
 /// With constraint (matches OCaml's `Typedtree.with_constraint`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum WithConstraint {
     Twith_type(TypedTypeDeclaration),
     Twith_module(Path, Loc<LidentIdx>),
@@ -746,13 +746,13 @@ pub enum WithConstraint {
 }
 
 /// Typed signature (matches OCaml's `Typedtree.signature`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedSignature {
     pub sig_items: Vec<TypedSignatureItem>,
 }
 
 /// Typed signature item (matches OCaml's `Typedtree.signature_item`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedSignatureItem {
     pub sig_desc: TypedSignatureItemDesc,
     pub sig_env: EnvRef,
@@ -760,7 +760,7 @@ pub struct TypedSignatureItem {
 }
 
 /// Typed signature item description (matches OCaml's `Typedtree.signature_item_desc`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedSignatureItemDesc {
     Tsig_value(TypedValueDescription),
     Tsig_type(RecFlag, Vec<TypedTypeDeclaration>),
@@ -775,7 +775,7 @@ pub enum TypedSignatureItemDesc {
 }
 
 /// Typed module declaration (matches OCaml's `Typedtree.module_declaration`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedModuleDeclaration {
     pub md_id: Ident,
     pub md_name: Loc<String>,
@@ -785,7 +785,7 @@ pub struct TypedModuleDeclaration {
 }
 
 /// Include description (for signatures, matches OCaml's `Typedtree.include_description`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IncludeDescription {
     pub incl_mod: ModuleType,
     pub incl_type: Vec<crate::types::decl::SignatureItem>,
@@ -794,7 +794,7 @@ pub struct IncludeDescription {
 }
 
 /// Module type constraint.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleTypeConstraint {
     /// Explicit signature.
     Tmodtype_explicit(Box<ModuleType>),
@@ -803,7 +803,7 @@ pub enum ModuleTypeConstraint {
 }
 
 /// Module coercion.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleCoercion {
     /// No coercion needed.
     Tcoerce_none,
@@ -822,7 +822,7 @@ pub enum ModuleCoercion {
 }
 
 /// Primitive coercion.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PrimitiveCoercion {
     /// Primitive description.
     pub pc_desc: crate::types::PrimitiveDescription,
@@ -836,7 +836,7 @@ pub struct PrimitiveCoercion {
 }
 
 /// A structure (module definition body).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Structure {
     /// Structure items.
     pub str_items: Vec<StructureItem>,
@@ -847,7 +847,7 @@ pub struct Structure {
 }
 
 /// A structure item.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StructureItem {
     /// Item description.
     pub str_desc: StructureItemDesc,
@@ -858,7 +858,7 @@ pub struct StructureItem {
 }
 
 /// Structure item description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum StructureItemDesc {
     /// Evaluated expression: `E`.
     Tstr_eval(Expression, Attributes),
@@ -891,7 +891,7 @@ pub use crate::types::TypeDeclaration as InternalTypeDeclaration;
 
 /// Typed type declaration for the typed tree.
 /// Matches OCaml's Typedtree.type_declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedTypeDeclaration {
     /// Type identifier.
     pub typ_id: Ident,
@@ -916,7 +916,7 @@ pub struct TypedTypeDeclaration {
 }
 
 /// Typed type kind.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedTypeKind {
     /// Abstract type.
     Ttype_abstract,
@@ -929,7 +929,7 @@ pub enum TypedTypeKind {
 }
 
 /// Typed constructor declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedConstructorDeclaration {
     /// Constructor identifier.
     pub cd_id: Ident,
@@ -948,7 +948,7 @@ pub struct TypedConstructorDeclaration {
 }
 
 /// Typed constructor arguments.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedConstructorArguments {
     /// Tuple arguments.
     Cstr_tuple(Vec<TypedCoreType>),
@@ -957,7 +957,7 @@ pub enum TypedConstructorArguments {
 }
 
 /// Typed label declaration for records.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedLabelDeclaration {
     /// Label identifier.
     pub ld_id: Ident,
@@ -984,7 +984,7 @@ pub struct TypedLabelDeclaration {
 }
 
 /// A type extension.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypeExtension {
     /// Extended type path.
     pub tyext_path: Path,
@@ -1002,7 +1002,7 @@ pub struct TypeExtension {
 use crate::types::Variance;
 
 /// A module binding.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleBinding {
     /// Module identifier.
     pub mb_id: Ident,
@@ -1017,7 +1017,7 @@ pub struct ModuleBinding {
 }
 
 /// A module type declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleTypeDeclaration {
     /// Module type identifier.
     pub mtd_id: Ident,
@@ -1032,7 +1032,7 @@ pub struct ModuleTypeDeclaration {
 }
 
 /// An open description (matches OCaml's `open_description`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OpenDeclaration {
     /// Resolved module path.
     pub open_path: Path,
@@ -1045,7 +1045,7 @@ pub struct OpenDeclaration {
 }
 
 /// An include declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IncludeDeclaration {
     /// Included module expression.
     pub incl_mod: ModuleExpr,
@@ -1059,7 +1059,7 @@ pub struct IncludeDeclaration {
 
 /// Typed value description (for `external` declarations).
 /// Matches OCaml's `Typedtree.value_description`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedValueDescription {
     /// Identifier.
     pub val_id: Ident,
@@ -1080,7 +1080,7 @@ pub struct TypedValueDescription {
 }
 
 /// Extension constructor.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExtensionConstructor {
     /// Constructor identifier.
     pub ext_id: Ident,
@@ -1097,7 +1097,7 @@ pub struct ExtensionConstructor {
 }
 
 /// Extension constructor kind.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ExtensionConstructorKind {
     /// Declaration with argument types and optional result type.
     Text_decl(ConstructorArgument, Option<TypedCoreType>),
@@ -1106,7 +1106,7 @@ pub enum ExtensionConstructorKind {
 }
 
 /// Constructor argument in extension declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ConstructorArgument {
     /// Tuple arguments.
     Cstr_tuple(Vec<TypedCoreType>),
@@ -1115,7 +1115,7 @@ pub enum ConstructorArgument {
 }
 
 /// Label declaration in a constructor record.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LabelDeclaration {
     /// Label identifier.
     pub ld_id: Ident,
@@ -1141,7 +1141,7 @@ pub struct LabelDeclaration {
 
 /// Reference to an environment (placeholder).
 /// In the full implementation, this would be an index or reference to the Env.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvRef(pub u32);
 
 impl EnvRef {
@@ -1157,7 +1157,7 @@ impl EnvRef {
 }
 
 /// Reference to a row description.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowDescRef(pub u32);
 
 // ============================================================================
