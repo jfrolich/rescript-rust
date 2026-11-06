@@ -2,8 +2,10 @@
 //! for interface digests: what dependents' compiles read of a value, and
 //! nothing else.
 //!
-//! - Source locations (`Location`, `Position`) are skipped: moving code does
-//!   not change what dependents compile.
+//! - Source locations (`Location`, `Position`) and the handles that stand for
+//!   them (`LamLoc`, `DeclLoc`) are skipped: moving code does not change what
+//!   dependents compile. A `LamLoc` is a row number in its compilation's
+//!   location table, so it shifts when code is added above it.
 //! - Local identifiers are numbered in order of first appearance instead of
 //!   by stamp: stamps come from a per-compile counter, so the same code gets
 //!   different stamps depending on what was compiled before it.
@@ -244,7 +246,7 @@ impl<'a, 'h, H: Hasher> ser::Serializer for &'a mut Canonical<'h, H> {
     }
     fn serialize_struct(self, name: &'static str, _: usize) -> Result<Compound<'a, 'h, H>> {
         let fields = match name {
-            "Location" | "Position" => Fields::Skip,
+            "Location" | "Position" | "LamLoc" | "DeclLoc" => Fields::Skip,
             "Ident" => Fields::Ident,
             _ => {
                 self.tag(18);
@@ -502,6 +504,46 @@ mod tests {
             global: Ident::new("Global", 0, IdentFlags::default()),
             value,
         }
+    }
+
+    #[derive(serde::Serialize)]
+    struct WithHandle {
+        loc: crate::lambda::LamLoc,
+        value: i64,
+    }
+
+    #[test]
+    fn location_handles_do_not_count() {
+        let digest = |node: &WithHandle| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            Canonical::new(&mut hasher).hash(node);
+            hasher.finish()
+        };
+        let a = digest(&WithHandle {
+            loc: crate::lambda::LamLoc::for_test(0),
+            value: 5,
+        });
+        assert_eq!(
+            a,
+            digest(&WithHandle {
+                loc: crate::lambda::LamLoc::for_test(7),
+                value: 5
+            })
+        );
+        assert_eq!(
+            a,
+            digest(&WithHandle {
+                loc: crate::lambda::LamLoc::NONE,
+                value: 5
+            })
+        );
+        assert_ne!(
+            a,
+            digest(&WithHandle {
+                loc: crate::lambda::LamLoc::NONE,
+                value: 6
+            })
+        );
     }
 
     #[test]
