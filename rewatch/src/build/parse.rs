@@ -433,6 +433,7 @@ fn generate_ast(
             stderr.is_some() || ast.arena().locations_required()
         })
     {
+        log::debug!("Parsing {} with source locations", source.file_path.display());
         result = parse_saved_source(&source, true);
     }
     let (stderr, mut stored_ast, deps) =
