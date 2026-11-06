@@ -138,6 +138,10 @@ pub(crate) struct ThreadTypeStore {
     row_fields: RefCell<Vec<Option<RowField>>>,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
+    /// The next [`PathBlock`](crate::types::type_expr::PathBlock) token for a
+    /// path written into an existing node. Kept here so tokens are unique
+    /// among every node one worker's compilations can reach.
+    next_path_block_token: Cell<u32>,
     /// Internalized dependency signatures keyed by the identity of the
     /// portable struct they were built from (`compiler/ml/env.ml:669-678`:
     /// one `persistent_structures` entry per read unit).
@@ -189,6 +193,14 @@ pub(crate) struct ThreadTypeStore {
 }
 
 impl ThreadTypeStore {
+    /// A path block no other node holds.
+    pub(crate) fn fresh_path_block(&self) -> crate::types::type_expr::PathBlock {
+        let token = self.next_path_block_token.get();
+        self.next_path_block_token
+            .set(token.checked_add(1).expect("path block tokens exhausted"));
+        crate::types::type_expr::PathBlock::token(token)
+    }
+
     fn new() -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
@@ -197,6 +209,7 @@ impl ThreadTypeStore {
             row_fields: RefCell::new(Vec::new()),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
+            next_path_block_token: Cell::new(0),
             pers: RefCell::new(HashMap::new()),
             shared_signatures: RefCell::new(HashSet::new()),
             type_decl_arcs: RefCell::new(HashMap::new()),

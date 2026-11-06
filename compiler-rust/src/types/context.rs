@@ -2568,6 +2568,11 @@ impl TypeContext {
         self.new_constr_at(GENERIC_LEVEL, path, args, PathBlock::OWN)
     }
 
+    /// The block of a path written into an existing `Tconstr` node.
+    pub fn fresh_path_block(&self) -> PathBlock {
+        self.store.fresh_path_block()
+    }
+
     /// `newconstr Predef.path_X args`: a constructor holding one of
     /// `Predef`'s global paths (predef.ml:52-86), at the current level.
     pub fn new_predef_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
@@ -5309,6 +5314,55 @@ mod tests {
         // snapshot (its arena allocation intentionally remains alive).
         ctx.set_desc(ty, TypeDesc::Ttuple(vec![local].into()));
         assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ref ts) if ts == &[local]));
+    }
+
+    #[test]
+    fn a_path_written_into_a_node_is_a_block_its_earlier_copies_do_not_hold() {
+        use super::super::type_expr::PathBlockOwner;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let t = ctx.new_constr(Path::pident(ctx.create_ident("t")), vec![]);
+        let block_of = |ty| match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path_block, .. } => *path_block,
+            _ => unreachable!(),
+        };
+        // A copy made now keeps the block `t` was allocated with.
+        let before = block_of(t).copied_from(t);
+        assert_eq!(before.owner(), PathBlockOwner::Of(t));
+        // `t.desc <- Tconstr (u, ..)` allocates `u`.
+        let token = ctx.fresh_path_block();
+        ctx.set_desc(
+            t,
+            TypeDesc::Tconstr {
+                path: Path::pident(ctx.create_ident("u")),
+                args: vec![].into(),
+                abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
+                path_block: token,
+            },
+        );
+        let after = block_of(t).copied_from(t);
+        assert!(matches!(after.owner(), PathBlockOwner::Token(_)));
+        assert_ne!(after, before);
+        assert_ne!(ctx.fresh_path_block(), token);
+
+        // Backtracking a speculative write restores the earlier block, and a
+        // node allocated after the restore never reuses a handle a surviving
+        // copy may still name.
+        let snapshot = ctx.snapshot_type_state();
+        let speculative = ctx.new_constr(Path::pident(ctx.create_ident("w")), vec![]);
+        ctx.set_desc(
+            t,
+            TypeDesc::Tconstr {
+                path: Path::pident(ctx.create_ident("w")),
+                args: vec![].into(),
+                abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
+                path_block: ctx.fresh_path_block(),
+            },
+        );
+        ctx.restore_type_state(snapshot);
+        assert_eq!(block_of(t), token);
+        let later = ctx.new_constr(Path::pident(ctx.create_ident("x")), vec![]);
+        assert_ne!(later, speculative);
+        assert_ne!(later, t);
     }
 
     #[test]

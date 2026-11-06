@@ -1512,7 +1512,7 @@ fn rewrite_type_paths_in_place(
                         path: rewritten,
                         args: args.clone(),
                         abbrev: *abbrev,
-                        path_block: crate::types::type_expr::PathBlock::OWN,
+                        path_block: ctx.fresh_path_block(),
                     },
                 );
             }
@@ -13577,7 +13577,7 @@ fn strip_self_module_prefix_in_sig(
                             path: rewritten,
                             args: args.clone(),
                             abbrev: *abbrev,
-                            path_block: crate::types::type_expr::PathBlock::OWN,
+                            path_block: type_ctx.fresh_path_block(),
                         },
                     );
                 }

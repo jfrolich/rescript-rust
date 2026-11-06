@@ -352,9 +352,10 @@ impl IntoIterator for TypeArgList {
 /// `Includemod.is_big`, which counts each distinct block once
 /// (includemod_error_size.rs).
 ///
-/// One `u32`: a [`TypeExprRef`] for a kept block, or a sentinel.
+/// A tagged [`PathBlockOwner`], so no node handle (local, store or shared)
+/// can be mistaken for a sentinel or a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PathBlock(u32);
+pub struct PathBlock(PathBlockOwner);
 
 /// Who a [`PathBlock`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -365,32 +366,34 @@ pub enum PathBlockOwner {
     Of(TypeExprRef),
     /// One of `Predef`'s global paths, identified by its ident.
     Predef,
+    /// A path written into an existing node (`ty.desc <- Tconstr (p', ..)`).
+    Token(u32),
 }
 
 impl PathBlock {
     /// A path allocated for this node.
-    pub const OWN: PathBlock = PathBlock(u32::MAX);
+    pub const OWN: PathBlock = PathBlock(PathBlockOwner::Own);
     /// One of `Predef`'s global paths.
-    pub const PREDEF: PathBlock = PathBlock(u32::MAX - 1);
+    pub const PREDEF: PathBlock = PathBlock(PathBlockOwner::Predef);
+
+    /// The block of a path written into an existing node: a token, since
+    /// copies made before the write keep the node's earlier block.
+    pub(crate) fn token(token: u32) -> PathBlock {
+        PathBlock(PathBlockOwner::Token(token))
+    }
 
     /// Whose block this is.
     #[inline]
     pub fn owner(self) -> PathBlockOwner {
-        match self {
-            PathBlock::OWN => PathBlockOwner::Own,
-            PathBlock::PREDEF => PathBlockOwner::Predef,
-            PathBlock(node) => PathBlockOwner::Of(TypeExprRef(node)),
-        }
+        self.0
     }
 
     /// The block of a copy of `node`, whose own block is `self`.
     #[inline]
     pub fn copied_from(self, node: TypeExprRef) -> PathBlock {
-        if self == PathBlock::OWN {
-            debug_assert!(node.0 < PathBlock::PREDEF.0);
-            PathBlock(node.0)
-        } else {
-            self
+        match self.0 {
+            PathBlockOwner::Own => PathBlock(PathBlockOwner::Of(node)),
+            _ => self,
         }
     }
 }
@@ -1260,11 +1263,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn copies_of_store_and_shared_nodes_keep_their_block() {
+        use super::{PathBlock, PathBlockOwner, SHARED_REF_BITS, STORE_REF_TAG};
+        for raw in [0, 7, STORE_REF_TAG | 3, SHARED_REF_BITS | 5, u32::MAX] {
+            let node = TypeExprRef(raw);
+            let copy = PathBlock::OWN.copied_from(node);
+            assert_eq!(copy.owner(), PathBlockOwner::Of(node));
+            assert_ne!(copy, PathBlock::OWN);
+            assert_ne!(copy, PathBlock::PREDEF);
+            assert_ne!(copy, PathBlock::token(raw));
+        }
+    }
+
+    #[test]
     fn compact_type_node_sizes() {
         use std::mem::size_of;
         assert_eq!(size_of::<crate::ident::Ident>(), 16);
         assert_eq!(size_of::<Path>(), 24);
-        assert_eq!(size_of::<super::PathBlock>(), 4);
+        assert_eq!(size_of::<super::PathBlock>(), 8);
+        assert_eq!(size_of::<TypeDesc>(), 64);
+        assert_eq!(size_of::<TypeExpr>(), 80);
         assert!(size_of::<TypeDesc>() <= 72);
         assert!(size_of::<TypeExpr>() <= 88);
     }

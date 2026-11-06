@@ -4968,7 +4968,7 @@ fn restore_child_self_manifests_from_parent_scope(
                 path: Path::pdot(parent_module_path.clone(), child_id.name()),
                 args,
                 abbrev,
-                path_block: crate::types::type_expr::PathBlock::OWN,
+                path_block: ctx.fresh_path_block(),
             },
         );
     }

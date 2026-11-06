@@ -23775,7 +23775,7 @@ fn qualify_label_description_paths(
                             path: rewritten,
                             args,
                             abbrev,
-                            path_block: crate::types::type_expr::PathBlock::OWN,
+                            path_block: ctx.fresh_path_block(),
                         },
                     );
                 }
@@ -25730,7 +25730,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                         path: rewritten,
                         args,
                         abbrev,
-                        path_block: crate::types::type_expr::PathBlock::OWN,
+                        path_block: ctx.fresh_path_block(),
                     },
                 );
             }

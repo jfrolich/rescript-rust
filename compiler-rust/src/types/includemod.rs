@@ -2809,7 +2809,7 @@ fn rewrite_substituted_type_paths(
                         path: new_path,
                         args: args.clone(),
                         abbrev: *abbrev,
-                        path_block: crate::types::type_expr::PathBlock::OWN,
+                        path_block: type_ctx.fresh_path_block(),
                     },
                 );
             }

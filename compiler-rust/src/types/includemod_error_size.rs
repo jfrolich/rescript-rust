@@ -183,6 +183,8 @@ enum PathBlockKey {
     Node(TypeExprRef),
     /// The global `Predef.path_X`, by the stamp of its ident.
     Predef(i32),
+    /// A path written into an existing node.
+    Token(u32),
     /// The target path of a substitution entry.
     Target(Target),
     /// The target `Mty_ident` of a module type substitution entry.
@@ -1175,6 +1177,7 @@ impl<'a> ErrorSize<'a> {
             (PathBlockOwner::Of(owner), _) => PathBlockKey::Node(owner),
             (PathBlockOwner::Predef, Path::Pident(id)) => PathBlockKey::Predef(id.stamp()),
             (PathBlockOwner::Predef, _) => PathBlockKey::Node(node),
+            (PathBlockOwner::Token(token), _) => PathBlockKey::Token(token),
         };
         if self.substituted {
             return self.copied_type_path(path, Some(key));
