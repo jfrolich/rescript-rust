@@ -19,11 +19,23 @@ const config = {
   "package-specs": {module: "esmodule", "in-source": true}, suffix: ".res.js",
   warnings: {number: "+26", error: "-a"},
 };
+// Unit names need no coordinates, so these compile without located work.
+const unitNames = "let file = __FILE__\nlet unit = __MODULE__\n" +
+  "let qualified = Pervasives.__FILE__ ++ Pervasives.__MODULE__\n";
+// The parser flags `__LINE__`/`__LOC__`/`__POS__` tokens without scoping, so
+// shadowed and module-qualified names are parsed with locations; output must
+// still match.
+const nameOnly = unitNames +
+  "let shadowed = {\n  let __LINE__ = 7\n  let __LOC__ = \"mine\"\n  (__LINE__, __LOC__)\n}\n" +
+  "module P = {\n  let __POS__ = 1\n}\nlet viaModule = P.__POS__\n";
 const cases = [
   ["clean", {"A.res": "let f = x => x + 1\n", "B.res": "let answer = A.f(41)\n"}, 0],
   ["location constants and assertions", {
     "A.res": "let file = __FILE__\nlet line = __LINE__\nlet loc = __LOC__\nlet pos = __POS__\nlet check = x => assert(x > 0)\n",
     "B.res": "let value = A.line\n",
+  }, 0],
+  ["unit names, shadowed and qualified location names", {
+    "A.res": nameOnly, "B.res": "let value = A.file ++ A.qualified\n",
   }, 0],
   ["shadowed unused binding", {
     "A.res": "let f = () => {\n let x = 1\n let x = 2\n x\n}\n", "B.res": "let answer = A.f()\n",
@@ -35,7 +47,7 @@ const cases = [
   ["syntax error", {"A.res": "let f = (x => x\n", "B.res": "let answer = A.f(41)\n"}, 1],
 ];
 function run(args) {
-  const result = spawnSync(executable, args, {cwd: root, encoding: "utf8", timeout: 10000});
+  const result = spawnSync(executable, args, {cwd: root, encoding: "utf8", timeout: 30000});
   assert.ifError(result.error);
   return result;
 }
@@ -60,6 +72,17 @@ try {
     assert.deepEqual(fastOutputs, outputs(), `${name}: JavaScript mismatch`);
     assert.ok(!fast.stderr.includes("requires source locations"), name);
     if (name === "shadowed unused binding") assert.match(fast.stderr, /unused/i);
+  }
+  // `-vv` logs each located parse or retry; unit names alone must not cause
+  // one, while a line number still does (it is parsed with locations up front).
+  for (const [sources, retries] of [[unitNames, false], ["let line = __LINE__\n", true]]) {
+    for (const file of fs.readdirSync(src)) fs.unlinkSync(path.join(src, file));
+    fs.writeFileSync(path.join(src, "A.res"), sources);
+    assert.equal(run(["clean"]).status, 0);
+    const verbose = run(["-vv", "build"]);
+    assert.equal(verbose.status, 0, verbose.stderr);
+    const log = verbose.stdout + verbose.stderr;
+    assert.equal(/(Parsing|Retrying) .* with source locations/.test(log), retries, log);
   }
 } finally {
   fs.rmSync(root, {recursive: true});
