@@ -24,123 +24,25 @@ use crate::parser::ast::{
 };
 use crate::types::asttypes::ArgLabel as TypeArgLabel;
 use crate::types::decl::ModuleType as DeclModuleType;
+pub use crate::types::tast_arena::{
+    TArgList, TCaseList, TCoreTypeIdx, TCoreTypeList, TExpColdIdx, TExprIdx, TExprList, TExtIdx,
+    TFieldList, TModExprIdx, TModTypeIdx, TParamList, TPatColdIdx, TPatIdx, TPatList, TSigItemList,
+    TStrItemList, TValDescIdx, TVbList, TypedArena,
+};
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
-use std::ops::Deref;
 use std::sync::Arc;
 
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
-
-/// Intentional Rust performance representation for sparse typedtree extras.
-///
-/// Most typed expressions and patterns have no extras. Store that common case
-/// as `None` instead of carrying an inline empty Vec on every node; callers
-/// still see slice/iterator semantics so the external typedtree shape is
-/// unchanged. Do not remove this during parity cleanup unless the replacement
-/// keeps the same OCaml-facing behavior and comparable memory profile.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SparseExtras<T> {
-    items: Option<Box<[T]>>,
-}
-
-impl<T> SparseExtras<T> {
-    /// Create an empty extras list.
-    pub fn new() -> Self {
-        Self { items: None }
-    }
-
-    /// Create extras from a Vec, preserving order.
-    pub fn from_vec(items: Vec<T>) -> Self {
-        if items.is_empty() {
-            Self::new()
-        } else {
-            Self {
-                items: Some(items.into_boxed_slice()),
-            }
-        }
-    }
-
-    /// Append one extra item.
-    pub fn push(&mut self, item: T) {
-        match self.items.take() {
-            None => {
-                self.items = Some(vec![item].into_boxed_slice());
-            }
-            Some(items) => {
-                let mut items = Vec::from(items);
-                items.push(item);
-                self.items = Some(items.into_boxed_slice());
-            }
-        }
-    }
-
-    /// Iterate over extras in typedtree order.
-    pub fn iter(&self) -> std::slice::Iter<'_, T> {
-        self.deref().iter()
-    }
-
-    /// Number of extras.
-    pub fn len(&self) -> usize {
-        self.deref().len()
-    }
-
-    /// True when there are no extras.
-    pub fn is_empty(&self) -> bool {
-        self.deref().is_empty()
-    }
-
-    /// Convert back to a Vec for callers that need ownership.
-    pub fn into_vec(self) -> Vec<T> {
-        self.items.map(Vec::from).unwrap_or_default()
-    }
-}
-
-impl<T> Default for SparseExtras<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> From<Vec<T>> for SparseExtras<T> {
-    fn from(items: Vec<T>) -> Self {
-        Self::from_vec(items)
-    }
-}
-
-impl<T> Deref for SparseExtras<T> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        self.items.as_deref().unwrap_or(&[])
-    }
-}
-
-impl<T> IntoIterator for SparseExtras<T> {
-    type Item = T;
-    type IntoIter = std::vec::IntoIter<T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.into_vec().into_iter()
-    }
-}
-
-impl<'a, T> IntoIterator for &'a SparseExtras<T> {
-    type Item = &'a T;
-    type IntoIter = std::slice::Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 /// Typed constants (internal representation after parsing).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
     /// Integer constant (matches OCaml's native int, 63-bit on 64-bit systems).
     Int(i64),
@@ -160,7 +62,7 @@ pub enum Constant {
 // ============================================================================
 
 /// Indicates whether a pattern match is exhaustive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Partial {
     /// Match is partial (not all cases covered).
     Partial,
@@ -173,27 +75,27 @@ pub enum Partial {
 // ============================================================================
 
 /// A typed pattern.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Pattern {
     /// Pattern description.
     pub pat_desc: PatternDesc,
     /// Source location.
     pub pat_loc: LocIdx,
-    /// Extra information (constraints, unpacks, etc.).
-    pub pat_extra: SparseExtras<(PatExtra, LocIdx, Attributes)>,
+    /// `pat_extra` (constraints, unpacks, etc.) and `pat_attributes`, in a
+    /// side table of the [`TypedArena`]: read them with
+    /// [`TypedArena::pat_extra`] and [`TypedArena::pat_attributes`].
+    pub pat_cold: Option<TPatColdIdx>,
     /// Type of the pattern.
     pub pat_type: TypeExprRef,
     /// Environment at this pattern.
     pub pat_env: EnvRef,
-    /// Attributes on the pattern.
-    pub pat_attributes: Attributes,
 }
 
 /// Extra information on a pattern.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PatExtra {
     /// Type constraint: `P : T`.
-    Tpat_constraint(TypedCoreType),
+    Tpat_constraint(TCoreTypeIdx),
     /// Type pattern: `#tconst`.
     Tpat_type(Path, Loc<LidentIdx>),
     /// Unpack pattern: `(module P)`.
@@ -201,7 +103,7 @@ pub enum PatExtra {
 }
 
 /// Pattern description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PatternDesc {
     /// Wildcard: `_`.
     Tpat_any,
@@ -210,41 +112,41 @@ pub enum PatternDesc {
     Tpat_var(Ident, Loc<String>),
 
     /// Alias: `P as x`.
-    Tpat_alias(Box<Pattern>, Ident, Loc<String>),
+    Tpat_alias(TPatIdx, Ident, Loc<String>),
 
     /// Constant: `1`, `'a'`, `"hello"`, `1.0`.
     Tpat_constant(Constant),
 
     /// Tuple: `(P1, ..., Pn)`.
     /// Invariant: length >= 2.
-    Tpat_tuple(Vec<Pattern>),
+    Tpat_tuple(TPatList),
 
     /// Constructor: `C`, `C(P)`, `C(P1, ..., Pn)`.
     /// The description is shared like OCaml's physical `constructor_description`
     /// record, so pattern copies in exhaustiveness and matching stay cheap.
-    Tpat_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Pattern>),
+    Tpat_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, TPatList),
 
     /// Variant: `` `A ``, `` `A(P) ``.
-    Tpat_variant(String, Option<Box<Pattern>>, RowDescRef),
+    Tpat_variant(String, Option<TPatIdx>, RowDescRef),
 
     /// Record: `{l1: P1, ..., ln: Pn}` or `{l1: P1, ..., _}`.
     /// The bool indicates whether the field is optional.
     Tpat_record(
-        Vec<(Loc<LidentIdx>, Arc<LabelDescription>, Pattern, bool)>,
+        Vec<(Loc<LidentIdx>, Arc<LabelDescription>, TPatIdx, bool)>,
         ClosedFlag,
         Option<Box<RecordPatternRest>>,
     ),
 
     /// Array: `[| P1, ..., Pn |]`.
-    Tpat_array(Vec<Pattern>),
+    Tpat_array(TPatList),
 
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
-    Tpat_or(Box<Pattern>, Box<Pattern>, Option<Box<RowDesc>>),
+    Tpat_or(TPatIdx, TPatIdx, Option<Box<RowDesc>>),
 }
 
 /// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RecordPatternRest {
     /// Identifier bound for the rest value.
     pub rest_ident: Ident,
@@ -263,34 +165,34 @@ pub struct RecordPatternRest {
 // ============================================================================
 
 /// A typed expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Expression {
     /// Expression description.
     pub exp_desc: ExpressionDesc,
     /// Source location.
     pub exp_loc: LocIdx,
-    /// Extra information (constraints, opens, newtypes, etc.).
-    pub exp_extra: SparseExtras<(ExpExtra, LocIdx, Attributes)>,
+    /// `exp_extra` (constraints, opens, newtypes, etc.) and
+    /// `exp_attributes`, in a side table of the [`TypedArena`]: read them
+    /// with [`TypedArena::exp_extra`] and [`TypedArena::exp_attributes`].
+    pub exp_cold: Option<TExpColdIdx>,
     /// Type of the expression.
     pub exp_type: TypeExprRef,
     /// Environment at this expression.
     pub exp_env: EnvRef,
-    /// Attributes on the expression.
-    pub exp_attributes: Attributes,
 }
 
 /// Extra information on an expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ExpExtra {
     /// Type constraint: `E : T`.
-    Texp_constraint(TypedCoreType),
+    Texp_constraint(TCoreTypeIdx),
     /// Coercion: `(E :> T)`. `target` is T as written; `source_type` is the
     /// inferred type of E and `target_type` the type of T, both
     /// head-expanded so a consumer without a typing environment can still
     /// relate them.
     Texp_coerce {
         source_type: TypeExprRef,
-        target: TypedCoreType,
+        target: TCoreTypeIdx,
         target_type: TypeExprRef,
     },
     /// Open: `let open M in E`.
@@ -300,7 +202,7 @@ pub enum ExpExtra {
 }
 
 /// Expression description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ExpressionDesc {
     /// Identifier: `x`, `M.x`.
     Texp_ident(Path, Loc<LidentIdx>, Arc<ValueDescription>),
@@ -309,12 +211,12 @@ pub enum ExpressionDesc {
     Texp_constant(Constant),
 
     /// Let binding: `let P = E in E'`.
-    Texp_let(RecFlag, Vec<ValueBinding>, Box<Expression>),
+    Texp_let(RecFlag, TVbList, TExprIdx),
 
     /// Function expression. Mirrors `compiler/ml/typedtree.ml`.
     Texp_function {
-        params: Vec<FunctionParam>,
-        body: Box<Expression>,
+        params: TParamList,
+        body: TExprIdx,
         /// Whether this is an async function.
         async_: bool,
     },
@@ -322,8 +224,8 @@ pub enum ExpressionDesc {
     /// Application: `E(E1, ..., En)`.
     /// Uses the ApplyArg representation.
     Texp_apply {
-        funct: Box<Expression>,
-        args: Vec<ApplyArg>,
+        funct: TExprIdx,
+        args: TArgList,
         /// Whether this is a partial application.
         partial: bool,
         /// Whether this was transformed from JSX.
@@ -332,31 +234,31 @@ pub enum ExpressionDesc {
 
     /// Match: `switch E { | P1 => E1 | ... }`.
     /// The two case lists are (value cases, exception cases).
-    Texp_match(Box<Expression>, Vec<Case>, Vec<Case>, Partial),
+    Texp_match(TExprIdx, TCaseList, TCaseList, Partial),
 
     /// Try: `try E catch { | P1 => E1 | ... }`.
-    Texp_try(Box<Expression>, Vec<Case>),
+    Texp_try(TExprIdx, TCaseList),
 
     /// Tuple: `(E1, ..., En)`.
-    Texp_tuple(Vec<Expression>),
+    Texp_tuple(TExprList),
 
     /// Constructor: `C`, `C(E)`, `C(E1, ..., En)`.
-    Texp_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Expression>),
+    Texp_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, TExprList),
 
     /// Variant: `` `A ``, `` `A(E) ``.
-    Texp_variant(String, Option<Box<Expression>>),
+    Texp_variant(String, Option<TExprIdx>),
 
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
     /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
-        fields: Vec<RecordField>,
+        fields: TFieldList,
         /// OCaml `representation` (compiler/ml/typedtree.ml `Texp_record`).
         /// When `fields` is non-empty OCaml takes it from the first label's
         /// `lbl_repres` (compiler/ml/typecore.ml:2767-2771), so Rust derives it
         /// from `fields[0]`. Only the empty-field case (typecore.ml:2772-2788)
         /// carries it separately; sparse storage keeps the common node small.
         empty_representation: Option<Box<crate::types::RecordRepresentation>>,
-        extended_expression: Option<Box<Expression>>,
+        extended_expression: Option<TExprIdx>,
     },
 
     /// Intentional Rust performance representation for large regular records
@@ -373,31 +275,26 @@ pub enum ExpressionDesc {
     /// the same external typedtree/lambda/JS behavior and comparable
     /// large-record performance.
     Texp_record_sparse {
-        fields: Vec<RecordField>,
+        fields: TFieldList,
         all_labels: std::sync::Arc<Vec<LabelDescription>>,
         omitted_loc: LocIdx,
-        extended_expression: Option<Box<Expression>>,
+        extended_expression: Option<TExprIdx>,
     },
 
     /// Field access: `E.l`.
-    Texp_field(Box<Expression>, Loc<LidentIdx>, Arc<LabelDescription>),
+    Texp_field(TExprIdx, Loc<LidentIdx>, Arc<LabelDescription>),
 
     /// Field mutation: `E.l = E'`.
-    Texp_setfield(
-        Box<Expression>,
-        Loc<LidentIdx>,
-        Arc<LabelDescription>,
-        Box<Expression>,
-    ),
+    Texp_setfield(TExprIdx, Loc<LidentIdx>, Arc<LabelDescription>, TExprIdx),
 
     /// Array literal: `[E1, ..., En]`.
-    Texp_array(Vec<Expression>),
+    Texp_array(TExprList),
 
     /// If-then-else: `if E1 then E2 else E3`.
-    Texp_ifthenelse(Box<Expression>, Box<Expression>, Option<Box<Expression>>),
+    Texp_ifthenelse(TExprIdx, TExprIdx, Option<TExprIdx>),
 
     /// Sequence: `E1; E2`.
-    Texp_sequence(Box<Expression>, Box<Expression>),
+    Texp_sequence(TExprIdx, TExprIdx),
 
     /// `break` (upstream #8348). Exits the nearest enclosing loop.
     Texp_break,
@@ -407,43 +304,26 @@ pub enum ExpressionDesc {
     Texp_continue,
 
     /// While loop: `while E1 do E2 done`.
-    Texp_while(Box<Expression>, Box<Expression>),
+    Texp_while(TExprIdx, TExprIdx),
 
     /// For loop: `for i = E1 to/downto E2 do E3 done`.
-    Texp_for(
-        Ident,
-        Box<Pattern>,
-        Box<Expression>,
-        Box<Expression>,
-        DirectionFlag,
-        Box<Expression>,
-    ),
+    Texp_for(Ident, TPatIdx, TExprIdx, TExprIdx, DirectionFlag, TExprIdx),
 
     /// For-of loop: `for pat of iterable { body }` (upstream #7887).
     /// The pattern stored is the original parser pattern (as in OCaml's
     /// `Texp_for_of of Ident.t * Parsetree.pattern * expression * expression`).
-    Texp_for_of(
-        Ident,
-        Box<crate::parser::ast::Pattern>,
-        Box<Expression>,
-        Box<Expression>,
-    ),
+    Texp_for_of(Ident, Box<crate::parser::ast::Pattern>, TExprIdx, TExprIdx),
 
     /// For-await-of loop: `for await pat of asyncIterable { body }` (upstream #7887).
-    Texp_for_await_of(
-        Ident,
-        Box<crate::parser::ast::Pattern>,
-        Box<Expression>,
-        Box<Expression>,
-    ),
+    Texp_for_await_of(Ident, Box<crate::parser::ast::Pattern>, TExprIdx, TExprIdx),
 
     /// A typed JavaScript tagged template: the typed `tag`, the exact raw
     /// segment sources (which may contain invalid escapes), and the typed
     /// interpolated values. There is always one more raw source than value.
     Texp_tagged_template {
-        tag: Box<Expression>,
+        tag: TExprIdx,
         raw_sources: Vec<String>,
-        values: Vec<Expression>,
+        values: TExprList,
     },
 
     /// A typed ordinary backquoted template: validated segments carrying
@@ -451,29 +331,29 @@ pub enum ExpressionDesc {
     /// always one more segment than value.
     Texp_template {
         segments: Vec<crate::string_literal::TemplateSegment>,
-        values: Vec<Expression>,
+        values: TExprList,
     },
 
     /// Object property read: `E["name"]`.
-    Texp_object_get(Box<Expression>, Loc<String>),
+    Texp_object_get(TExprIdx, Loc<String>),
 
     /// Object property write: `E["name"] = V`.
-    Texp_object_set(Box<Expression>, Loc<String>, Box<Expression>),
+    Texp_object_set(TExprIdx, Loc<String>, TExprIdx),
 
     /// Object literal: `{"a": E, ...}`, fields in source order.
-    Texp_object_literal(Vec<(Loc<String>, Expression)>),
+    Texp_object_literal(Vec<(Loc<String>, TExprIdx)>),
 
     /// Let module: `let module M = ME in E`.
-    Texp_letmodule(Ident, Loc<String>, Box<ModuleExpr>, Box<Expression>),
+    Texp_letmodule(Ident, Loc<String>, TModExprIdx, TExprIdx),
 
     /// Let exception: `let exception C of T in E`.
-    Texp_letexception(Box<ExtensionConstructor>, Box<Expression>),
+    Texp_letexception(TExtIdx, TExprIdx),
 
     /// Assert: `assert E`.
-    Texp_assert(Box<Expression>),
+    Texp_assert(TExprIdx),
 
     /// Pack: `(module M : MT)`.
-    Texp_pack(Box<ModuleExpr>),
+    Texp_pack(TModExprIdx),
 
     /// Extension constructor: `[%extension_constructor C]`.
     Texp_extension_constructor(Loc<LidentIdx>, Path),
@@ -482,12 +362,12 @@ pub enum ExpressionDesc {
 // DirectionFlag and Arity are re-exported from parser::ast
 
 /// Record label definition in a record expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RecordLabelDefinition {
     /// Label is kept from extended expression.
     Kept(TypeExprRef),
     /// Label is overridden with new expression.
-    Overridden(Loc<LidentIdx>, Expression),
+    Overridden(Loc<LidentIdx>, TExprIdx),
     /// Intentional Rust performance representation for an omitted optional label
     /// synthesized as `None`.
     ///
@@ -500,29 +380,29 @@ pub enum RecordLabelDefinition {
 
 pub type RecordField = (
     Loc<LidentIdx>,
-    LabelDescription,
+    Arc<LabelDescription>,
     RecordLabelDefinition,
     bool,
 );
 
 /// An argument in a function application.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ApplyArg {
     /// Argument label.
     pub label: TypeArgLabel,
     /// Argument expression, or None for omitted labeled arguments.
-    pub expression: Option<Expression>,
+    pub expression: Option<TExprIdx>,
 }
 
 /// A function parameter. Mirrors `compiler/ml/typedtree.ml`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FunctionParam {
     /// Source argument label.
     pub fp_lbl: TypeArgLabel,
     /// Identifier bound by generated Lambda.
     pub fp_param: Ident,
     /// Typed source pattern.
-    pub fp_pat: Pattern,
+    pub fp_pat: TPatIdx,
     /// Whether the parameter pattern is exhaustive.
     pub fp_partial: Partial,
     /// Optional parameter with a default value: `fp_pat` binds the option
@@ -536,23 +416,23 @@ pub struct FunctionParam {
 // ============================================================================
 
 /// A case in a match expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Case {
     /// Left-hand side pattern.
-    pub c_lhs: Pattern,
+    pub c_lhs: TPatIdx,
     /// Optional guard: `when E`.
-    pub c_guard: Option<Expression>,
+    pub c_guard: Option<TExprIdx>,
     /// Right-hand side expression.
-    pub c_rhs: Expression,
+    pub c_rhs: TExprIdx,
 }
 
 /// A value binding in a let expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ValueBinding {
     /// Binding pattern.
-    pub vb_pat: Pattern,
+    pub vb_pat: TPatIdx,
     /// Binding expression.
-    pub vb_expr: Expression,
+    pub vb_expr: TExprIdx,
     /// Attributes on the binding.
     pub vb_attributes: Attributes,
     /// Location of the binding.
@@ -564,7 +444,7 @@ pub struct ValueBinding {
 // ============================================================================
 
 /// A typed core type (type expression after type checking).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedCoreType {
     /// Type description.
     pub ctyp_desc: TypedCoreTypeDesc,
@@ -580,34 +460,34 @@ pub struct TypedCoreType {
 
 /// Arrow argument structure for Ttyp_arrow.
 /// Matches OCaml's `arg = {attrs: attributes; lbl: arg_label; typ: core_type}`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ArrowArg {
     /// Attributes on the argument.
     pub attrs: Attributes,
     /// Argument label.
     pub lbl: TypeArgLabel,
     /// Argument type (boxed to prevent infinite size).
-    pub typ: Box<TypedCoreType>,
+    pub typ: TCoreTypeIdx,
 }
 
 /// Typed core type description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedCoreTypeDesc {
     /// Type variable: `'a`.
     Ttyp_var(Option<String>),
     /// N-ary arrow type. Mirrors `compiler/ml/typedtree.ml`:
     /// `Ttyp_arrow of Parsetree.arg list * core_type`.
-    Ttyp_arrow(Vec<ArrowArg>, Box<TypedCoreType>),
+    Ttyp_arrow(Vec<ArrowArg>, TCoreTypeIdx),
     /// Tuple type: `(T1, ..., Tn)`.
-    Ttyp_tuple(Vec<TypedCoreType>),
+    Ttyp_tuple(TCoreTypeList),
     /// Type constructor: `t`, `M.t`, `('a, 'b) t`.
-    Ttyp_constr(Path, Loc<LidentIdx>, Vec<TypedCoreType>),
+    Ttyp_constr(Path, Loc<LidentIdx>, TCoreTypeList),
     /// Object type: `< m1: T1; ...; mn: Tn >`.
     Ttyp_object(Vec<ObjectField>, ClosedFlag),
     /// Polymorphic type: `'a 'b. T`.
-    Ttyp_poly(Vec<String>, Box<TypedCoreType>),
+    Ttyp_poly(Vec<String>, TCoreTypeIdx),
     /// Type alias: `T as 'a`.
-    Ttyp_alias(Box<TypedCoreType>, String),
+    Ttyp_alias(TCoreTypeIdx, String),
     /// Variant type: `[< `A | `B ]`.
     Ttyp_variant(Vec<RowFieldType>, ClosedFlag, Option<Vec<String>>),
     /// Package type: `(module MT)`.
@@ -615,7 +495,7 @@ pub enum TypedCoreTypeDesc {
 }
 
 /// An object field type.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ObjectField {
     /// Field name or inherit.
     pub of_desc: ObjectFieldDesc,
@@ -626,16 +506,16 @@ pub struct ObjectField {
 }
 
 /// Object field description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ObjectFieldDesc {
     /// Named field.
-    OTtag(Loc<String>, TypedCoreType),
+    OTtag(Loc<String>, TCoreTypeIdx),
     /// Inherited type.
-    OTinherit(TypedCoreType),
+    OTinherit(TCoreTypeIdx),
 }
 
 /// A row field type (for polymorphic variants).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RowFieldType {
     /// Field description.
     pub rf_desc: RowFieldDesc,
@@ -646,21 +526,21 @@ pub struct RowFieldType {
 }
 
 /// Row field description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RowFieldDesc {
     /// Tag: `` `A `` or `` `A of T ``.
-    Rtag(Loc<String>, bool, Vec<TypedCoreType>),
+    Rtag(Loc<String>, bool, TCoreTypeList),
     /// Inherit: `T`.
-    Rinherit(TypedCoreType),
+    Rinherit(TCoreTypeIdx),
 }
 
 /// A package type constraint.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageType {
     /// Module type path.
     pub pack_path: Path,
     /// Type constraints.
-    pub pack_fields: Vec<(Loc<LidentIdx>, TypedCoreType)>,
+    pub pack_fields: Vec<(Loc<LidentIdx>, TCoreTypeIdx)>,
 }
 
 // ============================================================================
@@ -668,7 +548,7 @@ pub struct PackageType {
 // ============================================================================
 
 /// A module expression (placeholder).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleExpr {
     /// Module description.
     pub mod_desc: ModuleExprDesc,
@@ -683,29 +563,29 @@ pub struct ModuleExpr {
 }
 
 /// Module expression description (placeholder).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleExprDesc {
     /// Identifier.
     Tmod_ident(Path, Loc<LidentIdx>),
     /// Structure.
     Tmod_structure(Structure),
     /// Functor application.
-    Tmod_apply(Box<ModuleExpr>, Box<ModuleExpr>, ModuleCoercion),
+    Tmod_apply(TModExprIdx, TModExprIdx, ModuleCoercion),
     /// Functor.
-    Tmod_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleExpr>),
+    Tmod_functor(Ident, Loc<String>, Option<TModTypeIdx>, TModExprIdx),
     /// Constraint.
     Tmod_constraint(
-        Box<ModuleExpr>,
+        TModExprIdx,
         DeclModuleType,
         ModuleTypeConstraint,
         ModuleCoercion,
     ),
     /// Unpack.
-    Tmod_unpack(Expression, DeclModuleType),
+    Tmod_unpack(TExprIdx, DeclModuleType),
 }
 
 /// Module type (matches OCaml's `Typedtree.module_type`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleType {
     /// Module type description.
     pub mty_desc: ModuleTypeDesc,
@@ -720,24 +600,24 @@ pub struct ModuleType {
 }
 
 /// Module type description (matches OCaml's `Typedtree.module_type_desc`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleTypeDesc {
     /// Named module type: `S` or `M.S`.
     Tmty_ident(Path, Loc<LidentIdx>),
     /// Signature: `sig ... end` / `{ ... }`.
     Tmty_signature(TypedSignature),
     /// Functor type: `functor (X : MT1) -> MT2`.
-    Tmty_functor(Ident, Loc<String>, Option<Box<ModuleType>>, Box<ModuleType>),
+    Tmty_functor(Ident, Loc<String>, Option<TModTypeIdx>, TModTypeIdx),
     /// With constraint: `MT with ...`.
-    Tmty_with(Box<ModuleType>, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
+    Tmty_with(TModTypeIdx, Vec<(Path, Loc<LidentIdx>, WithConstraint)>),
     /// Typeof: `module type of ME`.
-    Tmty_typeof(Box<ModuleExpr>),
+    Tmty_typeof(TModExprIdx),
     /// Alias: `(module M)`.
     Tmty_alias(Path, Loc<LidentIdx>),
 }
 
 /// With constraint (matches OCaml's `Typedtree.with_constraint`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum WithConstraint {
     Twith_type(TypedTypeDeclaration),
     Twith_module(Path, Loc<LidentIdx>),
@@ -746,13 +626,13 @@ pub enum WithConstraint {
 }
 
 /// Typed signature (matches OCaml's `Typedtree.signature`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedSignature {
-    pub sig_items: Vec<TypedSignatureItem>,
+    pub sig_items: TSigItemList,
 }
 
 /// Typed signature item (matches OCaml's `Typedtree.signature_item`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedSignatureItem {
     pub sig_desc: TypedSignatureItemDesc,
     pub sig_env: EnvRef,
@@ -760,12 +640,12 @@ pub struct TypedSignatureItem {
 }
 
 /// Typed signature item description (matches OCaml's `Typedtree.signature_item_desc`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedSignatureItemDesc {
-    Tsig_value(TypedValueDescription),
+    Tsig_value(TValDescIdx),
     Tsig_type(RecFlag, Vec<TypedTypeDeclaration>),
     Tsig_typext(TypeExtension),
-    Tsig_exception(ExtensionConstructor),
+    Tsig_exception(TExtIdx),
     Tsig_module(TypedModuleDeclaration),
     Tsig_recmodule(Vec<TypedModuleDeclaration>),
     Tsig_modtype(ModuleTypeDeclaration),
@@ -775,35 +655,35 @@ pub enum TypedSignatureItemDesc {
 }
 
 /// Typed module declaration (matches OCaml's `Typedtree.module_declaration`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedModuleDeclaration {
     pub md_id: Ident,
     pub md_name: Loc<String>,
-    pub md_type: ModuleType,
+    pub md_type: TModTypeIdx,
     pub md_attributes: Attributes,
     pub md_loc: LocIdx,
 }
 
 /// Include description (for signatures, matches OCaml's `Typedtree.include_description`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IncludeDescription {
-    pub incl_mod: ModuleType,
+    pub incl_mod: TModTypeIdx,
     pub incl_type: Vec<crate::types::decl::SignatureItem>,
     pub incl_attributes: Attributes,
     pub incl_loc: LocIdx,
 }
 
 /// Module type constraint.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleTypeConstraint {
     /// Explicit signature.
-    Tmodtype_explicit(Box<ModuleType>),
+    Tmodtype_explicit(TModTypeIdx),
     /// Implicit (no constraint).
     Tmodtype_implicit,
 }
 
 /// Module coercion.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ModuleCoercion {
     /// No coercion needed.
     Tcoerce_none,
@@ -822,7 +702,7 @@ pub enum ModuleCoercion {
 }
 
 /// Primitive coercion.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PrimitiveCoercion {
     /// Primitive description.
     pub pc_desc: crate::types::PrimitiveDescription,
@@ -836,10 +716,10 @@ pub struct PrimitiveCoercion {
 }
 
 /// A structure (module definition body).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Structure {
     /// Structure items.
-    pub str_items: Vec<StructureItem>,
+    pub str_items: TStrItemList,
     /// Inferred signature items for this structure.
     pub str_type: Vec<crate::types::decl::SignatureItem>,
     /// Final environment.
@@ -847,7 +727,7 @@ pub struct Structure {
 }
 
 /// A structure item.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StructureItem {
     /// Item description.
     pub str_desc: StructureItemDesc,
@@ -858,20 +738,20 @@ pub struct StructureItem {
 }
 
 /// Structure item description.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum StructureItemDesc {
     /// Evaluated expression: `E`.
-    Tstr_eval(Expression, Attributes),
+    Tstr_eval(TExprIdx, Attributes),
     /// Value binding: `let P = E`.
-    Tstr_value(RecFlag, Vec<ValueBinding>),
+    Tstr_value(RecFlag, TVbList),
     /// Primitive declaration: `external f : t = "..."`.
-    Tstr_primitive(TypedValueDescription),
+    Tstr_primitive(TValDescIdx),
     /// Type declaration: `type t = ...`.
     Tstr_type(RecFlag, Vec<TypedTypeDeclaration>),
     /// Type extension: `type t += ...`.
     Tstr_typext(TypeExtension),
     /// Exception declaration: `exception C`.
-    Tstr_exception(ExtensionConstructor),
+    Tstr_exception(TExtIdx),
     /// Module binding: `module M = ME`.
     Tstr_module(ModuleBinding),
     /// Recursive modules: `module rec M = ...`.
@@ -891,24 +771,24 @@ pub use crate::types::TypeDeclaration as InternalTypeDeclaration;
 
 /// Typed type declaration for the typed tree.
 /// Matches OCaml's Typedtree.type_declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedTypeDeclaration {
     /// Type identifier.
     pub typ_id: Ident,
     /// Type name with location.
     pub typ_name: Loc<String>,
     /// Type parameters with variance.
-    pub typ_params: Vec<(TypedCoreType, Variance)>,
+    pub typ_params: Vec<(TCoreTypeIdx, Variance)>,
     /// Internal type declaration for the environment.
     pub typ_type: InternalTypeDeclaration,
     /// Type constraints.
-    pub typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)>,
+    pub typ_cstrs: Vec<(TCoreTypeIdx, TCoreTypeIdx, LocIdx)>,
     /// Type kind.
     pub typ_kind: TypedTypeKind,
     /// Private flag.
     pub typ_private: PrivateFlag,
     /// Manifest type (for type aliases).
-    pub typ_manifest: Option<TypedCoreType>,
+    pub typ_manifest: Option<TCoreTypeIdx>,
     /// Location.
     pub typ_loc: LocIdx,
     /// Attributes.
@@ -916,7 +796,7 @@ pub struct TypedTypeDeclaration {
 }
 
 /// Typed type kind.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedTypeKind {
     /// Abstract type.
     Ttype_abstract,
@@ -929,7 +809,7 @@ pub enum TypedTypeKind {
 }
 
 /// Typed constructor declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedConstructorDeclaration {
     /// Constructor identifier.
     pub cd_id: Ident,
@@ -940,7 +820,7 @@ pub struct TypedConstructorDeclaration {
     /// Constructor arguments.
     pub cd_args: TypedConstructorArguments,
     /// Result type (for GADTs).
-    pub cd_res: Option<TypedCoreType>,
+    pub cd_res: Option<TCoreTypeIdx>,
     /// Location.
     pub cd_loc: LocIdx,
     /// Attributes.
@@ -948,16 +828,16 @@ pub struct TypedConstructorDeclaration {
 }
 
 /// Typed constructor arguments.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum TypedConstructorArguments {
     /// Tuple arguments.
-    Cstr_tuple(Vec<TypedCoreType>),
+    Cstr_tuple(TCoreTypeList),
     /// Record arguments.
     Cstr_record(Vec<TypedLabelDeclaration>),
 }
 
 /// Typed label declaration for records.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedLabelDeclaration {
     /// Label identifier.
     pub ld_id: Ident,
@@ -970,7 +850,7 @@ pub struct TypedLabelDeclaration {
     /// Whether the label is optional.
     pub ld_optional: bool,
     /// Label type.
-    pub ld_type: TypedCoreType,
+    pub ld_type: TCoreTypeIdx,
     /// Location.
     pub ld_loc: LocIdx,
     /// Attributes.
@@ -984,12 +864,12 @@ pub struct TypedLabelDeclaration {
 }
 
 /// A type extension.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypeExtension {
     /// Extended type path.
     pub tyext_path: Path,
     /// Type parameters.
-    pub tyext_params: Vec<(TypedCoreType, Variance)>,
+    pub tyext_params: Vec<(TCoreTypeIdx, Variance)>,
     /// Extension constructors.
     pub tyext_constructors: Vec<ExtensionConstructor>,
     /// Private flag.
@@ -1002,14 +882,14 @@ pub struct TypeExtension {
 use crate::types::Variance;
 
 /// A module binding.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleBinding {
     /// Module identifier.
     pub mb_id: Ident,
     /// Module name with location.
     pub mb_name: Loc<String>,
     /// Module expression.
-    pub mb_expr: ModuleExpr,
+    pub mb_expr: TModExprIdx,
     /// Module attributes.
     pub mb_attributes: Attributes,
     /// Location.
@@ -1017,14 +897,14 @@ pub struct ModuleBinding {
 }
 
 /// A module type declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleTypeDeclaration {
     /// Module type identifier.
     pub mtd_id: Ident,
     /// Module type name with location.
     pub mtd_name: Loc<String>,
     /// Module type (None for abstract).
-    pub mtd_type: Option<ModuleType>,
+    pub mtd_type: Option<TModTypeIdx>,
     /// Attributes.
     pub mtd_attributes: Attributes,
     /// Location.
@@ -1032,7 +912,7 @@ pub struct ModuleTypeDeclaration {
 }
 
 /// An open description (matches OCaml's `open_description`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OpenDeclaration {
     /// Resolved module path.
     pub open_path: Path,
@@ -1045,10 +925,10 @@ pub struct OpenDeclaration {
 }
 
 /// An include declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IncludeDeclaration {
     /// Included module expression.
-    pub incl_mod: ModuleExpr,
+    pub incl_mod: TModExprIdx,
     /// Included module type.
     pub incl_type: Vec<crate::types::decl::SignatureItem>,
     /// Attributes.
@@ -1059,14 +939,14 @@ pub struct IncludeDeclaration {
 
 /// Typed value description (for `external` declarations).
 /// Matches OCaml's `Typedtree.value_description`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypedValueDescription {
     /// Identifier.
     pub val_id: Ident,
     /// Name with location.
     pub val_name: Loc<String>,
     /// Typed core type (the annotated type).
-    pub val_desc: TypedCoreType,
+    pub val_desc: TCoreTypeIdx,
     /// Primitive names.
     pub val_prim: Option<crate::parser::ast::PrimitiveRepr>,
     /// `val_val.val_kind` (compiler/ml/typedtree.mli `value_description`):
@@ -1080,7 +960,7 @@ pub struct TypedValueDescription {
 }
 
 /// Extension constructor.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExtensionConstructor {
     /// Constructor identifier.
     pub ext_id: Ident,
@@ -1097,25 +977,25 @@ pub struct ExtensionConstructor {
 }
 
 /// Extension constructor kind.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ExtensionConstructorKind {
     /// Declaration with argument types and optional result type.
-    Text_decl(ConstructorArgument, Option<TypedCoreType>),
+    Text_decl(ConstructorArgument, Option<TCoreTypeIdx>),
     /// Rebind to another constructor.
     Text_rebind(Path, Loc<LidentIdx>),
 }
 
 /// Constructor argument in extension declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ConstructorArgument {
     /// Tuple arguments.
-    Cstr_tuple(Vec<TypedCoreType>),
+    Cstr_tuple(TCoreTypeList),
     /// Record arguments.
     Cstr_record(Vec<LabelDeclaration>),
 }
 
 /// Label declaration in a constructor record.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LabelDeclaration {
     /// Label identifier.
     pub ld_id: Ident,
@@ -1128,7 +1008,7 @@ pub struct LabelDeclaration {
     /// Whether the label is optional.
     pub ld_optional: bool,
     /// Label type.
-    pub ld_type: TypedCoreType,
+    pub ld_type: TCoreTypeIdx,
     /// Location.
     pub ld_loc: LocIdx,
     /// Attributes.
@@ -1141,7 +1021,7 @@ pub struct LabelDeclaration {
 
 /// Reference to an environment (placeholder).
 /// In the full implementation, this would be an index or reference to the Env.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvRef(pub u32);
 
 impl EnvRef {
@@ -1157,7 +1037,7 @@ impl EnvRef {
 }
 
 /// Reference to a row description.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowDescRef(pub u32);
 
 // ============================================================================
@@ -1165,60 +1045,36 @@ pub struct RowDescRef(pub u32);
 // ============================================================================
 
 impl Pattern {
-    /// Create a new pattern with all fields.
-    pub fn new(
-        desc: PatternDesc,
-        loc: LocIdx,
-        ty: TypeExprRef,
-        env: EnvRef,
-        attributes: Attributes,
-    ) -> Self {
+    /// Create a pattern without extras or attributes; see
+    /// [`TypedArena::with_pat_attributes`].
+    pub fn new(desc: PatternDesc, loc: LocIdx, ty: TypeExprRef, env: EnvRef) -> Self {
         Pattern {
             pat_desc: desc,
             pat_loc: loc,
-            pat_extra: SparseExtras::new(),
+            pat_cold: None,
             pat_type: ty,
             pat_env: env,
-            pat_attributes: attributes,
         }
-    }
-
-    /// Add extra information to this pattern (constraint, unpack, etc.).
-    pub fn with_pat_extra(mut self, extra: PatExtra, loc: LocIdx, attrs: Attributes) -> Self {
-        self.pat_extra.push((extra, loc, attrs));
-        self
     }
 }
 
 impl Expression {
-    /// Create a new expression with all fields.
-    pub fn new(
-        desc: ExpressionDesc,
-        loc: LocIdx,
-        ty: TypeExprRef,
-        env: EnvRef,
-        attributes: Attributes,
-    ) -> Self {
+    /// Create an expression without extras or attributes; see
+    /// [`TypedArena::with_exp_attributes`].
+    pub fn new(desc: ExpressionDesc, loc: LocIdx, ty: TypeExprRef, env: EnvRef) -> Self {
         Expression {
             exp_desc: desc,
             exp_loc: loc,
-            exp_extra: SparseExtras::new(),
+            exp_cold: None,
             exp_type: ty,
             exp_env: env,
-            exp_attributes: attributes,
         }
-    }
-
-    /// Add extra information to this expression.
-    pub fn with_exp_extra(mut self, extra: ExpExtra, loc: LocIdx, attrs: Attributes) -> Self {
-        self.exp_extra.push((extra, loc, attrs));
-        self
     }
 }
 
 impl Case {
     /// Create a new case with pattern and expression (no guard).
-    pub fn simple(lhs: Pattern, rhs: Expression) -> Self {
+    pub fn simple(lhs: TPatIdx, rhs: TExprIdx) -> Self {
         Case {
             c_lhs: lhs,
             c_guard: None,
@@ -1229,7 +1085,7 @@ impl Case {
 
 impl ValueBinding {
     /// Create a new value binding.
-    pub fn new(pat: Pattern, expr: Expression, loc: LocIdx, attributes: Attributes) -> Self {
+    pub fn new(pat: TPatIdx, expr: TExprIdx, loc: LocIdx, attributes: Attributes) -> Self {
         ValueBinding {
             vb_pat: pat,
             vb_expr: expr,
@@ -1287,7 +1143,47 @@ mod node_size_tests {
     #[test]
     fn typed_expression_sizes_stay_compact() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::ExpressionDesc>(), 72);
-        assert_eq!(size_of::<super::Expression>(), 112);
+        assert_eq!(size_of::<super::ExpressionDesc>(), 56);
+        assert_eq!(size_of::<super::Expression>(), 72);
+    }
+
+    // Module expression and module type children are arena handles.
+    #[test]
+    fn typed_module_nodes_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::ModuleExpr>(), 184);
+        assert_eq!(size_of::<super::ModuleType>(), 112);
+        assert_eq!(size_of::<super::ModuleTypeDesc>(), 56);
+    }
+
+    // Structure and signature items keep their large payloads (value
+    // descriptions, extension constructors) behind arena handles.
+    #[test]
+    fn typed_items_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::StructureItem>(), 96);
+        assert_eq!(size_of::<super::TypedSignatureItem>(), 96);
+        assert_eq!(size_of::<super::TypedCoreType>(), 80);
+    }
+
+    // Sub-patterns are handles into the TypedArena, so a pattern owns no
+    // boxed children; extras and attributes live in a side table.
+    #[test]
+    fn typed_patterns_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::PatternDesc>(), 56);
+        assert_eq!(size_of::<super::Pattern>(), 72);
+    }
+
+    // Children live in the TypedArena: list-carrying nodes hold 4-byte
+    // handles and 8-byte list ranges instead of inline subtrees.
+    #[test]
+    fn typed_list_items_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::Case>(), 12);
+        assert_eq!(size_of::<super::ValueBinding>(), 24);
+        assert_eq!(size_of::<super::FunctionParam>(), 64);
+        assert_eq!(size_of::<super::ApplyArg>(), 48);
+        assert_eq!(size_of::<super::RecordField>(), 40);
     }
 }

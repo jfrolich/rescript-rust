@@ -24,7 +24,9 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
-use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
+use crate::types::typedtree::{
+    Constant, EnvRef, Pattern, PatternDesc, TPatIdx, TPatList, TypedArena,
+};
 
 /// A pattern node in the matrix arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -56,6 +58,11 @@ pub(crate) trait Oracle {
     fn is_active(&self, warning: &ParmatchWarning) -> bool;
     /// Whether `loc` is a ghost location.
     fn is_ghost(&self, loc: LocIdx) -> bool;
+    /// The arena counter-examples are stored in: [`Parmatch::export`] adds
+    /// to it and [`Oracle::pred`] retypes from it. It is scratch space,
+    /// separate from the arena holding the patterns being checked.
+    fn scratch(&self) -> &TypedArena;
+    fn scratch_mut(&mut self) -> &mut TypedArena;
     /// `!print_res_pat v` (Pattern_printer.print_pattern).
     fn print_pattern(&mut self, v: &Pattern) -> String;
     /// The type checker's `partial_pred` on `Conv.conv u`
@@ -67,10 +74,10 @@ pub(crate) trait Oracle {
     fn placeholder_lid(&self) -> LidentIdx;
     /// `Ctype.none`.
     fn none_type(&mut self) -> TypeExprRef;
-    /// Whether the pattern carries the `res.dictPattern` attribute.
-    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool;
-    /// Whether the pattern carries `res.patFromVariantSpread`.
-    fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool;
+    /// Whether pattern attributes include `res.dictPattern`.
+    fn has_dict_pattern_attribute(&self, attrs: &crate::parser::ast::Attributes) -> bool;
+    /// Whether pattern attributes include `res.patFromVariantSpread`.
+    fn is_pat_from_variant_spread(&self, attrs: &crate::parser::ast::Attributes) -> bool;
     /// Whether `lid` is `Ldot (Lident "*predef*", "Some")`.
     fn is_predef_some_lid(&self, lid: LidentIdx) -> bool;
     /// Whether a constructor's runtime representation is a block whose
@@ -194,6 +201,8 @@ pub(crate) type Row = Vec<P>;
 /// The arena and algorithms.
 pub(crate) struct Parmatch<'a, O: Oracle> {
     pub oracle: O,
+    /// The arena of the patterns being checked ([`Parmatch::import`]).
+    ta: &'a TypedArena,
     nodes: Vec<Node<'a>>,
     omega: P,
     extra: P,
@@ -205,9 +214,10 @@ pub(crate) struct Parmatch<'a, O: Oracle> {
 pub(crate) struct Empty;
 
 impl<'a, O: Oracle> Parmatch<'a, O> {
-    pub fn new(oracle: O) -> Self {
+    pub fn new(oracle: O, ta: &'a TypedArena) -> Self {
         let mut pm = Parmatch {
             oracle,
+            ta,
             nodes: Vec::new(),
             omega: P(0),
             extra: P(0),
@@ -294,22 +304,23 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     /// Import a typed-tree pattern.
     pub fn import(&mut self, pat: &'a Pattern) -> P {
+        let ta = self.ta;
         let desc = match &pat.pat_desc {
             PatternDesc::Tpat_any => Desc::Any,
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
-            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import(inner)),
+            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import(ta.pattern(*inner))),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Borrowed(c)),
             PatternDesc::Tpat_tuple(items) => {
-                Desc::Tuple(items.iter().map(|item| self.import(item)).collect())
+                Desc::Tuple(ta.patterns(*items).map(|item| self.import(item)).collect())
             }
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
                 cstr: std::sync::Arc::clone(cstr),
-                args: args.iter().map(|arg| self.import(arg)).collect(),
+                args: ta.patterns(*args).map(|arg| self.import(arg)).collect(),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
                 label: Cow::Borrowed(label.as_str()),
-                arg: arg.as_deref().map(|arg| self.import(arg)),
+                arg: arg.map(|arg| self.import(ta.pattern(arg))),
             },
             PatternDesc::Tpat_record(fields, closed, rest) => Desc::Record {
                 fields: fields
@@ -317,7 +328,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .map(|(lid, lbl, p, opt)| Field {
                         lid: Some(*lid),
                         lbl: Cow::Borrowed(lbl),
-                        pat: self.import(p),
+                        pat: self.import(ta.pattern(*p)),
                         opt: *opt,
                     })
                     .collect(),
@@ -325,9 +336,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 has_rest: rest.is_some(),
             },
             PatternDesc::Tpat_array(items) => {
-                Desc::Array(items.iter().map(|item| self.import(item)).collect())
+                Desc::Array(ta.patterns(*items).map(|item| self.import(item)).collect())
             }
-            PatternDesc::Tpat_or(left, right, _) => Desc::Or(self.import(left), self.import(right)),
+            PatternDesc::Tpat_or(left, right, _) => Desc::Or(
+                self.import(ta.pattern(*left)),
+                self.import(ta.pattern(*right)),
+            ),
         };
         self.push(
             desc,
@@ -2246,23 +2260,24 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 impl<'a, O: Oracle> Parmatch<'a, O> {
     /// Import an owned typed pattern (a counter-example), without a source
     /// reference.
+    /// Import a counter-example returned by [`Oracle::pred`], whose
+    /// sub-patterns are in the oracle's scratch arena, without a source
+    /// reference.
     fn import_owned(&mut self, pat: &Pattern) -> P {
         let desc = match &pat.pat_desc {
             PatternDesc::Tpat_any => Desc::Any,
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
-            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import_owned(inner)),
+            PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import_scratch(*inner)),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Owned(c.clone())),
-            PatternDesc::Tpat_tuple(items) => {
-                Desc::Tuple(items.iter().map(|item| self.import_owned(item)).collect())
-            }
+            PatternDesc::Tpat_tuple(items) => Desc::Tuple(self.import_scratch_list(*items)),
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
                 cstr: std::sync::Arc::clone(cstr),
-                args: args.iter().map(|arg| self.import_owned(arg)).collect(),
+                args: self.import_scratch_list(*args),
             },
             PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
                 label: Cow::Owned(label.clone()),
-                arg: arg.as_deref().map(|arg| self.import_owned(arg)),
+                arg: arg.map(|arg| self.import_scratch(arg)),
             },
             PatternDesc::Tpat_record(fields, closed, rest) => Desc::Record {
                 fields: fields
@@ -2270,24 +2285,46 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     .map(|(lid, lbl, p, opt)| Field {
                         lid: Some(*lid),
                         lbl: Cow::Owned((**lbl).clone()),
-                        pat: self.import_owned(p),
+                        pat: self.import_scratch(*p),
                         opt: *opt,
                     })
                     .collect(),
                 closed: *closed,
                 has_rest: rest.is_some(),
             },
-            PatternDesc::Tpat_array(items) => {
-                Desc::Array(items.iter().map(|item| self.import_owned(item)).collect())
-            }
+            PatternDesc::Tpat_array(items) => Desc::Array(self.import_scratch_list(*items)),
             PatternDesc::Tpat_or(left, right, _) => {
-                Desc::Or(self.import_owned(left), self.import_owned(right))
+                Desc::Or(self.import_scratch(*left), self.import_scratch(*right))
             }
         };
         self.push(desc, Some(pat.pat_type), pat.pat_env, pat.pat_loc, None)
     }
 
+    fn import_scratch(&mut self, pat: TPatIdx) -> P {
+        let pat = self.oracle.scratch().pattern(pat).clone();
+        self.import_owned(&pat)
+    }
+
+    fn import_scratch_list(&mut self, pats: TPatList) -> Vec<P> {
+        let pats = self.oracle.scratch().pattern_list(pats).to_vec();
+        pats.into_iter()
+            .map(|pat| self.import_scratch(pat))
+            .collect()
+    }
+
+    /// Export a node into the scratch arena.
+    fn export_idx(&mut self, p: P) -> TPatIdx {
+        let pat = self.export(p);
+        self.oracle.scratch_mut().push_pattern(pat)
+    }
+
+    fn export_list(&mut self, ps: Vec<P>) -> TPatList {
+        let handles: Vec<TPatIdx> = ps.into_iter().map(|p| self.export_idx(p)).collect();
+        self.oracle.scratch_mut().push_pattern_list(&handles)
+    }
+
     /// Export a node as a typed-tree pattern (the input of `Conv.conv`).
+    /// Its sub-patterns are stored in the oracle's scratch arena.
     pub fn export(&mut self, p: P) -> Pattern {
         let node = self.node(p).clone();
         let ty = match node.ty {
@@ -2307,33 +2344,24 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     loc,
                 },
             ),
-            Desc::Alias(inner) => {
-                let inner = self.export(inner);
-                match node.src.map(|src| &src.pat_desc) {
-                    Some(PatternDesc::Tpat_alias(_, id, name)) => {
-                        PatternDesc::Tpat_alias(Box::new(inner), *id, name.clone())
-                    }
-                    _ => return inner,
+            Desc::Alias(inner) => match node.src.map(|src| &src.pat_desc) {
+                Some(PatternDesc::Tpat_alias(_, id, name)) => {
+                    PatternDesc::Tpat_alias(self.export_idx(inner), *id, name.clone())
                 }
-            }
+                _ => return self.export(inner),
+            },
             Desc::Constant(c) => PatternDesc::Tpat_constant(c.into_owned()),
-            Desc::Tuple(items) => {
-                PatternDesc::Tpat_tuple(items.into_iter().map(|p| self.export(p)).collect())
-            }
+            Desc::Tuple(items) => PatternDesc::Tpat_tuple(self.export_list(items)),
             Desc::Construct { lid, cstr, args } => {
                 let lid = lid.unwrap_or_else(|| crate::parse_arena::Located {
                     txt: self.oracle.placeholder_lid(),
                     loc: LocIdx::none(),
                 });
-                PatternDesc::Tpat_construct(
-                    lid,
-                    cstr,
-                    args.into_iter().map(|p| self.export(p)).collect(),
-                )
+                PatternDesc::Tpat_construct(lid, cstr, self.export_list(args))
             }
             Desc::Variant { label, arg } => PatternDesc::Tpat_variant(
                 label.into_owned(),
-                arg.map(|arg| Box::new(self.export(arg))),
+                arg.map(|arg| self.export_idx(arg)),
                 crate::types::typedtree::RowDescRef(0),
             ),
             Desc::Record {
@@ -2361,7 +2389,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                             (
                                 lid,
                                 std::sync::Arc::new(field.lbl.into_owned()),
-                                self.export(field.pat),
+                                self.export_idx(field.pat),
                                 field.opt,
                             )
                         })
@@ -2370,18 +2398,20 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     rest,
                 )
             }
-            Desc::Array(items) => {
-                PatternDesc::Tpat_array(items.into_iter().map(|p| self.export(p)).collect())
-            }
+            Desc::Array(items) => PatternDesc::Tpat_array(self.export_list(items)),
             Desc::Or(p1, p2) => {
-                PatternDesc::Tpat_or(Box::new(self.export(p1)), Box::new(self.export(p2)), None)
+                let p1 = self.export_idx(p1);
+                let p2 = self.export_idx(p2);
+                PatternDesc::Tpat_or(p1, p2, None)
             }
         };
         let attributes = node
             .src
-            .map(|src| src.pat_attributes.clone())
+            .map(|src| self.ta.pat_attributes(src).clone())
             .unwrap_or_default();
-        Pattern::new(desc, node.loc, ty, node.env, attributes)
+        self.oracle
+            .scratch_mut()
+            .with_pat_attributes(Pattern::new(desc, node.loc, ty, node.env), attributes)
     }
 
     /// `initial_matrix casel` (parmatch.ml:1783-1787).
@@ -2499,7 +2529,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     if self.check_partial_all(&v, casel).is_some() {
                         errmsg.push_str("\n(However, some guarded clause may match this value.)");
                     }
-                    if contains_extension(&v) {
+                    if contains_extension(self.oracle.scratch(), &v) {
                         errmsg.push_str(
                             "\nMatching over values of extensible variant types (the *extension* above)\nmust include a wild card pattern in order to be exhaustive.",
                         );
@@ -2520,6 +2550,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     /// `collect_paths_from_pat r p` (parmatch.ml:2112-2131).
     fn collect_paths_from_pat(&mut self, r: &mut Vec<Path>, p: &Pattern) {
+        let ta = self.ta;
         match &p.pat_desc {
             PatternDesc::Tpat_construct(_, cstr, ps) => {
                 if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_)) {
@@ -2530,7 +2561,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         r.push(path);
                     }
                 }
-                for p in ps {
+                for p in ta.patterns(*ps) {
                     self.collect_paths_from_pat(r, p);
                 }
             }
@@ -2539,21 +2570,21 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             | PatternDesc::Tpat_constant(_)
             | PatternDesc::Tpat_variant(_, None, _) => {}
             PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-                for p in ps {
+                for p in ta.patterns(*ps) {
                     self.collect_paths_from_pat(r, p);
                 }
             }
             PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, p, _) in fields {
-                    self.collect_paths_from_pat(r, p);
+                    self.collect_paths_from_pat(r, ta.pattern(*p));
                 }
             }
             PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_alias(p, _, _) => {
-                self.collect_paths_from_pat(r, p)
+                self.collect_paths_from_pat(r, ta.pattern(*p))
             }
             PatternDesc::Tpat_or(p1, p2, _) => {
-                self.collect_paths_from_pat(r, p1);
-                self.collect_paths_from_pat(r, p2);
+                self.collect_paths_from_pat(r, ta.pattern(*p1));
+                self.collect_paths_from_pat(r, ta.pattern(*p2));
             }
         }
     }
@@ -2598,9 +2629,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     fn node_has_dict_pattern(&self, p: P) -> bool {
-        self.node(p)
-            .src
-            .is_some_and(|src| self.oracle.has_dict_pattern_attribute(src))
+        self.node(p).src.is_some_and(|src| {
+            self.oracle
+                .has_dict_pattern_attribute(self.ta.pat_attributes(src))
+        })
     }
 
     /// `contains_dict_pattern` (parmatch.ml:1960-1968) on a node.
@@ -2749,9 +2781,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 Answer::Upartial(ps) => {
                     for p in ps {
                         let node = self.node(p);
-                        let from_spread = node
-                            .src
-                            .is_some_and(|src| self.oracle.is_pat_from_variant_spread(src));
+                        let from_spread = node.src.is_some_and(|src| {
+                            self.oracle
+                                .is_pat_from_variant_spread(self.ta.pat_attributes(src))
+                        });
                         if !from_spread {
                             let loc = node.loc;
                             self.oracle.warn(loc, ParmatchWarning::UnusedPat);
@@ -2768,20 +2801,18 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 }
 
 /// `contains_extension pat` (parmatch.ml:1950-1958).
-pub(crate) fn contains_extension(pat: &Pattern) -> bool {
+pub(crate) fn contains_extension(ta: &TypedArena, pat: &Pattern) -> bool {
+    let sub = |p: &TPatIdx| contains_extension(ta, ta.pattern(*p));
     match &pat.pat_desc {
         PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => true,
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
-        PatternDesc::Tpat_alias(p, _, _) => contains_extension(p),
-        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-            ps.iter().any(contains_extension)
-        }
-        PatternDesc::Tpat_construct(_, _, ps) => ps.iter().any(contains_extension),
-        PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(contains_extension),
-        PatternDesc::Tpat_record(fields, _, _) => {
-            fields.iter().any(|(_, _, p, _)| contains_extension(p))
-        }
-        PatternDesc::Tpat_or(p1, p2, _) => contains_extension(p1) || contains_extension(p2),
+        PatternDesc::Tpat_alias(p, _, _) => sub(p),
+        PatternDesc::Tpat_tuple(ps)
+        | PatternDesc::Tpat_array(ps)
+        | PatternDesc::Tpat_construct(_, _, ps) => ta.pattern_list(*ps).iter().any(sub),
+        PatternDesc::Tpat_variant(_, arg, _) => arg.as_ref().is_some_and(sub),
+        PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| sub(p)),
+        PatternDesc::Tpat_or(p1, p2, _) => sub(p1) || sub(p2),
     }
 }
 
@@ -3034,7 +3065,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 continue;
             };
             let mut vars = IdSet::new();
-            pat_bound_idents(case.lhs, &mut vars);
+            pat_bound_idents(self.ta, case.lhs, &mut vars);
             let all: IdSet = vars.intersection(guard_idents).cloned().collect();
             if all.is_empty() {
                 continue;
@@ -3059,38 +3090,38 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 }
 
 /// `Typedtree.pat_bound_idents` (typedtree.ml:455-477) as a set.
-fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
+fn pat_bound_idents(ta: &TypedArena, pat: &Pattern, out: &mut IdSet) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
             out.insert(*id);
         }
         PatternDesc::Tpat_alias(p, id, _) => {
-            pat_bound_idents(p, out);
+            pat_bound_idents(ta, ta.pattern(*p), out);
             out.insert(*id);
         }
-        PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(p1, out),
+        PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(ta, ta.pattern(*p1), out),
         PatternDesc::Tpat_record(fields, _, rest) => {
             if let Some(rest) = rest {
                 out.insert(rest.rest_ident);
             }
             for (_, _, p, _) in fields {
-                pat_bound_idents(p, out);
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
-            for p in ps {
-                pat_bound_idents(p, out);
+            for p in ta.pattern_list(*ps) {
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
         PatternDesc::Tpat_construct(_, _, ps) => {
-            for p in ps {
-                pat_bound_idents(p, out);
+            for p in ta.pattern_list(*ps) {
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
         PatternDesc::Tpat_variant(_, arg, _) => {
             if let Some(p) = arg {
-                pat_bound_idents(p, out);
+                pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
     }
