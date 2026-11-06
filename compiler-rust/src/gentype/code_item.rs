@@ -1,11 +1,12 @@
 // Port of compiler/gentype/CodeItem.ml:1-58.
 
 use crate::gentype::gen_type_common::{StringMap, Type, doc_string};
-use crate::location::Location;
-
+/// A declaration exported to TypeScript. `loc` names the declaration in the
+/// location table of its owner: the translating `TypeContext`, or the
+/// [`TypeDeclarations`] table once cached past that context.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportType {
-    pub loc: Location,
+    pub loc: crate::types::DeclLoc,
     pub name_as: Option<String>,
     pub opaque: Option<bool>,
     pub type_: Type,
@@ -52,6 +53,33 @@ pub struct ExportTypeItem {
 }
 
 pub type ExportTypeMap = StringMap<ExportTypeItem>;
+
+/// The type declarations of one typed artifact as GenType caches them for
+/// importers, with the locations their export types name (portable handles).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TypeDeclarations {
+    pub declarations: Vec<TypeDeclaration>,
+    pub locations: crate::types::DeclLocTable,
+}
+
+impl TypeDeclarations {
+    /// Move `declarations` past the lifetime of the context `locs` resolves.
+    pub fn portable(declarations: Vec<TypeDeclaration>, locs: &dyn crate::types::DeclLocs) -> Self {
+        let mut locations = crate::types::DeclLocTable::default();
+        let declarations = declarations
+            .into_iter()
+            .map(|mut declaration| {
+                let export_type = &mut declaration.export_from_type_declaration.export_type;
+                export_type.loc = locations.intern(locs.resolve_loc(export_type.loc));
+                declaration
+            })
+            .collect();
+        TypeDeclarations {
+            declarations,
+            locations,
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeDeclaration {
