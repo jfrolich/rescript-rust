@@ -4,6 +4,7 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
+use crate::types::path::PathView;
 use crate::fast_hash::AHashMap as HashMap;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeSet;
@@ -863,7 +864,7 @@ fn untagged_payload_type_cannot_be_undefined(
                 || path.same(&crate::types::predef::path_bigint())
                 || path.same(&crate::types::predef::path_bool())
                 || path.same(&crate::types::predef::path_array())
-                || matches!(path, crate::types::path::Path::Pident(id) if id.name() == "dict")
+                || matches!(path.view(), crate::types::path::PathView::Pident(id) if id.name() == "dict")
                 || matches!(path.name().as_str(), "Js.Dict.t" | "Js_dict.t")
         }
         crate::types::type_expr::TypeDesc::Tarrow { .. }
@@ -6492,8 +6493,8 @@ fn get_variant_constructors_from_env(
         let TypeDesc::Tconstr { path, .. } = &*desc else {
             return Vec::new();
         };
-        let exact_lookup = |decl: &crate::types::decl::TypeDeclaration| match path {
-            crate::types::Path::Pident(_) => true,
+        let exact_lookup = |decl: &crate::types::decl::TypeDeclaration| match path.view() {
+            crate::types::path::PathView::Pident(_) => true,
             _ => decl
                 .type_path
                 .as_ref()
@@ -6893,15 +6894,15 @@ fn get_extension_cases(
 /// Equivalent to OCaml's `transl_normal_path`.
 fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
     use crate::types::path::Path;
-    match path {
-        Path::Pident(id) => {
+    match path.view() {
+        PathView::Pident(id) => {
             if id.is_global() {
                 RawLambda::global_module(*id)
             } else {
                 RawLambda::Lvar(*id)
             }
         }
-        Path::Pdot(p, s, pos) => RawLambda::Lprim(Box::new(RawPrimInfo {
+        PathView::Pdot(p, s, pos) => RawLambda::Lprim(Box::new(RawPrimInfo {
             primitive: Primitive::Pfield(
                 *pos,
                 FieldDbgInfo::Module {
@@ -6911,7 +6912,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
             args: vec![transl_normal_path(p)],
             loc: LamLoc::NONE,
         })),
-        Path::Papply(_, _) => panic!("transl_normal_path: Papply"),
+        PathView::Papply(_, _) => panic!("transl_normal_path: Papply"),
     }
 }
 
@@ -6944,14 +6945,14 @@ fn normalize_path_via_ctx(
 ) -> crate::types::path::Path {
     use crate::types::path::Path;
 
-    match path {
-        Path::Pdot(prefix, name, pos) => {
+    match path.view() {
+        PathView::Pdot(prefix, name, pos) => {
             // First normalize the prefix recursively
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
-            if norm_prefix == **prefix {
+            if norm_prefix == *prefix {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(norm_prefix), *name, *pos)
+                Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
         _ => path.clone(),
@@ -6967,21 +6968,21 @@ fn normalize_module_path_via_ctx(
     use crate::types::path::Path;
 
     // First normalize prefix recursively for Pdot
-    let path = match path {
-        Path::Pdot(prefix, name, pos) => {
+    let path = match path.view() {
+        PathView::Pdot(prefix, name, pos) => {
             let norm_prefix = normalize_module_path_via_ctx(ctx_ref, prefix);
-            if norm_prefix == **prefix {
+            if norm_prefix == *prefix {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(norm_prefix), *name, *pos)
+                Path::pdot_pos(norm_prefix, *name, *pos)
             }
         }
         _ => path.clone(),
     };
 
     // Check if this path resolves to a module alias via sig caches
-    match &path {
-        Path::Pdot(prefix, name, _) => {
+    match path.view() {
+        PathView::Pdot(prefix, name, _) => {
             // Strategy 1: check the qualified module components cache.
             // This covers persistent module aliases like Js.Exn → Stdlib_Exn
             // that were resolved during type checking via with_resolved_module_components_for_path.
@@ -8448,7 +8449,7 @@ fn resolve_labels_from_type(
         }
     }
 
-    if let crate::types::Path::Pident(ref id) = path {
+    if let crate::types::path::PathView::Pident(ref id) = path.view() {
         if id.stamp() != 0 {
             if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
                 if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
@@ -8466,7 +8467,7 @@ fn resolve_labels_from_type(
             return Some(build_label_descriptions(labels, repr, decl.type_private));
         }
     }
-    if matches!(path, crate::types::Path::Pident(_))
+    if matches!(path.view(), crate::types::path::PathView::Pident(_))
         && let Some(decl) = ctx_ref.find_type_decl(path.last())
     {
         if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
@@ -8494,7 +8495,7 @@ fn resolve_labels_from_type(
 
     // Handle inline records: path is Pdot(parent_type, constructor_name, _)
     // Look up the parent type declaration and find the constructor's inline record
-    if let crate::types::Path::Pdot(ref parent_path, ref cstr_name, _) = path {
+    if let crate::types::path::PathView::Pdot(ref parent_path, ref cstr_name, _) = path.view() {
         // Try to find the parent type declaration
         let parent_decl = env
             .lookup_type(parent_path)
@@ -8511,7 +8512,7 @@ fn resolve_labels_from_type(
                     .map(|d| d.clone())
             })
             .or_else(|| {
-                if let crate::types::Path::Pident(ref id) = **parent_path {
+                if let crate::types::path::PathView::Pident(ref id) = parent_path.view() {
                     if id.stamp() != 0 {
                         ctx_ref
                             .find_type_decl_by_stamp(id.stamp())
@@ -8622,8 +8623,8 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
             match &*desc {
                 TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, row)),
                 TypeDesc::Tconstr { path, .. } => {
-                    let stamp = match path {
-                        crate::types::Path::Pident(id) => id.stamp(),
+                    let stamp = match path.view() {
+                        crate::types::path::PathView::Pident(id) => id.stamp(),
                         _ => -1,
                     };
                     Action::ExpandConstr(stamp, path.name())

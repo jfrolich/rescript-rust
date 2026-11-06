@@ -1,5 +1,6 @@
 //! Sexp printer for Typedtree - used for parity testing between OCaml and Rust compilers
 
+use crate::types::path::PathView;
 use crate::ident::Ident;
 use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
@@ -132,12 +133,12 @@ fn location_idx(arena: &ParseArena, with_locs: bool, loc: LocIdx) -> Sexp {
 // ============================================================================
 
 fn sexp_path(p: &Path) -> Sexp {
-    match p {
-        Path::Pident(id) => Sexp::list(vec![Sexp::atom("Pident"), sexp_ident(id)]),
-        Path::Pdot(parent, s, _) => {
+    match p.view() {
+        PathView::Pident(id) => Sexp::list(vec![Sexp::atom("Pident"), sexp_ident(id)]),
+        PathView::Pdot(parent, s, _) => {
             Sexp::list(vec![Sexp::atom("Pdot"), sexp_path(parent), string(s)])
         }
-        Path::Papply(p1, p2) => {
+        PathView::Papply(p1, p2) => {
             Sexp::list(vec![Sexp::atom("Papply"), sexp_path(p1), sexp_path(p2)])
         }
     }

@@ -71,7 +71,7 @@ pub use decl::{
     TypeDeclaration, TypeInlinedType, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
     may_equal_constructor, same_constructor,
 };
-pub use path::{NOPOS, Path, Typath};
+pub use path::{NOPOS, Path, PathView, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, LOWEST_LEVEL, MutabilityRef,

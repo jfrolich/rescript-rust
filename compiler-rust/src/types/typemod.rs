@@ -6,6 +6,7 @@
 //! - Signatures (module types)
 //! - Functor application and coercion
 
+use crate::types::path::PathView;
 use crate::diagnostics::{Warning, WarningConfig};
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
@@ -1358,7 +1359,7 @@ fn include_module_alias_heads(
         .map(|pers| pers.flattened_alias_heads_for_path(&root_path))
         .unwrap_or_default();
     for alias_source in ctx.alias_sources_for_component_path(&root_path) {
-        let Path::Pident(id) = alias_source else {
+        let PathView::Pident(id) = alias_source.view() else {
             continue;
         };
         if !(id.is_persistent() || id.stamp() == 0) {
@@ -1392,19 +1393,19 @@ fn rewrite_included_path_to_local(
             .get(name)
             .or_else(|| local_module_ids.get(name))
             .or_else(|| local_modtype_ids.get(name))
-            .map(|id| Path::Pident(*id))
+            .map(|id| Path::pident(*id))
     };
 
-    match path {
-        Path::Pident(_) => None,
-        Path::Pdot(prefix, name, pos) => {
-            if include_root_path.is_some_and(|root| prefix.as_ref().same(root)) {
+    match path.view() {
+        PathView::Pident(_) => None,
+        PathView::Pdot(prefix, name, pos) => {
+            if include_root_path.is_some_and(|root| prefix.same(root)) {
                 if let Some(rewritten) = rewrite_direct_child(name) {
                     return Some(rewritten);
                 }
             }
 
-            if let Path::Pident(prefix_id) = prefix.as_ref() {
+            if let PathView::Pident(prefix_id) = prefix.view() {
                 if include_alias_heads
                     .iter()
                     .any(|flat| prefix_id.name() == flat)
@@ -1423,9 +1424,9 @@ fn rewrite_included_path_to_local(
                 local_module_ids,
                 local_modtype_ids,
             )
-            .map(|rewritten_prefix| Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos))
+            .map(|rewritten_prefix| Path::pdot_pos(rewritten_prefix, *name, *pos))
         }
-        Path::Papply(functor, arg) => {
+        PathView::Papply(functor, arg) => {
             let rewritten_functor = rewrite_included_path_to_local(
                 functor,
                 include_root_path,
@@ -1445,12 +1446,7 @@ fn rewrite_included_path_to_local(
             if rewritten_functor.is_none() && rewritten_arg.is_none() {
                 None
             } else {
-                Some(Path::Papply(
-                    std::sync::Arc::new(
-                        rewritten_functor.unwrap_or_else(|| functor.as_ref().clone()),
-                    ),
-                    std::sync::Arc::new(rewritten_arg.unwrap_or_else(|| arg.as_ref().clone())),
-                ))
+                Some(Path::papply(rewritten_functor.unwrap_or_else(|| functor.as_ref().clone()),, rewritten_arg.unwrap_or_else(|| arg.as_ref().clone())))
             }
         }
     }
@@ -1462,12 +1458,12 @@ fn included_path_is_direct_child(
     include_alias_heads: &[String],
     child_name: &str,
 ) -> bool {
-    match path {
-        Path::Pdot(prefix, name, _) if name == child_name => {
-            include_root_path.is_some_and(|root| prefix.as_ref().same(root))
+    match path.view() {
+        PathView::Pdot(prefix, name, _) if name == child_name => {
+            include_root_path.is_some_and(|root| prefix.same(root))
                 || matches!(
-                    prefix.as_ref(),
-                    Path::Pident(prefix_id)
+                    prefix,
+                    Path::pident(prefix_id)
                         if include_alias_heads.iter().any(|flat| prefix_id.name() == flat)
                 )
         }
@@ -1640,7 +1636,7 @@ fn rewrite_included_type_decl_paths_to_local(
     local_modtype_ids: &HashMap<String, Ident>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
-    decl.type_path = Some(Path::Pident(*id));
+    decl.type_path = Some(Path::pident(*id));
     for param in &decl.type_params {
         rewrite_included_type_paths_to_local(
             ctx,
@@ -1669,7 +1665,7 @@ fn rewrite_included_type_decl_paths_to_local(
                     local_modtype_ids,
                 )
                 .is_some_and(
-                    |local| matches!(&local, Path::Pident(local_id) if local_id.same(id)),
+                    |local| matches!(local.view(), PathView::Pident(local_id) if local_id.same(id)),
                 ) =>
             {
                 Some(args.clone())
@@ -1940,7 +1936,7 @@ fn rewrite_included_signature_paths_to_local(
             }
             crate::types::decl::SignatureItem::SigModule(id, md, _) => {
                 if md.md_path.is_none() {
-                    md.md_path = Some(Path::Pident(*id));
+                    md.md_path = Some(Path::pident(*id));
                 }
                 let keep_strengthened_alias_target = match &md.md_type {
                     crate::types::decl::ModuleType::MtyAlias(_, path)
@@ -1997,24 +1993,17 @@ fn rewrite_included_signature_paths_to_local(
 fn module_type_is_self_alias(mty: &crate::types::decl::ModuleType, id: &Ident) -> bool {
     matches!(
         mty,
-        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-            | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
+        crate::types::decl::ModuleType::MtyAlias(_, Path::pident(alias_id))
+            | crate::types::decl::ModuleType::MtyIdent(PathView::Pident(alias_id))
             if alias_id.same(id)
     )
 }
 
 fn rewrite_module_path_prefix(path: &Path, old_param: &Ident, new_prefix: &Path) -> Path {
-    match path {
-        Path::Pident(id) if id.same(old_param) => new_prefix.clone(),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(rewrite_module_path_prefix(prefix, old_param, new_prefix)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(rewrite_module_path_prefix(functor, old_param, new_prefix)),
-            std::sync::Arc::new(rewrite_module_path_prefix(arg, old_param, new_prefix)),
-        ),
+    match path.view() {
+        PathView::Pident(id) if id.same(old_param) => new_prefix.clone(),
+        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(rewrite_module_path_prefix(prefix, old_param, new_prefix), *name, *pos),
+        PathView::Papply(functor, arg) => Path::papply(rewrite_module_path_prefix(functor, old_param, new_prefix), rewrite_module_path_prefix(arg, old_param, new_prefix)),
         _ => path.clone(),
     }
 }
@@ -2488,31 +2477,28 @@ fn rewrite_module_path_prefix_with_aliases(
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
 ) -> Path {
-    match path {
-        Path::Pdot(prefix, name, pos) => {
+    match path.view() {
+        PathView::Pdot(prefix, name, pos) => {
             let rewritten_prefix =
                 rewrite_module_path_prefix_with_aliases(prefix, old_param, arg_aliases);
-            if let Path::Pident(id) = &rewritten_prefix {
+            if let PathView::Pident(id) = rewritten_prefix.view() {
                 if id.same(old_param) {
                     if let Some(alias_path) = arg_aliases.get(name.as_str()) {
                         return alias_path.clone();
                     }
                 }
             }
-            Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
+            Path::pdot_pos(rewritten_prefix, *name, *pos)
         }
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(rewrite_module_path_prefix_with_aliases(
+        PathView::Papply(functor, arg) => Path::papply(rewrite_module_path_prefix_with_aliases(
                 functor,
                 old_param,
                 arg_aliases,
-            )),
-            std::sync::Arc::new(rewrite_module_path_prefix_with_aliases(
+            ), rewrite_module_path_prefix_with_aliases(
                 arg,
                 old_param,
                 arg_aliases,
             )),
-        ),
         _ => path.clone(),
     }
 }
@@ -2795,12 +2781,12 @@ pub(crate) fn find_type_decl_for_path(
     // `Env.lookup_type` on qualified paths currently falls back to leaf-name
     // lookup, which can select an unrelated declaration with the same type
     // name. Keep direct env lookup for simple identifiers only.
-    if let Path::Pident(_) = path {
+    if let PathView::Pident(_) = path.view() {
         if let Ok(type_decl) = env.lookup_type(path) {
             return Some((*type_decl).clone());
         }
     }
-    if let Path::Pident(id) = path {
+    if let PathView::Pident(id) = path.view() {
         if let Some(type_decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
             return Some((*type_decl).clone());
         }
@@ -2815,10 +2801,10 @@ pub(crate) fn find_type_decl_for_path(
     }
 
     // Try resolving through module aliases visible in the local env.
-    if let Path::Pdot(parent, type_name, _) = path {
-        if let Path::Pident(parent_id) = parent.as_ref() {
+    if let PathView::Pdot(parent, type_name, _) = path.view() {
+        if let PathView::Pident(parent_id) = parent.view() {
             if let Ok(module_desc) = env
-                .lookup_module(parent.as_ref())
+                .lookup_module(parent)
                 .or_else(|_| env.find_module(parent_id.name()))
             {
                 use crate::types::decl::ModuleType;
@@ -5206,7 +5192,7 @@ fn resolve_variant_spread_sources(
                     let (path, source_decl) =
                         resolve_type_constructor_path(tctx, env, &spread_lid, None);
                     if let Some(source_decl) = source_decl {
-                        is_pdot = matches!(path, Path::Pdot(..));
+                        is_pdot = matches!(path.view(), PathView::Pdot(..));
                         found = Some(handle_source_decl(
                             &source_decl,
                             tctx.longident_to_string(&spread_lid),
@@ -6304,20 +6290,20 @@ fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
     // flattened `Stdlib_File.t` and `Stdlib_Blob.t` paths after expansion.
     // Rust can still hold the selected `Stdlib.File.t` / `Stdlib.Blob.t`
     // component paths before expansion, so recognize both representations.
-    let parent = match path {
-        Path::Pident(id) => {
+    let parent = match path.view() {
+        PathView::Pident(id) => {
             return match id.name() {
                 "array" => Some("Array"),
                 "promise" => Some("Promise"),
                 _ => None,
             };
         }
-        Path::Pdot(parent, type_name, _) if type_name == "t" => parent.as_ref(),
+        PathView::Pdot(parent, type_name, _) if type_name == "t" => parent,
         _ => return None,
     };
-    match parent {
+    match parent.view() {
         // `Stdlib_X.t`
-        Path::Pident(id) => match id.name() {
+        PathView::Pident(id) => match id.name() {
             "Stdlib_ArrayBuffer" => Some("ArrayBuffer"),
             "Stdlib_Date" => Some("Date"),
             "Stdlib_RegExp" => Some("RegExp"),
@@ -6326,7 +6312,7 @@ fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
             _ => None,
         },
         // `Stdlib.X.t`
-        Path::Pdot(root, module_name, _) if matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib") => {
+        PathView::Pdot(root, module_name, _) if matches!(root.view(), PathView::Pident(id) if id.name() == "Stdlib") => {
             match module_name.as_str() {
                 "ArrayBuffer" => Some("ArrayBuffer"),
                 "BigInt64Array" => Some("BigInt64Array"),
@@ -6401,8 +6387,8 @@ fn find_type_decl_for_abbrev_cycle(
 }
 
 fn type_abbrev_path_to_check(path: &Path, ids: &[Ident]) -> bool {
-    match path {
-        Path::Pident(id) => ids.iter().any(|candidate| candidate.same(id)),
+    match path.view() {
+        PathView::Pident(id) => ids.iter().any(|candidate| candidate.same(id)),
         _ => false,
     }
 }
@@ -7073,8 +7059,8 @@ fn persistent_module_origin(me: &crate::types::typedtree::ModuleExpr) -> Option<
         ModuleExprDesc::Tmod_ident(path, _) => path.clone(),
         _ => return None,
     };
-    match &path {
-        Path::Pident(id) if id.is_persistent() => Some(path),
+    match path.view() {
+        PathView::Pident(id) if id.is_persistent() => Some(path),
         _ => None,
     }
 }
@@ -7246,9 +7232,9 @@ fn check_constraints_rec(
         crate::types::type_expr::TypeDesc::Tconstr { path, args, .. } => {
             let fresh_args = args.iter().map(|_| ctx.new_var(None)).collect();
             let expected = ctx.new_constr(path.clone(), fresh_args);
-            let decl = match &path {
-                Path::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
-                Path::Pdot(parent, type_name, _) => {
+            let decl = match path.view() {
+                PathView::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
+                PathView::Pdot(parent, type_name, _) => {
                     crate::types::typecore::lookup_type_in_resolved_path(
                         parent,
                         type_name.as_str(),
@@ -7258,7 +7244,7 @@ fn check_constraints_rec(
                     )
                     .map(|(_, _, decl)| (*decl).clone())
                 }
-                Path::Papply(..) => None,
+                PathView::Papply(..) => None,
             };
             if let Some(decl) = decl {
                 crate::types::ctype::enforce_constraints(ctx, env, expected, &decl);
@@ -7491,7 +7477,7 @@ fn push_sig_values_from_env_pattern(
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => {
             let value_desc = env
-                .lookup_value(&Path::Pident(*id))
+                .lookup_value(&Path::pident(*id))
                 .expect("let-bound value missing from structure environment")
                 .clone();
             sig_items.push(crate::types::decl::SignatureItem::SigValue(*id, value_desc));
@@ -7499,7 +7485,7 @@ fn push_sig_values_from_env_pattern(
         PatternDesc::Tpat_alias(inner, id, _) => {
             push_sig_values_from_env_pattern(env, inner, sig_items);
             let value_desc = env
-                .lookup_value(&Path::Pident(*id))
+                .lookup_value(&Path::pident(*id))
                 .expect("let-bound alias missing from structure environment")
                 .clone();
             sig_items.push(crate::types::decl::SignatureItem::SigValue(*id, value_desc));
@@ -7514,7 +7500,7 @@ fn push_sig_values_from_env_pattern(
             // (typedtree.ml:464-469).
             if let Some(rest) = rest {
                 let value_desc = env
-                    .lookup_value(&Path::Pident(rest.rest_ident))
+                    .lookup_value(&Path::pident(rest.rest_ident))
                     .expect("let-bound record rest missing from structure environment")
                     .clone();
                 sig_items.push(crate::types::decl::SignatureItem::SigValue(
@@ -7812,7 +7798,7 @@ fn lookup_module_path_for_module_expr<'a>(
     if !tctx.transparent_modules
         && let Longident::Lident(mod_idx) = lid
         && let Ok((_, md)) = env.find_module_with_id(arena.get_string(*mod_idx))
-        && let crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(target)) = &md.md_type
+        && let crate::types::decl::ModuleType::MtyAlias(_, Path::pident(target)) = &md.md_type
         && target.is_persistent()
         && let Some(pers) = tctx.persistent_env.as_mut()
     {
@@ -7979,7 +7965,7 @@ fn check_recursive_module_reference_lid(
 pub(crate) fn is_recursive_module_placeholder_type(mty: &crate::types::decl::ModuleType) -> bool {
     matches!(
         mty,
-        crate::types::decl::ModuleType::MtyIdent(Path::Pident(id))
+        crate::types::decl::ModuleType::MtyIdent(Path::pident(id))
             if id.name() == "#recmod#"
     )
 }
@@ -8125,7 +8111,7 @@ pub fn lookup_module_type_by_lid(
                 if let Some(sig) = pers.get_renamed_sig(mod_name, ctx) {
                     // env.ml:865-875: `find_module` of a persistent unit is
                     // its forced `ps_sig`, with local item paths.
-                    let root = Path::Pident(Ident::create_persistent(mod_name));
+                    let root = Path::pident(Ident::create_persistent(mod_name));
                     return Some(DeclMty::MtySignature(std::sync::Arc::new(
                         localize_scraped_signature_vec(ctx, Some(&*pers), &sig, &root),
                     )));
@@ -8323,13 +8309,13 @@ fn resolve_modtype_path_to_sig_impl(
         return None;
     }
 
-    let result = match path {
-        Path::Pident(id) => env.and_then(|local_env| {
+    let result = match path.view() {
+        PathView::Pident(id) => env.and_then(|local_env| {
             let mtd = local_env.lookup_modtype(&Path::pident(*id)).ok()?;
             let mty = mtd.mtd_type.as_ref()?;
             resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
         }),
-        Path::Pdot(parent, name, _) => env.and_then(|local_env| {
+        PathView::Pdot(parent, name, _) => env.and_then(|local_env| {
             let (_, mtd) = crate::types::typecore::lookup_modtype_in_resolved_path(
                 parent,
                 name.as_str(),
@@ -8340,7 +8326,7 @@ fn resolve_modtype_path_to_sig_impl(
             let mty = mtd.mtd_type.as_ref()?;
             resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
         }),
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     };
 
     visiting.remove(path);
@@ -8362,8 +8348,8 @@ fn resolve_path_to_sig_impl(
         return None;
     }
 
-    let result = match path {
-        Path::Pident(id) => {
+    let result = match path.view() {
+        PathView::Pident(id) => {
             let name = id.name();
             if let Some(local_env) = env {
                 if let Ok(md) = local_env.lookup_module(&Path::pident(*id)) {
@@ -8401,7 +8387,7 @@ fn resolve_path_to_sig_impl(
                 None
             }
         }
-        Path::Pdot(parent, name, _) => {
+        PathView::Pdot(parent, name, _) => {
             if let Some(local_env) = env {
                 if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
                     path, local_env, pers_env, ctx,
@@ -8688,8 +8674,8 @@ fn apply_package_constraints_to_module_type(
             return None;
         }
 
-        let result = match path {
-            Path::Pident(id) => {
+        let result = match path.view() {
+            PathView::Pident(id) => {
                 let ident_path = Path::pident(*id);
                 if let Ok(mtd) = env.lookup_modtype(&ident_path) {
                     if let Some(mty) = mtd.mtd_type.as_ref() {
@@ -8738,7 +8724,7 @@ fn apply_package_constraints_to_module_type(
                     })
                 }
             }
-            Path::Pdot(parent, name, _) => {
+            PathView::Pdot(parent, name, _) => {
                 if let Some((rewritten_sig, nested_modules)) =
                     crate::types::typecore::with_resolved_module_components_for_path(
                         path,
@@ -8782,7 +8768,7 @@ fn apply_package_constraints_to_module_type(
                     finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
                 }
             }
-            Path::Papply(_, _) => None,
+            PathView::Papply(_, _) => None,
         };
 
         visiting.remove(path);
@@ -8849,7 +8835,7 @@ fn apply_with_type_constraints_to_module_type(
                 }
 
                 if args.is_empty() {
-                    if let Path::Pident(id) = &path {
+                    if let PathView::Pident(id) = path.view() {
                         if let Some(manifest) = substs.get(id.name()) {
                             let replacement =
                                 if let Some(replacement) = cache.get(id.name()).copied() {
@@ -9173,9 +9159,9 @@ pub fn modtype_of_package(
         .map(|(lid, ty)| (flatten_package_constraint_path(lid, arena, ctx), *ty))
         .collect();
 
-    let base_mty = match package_path {
-        Path::Pident(_) => env.lookup_modtype(package_path).ok()?.mtd_type.clone()?,
-        Path::Pdot(parent, modtype_name, _) => {
+    let base_mty = match package_path.view() {
+        PathView::Pident(_) => env.lookup_modtype(package_path).ok()?.mtd_type.clone()?,
+        PathView::Pdot(parent, modtype_name, _) => {
             crate::types::typecore::lookup_modtype_in_resolved_path(
                 parent,
                 modtype_name,
@@ -9186,7 +9172,7 @@ pub fn modtype_of_package(
             .and_then(|(_, mtd)| mtd.mtd_type)
             .or_else(|| env.lookup_modtype(package_path).ok()?.mtd_type.clone())?
         }
-        Path::Papply(_, _) => return None,
+        PathView::Papply(_, _) => return None,
     };
     if package_lids.is_empty() {
         // OCaml compiler/ml/typemod.ml:1176-1183 calls Env.find_modtype
@@ -9217,12 +9203,12 @@ pub(crate) fn package_modtype_signature_expected(
         return false;
     }
 
-    let found_mty = match package_path {
-        Path::Pident(_) => env
+    let found_mty = match package_path.view() {
+        PathView::Pident(_) => env
             .lookup_modtype(package_path)
             .ok()
             .map(|mtd| mtd.mtd_type.clone()),
-        Path::Pdot(parent, modtype_name, _) => {
+        PathView::Pdot(parent, modtype_name, _) => {
             crate::types::typecore::lookup_modtype_in_resolved_path(
                 parent,
                 modtype_name,
@@ -9237,7 +9223,7 @@ pub(crate) fn package_modtype_signature_expected(
                     .map(|mtd| mtd.mtd_type.clone())
             })
         }
-        Path::Papply(_, _) => return false,
+        PathView::Papply(_, _) => return false,
     };
 
     let Some(mtd_type) = found_mty else {
@@ -9264,8 +9250,8 @@ fn parent_path_for_module_type(mty: &crate::types::decl::ModuleType) -> Option<P
     use crate::types::decl::ModuleType as DeclMty;
 
     match mty {
-        DeclMty::MtyIdent(Path::Pdot(parent, _, _))
-        | DeclMty::MtyAlias(_, Path::Pdot(parent, _, _)) => Some(parent.as_ref().clone()),
+        DeclMty::MtyIdent(PathView::Pdot(parent, _, _))
+        | DeclMty::MtyAlias(_, PathView::Pdot(parent, _, _)) => Some(parent.clone()),
         _ => None,
     }
 }
@@ -9329,12 +9315,12 @@ pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
 ) -> TypeModResult<()> {
     use crate::types::decl::ModuleType as DeclMty;
 
-    let Some(mut current_mty) = (match package_path {
-        Path::Pident(_) => env
+    let Some(mut current_mty) = (match package_path.view() {
+        PathView::Pident(_) => env
             .lookup_modtype(package_path)
             .ok()
             .and_then(|mtd| mtd.mtd_type.clone()),
-        Path::Pdot(parent, modtype_name, _) => {
+        PathView::Pdot(parent, modtype_name, _) => {
             crate::types::typecore::lookup_modtype_in_resolved_path(
                 parent,
                 modtype_name,
@@ -9349,7 +9335,7 @@ pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
                     .and_then(|mtd| mtd.mtd_type.clone())
             })
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     }) else {
         return Ok(());
     };
@@ -9625,14 +9611,14 @@ fn check_usage_of_path_of_substituted_item(
 
     fn iter_path_apply(path: &Path, mut f: impl FnMut(&Path, &Path)) {
         fn loop_(path: &Path, f: &mut impl FnMut(&Path, &Path)) {
-            match path {
-                Path::Papply(funct, arg) => {
+            match path.view() {
+                PathView::Papply(funct, arg) => {
                     f(funct, arg);
                     loop_(funct, f);
                     loop_(arg, f);
                 }
-                Path::Pdot(prefix, _, _) => loop_(prefix, f),
-                Path::Pident(_) => {}
+                PathView::Pdot(prefix, _, _) => loop_(prefix, f),
+                PathView::Pident(_) => {}
             }
         }
 
@@ -9976,12 +9962,12 @@ fn check_destructive_substitution_alias_usage<'a>(
     };
 
     fn path_concat(head: &Ident, path: &Path) -> Path {
-        match path {
-            Path::Pident(id) => Path::pdot(Path::pident(*head), id.name()),
-            Path::Pdot(prefix, name, pos) => {
-                Path::Pdot(std::sync::Arc::new(path_concat(head, prefix)), *name, *pos)
+        match path.view() {
+            PathView::Pident(id) => Path::pdot(Path::pident(*head), id.name()),
+            PathView::Pdot(prefix, name, pos) => {
+                Path::pdot_pos(path_concat(head, prefix), *name, *pos)
             }
-            Path::Papply(_, _) => Path::pdot(Path::pident(*head), path.name()),
+            PathView::Papply(_, _) => Path::pdot(Path::pident(*head), path.name()),
         }
     }
 
@@ -10084,7 +10070,7 @@ fn check_destructive_substitution_alias_usage<'a>(
             | (Some(ResolvedWithConstraintTarget::Module { path }), false) => path,
             _ => continue,
         };
-        if matches!(path, Path::Pdot(..)) {
+        if matches!(path.view(), PathView::Pdot(..)) {
             let Some((signature_to_check, paths)) = destructive_substitution_signature_and_paths(
                 tctx,
                 env,
@@ -10480,8 +10466,8 @@ fn rewrite_functor_param_type_paths_in_type(
                 );
             }
 
-            if let Path::Pdot(prefix, type_name, _) = path {
-                if let Path::Pident(id) = prefix.as_ref() {
+            if let PathView::Pdot(prefix, type_name, _) = path.view() {
+                if let PathView::Pident(id) = prefix.view() {
                     if id.name() == param_name && !has_args {
                         if let Some(manifest_ty) = manifests.get(type_name.as_str()) {
                             // Cache manifest substitution results so all occurrences of
@@ -11086,8 +11072,8 @@ fn scrape_resolve_module_path(
         return None;
     }
 
-    let resolved = match path {
-        Path::Pident(id) => {
+    let resolved = match path.view() {
+        PathView::Pident(id) => {
             let name = id.name();
             if let Ok(md) = env.lookup_module(&Path::pident(*id)) {
                 match &md.md_type {
@@ -11124,7 +11110,7 @@ fn scrape_resolve_module_path(
                     })
             }
         }
-        Path::Pdot(parent, submod, _) => {
+        PathView::Pdot(parent, submod, _) => {
             let resolved_component = if force_component_subst {
                 crate::types::typecore::with_resolved_module_components_for_path(
                     parent,
@@ -11181,7 +11167,7 @@ fn scrape_resolve_module_path(
                 None
             }
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     };
 
     visiting.remove(path);
@@ -11265,9 +11251,9 @@ fn find_modtype_expansion(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
-    match path {
-        Path::Pident(_) => env.lookup_modtype(path).ok()?.mtd_type.clone(),
-        Path::Pdot(parent, name, _) => {
+    match path.view() {
+        PathView::Pident(_) => env.lookup_modtype(path).ok()?.mtd_type.clone(),
+        PathView::Pdot(parent, name, _) => {
             let (_, mtd) = crate::types::typecore::lookup_modtype_in_resolved_path(
                 parent,
                 name.as_str(),
@@ -11277,7 +11263,7 @@ fn find_modtype_expansion(
             )?;
             mtd.mtd_type
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     }
 }
 
@@ -11557,7 +11543,7 @@ fn localize_scraped_signature_vec(
         .map(|pers| pers.flattened_alias_heads_for_path(root))
         .unwrap_or_default();
     for alias_source in ctx.alias_sources_for_component_path(root) {
-        if let Path::Pident(id) = alias_source
+        if let PathView::Pident(id) = alias_source.view()
             && (id.is_persistent() || id.stamp() == 0)
             && !heads.iter().any(|existing| existing == id.name())
         {
@@ -11747,8 +11733,8 @@ fn normalize_module_alias_path_inner(
     // an alias. This matters for namespace-backed aliases such as
     // `Webapi.Fetch.Request`: `Webapi.Fetch` must normalize to
     // `Webapi__Fetch` before the child component is selected.
-    let path = match path {
-        Path::Pdot(prefix, name, pos) => {
+    let path = match path.view() {
+        PathView::Pdot(prefix, name, pos) => {
             let normalized_prefix = normalize_module_alias_path_inner(
                 env,
                 pers_env,
@@ -11760,19 +11746,17 @@ fn normalize_module_alias_path_inner(
             if normalized_prefix.same(prefix) {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(normalized_prefix), *name, *pos)
+                Path::pdot_pos(normalized_prefix, *name, *pos)
             }
         }
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(normalize_module_alias_path_inner(
+        PathView::Papply(functor, arg) => Path::papply(normalize_module_alias_path_inner(
                 env,
                 pers_env,
                 ctx,
                 original,
                 functor,
                 check_missing,
-            )?),
-            std::sync::Arc::new(normalize_module_alias_path_inner(
+            )?, normalize_module_alias_path_inner(
                 env,
                 pers_env,
                 ctx,
@@ -11780,8 +11764,7 @@ fn normalize_module_alias_path_inner(
                 arg,
                 check_missing,
             )?),
-        ),
-        Path::Pident(id) if check_missing && id.is_persistent() && !env.has_module_ident(id) => {
+        PathView::Pident(id) if check_missing && id.is_persistent() && !env.has_module_ident(id) => {
             if let Some(pers) = pers_env.as_mut()
                 && pers.find_pers_struct(id.name(), ctx).is_none()
                 && pers.last_error().is_none()
@@ -11790,7 +11773,7 @@ fn normalize_module_alias_path_inner(
             }
             path.clone()
         }
-        Path::Pident(_) => path.clone(),
+        PathView::Pident(_) => path.clone(),
     };
 
     force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &path);
@@ -11829,15 +11812,15 @@ fn force_persistent_sigs_for_normalize_path(
     ctx: &crate::types::context::TypeContext,
     path: &Path,
 ) {
-    match path {
-        Path::Pdot(parent, _, _) => {
+    match path.view() {
+        PathView::Pdot(parent, _, _) => {
             force_persistent_sigs_for_normalize_path(env, pers_env, ctx, parent);
         }
-        Path::Papply(functor, arg) => {
+        PathView::Papply(functor, arg) => {
             force_persistent_sigs_for_normalize_path(env, pers_env, ctx, functor);
             force_persistent_sigs_for_normalize_path(env, pers_env, ctx, arg);
         }
-        Path::Pident(id) if id.is_persistent() && !env.has_module_ident(id) => {
+        PathView::Pident(id) if id.is_persistent() && !env.has_module_ident(id) => {
             // OCaml compiler/ml/typemod.ml:1244-1247 calls
             // `Env.normalize_path` for alias targets. env.ml:903-914
             // normalizes a `Pdot` prefix first, and env.ml:865-875 forces
@@ -13009,10 +12992,10 @@ fn anchor_local_module_aliases_to_owner(
     use crate::types::decl::SignatureItem as SigItem;
 
     fn path_contains_apply(path: &Path) -> bool {
-        match path {
-            Path::Pident(_) => false,
-            Path::Pdot(prefix, _, _) => path_contains_apply(prefix),
-            Path::Papply(_, _) => true,
+        match path.view() {
+            PathView::Pident(_) => false,
+            PathView::Pdot(prefix, _, _) => path_contains_apply(prefix),
+            PathView::Papply(_, _) => true,
         }
     }
 
@@ -13250,9 +13233,9 @@ fn strip_self_module_prefix_in_sig(
         module_id: &Ident,
         direct_items: &HashMap<String, Ident>,
     ) -> Option<Path> {
-        match path {
-            Path::Pdot(prefix, name, pos) => {
-                if let Path::Pident(prefix_id) = prefix.as_ref() {
+        match path.view() {
+            PathView::Pdot(prefix, name, pos) => {
+                if let PathView::Pident(prefix_id) = prefix.view() {
                     if prefix_id.name() == module_id.name() {
                         if let Some(local_id) = direct_items.get(name.as_str()) {
                             return Some(Path::pident(*local_id));
@@ -13260,7 +13243,7 @@ fn strip_self_module_prefix_in_sig(
                     }
                 }
                 rewrite_self_path(prefix, module_id, direct_items).map(|rewritten_prefix| {
-                    Path::Pdot(std::sync::Arc::new(rewritten_prefix), *name, *pos)
+                    Path::pdot_pos(rewritten_prefix, *name, *pos)
                 })
             }
             _ => None,
@@ -13474,7 +13457,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
     ) {
         if matches!(
             mod_expr.mod_desc,
-            ModuleExprDesc::Tmod_ident(Path::Pdot(..), _)
+            ModuleExprDesc::Tmod_ident(PathView::Pdot(..), _)
         ) {
             crate::types::typecore::rebind_direct_sig_type_family_to_access_path(
                 type_ctx, child_path, sub_sig,
@@ -13549,7 +13532,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
 
 fn module_expr_has_dotted_alias_child_modules(mod_expr: &ModuleExpr) -> bool {
     match &mod_expr.mod_desc {
-        ModuleExprDesc::Tmod_ident(Path::Pdot(..), _) => true,
+        ModuleExprDesc::Tmod_ident(PathView::Pdot(..), _) => true,
         ModuleExprDesc::Tmod_structure(structure) => {
             structure_has_dotted_alias_child_modules(structure)
         }
@@ -13764,8 +13747,8 @@ fn extract_module_type_from_mod_expr_inner(
                 return None;
             }
 
-            let result = match path {
-                Path::Pident(id) => {
+            let result = match path.view() {
+                PathView::Pident(id) => {
                     if let Ok(md) = env.lookup_module(&Path::pident(*id)) {
                         let anchored_mty = anchored_module_type(&Path::pident(*id), &md.md_type);
                         if let Some(sig) = resolve_mty(&anchored_mty, env, type_ctx, visiting) {
@@ -13780,7 +13763,7 @@ fn extract_module_type_from_mod_expr_inner(
                     }
                     None
                 }
-                Path::Pdot(parent, name, _) => {
+                PathView::Pdot(parent, name, _) => {
                     if let Some(type_ctx) = type_ctx {
                         let mut no_persistent_env = None;
                         if let Some((_, owner_path, md)) =
@@ -13848,7 +13831,7 @@ fn extract_module_type_from_mod_expr_inner(
                         _ => None,
                     })
                 }
-                Path::Papply(_, _) => None,
+                PathView::Papply(_, _) => None,
             };
 
             visiting.remove(path);
@@ -13882,8 +13865,8 @@ fn extract_module_type_from_mod_expr_inner(
         use crate::types::decl::ModuleType as DeclMty;
         use crate::types::decl::SignatureItem as SigItem;
 
-        match path {
-            Path::Pident(id) => {
+        match path.view() {
+            PathView::Pident(id) => {
                 if let Ok(md) = env.lookup_module(&Path::pident(*id)) {
                     return Some(anchored_module_type(&Path::pident(*id), &md.md_type));
                 }
@@ -13894,7 +13877,7 @@ fn extract_module_type_from_mod_expr_inner(
                 }
                 None
             }
-            Path::Pdot(parent, name, _) => {
+            PathView::Pdot(parent, name, _) => {
                 if let Some(type_ctx) = type_ctx {
                     let mut no_persistent_env = None;
                     if let Some((_, owner_path, md)) =
@@ -13960,7 +13943,7 @@ fn extract_module_type_from_mod_expr_inner(
                 }
                 None
             }
-            Path::Papply(_, _) => Some(DeclMty::MtyIdent(path.clone())),
+            PathView::Papply(_, _) => Some(DeclMty::MtyIdent(path.clone())),
         }
     }
 
@@ -14230,9 +14213,9 @@ fn extract_module_type_from_mod_expr_inner(
                         }
                         if !included {
                             if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
-                                let mod_name: Option<&str> = match path {
-                                    crate::types::Path::Pident(id) => Some(id.name()),
-                                    crate::types::Path::Pdot(_, name, _) => Some(name.as_ref()),
+                                let mod_name: Option<&str> = match path.view() {
+                                    crate::types::path::PathView::Pident(id) => Some(id.name()),
+                                    crate::types::path::PathView::Pdot(_, name, _) => Some(name.as_ref()),
                                     _ => None,
                                 };
                                 if let Some(mod_name) = mod_name {
@@ -15617,20 +15600,13 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
 }
 
 fn recmodule_substitute_module_path(path: &Path, subst: &[(Ident, Path)]) -> Path {
-    match path {
-        Path::Pident(id) => subst
+    match path.view() {
+        PathView::Pident(id) => subst
             .iter()
             .find_map(|(old_id, new_path)| old_id.same(id).then(|| new_path.clone()))
             .unwrap_or_else(|| path.clone()),
-        Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(recmodule_substitute_module_path(prefix, subst)),
-            *name,
-            *pos,
-        ),
-        Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(recmodule_substitute_module_path(functor, subst)),
-            std::sync::Arc::new(recmodule_substitute_module_path(arg, subst)),
-        ),
+        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(recmodule_substitute_module_path(prefix, subst), *name, *pos),
+        PathView::Papply(functor, arg) => Path::papply(recmodule_substitute_module_path(functor, subst), recmodule_substitute_module_path(arg, subst)),
     }
 }
 
@@ -19750,7 +19726,7 @@ fn type_structure_item<'a>(
                                 // Include should expose constructors from included variant types
                                 // in the current scope, matching OCaml's Env.add_signature.
                                 let ty_res = tctx.type_ctx.new_constr(
-                                    crate::types::path::Path::Pident(*id),
+                                    crate::types::path::Path::pident(*id),
                                     decl.type_params.clone(),
                                 );
                                 crate::types::ctype::force_generalize_sig_type(
@@ -19795,7 +19771,7 @@ fn type_structure_item<'a>(
                                             let inlined = inline_record_descs
                                                 .get_or_insert_with(|| {
                                                     crate::types::env_lazy::constructors_of_type_path(
-                                                        &crate::types::path::Path::Pident(*id),
+                                                        &crate::types::path::Path::pident(*id),
                                                         decl,
                                                         tctx.type_ctx,
                                                     )
@@ -19863,7 +19839,7 @@ fn type_structure_item<'a>(
                                 // Include should expose record labels from included types
                                 // in the current scope, matching OCaml's Env.add_signature.
                                 let ty_res = tctx.type_ctx.new_constr(
-                                    crate::types::path::Path::Pident(*id),
+                                    crate::types::path::Path::pident(*id),
                                     decl.type_params.clone(),
                                 );
                                 // Include signatures can carry non-generic nodes in Rust.
@@ -21119,7 +21095,7 @@ module M3: {
         // localize module aliases through `Subst.modtype` while copying a signature.
         assert!(matches!(
             &n_prime_decl.md_type,
-            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id))
+            crate::types::decl::ModuleType::MtyAlias(_, Path::pident(id))
                 if id.same(&local_n)
         ));
     }

@@ -1,6 +1,7 @@
 //! References and located items of a module: a port of
 //! analysis/src/process_extra.ml.
 
+use crate::types::path::PathView;
 use super::process_attributes::{self as attrs, Attrs};
 use super::process_cmt::{Annots, Ctx, dig};
 use super::resolve_path::{self, Resolution};
@@ -85,7 +86,7 @@ fn extra_for_file(file: &File, types: &crate::types::TypeContext) -> Extra {
             TypeKind::Variant(constructors) => {
                 for c in constructors {
                     add_reference(&mut extra, c.stamp, c.cname.loc);
-                    let path = Path::Pident(Ident::new(
+                    let path = Path::pident(Ident::new(
                         d.name.txt.as_str(),
                         c.stamp,
                         IdentFlags::from_bits_truncate(0),
@@ -454,7 +455,7 @@ impl ExtraIterator<'_, '_> {
                 Some((t, tip)) => self.add_for_path(path, txt, l, t, tip),
                 None => self.add_for_path_parent(path, l),
             }
-            if let (Path::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path, txt) {
+            if let (PathView::Pdot(pinner, _, _), Longident::Ldot(inner, name)) = (path, txt) {
                 let name_len = self.ctx.arena.get_string(*name).len() as i32;
                 self.add_for_longident(None, pinner, inner, loc.chop_location_end(name_len + 1));
             }

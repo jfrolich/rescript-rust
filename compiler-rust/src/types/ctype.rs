@@ -22,6 +22,7 @@
 //! Type errors are represented as `TypeError` with detailed information
 //! about what went wrong during unification or other operations.
 
+use crate::types::path::PathView;
 use super::asttypes::{Label, MutableFlag, PrivateFlag};
 use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
@@ -543,13 +544,13 @@ pub(crate) fn lookup_type_decl_for_path<'a>(
     // Try direct env lookup. For qualified paths, only accept exact
     // identity matches (`Path.same`) to mirror OCaml's stamp-based lookup.
     // Name-only equality can pick declarations from different scopes.
-    let exact_env_decl = match path {
-        Path::Pident(id) => env.find_type_by_ident(id),
+    let exact_env_decl = match path.view() {
+        PathView::Pident(id) => env.find_type_by_ident(id),
         _ => env.lookup_type(path),
     };
     if let Ok(decl) = exact_env_decl {
-        let exact_lookup = match path {
-            Path::Pident(_) => true,
+        let exact_lookup = match path.view() {
+            PathView::Pident(_) => true,
             _ => decl
                 .type_path
                 .as_ref()
@@ -595,7 +596,7 @@ fn get_level_with_lookup_capture(
     // For dotted paths, compiler/ml/env.ml:800-813 builds parent component
     // tables as a lookup side effect; `lower_args` depends on that happening
     // before local binders are created.
-    if matches!(path, Path::Pdot(_, _, _)) {
+    if matches!(path.view(), PathView::Pdot(_, _, _)) {
         if let Some(paths) = pending_type_lookup_paths.as_deref_mut() {
             paths.push(path.clone());
         }
@@ -613,12 +614,12 @@ fn get_level_with_lookup_capture(
     if let Some(found_level) = ctx.find_type_newtype_level(scope_id, path) {
         return found_level.unwrap_or_else(|| path.binding_time());
     }
-    let found_level = match path {
-        Path::Pident(id) => env
+    let found_level = match path.view() {
+        PathView::Pident(id) => env
             .find_type_by_ident(id)
             .ok()
             .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level)),
-        Path::Pdot(parent, type_name, _) => {
+        PathView::Pdot(parent, type_name, _) => {
             // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
             // dotted path lookup reaches compiler/ml/env.ml:800-813 through
             // find_module_descr at env.ml:781-793. That path reads component
@@ -636,17 +637,17 @@ fn get_level_with_lookup_capture(
             )
             .and_then(|(_, _, decl)| decl.type_newtype_level.map(|(level, _)| level))
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     };
     ctx.register_type_newtype_level(scope_id, path, found_level);
     found_level.unwrap_or_else(|| path.binding_time())
 }
 
 pub(crate) fn path_root_is_persistent(path: &Path) -> bool {
-    match path {
-        Path::Pident(id) => id.is_persistent(),
-        Path::Pdot(parent, _, _) => path_root_is_persistent(parent),
-        Path::Papply(_, _) => false,
+    match path.view() {
+        PathView::Pident(id) => id.is_persistent(),
+        PathView::Pdot(parent, _, _) => path_root_is_persistent(parent),
+        PathView::Papply(_, _) => false,
     }
 }
 
@@ -736,7 +737,7 @@ fn local_non_recursive_abbrev(
 
 /// OCaml `in_current_module` (compiler/ml/ctype.ml:243-245).
 fn in_current_module(path: &Path) -> bool {
-    matches!(path, Path::Pident(_))
+    matches!(path.view(), PathView::Pident(_))
 }
 
 /// OCaml `non_aliasable` (compiler/ml/ctype.ml:1729-1731).
@@ -1573,7 +1574,7 @@ fn add_gadt_equation(
     };
 
     // Add as a local constraint
-    if let Path::Pident(id) = source_path {
+    if let PathView::Pident(id) = source_path.view() {
         ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
     }
     env.add_local_constraint(source_path.clone(), decl);
@@ -1614,7 +1615,7 @@ fn create_reified_constr(
     let decl = reified_type_decl(newtype_level);
     env.add_type(ident, decl.clone());
     ctx.register_type_decl_by_stamp(ident.stamp(), decl);
-    let path = Path::Pident(ident);
+    let path = Path::pident(ident);
     let abbrev = ctx.alloc_abbrev(AbbrevMemo::Mnil);
     ctx.alloc_type_at_level(
         TypeDesc::Tconstr {
@@ -2429,7 +2430,7 @@ fn update_level_expand_with_lookup_capture(
                 // without a lookup (see `get_level_with_lookup_capture`), so
                 // it needs no copy unless it is recorded or expanded.
                 let persistent_level = (path_root_is_persistent(path)
-                    && (pending_type_lookup_paths.is_none() || !matches!(path, Path::Pdot(..))))
+                    && (pending_type_lookup_paths.is_none() || !matches!(path.view(), PathView::Pdot(..))))
                 .then(|| path.binding_time());
                 let path_level = match persistent_level {
                     Some(path_level) => path_level,
@@ -2671,8 +2672,8 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
         return None;
     }
 
-    let result = match module_path {
-        Path::Pident(id) => {
+    let result = match module_path.view() {
+        PathView::Pident(id) => {
             // Match OCaml Env.find_module path semantics: only persistent
             // identifiers can fall back to loading a .cmi by name.
             if !id.is_persistent() {
@@ -2692,7 +2693,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
             crate::cmi::persistent_env::substitute_submodule_paths(&sig, module_path, ctx);
             Some(Arc::new(sig))
         }
-        Path::Pdot(parent, module_name, _) => {
+        PathView::Pdot(parent, module_name, _) => {
             let parent_sig =
                 resolve_module_signature_through_cmi_shared(ctx, load_paths, parent, visiting)?;
             let mut resolved = None;
@@ -2725,7 +2726,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
             }
             resolved
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     };
 
     if let Some(sig) = result.as_ref() {
@@ -2753,8 +2754,8 @@ fn resolve_module_signature_through_persistent_env_shared(
         return None;
     }
 
-    let result = match module_path {
-        Path::Pident(id) => {
+    let result = match module_path.view() {
+        PathView::Pident(id) => {
             if !id.is_persistent() {
                 return None;
             }
@@ -2769,7 +2770,7 @@ fn resolve_module_signature_through_persistent_env_shared(
             ctx.set_persistent_env(pers_env);
             Some(ps.ps_sig.clone())
         }
-        Path::Pdot(parent, module_name, _) => {
+        PathView::Pdot(parent, module_name, _) => {
             let parent_sig =
                 resolve_module_signature_through_persistent_env_shared(ctx, parent, visiting)?;
             let mut resolved = None;
@@ -2792,7 +2793,7 @@ fn resolve_module_signature_through_persistent_env_shared(
             }
             resolved
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     };
 
     if let Some(sig) = result.as_ref() {
@@ -2814,26 +2815,26 @@ fn normalize_module_path_through_components(
         return Some(module_path.clone());
     }
 
-    let normalized_path = match module_path {
-        Path::Pdot(parent, name, pos) => {
+    let normalized_path = match module_path.view() {
+        PathView::Pdot(parent, name, pos) => {
             let parent =
                 normalize_module_path_through_components(ctx, load_paths, parent, visiting)
                     .unwrap_or_else(|| (**parent).clone());
-            Path::Pdot(std::sync::Arc::new(parent), *name, *pos)
+            Path::pdot_pos(parent, *name, *pos)
         }
-        Path::Papply(functor, arg) => {
+        PathView::Papply(functor, arg) => {
             let functor =
                 normalize_module_path_through_components(ctx, load_paths, functor, visiting)
                     .unwrap_or_else(|| (**functor).clone());
             let arg = normalize_module_path_through_components(ctx, load_paths, arg, visiting)
                 .unwrap_or_else(|| (**arg).clone());
-            Path::Papply(std::sync::Arc::new(functor), std::sync::Arc::new(arg))
+            Path::papply(functor, arg)
         }
-        Path::Pident(_) => module_path.clone(),
+        PathView::Pident(_) => module_path.clone(),
     };
 
-    let alias_target = match &normalized_path {
-        Path::Pdot(parent, module_name, _) => {
+    let alias_target = match normalized_path.view() {
+        PathView::Pdot(parent, module_name, _) => {
             let mut lookup_visiting = HashSet::new();
             let parent_sig = resolve_module_signature_through_cmi_shared(
                 ctx,
@@ -2881,8 +2882,8 @@ pub(crate) fn resolve_type_item_through_modules(
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use crate::types::decl::SignatureItem;
 
-    let (module_path, type_name) = match path {
-        Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
+    let (module_path, type_name) = match path.view() {
+        PathView::Pdot(parent, name, _) => (parent, name.as_str()),
         _ => return None,
     };
     let path_name = path_root_is_persistent(path).then(|| path.name());
@@ -3006,8 +3007,8 @@ fn resolve_module_type_through_env_path(
         return None;
     }
 
-    match path {
-        Path::Pident(id) => {
+    match path.view() {
+        PathView::Pident(id) => {
             let name = id.name();
             if id.is_persistent() {
                 // OCaml env.ml:865-875 checks the local module table first,
@@ -3060,11 +3061,11 @@ fn resolve_module_type_through_env_path(
                 None
             }
         }
-        Path::Pdot(parent, name, _) => {
+        PathView::Pdot(parent, name, _) => {
             let mut persistent_env = in_process_module_resolution_env(ctx);
             let parent_is_opened_component = env.path_starts_with_opened_component(parent);
             if parent_is_opened_component {
-                let selected_child_path = Path::pdot(parent.as_ref().clone(), name.to_string());
+                let selected_child_path = Path::pdot(parent.clone(), name.to_string());
                 if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
                     &selected_child_path,
                     env,
@@ -3168,7 +3169,7 @@ fn resolve_module_type_through_env_path(
                 None
             }
         }
-        Path::Papply(_, _) => None,
+        PathView::Papply(_, _) => None,
     }
 }
 
@@ -3471,7 +3472,7 @@ fn lookup_component_module_sig_type(
 ) -> Option<(crate::ident::Ident, Arc<super::decl::TypeDeclaration>)> {
     use super::decl::SignatureItem;
 
-    if matches!(module_path, Path::Pdot(..) | Path::Papply(..)) {
+    if matches!(module_path.view(), PathView::Pdot(..) | PathView::Papply(..)) {
         let mut persistent_env = in_process_module_resolution_env(ctx);
         // OCaml compiler/ml/env.ml:781-793 resolves dotted module descriptors
         // through `comp_components`, and env.ml:800-813 then reads `comp_types`.
@@ -3495,8 +3496,8 @@ fn lookup_component_module_sig_type(
         .flatten();
     }
 
-    let raw_sig = match module_path {
-        Path::Pident(id) => {
+    let raw_sig = match module_path.view() {
+        PathView::Pident(id) => {
             // OCaml compiler/ml/env.ml:781-788 path lookup uses exact
             // `IdTbl.find_same` for persistent `Pident`s; only source
             // Longident lookup uses name fallback before persistent lookup
@@ -3513,7 +3514,7 @@ fn lookup_component_module_sig_type(
                 _ => None,
             })
         }
-        Path::Pdot(..) | Path::Papply(..) => None,
+        PathView::Pdot(..) | PathView::Papply(..) => None,
     }?;
     raw_sig.iter().find_map(|item| match item {
         SignatureItem::SigType(id, decl, _) if id.name() == type_name => Some((*id, decl.clone())),
@@ -3542,7 +3543,7 @@ fn lookup_raw_module_sig_type(
         }
     }
 
-    if let Path::Pident(id) = module_path
+    if let PathView::Pident(id) = module_path.view()
         && id.is_persistent()
     {
         // OCaml compiler/ml/env.ml:800-813 `find_type_full` reaches persistent
@@ -3609,8 +3610,8 @@ fn resolve_type_item_through_env_uncached<'a>(
     path: &Path,
     strengthen_alias_types: bool,
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclarationRef<'a>)> {
-    let (module_path, type_name) = match path {
-        Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
+    let (module_path, type_name) = match path.view() {
+        PathView::Pdot(parent, name, _) => (parent, name.as_str()),
         _ => return None,
     };
 
@@ -3761,8 +3762,8 @@ pub(crate) fn normalize_path_full_strict(
 }
 
 fn module_path_exists_for_strict_normalize(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
-    match path {
-        Path::Pident(id) => {
+    match path.view() {
+        PathView::Pident(id) => {
             if env.find_module_same(id).is_ok() {
                 return true;
             }
@@ -3780,7 +3781,7 @@ fn module_path_exists_for_strict_normalize(ctx: &TypeContext, env: &Env, path: &
                 return false;
             }
         }
-        Path::Pdot(parent, module_name, _) => {
+        PathView::Pdot(parent, module_name, _) => {
             let mut persistent_env = in_process_module_resolution_env(ctx);
             if crate::types::typecore::lookup_module_in_resolved_path(
                 parent,
@@ -3794,7 +3795,7 @@ fn module_path_exists_for_strict_normalize(ctx: &TypeContext, env: &Env, path: &
                 return true;
             }
         }
-        Path::Papply(_, _) => {}
+        PathView::Papply(_, _) => {}
     }
 
     let mut persistent_env = in_process_module_resolution_env(ctx);
@@ -3851,7 +3852,7 @@ fn normalize_path_full_inner(
         return path.clone();
     }
 
-    if let Path::Pdot(parent, module_name, _) = path {
+    if let PathView::Pdot(parent, module_name, _) = path.view() {
         let path_starts_with_implicit_opened_component =
             env.path_starts_with_implicit_opened_component(path);
         if !force_module_lookup_side_effects
@@ -3886,8 +3887,8 @@ fn normalize_path_full_inner(
     // compiler/ml/env.ml:903-910 handles both `Pdot` prefixes and both sides
     // of `Papply`; functor arguments use lax normalization but still force
     // local module-declaration thunks through env.ml:865-875.
-    let path = match path {
-        Path::Pdot(p, s, pos) => {
+    let path = match path.view() {
+        PathView::Pdot(p, s, pos) => {
             // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
             // prefix before `find_module ~alias:true` inspects the path at
             // env.ml:865-882. Component aliases already handled above model the
@@ -3901,13 +3902,13 @@ fn normalize_path_full_inner(
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
-            if p_norm == **p {
+            if p_norm == *p {
                 path.clone()
             } else {
-                Path::Pdot(std::sync::Arc::new(p_norm), *s, *pos)
+                Path::pdot_pos(p_norm, *s, *pos)
             }
         }
-        Path::Papply(p1, p2) => {
+        PathView::Papply(p1, p2) => {
             let p1_norm = normalize_path_full_inner(
                 ctx,
                 env,
@@ -3926,10 +3927,10 @@ fn normalize_path_full_inner(
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
             );
-            if p1_norm == **p1 && p2_norm == **p2 {
+            if p1_norm == *p1 && p2_norm == *p2 {
                 path.clone()
             } else {
-                Path::Papply(std::sync::Arc::new(p1_norm), std::sync::Arc::new(p2_norm))
+                Path::papply(p1_norm, p2_norm)
             }
         }
         _ => path.clone(),
@@ -3943,7 +3944,7 @@ fn normalize_path_full_inner(
     // compiler/ml/env.ml:1874-1877 `open_signature`, which exposes opened
     // components but not root module bindings, so implicit `Pervasives` and
     // `Stdlib` roots naturally take the persistent force path here.
-    if let Path::Pident(id) = &path {
+    if let PathView::Pident(id) = path.view() {
         let has_local_module = env.find_module_same(id).is_ok();
         if id.is_persistent() && !has_local_module {
             ctx.trigger_module_sig_rename(id.name());
@@ -3951,7 +3952,7 @@ fn normalize_path_full_inner(
     }
 
     if !force_module_lookup_side_effects
-        && let Path::Pdot(parent, module_name, _) = &path
+        && let PathView::Pdot(parent, module_name, _) = path.view()
         && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
         && !alias_path.same(&path)
     {
@@ -3978,7 +3979,7 @@ fn normalize_path_full_inner(
     // `EnvLazy.force subst_modtype_maker data` before seeing whether the
     // module is an alias. A plain env lookup would inspect the declaration but
     // skip the freshening side effects that determine later identifier stamps.
-    if matches!(path, Path::Pdot(..)) {
+    if matches!(path.view(), PathView::Pdot(..)) {
         if !visiting.insert(path.clone()) {
             return path;
         }
@@ -3997,8 +3998,8 @@ fn normalize_path_full_inner(
             );
         }
     } else {
-        let md = match &path {
-            Path::Pident(id) => env.find_module_same(id),
+        let md = match path.view() {
+            PathView::Pident(id) => env.find_module_same(id),
             _ => env.lookup_module(&path),
         };
         if let Ok(md) = md
@@ -4088,7 +4089,7 @@ fn pdot_expansion(
         // See the general route: parameterized strengthened self-manifests
         // rewrite to the alias target instead of substituting.
         if matches!(mode, ExpandHeadMode::General) && synthetic_self_manifest && arity != 0 {
-            if let Path::Pdot(parent, type_name, pos) = path {
+            if let PathView::Pdot(parent, type_name, pos) = path.view() {
                 let mut persistent_env = in_process_module_resolution_env(ctx);
                 let target = crate::types::typecore::module_alias_target_for_path(
                     parent,
@@ -4098,7 +4099,7 @@ fn pdot_expansion(
                 )
                 .filter(|target_module_path| !target_module_path.same(parent))
                 .map(|target_module_path| {
-                    Path::Pdot(std::sync::Arc::new(target_module_path), *type_name, *pos)
+                    Path::pdot_pos(target_module_path, *type_name, *pos)
                 });
                 if let Some(target) = target {
                     return PdotExpansion::Rewrite(target);
@@ -4151,8 +4152,8 @@ fn try_expand_head_with_mode(
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
-            let stamp = match &path {
-                Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
+            let stamp = match path.view() {
+                PathView::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
                 _ => None,
             };
 
@@ -4222,7 +4223,7 @@ fn try_expand_head_with_mode(
             // Predefined types have no manifest (compiler/ml/predef.ml:239-424):
             // the general route below finds the abstract declaration with
             // `IdTbl.find_same` and stops without expanding.
-            if let Path::Pident(id) = &path
+            if let PathView::Pident(id) = path.view()
                 && super::predef::is_predef_type_ident(id)
                 && env
                     .find_type_by_ident(id)
@@ -4234,7 +4235,7 @@ fn try_expand_head_with_mode(
             // Qualified heads: the outcome depends only on the module scope,
             // the path, the mode and the arity (each lookup on this route is
             // memoized per `Env::scope_id`), so it is computed once per key.
-            if matches!(&path, Path::Pdot(..)) {
+            if matches!(path.view(), PathView::Pdot(..)) {
                 let scope_id = env.scope_id();
                 let mode_tag = mode as u8;
                 let expansion = match ctx.find_pdot_expansion(scope_id, mode_tag, args.len(), &path)
@@ -4282,8 +4283,8 @@ fn try_expand_head_with_mode(
             // hits to unrelated declarations.
             let mut forbid_fallback_manifest_expansion = false;
             let mut local_env_type_is_authoritative = false;
-            let exact_env_decl = match &path {
-                Path::Pident(id) => {
+            let exact_env_decl = match path.view() {
+                PathView::Pident(id) => {
                     // OCaml compiler/ml/env.ml:800-813 uses
                     // `IdTbl.find_same` for Pident paths, and ctype.ml:1367-1372
                     // falls through to normalization only after that exact
@@ -4294,8 +4295,8 @@ fn try_expand_head_with_mode(
                 _ => env.lookup_type(&path),
             };
             if let Ok(env_decl) = exact_env_decl {
-                let exact_lookup = match &path {
-                    Path::Pident(_) => {
+                let exact_lookup = match path.view() {
+                    PathView::Pident(_) => {
                         // OCaml abbreviation expansion calls `Env.find_type`,
                         // whose `Pident` case is exact `IdTbl.find_same`;
                         // do not use Rust's broader recovery fallback here
@@ -4303,7 +4304,7 @@ fn try_expand_head_with_mode(
                         // compiler/ml/ctype.ml:1395-1439).
                         true
                     }
-                    Path::Pdot(_, _, _) => {
+                    PathView::Pdot(_, _, _) => {
                         // OCaml `Env.find_type` resolves every qualified path
                         // through `find_module_descr` and the parent component
                         // table (compiler/ml/env.ml:781-813). Even an exact
@@ -4313,9 +4314,9 @@ fn try_expand_head_with_mode(
                         // env.ml:1699-1710 before exposing the type.
                         false
                     }
-                    Path::Papply(_, _) => false,
+                    PathView::Papply(_, _) => false,
                 };
-                local_env_type_is_authoritative = matches!(&path, Path::Pident(id) if !id.is_persistent() && id.stamp() != 0)
+                local_env_type_is_authoritative = matches!(&path, Path::pident(id) if !id.is_persistent() && id.stamp() != 0)
                     && exact_lookup;
                 if exact_lookup {
                     let self_manifest = env_decl.type_manifest.is_some_and(|manifest| {
@@ -4328,8 +4329,8 @@ fn try_expand_head_with_mode(
                             } if manifest_path.same(&path)
                         )
                     });
-                    let alias_backed_parent = match &path {
-                        Path::Pdot(parent, _, _) => {
+                    let alias_backed_parent = match path.view() {
+                        PathView::Pdot(parent, _, _) => {
                             let mut persistent_env = in_process_module_resolution_env(ctx);
                             // OCaml compiler/ml/env.ml:800-813 resolves type
                             // expansions through `find_type_full`, whose
@@ -4374,7 +4375,7 @@ fn try_expand_head_with_mode(
             // allowing expansion when env name lookup is unavailable.
             // Skip if env already found the type as abstract (no manifest).
             if !forbid_fallback_manifest_expansion
-                && let Path::Pident(id) = &path
+                && let PathView::Pident(id) = path.view()
                 && !id.is_persistent()
                 && id.stamp() != 0
                 && let Some(stamp_decl) = ctx
@@ -4403,7 +4404,7 @@ fn try_expand_head_with_mode(
             // compiler/ml/env.ml:1438-1444 and compiler/ml/mtype.ml:55-70
             // applies in both Rust expansion modes.
             let strengthen_alias_types = true;
-            let resolved_env_decl = if matches!(&path, Path::Pdot(..)) {
+            let resolved_env_decl = if matches!(path.view(), PathView::Pdot(..)) {
                 resolve_type_through_env(ctx, env, &path, strengthen_alias_types)
             } else {
                 None
@@ -4435,8 +4436,8 @@ fn try_expand_head_with_mode(
                         && synthetic_self_manifest
                         && !args.is_empty()
                     {
-                        let immediate_alias_target_path = match &path {
-                            Path::Pdot(parent, type_name, pos) => {
+                        let immediate_alias_target_path = match path.view() {
+                            PathView::Pdot(parent, type_name, pos) => {
                                 let mut persistent_env = in_process_module_resolution_env(ctx);
                                 // OCaml compiler/ml/env.ml:800-813 reaches
                                 // aliases for type expansion through
@@ -4451,11 +4452,7 @@ fn try_expand_head_with_mode(
                                 )
                                 .filter(|target_module_path| !target_module_path.same(parent))
                                 .map(|target_module_path| {
-                                    Path::Pdot(
-                                        std::sync::Arc::new(target_module_path),
-                                        *type_name,
-                                        *pos,
-                                    )
+                                    Path::pdot_pos(target_module_path, *type_name, *pos)
                                 })
                             }
                             _ => None,
@@ -4493,7 +4490,7 @@ fn try_expand_head_with_mode(
             // Env.find_type_expansion and then Env.normalize_path. Rust's
             // global declaration store is not an Env lookup boundary and must
             // not bypass normalize_path's persistent-module force.
-            let allow_global_fallbacks = matches!(&path, Path::Pident(id) if id.is_persistent())
+            let allow_global_fallbacks = matches!(&path, Path::pident(id) if id.is_persistent())
                 && matches!(mode, ExpandHeadMode::General);
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
@@ -4532,7 +4529,7 @@ fn try_expand_head_with_mode(
             }
 
             // 3. Try full qualified path lookup (for Pdot paths like Js.Promise.t)
-            if allow_global_fallbacks && matches!(path, Path::Pdot(_, _, _)) {
+            if allow_global_fallbacks && matches!(path.view(), PathView::Pdot(_, _, _)) {
                 let _path_name = &path.name();
                 // First check cached path store
                 if let Some(store_decl) = ctx.find_type_decl_by_path(_path_name) {
@@ -4701,7 +4698,7 @@ pub(crate) fn cyclic_abbrev(ctx: &TypeContext, env: &Env, id: &Ident, ty: TypeEx
             TypeDesc::Tconstr { path, .. } => path.clone(),
             _ => return false,
         };
-        if matches!(&path, Path::Pident(p) if p.same(id)) || seen.contains(&ty) {
+        if matches!(&path, Path::pident(p) if p.same(id)) || seen.contains(&ty) {
             return true;
         }
         match expand_abbrev_opt_once(ctx, env, ty) {
@@ -13550,14 +13547,14 @@ fn normalize_type_rec(
         // declaration instead of the `#row` type.
         let renamed = match &*ctx.get_desc(tm) {
             TypeDesc::Tconstr {
-                path: Path::Pdot(m, i, pos),
+                path: PathView::Pdot(m, i, pos),
                 args,
                 ..
             } => {
                 let i = i.as_str();
                 let i_prime = &i[..i.len() - 4];
                 TypeDesc::Tconstr {
-                    path: Path::Pdot(m.clone(), crate::name::Name::new(i_prime), *pos),
+                    path: Path::pdot_pos(m.clone(), crate::name::Name::new(i_prime), *pos),
                     args: args.clone(),
                     abbrev: ctx.alloc_abbrev_nil(),
                 }
@@ -14506,7 +14503,7 @@ mod tests {
         let original_manifest = ctx.repr(original_manifest);
         assert!(matches!(
             &*ctx.get_desc(original_manifest),
-            TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::Pident(id) if id.name() == "u")
+            TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::pident(id) if id.name() == "u")
         ));
     }
 

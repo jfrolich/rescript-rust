@@ -5,6 +5,7 @@
 
 mod type_clash;
 
+use crate::types::path::PathView;
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt;
@@ -7834,13 +7835,13 @@ fn type_is_jsx_component(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let repr = type_ctx.repr(ty);
     match &*type_ctx.get_desc(repr) {
         TypeDesc::Tconstr {
-            path: crate::types::path::Path::Pdot(parent, name, _),
+            path: crate::types::path::PathView::Pdot(parent, name, _),
             ..
         } => {
             name == "component"
                 && matches!(
-                    parent.as_ref(),
-                    crate::types::path::Path::Pident(id) if id.name() == "Jsx"
+                    parent,
+                    crate::types::path::Path::pident(id) if id.name() == "Jsx"
                 )
         }
         TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_component(type_ctx, *next),
@@ -8447,7 +8448,7 @@ fn with_type_decl_for_path<R>(
     path: &crate::types::Path,
     f: impl FnOnce(&crate::types::TypeDeclaration) -> R,
 ) -> Option<R> {
-    if let crate::types::Path::Pident(id) = path
+    if let crate::types::path::PathView::Pident(id) = path.view()
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
     {
@@ -9005,7 +9006,7 @@ fn type_decl_manifest_for_path(
 
     // A predefined type (e.g. `promise`) has no manifest; resolving it by name
     // could pick a user declaration that shadows it.
-    if let crate::types::Path::Pident(id) = path
+    if let crate::types::path::PathView::Pident(id) = path.view()
         && crate::types::predef::find_predef_ident(id.name())
             .is_some_and(|predef| predef.stamp() == id.stamp())
     {
@@ -9015,7 +9016,7 @@ fn type_decl_manifest_for_path(
     // Once the declaration for `path` is found, its manifest (or lack of one)
     // is the answer; falling back to another declaration with the same name
     // would expand an unrelated type.
-    if let crate::types::Path::Pident(id) = path
+    if let crate::types::path::PathView::Pident(id) = path.view()
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
     {
@@ -12197,14 +12198,14 @@ fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) ->
     if p1.same(p2) {
         return true;
     }
-    let leaf1 = match p1 {
-        Path::Pident(id) => id.name(),
-        Path::Pdot(_, name, _) => name.as_str(),
+    let leaf1 = match p1.view() {
+        PathView::Pident(id) => id.name(),
+        PathView::Pdot(_, name, _) => name.as_str(),
         _ => return false,
     };
-    let leaf2 = match p2 {
-        Path::Pident(id) => id.name(),
-        Path::Pdot(_, name, _) => name.as_str(),
+    let leaf2 = match p2.view() {
+        PathView::Pident(id) => id.name(),
+        PathView::Pdot(_, name, _) => name.as_str(),
         _ => return false,
     };
     leaf1 == leaf2

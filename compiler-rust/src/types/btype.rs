@@ -11,6 +11,7 @@
 //! These operations are the building blocks for more complex type
 //! operations like unification and generalization.
 
+use crate::types::path::PathView;
 use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
@@ -560,9 +561,9 @@ pub fn is_row_name(s: &str) -> bool {
 pub fn is_constr_row(ctx: &TypeContext, t: TypeExprRef, allow_ident: bool) -> bool {
     let desc = ctx.borrow_desc(t);
     match &*desc {
-        TypeDesc::Tconstr { path, .. } => match path {
-            Path::Pident(id) if allow_ident => is_row_name(id.name()),
-            Path::Pdot(_, s, _) => is_row_name(s),
+        TypeDesc::Tconstr { path, .. } => match path.view() {
+            PathView::Pident(id) if allow_ident => is_row_name(id.name()),
+            PathView::Pdot(_, s, _) => is_row_name(s),
             _ => false,
         },
         _ => false,

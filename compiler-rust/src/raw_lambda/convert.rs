@@ -3,6 +3,7 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
+use crate::types::path::PathView;
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 use std::path::Path as StdPath;
@@ -1948,10 +1949,10 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn value_path_loc_constant(&self, path: &crate::types::Path, loc: SrcLoc) -> Option<RawLambda> {
-        let crate::types::Path::Pdot(prefix, name, _) = path else {
+        let crate::types::path::PathView::Pdot(prefix, name, _) = path.view() else {
             return None;
         };
-        let crate::types::Path::Pident(id) = &**prefix else {
+        let crate::types::path::PathView::Pident(id) = prefix.view() else {
             return None;
         };
         if id.name() != "Pervasives" {
@@ -2723,14 +2724,14 @@ impl<'a> RawLambdaConverter<'a> {
             self.normalize_value_path_in_env(env, path)
         };
         fn segments(p: &Path, acc: Vec<String>) -> Option<(Ident, Vec<String>)> {
-            match p {
-                Path::Pident(id) => id.is_persistent().then_some((*id, acc)),
-                Path::Pdot(prefix, name, _) => {
+            match p.view() {
+                PathView::Pident(id) => id.is_persistent().then_some((*id, acc)),
+                PathView::Pdot(prefix, name, _) => {
                     let mut acc = acc;
                     acc.insert(0, name.to_string());
                     segments(prefix, acc)
                 }
-                Path::Papply(..) => None,
+                PathView::Papply(..) => None,
             }
         }
         match segments(&path, Vec::new()) {
@@ -3812,15 +3813,15 @@ impl<'a> RawLambdaConverter<'a> {
         path: &crate::types::Path,
         loc: SrcLoc,
     ) -> RawLambda {
-        match path {
-            crate::types::Path::Pident(id) => {
+        match path.view() {
+            crate::types::path::PathView::Pident(id) => {
                 if id.is_global() {
                     RawLambda::global_module(*id)
                 } else {
                     RawLambda::var(*id)
                 }
             }
-            crate::types::Path::Pdot(prefix, name, pos) => {
+            crate::types::path::PathView::Pdot(prefix, name, pos) => {
                 let prefix_lam = self.translate_normal_path_raw_in_env(env, prefix, loc);
                 // OCaml compiler/ml/lambda.ml:635-643 preserves the Pdot
                 // runtime position while translating paths. If Rust path
@@ -3843,7 +3844,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.lam_loc(loc),
                 )
             }
-            crate::types::Path::Papply(_, _) => RawLambda::unit(),
+            crate::types::path::PathView::Papply(_, _) => RawLambda::unit(),
         }
     }
 
@@ -3940,7 +3941,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .ok()
                 .map(|md| md.md_type.clone())
                 .or_else(|| {
-                    if let crate::types::Path::Pdot(prefix, name, _) = module_path {
+                    if let crate::types::path::PathView::Pdot(prefix, name, _) = module_path.view() {
                         // OCaml compiler/ml/env.ml:903-913 normalizes dotted
                         // paths through find_module; recover the same nested
                         // module type from the parent signature when this env
@@ -3950,7 +3951,7 @@ impl<'a> RawLambdaConverter<'a> {
                             this, env, prefix, parent_mty, name, 0,
                         );
                     }
-                    if let crate::types::Path::Pident(id) = module_path
+                    if let crate::types::path::PathView::Pident(id) = module_path.view()
                         && (id.is_persistent() || id.is_global())
                     {
                         let sig = this
@@ -4019,8 +4020,8 @@ impl<'a> RawLambdaConverter<'a> {
             return true;
         }
 
-        match path {
-            crate::types::Path::Pident(id) if id.is_persistent() || id.is_global() => self
+        match path.view() {
+            crate::types::path::PathView::Pident(id) if id.is_persistent() || id.is_global() => self
                 .persistent_env
                 .as_mut()
                 .and_then(|pers| pers.find_pers_struct(id.name(), self.type_ctx))
@@ -4033,13 +4034,13 @@ impl<'a> RawLambdaConverter<'a> {
         env: &'e crate::types::env::Env,
         path: &crate::types::Path,
     ) -> Option<&'e crate::types::decl::ModuleDeclaration> {
-        match path {
+        match path.view() {
             // OCaml Env.find_module resolves Pident through IdTbl.find_same
             // (compiler/ml/env.ml:865-875). Do not let an opened same-name
             // component answer for an already-selected persistent root.
-            crate::types::Path::Pident(id) => env.find_module_same(id).ok(),
-            crate::types::Path::Pdot(..) => env.lookup_module(path).ok(),
-            crate::types::Path::Papply(..) => None,
+            crate::types::path::PathView::Pident(id) => env.find_module_same(id).ok(),
+            crate::types::path::PathView::Pdot(..) => env.lookup_module(path).ok(),
+            crate::types::path::PathView::Papply(..) => None,
         }
     }
 
@@ -4092,23 +4093,10 @@ impl<'a> RawLambdaConverter<'a> {
         path: &crate::types::Path,
         force_root: bool,
     ) -> crate::types::Path {
-        let path = match path {
-            crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                std::sync::Arc::new(
-                    self.normalize_module_path_with_root_force(env, prefix, force_root),
-                ),
-                name.clone(),
-                *pos,
-            ),
-            crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                std::sync::Arc::new(
-                    self.normalize_module_path_with_root_force(env, left, force_root),
-                ),
-                std::sync::Arc::new(
-                    self.normalize_module_path_with_root_force(env, right, force_root),
-                ),
-            ),
-            crate::types::Path::Pident(id) => {
+        let path = match path.view() {
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_module_path_with_root_force(env, prefix, force_root),, name.clone(), *pos),
+            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(self.normalize_module_path_with_root_force(env, left, force_root),, self.normalize_module_path_with_root_force(env, right, force_root),),
+            crate::types::path::PathView::Pident(id) => {
                 if force_root {
                     self.force_persistent_normalized_prefix(env, id);
                 }
@@ -4116,7 +4104,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         };
 
-        if let crate::types::Path::Pdot(parent, name, _) = &path
+        if let crate::types::path::PathView::Pdot(parent, name, _) = &path
             && let Some(md) = self.force_qualified_module_for_normalization(env, parent, name)
             && let crate::types::decl::ModuleType::MtyAlias(_, alias_target) = &md.md_type
             && !alias_target.same(&path)
@@ -4124,7 +4112,7 @@ impl<'a> RawLambdaConverter<'a> {
             return self.normalize_module_path_with_root_force(env, alias_target, force_root);
         }
 
-        if matches!(&path, crate::types::Path::Pdot(..))
+        if matches!(&path, crate::types::path::PathView::Pdot(..))
             && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4159,7 +4147,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(&path, crate::types::Path::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
+        if matches!(&path, crate::types::path::PathView::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4220,23 +4208,16 @@ impl<'a> RawLambdaConverter<'a> {
         env: &crate::types::env::Env,
         path: &crate::types::Path,
     ) -> crate::types::Path {
-        let path = match path {
-            crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
-                *name,
-                *pos,
-            ),
-            crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, left)),
-                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, right)),
-            ),
-            crate::types::Path::Pident(id) => {
+        let path = match path.view() {
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_value_prefix_path_in_env(env, prefix), *name, *pos),
+            crate::types::path::PathView::Papply(left, right) => crate::types::Path::papply(self.normalize_value_prefix_path_in_env(env, left), self.normalize_value_prefix_path_in_env(env, right)),
+            crate::types::path::PathView::Pident(id) => {
                 self.force_persistent_normalized_prefix(env, id);
                 path.clone()
             }
         };
 
-        if let crate::types::Path::Pdot(parent, name, _) = &path
+        if let crate::types::path::PathView::Pdot(parent, name, _) = path.view()
             && let Some(md) = self.force_qualified_module_for_normalization(env, parent, name)
             && let crate::types::decl::ModuleType::MtyAlias(_, alias_target) = &md.md_type
             && !alias_target.same(&path)
@@ -4244,7 +4225,7 @@ impl<'a> RawLambdaConverter<'a> {
             return self.normalize_value_prefix_path_in_env(env, alias_target);
         }
 
-        if matches!(&path, crate::types::Path::Pdot(..))
+        if matches!(path.view(), crate::types::path::PathView::Pdot(..))
             && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4278,7 +4259,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(&path, crate::types::Path::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
+        if matches!(path.view(), crate::types::path::PathView::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -4320,14 +4301,10 @@ impl<'a> RawLambdaConverter<'a> {
         env: &crate::types::env::Env,
         path: &crate::types::Path,
     ) -> crate::types::Path {
-        match path {
-            crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
-                *name,
-                *pos,
-            ),
-            crate::types::Path::Pident(_) => path.clone(),
-            crate::types::Path::Papply(_, _) => path.clone(),
+        match path.view() {
+            crate::types::path::PathView::Pdot(prefix, name, pos) => crate::types::Path::pdot_pos(self.normalize_value_prefix_path_in_env(env, prefix), *name, *pos),
+            crate::types::path::PathView::Pident(_) => path.clone(),
+            crate::types::path::PathView::Papply(_, _) => path.clone(),
         }
     }
 
@@ -4406,18 +4383,18 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             }
 
-            match normalized {
-                crate::types::Path::Pident(id) => {
+            match normalized.view() {
+                crate::types::path::PathView::Pident(id) => {
                     if id.is_global() || id.is_persistent() {
                         this.note_possible_required_module(&id);
                     }
                 }
-                crate::types::Path::Pdot(prefix, _, _) => {
-                    note_from_path(this, env, prefix.as_ref());
+                crate::types::path::PathView::Pdot(prefix, _, _) => {
+                    note_from_path(this, env, prefix);
                 }
-                crate::types::Path::Papply(left, right) => {
-                    note_from_path(this, env, left.as_ref());
-                    note_from_path(this, env, right.as_ref());
+                crate::types::path::PathView::Papply(left, right) => {
+                    note_from_path(this, env, left);
+                    note_from_path(this, env, right);
                 }
             }
         }
@@ -4442,15 +4419,15 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
                 self.note_possible_required_modules_from_empty_include(inner);
             }
-            ModuleExprDesc::Tmod_ident(crate::types::Path::Pident(id), _) => {
+            ModuleExprDesc::Tmod_ident(crate::types::path::PathView::Pident(id), _) => {
                 if let Some(env) = self.env_for_module_expr(module_expr) {
-                    if env.lookup_module(&crate::types::Path::Pident(*id)).is_err() {
+                    if env.lookup_module(&crate::types::Path::pident(*id)).is_err() {
                         self.note_possible_required_module(id);
                         return;
                     }
                 } else if self
                     .env
-                    .lookup_module(&crate::types::Path::Pident(*id))
+                    .lookup_module(&crate::types::Path::pident(*id))
                     .is_err()
                 {
                     self.note_possible_required_module(id);
@@ -7178,7 +7155,7 @@ impl<'a> RawLambdaConverter<'a> {
         let arg_type = ctx.repr(crate::types::ctype::expand_head(ctx, env, arg_type));
         matches!(
             &*ctx.get_desc(arg_type),
-            TypeDesc::Tconstr { path: Path::Pident(id), args, .. }
+            TypeDesc::Tconstr { path: PathView::Pident(id), args, .. }
                 if id.name() == "unit" && args.is_empty()
         )
     }
@@ -7801,7 +7778,7 @@ mod tests {
         handler_value: i64,
     ) -> Expression {
         let lid = Located::mknoloc(arena.push_lident(name));
-        let path = crate::types::Path::Pident(Ident::create_persistent(name));
+        let path = crate::types::Path::pident(Ident::create_persistent(name));
         let constructor = crate::types::ConstructorDescription {
             cstr_name: name.to_string(),
             cstr_res: crate::types::TypeExprRef(0),
@@ -8301,7 +8278,7 @@ mod tests {
             prim_native_float: false,
             prim_from_constructor: false,
         };
-        let alias_ty = ctx.new_constr(crate::types::Path::Pident(alias_id), vec![]);
+        let alias_ty = ctx.new_constr(crate::types::Path::pident(alias_id), vec![]);
 
         let primitive = primitive_wrapper_body_primitive(converter.translate_primitive_raw_in_env(
             SrcLoc::from(Location::none()),
@@ -8332,7 +8309,7 @@ mod tests {
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyAlias(
                             crate::types::decl::AliasPresence::MtaPresent,
-                            crate::types::Path::Pident(local_n),
+                            crate::types::Path::pident(local_n),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: crate::types::DeclLoc::none(),
@@ -8347,7 +8324,7 @@ mod tests {
         );
 
         let alias_path =
-            crate::types::Path::pdot_pos(crate::types::Path::Pident(original_module), "N", 0);
+            crate::types::Path::pdot_pos(crate::types::Path::pident(original_module), "N", 0);
         let coercion = ModuleCoercion::Tcoerce_alias(
             EnvRef(0),
             alias_path,
@@ -8395,7 +8372,7 @@ mod tests {
             prim_native_float: false,
             prim_from_constructor: false,
         };
-        let alias_ty = ctx.new_constr(crate::types::Path::Pident(alias_id), vec![]);
+        let alias_ty = ctx.new_constr(crate::types::Path::pident(alias_id), vec![]);
 
         let primitive = primitive_wrapper_body_primitive(converter.translate_primitive_raw_in_env(
             SrcLoc::from(Location::none()),
@@ -8428,7 +8405,7 @@ mod tests {
                     Ident::create_local("List"),
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyIdent(
-                            crate::types::Path::Pident(pkg_list),
+                            crate::types::Path::pident(pkg_list),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: crate::types::DeclLoc::none(),
@@ -8453,7 +8430,7 @@ mod tests {
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_module_path_raw(
-            &crate::types::Path::pdot(crate::types::Path::Pident(pkg), "List"),
+            &crate::types::Path::pdot(crate::types::Path::pident(pkg), "List"),
             SrcLoc::from(Location::none()),
         );
 
@@ -8473,7 +8450,7 @@ mod tests {
 
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_module_path_raw(
-            &crate::types::Path::Pident(side_effect),
+            &crate::types::path::PathView::Pident(side_effect),
             SrcLoc::from(Location::none()),
         );
         let possible_required_modules = converter.take_possible_required_modules();
@@ -8494,13 +8471,13 @@ mod tests {
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
             mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                crate::types::Path::Pident(side_effect),
+                crate::types::Path::pident(side_effect),
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
-                crate::types::Path::Pident(side_effect),
+                crate::types::Path::pident(side_effect),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -8527,13 +8504,13 @@ mod tests {
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
             mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                crate::types::Path::Pident(side_effect),
+                crate::types::Path::pident(side_effect),
                 crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
             ),
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaPresent,
-                crate::types::Path::Pident(side_effect),
+                crate::types::Path::pident(side_effect),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -8559,7 +8536,7 @@ mod tests {
         env.add_module(
             local_l,
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtyIdent(crate::types::Path::Pident(
+                md_type: crate::types::decl::ModuleType::MtyIdent(crate::types::Path::pident(
                     modtype_x,
                 )),
                 md_attributes: Vec::new(),
@@ -8571,7 +8548,7 @@ mod tests {
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
-            &crate::types::Path::pdot(crate::types::Path::Pident(local_l), "length"),
+            &crate::types::Path::pdot(crate::types::Path::pident(local_l), "length"),
             SrcLoc::from(Location::none()),
         );
 
@@ -8604,7 +8581,7 @@ mod tests {
                     Ident::create_local("List"),
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyIdent(
-                            crate::types::Path::Pident(pkg_list),
+                            crate::types::Path::pident(pkg_list),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: crate::types::DeclLoc::none(),
@@ -8640,7 +8617,7 @@ mod tests {
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
             &crate::types::Path::pdot(
-                crate::types::Path::pdot(crate::types::Path::Pident(pkg), "List"),
+                crate::types::Path::pdot(crate::types::Path::pident(pkg), "List"),
                 "length",
             ),
             SrcLoc::from(Location::none()),
@@ -8674,7 +8651,7 @@ mod tests {
         let make = Ident::create_local("make");
 
         let icon_export_path =
-            crate::types::Path::pdot(crate::types::Path::Pident(icon), export.name().to_string());
+            crate::types::Path::pdot(crate::types::Path::pident(icon), export.name().to_string());
         let subtitles_path =
             crate::types::Path::pdot(icon_export_path.clone(), subtitles.name().to_string());
         let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
@@ -8819,7 +8796,7 @@ mod tests {
                         crate::types::decl::ModuleDeclaration {
                             md_type: crate::types::decl::ModuleType::MtyIdent(
                                 crate::types::Path::pdot(
-                                    crate::types::Path::Pident(inner_define),
+                                    crate::types::Path::pident(inner_define),
                                     "S0",
                                 ),
                             ),
@@ -8850,7 +8827,7 @@ mod tests {
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
             &crate::types::Path::pdot_pos(
-                crate::types::Path::pdot_pos(crate::types::Path::Pident(inner_define), "N0", 1),
+                crate::types::Path::pdot_pos(crate::types::Path::pident(inner_define), "N0", 1),
                 "f1",
                 0,
             ),
