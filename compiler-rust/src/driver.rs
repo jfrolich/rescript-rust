@@ -7470,6 +7470,7 @@ fn escaped_constructor_path_in_type(
             escaped_constructor_path_in_type(type_ctx, *fields, var_level, seen)
         }
         TypeDesc::Tvariant(row) => {
+            let row = &type_ctx.row_desc(row);
             for (_, field) in &row.row_fields {
                 match field {
                     crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
@@ -9234,7 +9235,7 @@ fn polyvariant_row(
     let repr = type_ctx.repr(ty);
     let desc = type_ctx.get_desc(repr);
     let row = match &*desc {
-        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(type_ctx, row),
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(type_ctx, &type_ctx.row_desc(row)),
         _ => return None,
     };
     Some(row)
@@ -10190,6 +10191,7 @@ fn format_package_type_expr_for_error(
     let TypeDesc::Tpackage { path, lids, args } = desc else {
         return format_type_expr(type_ctx, ty);
     };
+    let lids = type_ctx.package_lids(lids);
     if lids.is_empty() {
         return format_type_expr(type_ctx, ty);
     }

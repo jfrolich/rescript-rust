@@ -208,14 +208,88 @@ impl TypeRefList {
     }
 }
 
-/// Append-only pools of the immutable lists in type descriptors for one
-/// storage tier (see [`TypeRefList`], [`TypeArgList`]). `tag` is the tier's
-/// tag bits, or-ed into every handle it returns.
+/// A `Copy` handle to one immutable payload of a type descriptor, stored in
+/// the payload pool of the owning tier (see [`TypePayloadPool`]); the tier is
+/// selected by the same tag bits as [`TypeExprRef`].
+macro_rules! payload_handle {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy)]
+        pub struct $name(u32);
+
+        impl $name {
+            #[inline]
+            pub(crate) fn from_raw(raw: u32) -> Self {
+                $name(raw)
+            }
+
+            #[inline]
+            pub(crate) fn raw(self) -> u32 {
+                self.0
+            }
+
+            #[inline]
+            pub(crate) fn is_store(self) -> bool {
+                self.0 & STORE_REF_TAG != 0
+            }
+
+            #[inline]
+            pub(crate) fn is_shared(self) -> bool {
+                self.0 & SHARED_REF_BITS == SHARED_REF_BITS
+            }
+        }
+
+        impl From<&$name> for $name {
+            #[inline]
+            fn from(handle: &$name) -> Self {
+                *handle
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, concat!(stringify!($name), "({:#x})"), self.0)
+            }
+        }
+    };
+}
+
+payload_handle!(
+    /// The row of a `Tvariant` (`compiler/ml/types.ml:42`): an immutable
+    /// [`RowDesc`] in a payload pool. Read it with `TypeContext::row_desc`.
+    RowDescRef
+);
+
+payload_handle!(
+    /// The constraint names of a `Tpackage` (`compiler/ml/types.ml:50`).
+    /// Read them with `TypeContext::package_lids`.
+    PackageLidsRef
+);
+
+/// Append-only pools of the immutable payloads of type descriptors for one
+/// storage tier: type lists ([`TypeRefList`]), arrow parameter lists
+/// ([`TypeArgList`]), rows ([`RowDescRef`]) and package constraint names
+/// ([`PackageLidsRef`]). `tag` is the tier's tag bits, or-ed into every
+/// handle it returns.
 #[derive(Default)]
-pub(crate) struct TypeListPool {
+pub(crate) struct TypePayloadPool {
     items: std::cell::RefCell<Vec<TypeExprRef>>,
     args: std::cell::RefCell<Vec<TypeArg>>,
+    rows: std::cell::RefCell<Vec<RowDesc>>,
+    lids: std::cell::RefCell<Vec<Vec<Longident>>>,
     tag: u32,
+}
+
+/// Append one payload to `pool`, returning its tagged index.
+fn pool_push<T>(pool: &std::cell::RefCell<Vec<T>>, item: T, tag: u32) -> u32 {
+    let mut pool = pool.borrow_mut();
+    let index = u32::try_from(pool.len()).expect("type payload pool exceeds u32::MAX");
+    assert!(
+        index & SHARED_REF_BITS == 0,
+        "type payload pool index exceeds the tag range"
+    );
+    pool.push(item);
+    index | tag
 }
 
 /// Append `items` to `pool`, returning the tagged start position.
@@ -230,13 +304,33 @@ fn pool_append<T: Copy>(pool: &std::cell::RefCell<Vec<T>>, items: &[T], tag: u32
     start | tag
 }
 
-impl TypeListPool {
+impl TypePayloadPool {
     pub(crate) fn with_tag(tag: u32) -> Self {
-        TypeListPool {
-            items: Default::default(),
-            args: Default::default(),
+        TypePayloadPool {
             tag,
+            ..Default::default()
         }
+    }
+
+    /// Add a row.
+    pub(crate) fn alloc_row(&self, row: RowDesc) -> RowDescRef {
+        RowDescRef(pool_push(&self.rows, row, self.tag))
+    }
+
+    /// A copy of a row allocated by this pool.
+    #[inline]
+    pub(crate) fn get_row(&self, row: RowDescRef) -> RowDesc {
+        self.rows.borrow()[(row.raw() & !self.tag) as usize].clone()
+    }
+
+    /// Add package constraint names.
+    pub(crate) fn alloc_lids(&self, lids: Vec<Longident>) -> PackageLidsRef {
+        PackageLidsRef(pool_push(&self.lids, lids, self.tag))
+    }
+
+    /// A copy of package constraint names allocated by this pool.
+    pub(crate) fn get_lids(&self, lids: PackageLidsRef) -> Vec<Longident> {
+        self.lids.borrow()[(lids.raw() & !self.tag) as usize].clone()
     }
 
     /// Append `items` as a new list.
@@ -429,7 +523,7 @@ pub enum TypeDesc {
     Tsubst(TypeExprRef),
 
     /// Polymorphic variant type
-    Tvariant(Box<RowDesc>),
+    Tvariant(RowDescRef),
 
     /// Universal type variable (from forall quantifier)
     Tunivar(Option<crate::name::Name>),
@@ -447,7 +541,7 @@ pub enum TypeDesc {
         /// Module type path
         path: Path,
         /// Longidents for package constraints
-        lids: Box<Vec<Longident>>,
+        lids: PackageLidsRef,
         /// Type arguments
         args: TypeRefList,
     },
@@ -1343,8 +1437,8 @@ mod tests {
         assert_eq!(size_of::<crate::ident::Ident>(), 16);
         assert_eq!(size_of::<Path>(), 8);
         assert_eq!(size_of::<TypeRefList>(), 8);
-        assert!(size_of::<TypeDesc>() <= 32);
-        assert!(size_of::<TypeExpr>() <= 48);
+        assert_eq!(size_of::<TypeDesc>(), 24);
+        assert_eq!(size_of::<TypeExpr>(), 40);
     }
 
     #[test]

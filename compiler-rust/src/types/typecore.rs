@@ -3639,9 +3639,15 @@ fn transl_type_inner(
                             let expanded_desc = ctx.get_desc(expanded);
                             match &*expanded_desc {
                                 TypeDesc::Tvariant(row_desc)
-                                    if crate::types::btype::static_row(ctx, row_desc) =>
+                                    if crate::types::btype::static_row(
+                                        ctx,
+                                        &ctx.row_desc(row_desc),
+                                    ) =>
                                 {
-                                    Some(crate::types::btype::row_repr(ctx, row_desc).row_fields)
+                                    Some(
+                                        crate::types::btype::row_repr(ctx, &ctx.row_desc(row_desc))
+                                            .row_fields,
+                                    )
                                 }
                                 _ => None,
                             }
@@ -3867,7 +3873,7 @@ fn transl_type_inner(
 
             let package_ty = ctx.new_type(TypeDesc::Tpackage {
                 path: pack_path.clone(),
-                lids: Box::new(lids),
+                lids: ctx.new_package_lids(lids),
                 args: ctx.new_type_list(&args),
             });
             let ctyp = TypedCoreType {
@@ -4008,8 +4014,8 @@ fn build_or_pat(
     let expanded = crate::types::ctype::expand_head(ctx, env, spread_ty_ref);
     let expanded_desc = ctx.get_desc(expanded);
     let row0 = match &*expanded_desc {
-        TypeDesc::Tvariant(row) if crate::types::btype::static_row(ctx, row) => {
-            crate::types::btype::row_repr(ctx, row)
+        TypeDesc::Tvariant(row) if crate::types::btype::static_row(ctx, &ctx.row_desc(row)) => {
+            crate::types::btype::row_repr(ctx, &ctx.row_desc(row))
         }
         _ => {
             return Err(TypeCoreError::NotAVariantType {
@@ -5783,7 +5789,7 @@ fn variant_payload_type_from_expected(
     let expected_desc = ctx.get_desc(ctx.repr(expanded_expected));
     match &*expected_desc {
         TypeDesc::Tvariant(row) => {
-            let row = crate::types::btype::row_repr(ctx, row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             row.row_fields
                 .iter()
                 .find(|(field_label, _)| field_label == label)
@@ -8818,6 +8824,7 @@ fn force_lower_args_type_lookup_paths(
                 visit_manifest(tctx, env, inner, seen);
             }
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 let row = row.clone();
                 drop(desc);
                 if let Some((_, args)) = &row.row_name {
@@ -10817,7 +10824,7 @@ fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env
     let repr = ctx.repr(expanded);
     let desc = ctx.get_desc(repr);
     let row = match &*desc {
-        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, row),
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, &ctx.row_desc(row)),
         _ => return,
     };
     drop(desc);
@@ -10842,7 +10849,7 @@ fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env
             row_fixed: row.row_fixed,
             row_name,
         };
-        let closed_ty = ctx.new_generic_type(TypeDesc::Tvariant(Box::new(closed_row)));
+        let closed_ty = ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(closed_row)));
         let _ = crate::types::unify(ctx, &mut tctx.unify_state, row.row_more, closed_ty);
     }
 }
@@ -11508,7 +11515,7 @@ fn finalize_variant_in_pattern(
         let repr = ctx.repr(expanded);
         let desc = ctx.get_desc(repr);
         if let TypeDesc::Tvariant(row) = &*desc {
-            let row = crate::types::btype::row_repr(ctx, row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             let row_is_fixed = crate::types::btype::row_fixed(ctx, &row);
             let field_repr = crate::types::btype::row_field(ctx, tag, &row);
             drop(desc);
@@ -12067,7 +12074,7 @@ fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
         }
         let desc = ctx.get_desc(current);
         if let TypeDesc::Tvariant(row) = &*desc {
-            let row = crate::types::btype::row_repr(ctx, row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             if !row.row_fixed {
                 for (_, field) in &row.row_fields {
                     if matches!(
@@ -13650,8 +13657,8 @@ fn type_variant(
             let expected_inst_desc = ctx.get_desc(ctx.repr(expanded_expected_inst));
             match (&*expected_desc, &*expected_inst_desc) {
                 (TypeDesc::Tvariant(row), TypeDesc::Tvariant(row0)) => {
-                    let row = crate::types::btype::row_repr(ctx, row);
-                    let row0 = crate::types::btype::row_repr(ctx, row0);
+                    let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
+                    let row0 = crate::types::btype::row_repr(ctx, &ctx.row_desc(row0));
                     let field = row
                         .row_fields
                         .iter()
@@ -18400,6 +18407,7 @@ fn pack_type_contains_local_module_dependency(
                 || pack_type_contains_local_module_dependency(ctx, env, pers_env, *rest, visited)
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             for (_, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(ty)) => {
@@ -18470,7 +18478,7 @@ fn type_pack(
     let (pack_path, pack_lids, expected_pack_args) = {
         let desc = ctx.get_desc(ctx.repr(expanded));
         match &*desc {
-            TypeDesc::Tpackage { path, lids, args } => (path.clone(), lids.clone(), args.clone()),
+            TypeDesc::Tpackage { path, lids, args } => (path.clone(), *lids, args.clone()),
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
                 return Err(TypeCoreError::CannotInferSignature { loc });
             }
@@ -18482,6 +18490,8 @@ fn type_pack(
             }
         }
     };
+    let pack_lids_ref = pack_lids;
+    let pack_lids = ctx.package_lids(pack_lids_ref);
     // OCaml compiler/ml/typecore.ml:3518-3525 expands `instance env ty_expected`
     // before entering Typemod.type_package. That expansion reaches qualified
     // type declarations through Env.find_type_full/find_module_descr
@@ -18731,7 +18741,7 @@ fn type_pack(
     };
     let packed_type = ctx.new_type(TypeDesc::Tpackage {
         path: pack_path,
-        lids: pack_lids,
+        lids: pack_lids_ref,
         args: ctx.new_type_list(&pack_args),
     });
     // Matches compiler/ml/typecore.ml:3525-3531: `Pexp_pack` returns via
@@ -18792,7 +18802,7 @@ fn module_type_from_package_binding(
     Ok(crate::types::typemod::modtype_of_package(
         env,
         &path,
-        &lids,
+        &ctx.package_lids(lids),
         &ctx.type_list(args),
         tctx.arena,
         &mut tctx.persistent_env,
@@ -21026,34 +21036,37 @@ where
             TypeDesc::Tnil => CopyTypeExprPlan::Tnil,
             TypeDesc::Tlink(target) => CopyTypeExprPlan::Tlink(*target),
             TypeDesc::Tsubst(target) => CopyTypeExprPlan::Tsubst(*target),
-            TypeDesc::Tvariant(row) => CopyTypeExprPlan::Tvariant {
-                row_fields: row
-                    .row_fields
-                    .iter()
-                    .map(|(label, field)| {
-                        let field = match field {
-                            RowField::Rpresent(ty) => CopyRowFieldPlan::Rpresent(*ty),
-                            RowField::Reither {
-                                constant,
-                                types,
-                                matched,
-                                link,
-                            } => CopyRowFieldPlan::Reither {
-                                constant: *constant,
-                                types: types.clone(),
-                                matched: *matched,
-                                link: *link,
-                            },
-                            RowField::Rabsent => CopyRowFieldPlan::Rabsent,
-                        };
-                        (label.clone(), field)
-                    })
-                    .collect(),
-                row_more: row.row_more,
-                row_closed: row.row_closed,
-                row_fixed: row.row_fixed,
-                row_name: row.row_name.clone(),
-            },
+            TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
+                CopyTypeExprPlan::Tvariant {
+                    row_fields: row
+                        .row_fields
+                        .iter()
+                        .map(|(label, field)| {
+                            let field = match field {
+                                RowField::Rpresent(ty) => CopyRowFieldPlan::Rpresent(*ty),
+                                RowField::Reither {
+                                    constant,
+                                    types,
+                                    matched,
+                                    link,
+                                } => CopyRowFieldPlan::Reither {
+                                    constant: *constant,
+                                    types: types.clone(),
+                                    matched: *matched,
+                                    link: *link,
+                                },
+                                RowField::Rabsent => CopyRowFieldPlan::Rabsent,
+                            };
+                            (label.clone(), field)
+                        })
+                        .collect(),
+                    row_more: row.row_more,
+                    row_closed: row.row_closed,
+                    row_fixed: row.row_fixed,
+                    row_name: row.row_name.clone(),
+                }
+            }
             TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
             TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
                 body: *body,
@@ -21061,7 +21074,7 @@ where
             },
             TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
                 path: type_path(path),
-                lids: *lids.clone(),
+                lids: ctx.package_lids(lids),
                 args: args.clone(),
             },
         }
@@ -21189,7 +21202,7 @@ where
                         )
                     }),
                 };
-                TypeDesc::Tvariant(Box::new(copied_row))
+                TypeDesc::Tvariant(ctx.new_row_desc(copied_row))
             }
             CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
             CopyTypeExprPlan::Tpoly { body, vars } => {
@@ -21212,7 +21225,7 @@ where
                 );
                 TypeDesc::Tpackage {
                     path,
-                    lids: Box::new(lids),
+                    lids: ctx.new_package_lids(lids),
                     args: copied_args,
                 }
             }
@@ -23397,6 +23410,7 @@ fn type_contains_unresolved_local_path(
                 || type_contains_unresolved_local_path(ctx, env, pers_env, *rest, visited)
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             for (_, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(ty)) => {
@@ -23585,6 +23599,7 @@ fn qualify_label_description_paths(
                 );
             }
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 for (_label, field) in &row.row_fields {
                     match field {
                         RowField::Rpresent(Some(ty)) => {
@@ -24915,6 +24930,7 @@ fn force_type_paths_for_lookup_from_type(
             force_type_paths_for_lookup_from_type(ctx, env, pers_env, rest, seen);
         }
         TypeDesc::Tvariant(row) => {
+            let row = ctx.row_desc(row);
             force_type_paths_for_lookup_from_type(ctx, env, pers_env, row.row_more, seen);
             for (_label, field) in row.row_fields {
                 match field {
@@ -25610,6 +25626,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
             );
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             for (_label, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(ty)) => {
@@ -28901,15 +28918,13 @@ mod tests {
             "t",
         );
         let row_more = ctx.new_var(None);
-        let ty = ctx.new_type(TypeDesc::Tvariant(Box::new(
-            crate::types::type_expr::RowDesc {
-                row_fields: Vec::new().into(),
-                row_more,
-                row_closed: false,
-                row_fixed: false,
-                row_name: Some((local.clone(), Vec::new())),
-            },
-        )));
+        let ty = ctx.new_variant(crate::types::type_expr::RowDesc {
+            row_fields: Vec::new().into(),
+            row_more,
+            row_closed: false,
+            row_fixed: false,
+            row_name: Some((local.clone(), Vec::new())),
+        });
         let map = |p: &Path| {
             if p.same(&local) {
                 rerooted.clone()
@@ -28920,6 +28935,7 @@ mod tests {
         let copied = copy_type_expr_mapping_paths(&ctx, ty, &mut TypeExprRefMap::new(), &map);
         match &*ctx.get_desc(ctx.repr(copied)) {
             TypeDesc::Tvariant(row) => {
+                let row = ctx.row_desc(row);
                 let (name, _) = row.row_name.as_ref().expect("row name");
                 assert!(name.same(&rerooted));
             }
@@ -29366,7 +29382,7 @@ fn pm_type_path(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Path {
 fn pm_row_of(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> crate::types::type_expr::RowDesc {
     let ty = ctx.repr(crate::types::ctype::expand_head(ctx, env, ty));
     match &*ctx.get_desc(ty) {
-        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, row),
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, &ctx.row_desc(row)),
         _ => crate::misc::fatal_error("Parmatch.row_of_pat"),
     }
 }

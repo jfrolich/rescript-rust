@@ -136,7 +136,7 @@ pub(crate) struct ThreadTypeStore {
     /// to the reading compilation's overlay.
     abbrevs: RefCell<Vec<AbbrevMemo>>,
     row_fields: RefCell<Vec<Option<RowField>>>,
-    type_lists: super::type_expr::TypeListPool,
+    type_lists: super::type_expr::TypePayloadPool,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
     /// Internalized dependency signatures keyed by the identity of the
@@ -196,7 +196,9 @@ impl ThreadTypeStore {
             types: TypeArena::new(),
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            type_lists: super::type_expr::TypeListPool::with_tag(super::type_expr::STORE_REF_TAG),
+            type_lists: super::type_expr::TypePayloadPool::with_tag(
+                super::type_expr::STORE_REF_TAG,
+            ),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             pers: RefCell::new(HashMap::new()),
@@ -399,6 +401,35 @@ impl ThreadTypeStore {
     /// Allocate a type list in the worker store.
     pub(crate) fn alloc_type_list(&self, items: &[TypeExprRef]) -> super::type_expr::TypeRefList {
         self.type_lists.alloc(items)
+    }
+
+    /// Store a `Tvariant` row in the worker store.
+    pub(crate) fn alloc_row_desc(
+        &self,
+        row: super::type_expr::RowDesc,
+    ) -> super::type_expr::RowDescRef {
+        self.type_lists.alloc_row(row)
+    }
+
+    /// A copy of a worker-store row.
+    pub(crate) fn row_desc(&self, row: super::type_expr::RowDescRef) -> super::type_expr::RowDesc {
+        self.type_lists.get_row(row)
+    }
+
+    /// Store `Tpackage` constraint names in the worker store.
+    pub(crate) fn alloc_package_lids(
+        &self,
+        lids: Vec<crate::parser::longident::Longident>,
+    ) -> super::type_expr::PackageLidsRef {
+        self.type_lists.alloc_lids(lids)
+    }
+
+    /// A copy of worker-store `Tpackage` constraint names.
+    pub(crate) fn package_lids(
+        &self,
+        lids: super::type_expr::PackageLidsRef,
+    ) -> Vec<crate::parser::longident::Longident> {
+        self.type_lists.get_lids(lids)
     }
 
     /// Allocate an arrow parameter list in the worker store.

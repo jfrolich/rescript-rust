@@ -457,9 +457,13 @@ pub fn translateTypeExprFromTypes_(
             }
         }
         TypeDesc::Tlink(t) => translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &t),
-        TypeDesc::Tvariant(row_desc) => {
-            translate_variant(ctx, config, type_vars_gen, type_env, &row_desc)
-        }
+        TypeDesc::Tvariant(row_desc) => translate_variant(
+            ctx,
+            config,
+            type_vars_gen,
+            type_env,
+            &ctx.row_desc(row_desc),
+        ),
         TypeDesc::Tpackage {
             path,
             lids,
@@ -469,7 +473,8 @@ pub fn translateTypeExprFromTypes_(
             // `Tpackage(path, ids, types)` translates package constraints by
             // pairing the stored Longident list with the stored type list before
             // calling `TypeEnv.add_type_equations`.
-            let ids = lids
+            let ids = ctx
+                .package_lids(lids)
                 .iter()
                 .map(|lid| longident_to_strings(ctx, lid))
                 .collect::<Vec<_>>();

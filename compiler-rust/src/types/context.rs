@@ -22,15 +22,16 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, RowDesc, RowField,
-    RowFieldRef, TypeArg, TypeArgList, TypeArgs, TypeDesc, TypeExpr, TypeExprRef, TypeRefList,
-    TypeRefs,
+    AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, PackageLidsRef,
+    RowDesc, RowDescRef, RowField, RowFieldRef, TypeArg, TypeArgList, TypeArgs, TypeDesc, TypeExpr,
+    TypeExprRef, TypeRefList, TypeRefs,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
 use crate::parse_arena::LidentIdx;
+use crate::parser::longident::Longident;
 use crate::types::path::PathView;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -511,7 +512,7 @@ pub struct TypeContext {
     /// borrows valid while another stored node is written.
     store_descs: TypeArena,
     /// Type lists (`TypeRefList`) allocated by this compilation.
-    type_lists: super::type_expr::TypeListPool,
+    type_lists: super::type_expr::TypePayloadPool,
     store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
     /// Level marking and lowering are also compilation-local, including on
     /// diagnostic exits that do not finish a mark/unmark traversal.
@@ -2595,6 +2596,54 @@ impl TypeContext {
         self.store.type_args(list)
     }
 
+    /// Store an immutable `Tvariant` row (same tier rule as
+    /// [`Self::new_type_list`]).
+    pub fn new_row_desc(&self, row: RowDesc) -> RowDescRef {
+        if self.in_store_build() {
+            return self.store.alloc_row_desc(row);
+        }
+        self.type_lists.alloc_row(row)
+    }
+
+    /// A copy of a `Tvariant` row.
+    #[inline]
+    pub fn row_desc(&self, row: impl Into<RowDescRef>) -> RowDesc {
+        let row = row.into();
+        if row.is_store() {
+            return self.store_row_desc(row);
+        }
+        self.type_lists.get_row(row)
+    }
+
+    #[inline(never)]
+    fn store_row_desc(&self, row: RowDescRef) -> RowDesc {
+        if row.is_shared() {
+            return super::shared_store::page_row(&self.shared_pages.borrow(), row).clone();
+        }
+        self.store.row_desc(row)
+    }
+
+    /// Store the constraint names of a `Tpackage` (same tier rule as
+    /// [`Self::new_type_list`]).
+    pub fn new_package_lids(&self, lids: Vec<Longident>) -> PackageLidsRef {
+        if self.in_store_build() {
+            return self.store.alloc_package_lids(lids);
+        }
+        self.type_lists.alloc_lids(lids)
+    }
+
+    /// A copy of the constraint names of a `Tpackage`.
+    pub fn package_lids(&self, lids: impl Into<PackageLidsRef>) -> Vec<Longident> {
+        let lids = lids.into();
+        if lids.is_shared() {
+            return super::shared_store::page_lids(&self.shared_pages.borrow(), lids).to_vec();
+        }
+        if lids.is_store() {
+            return self.store.package_lids(lids);
+        }
+        self.type_lists.get_lids(lids)
+    }
+
     /// [`Self::store_type_list_for`] for arrow parameter lists.
     fn store_type_args_for(&self, list: TypeArgList) -> TypeArgList {
         if list.is_empty() || list.is_store() {
@@ -2797,7 +2846,7 @@ impl TypeContext {
 
     /// Create a variant type.
     pub fn new_variant(&self, row: RowDesc) -> TypeExprRef {
-        self.new_type(TypeDesc::Tvariant(Box::new(row)))
+        self.new_type(TypeDesc::Tvariant(self.new_row_desc(row)))
     }
 
     // ========================================================================
@@ -4571,9 +4620,8 @@ impl TypeContext {
         }
     }
 
-    /// Poison the store build if `desc` refers to compilation-local cells.
-    /// `desc` with its type lists in the worker store (see
-    /// `store_type_list_for`).
+    /// `desc` with its payloads (type and parameter lists, row, package
+    /// names) in the worker store (see `store_type_list_for`).
     fn store_desc_lists(&self, mut desc: TypeDesc) -> TypeDesc {
         match &mut desc {
             TypeDesc::Ttuple(list)
@@ -4581,11 +4629,22 @@ impl TypeContext {
             | TypeDesc::Tpoly { vars: list, .. }
             | TypeDesc::Tpackage { args: list, .. } => *list = self.store_type_list_for(*list),
             TypeDesc::Tarrow { args, .. } => *args = self.store_type_args_for(*args),
+            TypeDesc::Tvariant(row) if !row.is_store() => {
+                *row = self.store.alloc_row_desc(self.type_lists.get_row(*row));
+            }
             _ => {}
+        }
+        if let TypeDesc::Tpackage { lids, .. } = &mut desc
+            && !lids.is_store()
+        {
+            *lids = self
+                .store
+                .alloc_package_lids(self.type_lists.get_lids(*lids));
         }
         desc
     }
 
+    /// Poison the store build if `desc` refers to compilation-local cells.
     fn check_store_desc(&self, desc: &TypeDesc) {
         match desc {
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
@@ -4622,6 +4681,7 @@ impl TypeContext {
             }
             TypeDesc::Tlink(ty) | TypeDesc::Tsubst(ty) => self.check_store_ref(*ty),
             TypeDesc::Tvariant(row) => {
+                let row = self.row_desc(row);
                 self.check_store_ref(row.row_more);
                 for (_, field) in row.row_fields.iter() {
                     self.check_store_row_field(field);
@@ -5145,18 +5205,21 @@ mod tests {
         let a = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
         let pool = a.store.shared_pool();
         let base = pool
-            .publish(2, 0, 0, 0, |_| {
-                (
-                    vec![
+            .publish(
+                super::super::shared_store::SharedGraphSizes {
+                    nodes: 2,
+                    ..Default::default()
+                },
+                |_| super::super::shared_store::SharedGraphParts {
+                    nodes: vec![
                         (TypeDesc::Tvar(None), GENERIC_LEVEL),
                         (TypeDesc::Tnil, GENERIC_LEVEL),
                     ],
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            })
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: Vec::new(),
+                },
+            )
             .expect("pool has room");
         let var = super::super::shared_store::shared_ref(base, 0);
         let nil = super::super::shared_store::shared_ref(base, 1);

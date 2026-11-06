@@ -27,7 +27,7 @@ use crate::types::env::Env;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
-use crate::{parser::code_frame, types::ArgLabel};
+use crate::parser::code_frame;
 
 // ============================================================================
 // Error Types
@@ -2728,7 +2728,7 @@ fn rewrite_substituted_type_paths(
             rewrite_substituted_type_paths(type_ctx, *rest, subst, seen);
         }
         TypeDesc::Tvariant(row0) => {
-            let row = crate::types::btype::row_repr(type_ctx, row0);
+            let row = crate::types::btype::row_repr(type_ctx, &type_ctx.row_desc(row0));
             for (_, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(arg)) => {
@@ -3555,7 +3555,7 @@ fn type_manifest_for_inclusion(
 
     match (&impl_desc, &sig_desc) {
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row))
-            if type_manifest_is_absrow(type_ctx, env, sig_row.row_more) =>
+            if type_manifest_is_absrow(type_ctx, env, type_ctx.row_desc(sig_row).row_more) =>
         {
             return fixed_private_variant_manifest_for_inclusion(
                 type_ctx,
@@ -3563,8 +3563,8 @@ fn type_manifest_for_inclusion(
                 impl_manifest,
                 impl_params,
                 sig_params,
-                impl_row,
-                sig_row,
+                &type_ctx.row_desc(impl_row),
+                &type_ctx.row_desc(sig_row),
                 param_map,
             );
         }
@@ -3986,6 +3986,8 @@ fn type_exprs_equal_for_inclusion_inner(
             // Ctype.equal. Its package branch calls complete_type_list twice
             // (compiler/ml/ctype.ml:3048-3053, 2044-2047), allocating one
             // hidden `Pkg` module per side before comparing package arguments.
+            let impl_lids = &type_ctx.package_lids(impl_lids);
+            let sig_lids = &type_ctx.package_lids(sig_lids);
             let labels_complete = env.is_none_or(|env| {
                 let sig_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
                     type_ctx,
@@ -4021,7 +4023,14 @@ fn type_exprs_equal_for_inclusion_inner(
             // polymorphic variant rows by row_repr/merge_row_fields and then
             // recursively equal-checks paired payloads under the same parameter
             // renaming map.
-            rows_equal_for_inclusion(type_ctx, env, param_map, impl_row, sig_row, seen)
+            rows_equal_for_inclusion(
+                type_ctx,
+                env,
+                param_map,
+                &type_ctx.row_desc(impl_row),
+                &type_ctx.row_desc(sig_row),
+                seen,
+            )
         }
         // OCaml compiler/ml/ctype.ml:3293-3330 compares object
         // manifests through `eqtype_fields`, not physical identity.

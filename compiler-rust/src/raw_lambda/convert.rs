@@ -1866,7 +1866,7 @@ impl<'a> RawLambdaConverter<'a> {
                 false
             }
             TypeDesc::Tvariant(row) => {
-                let row = btype::row_repr(self.type_ctx, row);
+                let row = btype::row_repr(self.type_ctx, &self.type_ctx.row_desc(row));
                 row.row_closed
                     && !row.row_fields.iter().any(|(_, f)| {
                         matches!(

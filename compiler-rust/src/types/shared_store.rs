@@ -19,7 +19,11 @@
 //!
 //! References carry `type_expr::STORE_REF_TAG | SHARED_REF_TAG`.
 
-use super::type_expr::{TypeDesc, TypeExprRef};
+use super::type_expr::{
+    PackageLidsRef, RowDesc, RowDescRef, SHARED_REF_BITS, TypeArg, TypeArgList, TypeDesc,
+    TypeExprRef, TypeRefList,
+};
+use crate::parser::longident::Longident;
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
@@ -56,10 +60,12 @@ pub(crate) struct SharedTypeNode {
 pub(crate) struct SharedGraph {
     base: u32,
     nodes: Box<[SharedTypeNode]>,
-    /// The graph's type lists (`TypeRefList`), indexed right after its nodes,
-    /// then its arrow parameter lists (`TypeArgList`).
+    /// Descriptor payloads, indexed after the nodes (see
+    /// [`SharedGraphSizes`]).
     lists: Box<[TypeExprRef]>,
-    args: Box<[super::type_expr::TypeArg]>,
+    args: Box<[TypeArg]>,
+    rows: Box<[RowDesc]>,
+    lids: Box<[Vec<Longident>]>,
     layouts: Box<[Layout]>,
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
@@ -92,33 +98,48 @@ pub(crate) fn page_location(
     graph.locations[index]
 }
 
-/// Resolve shared node `idx` through a page table.
-/// The elements of a shared type list.
+/// The graph owning shared index `idx`, and `idx`'s offset in it.
 #[inline]
-pub(crate) fn page_list(
-    pages: &[OnceLock<Arc<SharedGraph>>],
-    list: super::type_expr::TypeRefList,
-) -> &[TypeExprRef] {
-    let idx = list.raw_start() & !super::type_expr::SHARED_REF_BITS;
+fn page_graph(pages: &[OnceLock<Arc<SharedGraph>>], raw: u32) -> (&SharedGraph, usize) {
+    let idx = raw & !SHARED_REF_BITS;
     let graph = pages[(idx >> PAGE_BITS) as usize]
         .get()
-        .expect("shared type list refers to an unpublished page");
-    let start = (idx - graph.base) as usize - graph.nodes.len();
+        .expect("shared type index refers to an unpublished page");
+    (graph, (idx - graph.base) as usize)
+}
+
+/// The elements of a shared type list.
+#[inline]
+pub(crate) fn page_list(pages: &[OnceLock<Arc<SharedGraph>>], list: TypeRefList) -> &[TypeExprRef] {
+    let (graph, offset) = page_graph(pages, list.raw_start());
+    let start = offset - graph.nodes.len();
     &graph.lists[start..start + list.len()]
 }
 
 /// The parameters of a shared arrow parameter list.
 #[inline]
-pub(crate) fn page_args(
-    pages: &[OnceLock<Arc<SharedGraph>>],
-    list: super::type_expr::TypeArgList,
-) -> &[super::type_expr::TypeArg] {
-    let idx = list.raw_start() & !super::type_expr::SHARED_REF_BITS;
-    let graph = pages[(idx >> PAGE_BITS) as usize]
-        .get()
-        .expect("shared parameter list refers to an unpublished page");
-    let start = (idx - graph.base) as usize - graph.nodes.len() - graph.lists.len();
+pub(crate) fn page_args(pages: &[OnceLock<Arc<SharedGraph>>], list: TypeArgList) -> &[TypeArg] {
+    let (graph, offset) = page_graph(pages, list.raw_start());
+    let start = offset - graph.nodes.len() - graph.lists.len();
     &graph.args[start..start + list.len()]
+}
+
+/// A shared row.
+#[inline]
+pub(crate) fn page_row(pages: &[OnceLock<Arc<SharedGraph>>], row: RowDescRef) -> &RowDesc {
+    let (graph, offset) = page_graph(pages, row.raw());
+    &graph.rows[offset - graph.nodes.len() - graph.lists.len() - graph.args.len()]
+}
+
+/// The constraint names of a shared package type.
+#[inline]
+pub(crate) fn page_lids(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    lids: PackageLidsRef,
+) -> &[Longident] {
+    let (graph, offset) = page_graph(pages, lids.raw());
+    &graph.lids
+        [offset - graph.nodes.len() - graph.lists.len() - graph.args.len() - graph.rows.len()]
 }
 
 #[inline]
@@ -129,15 +150,60 @@ pub(crate) fn page_node(pages: &[OnceLock<Arc<SharedGraph>>], idx: u32) -> &Shar
     &graph.nodes[(idx - graph.base) as usize]
 }
 
-/// Node descriptors with levels, variant layouts and locations of a graph
-/// being published.
-pub(crate) type SharedGraphParts = (
-    Vec<(TypeDesc, i32)>,
-    Vec<TypeExprRef>,
-    Vec<super::type_expr::TypeArg>,
-    Vec<Layout>,
-    Vec<crate::location::Location>,
-);
+/// Sizes of a graph to publish. The graph's shared indices are its nodes,
+/// then its type-list elements, arrow parameters, rows and package
+/// constraint lists, in that order; variant layouts index separately from
+/// the same base.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SharedGraphSizes {
+    pub(crate) nodes: usize,
+    pub(crate) list_items: usize,
+    pub(crate) arg_items: usize,
+    pub(crate) rows: usize,
+    pub(crate) lids: usize,
+    pub(crate) layouts: usize,
+}
+
+impl SharedGraphSizes {
+    /// Offset of the first type-list element from the graph's base.
+    pub(crate) fn lists_start(&self) -> usize {
+        self.nodes
+    }
+
+    pub(crate) fn args_start(&self) -> usize {
+        self.lists_start() + self.list_items
+    }
+
+    pub(crate) fn rows_start(&self) -> usize {
+        self.args_start() + self.arg_items
+    }
+
+    pub(crate) fn lids_start(&self) -> usize {
+        self.rows_start() + self.rows
+    }
+
+    fn indices(&self) -> usize {
+        self.lids_start() + self.lids
+    }
+}
+
+/// Descriptor payloads of a graph being published (see [`SharedGraphSizes`]).
+#[derive(Default)]
+pub(crate) struct SharedGraphPayloads {
+    pub(crate) lists: Vec<TypeExprRef>,
+    pub(crate) args: Vec<TypeArg>,
+    pub(crate) rows: Vec<RowDesc>,
+    pub(crate) lids: Vec<Vec<Longident>>,
+}
+
+/// Node descriptors with levels, payloads, variant layouts and locations of
+/// a graph being published.
+pub(crate) struct SharedGraphParts {
+    pub(crate) nodes: Vec<(TypeDesc, i32)>,
+    pub(crate) payloads: SharedGraphPayloads,
+    pub(crate) layouts: Vec<Layout>,
+    pub(crate) locations: Vec<crate::location::Location>,
+}
 
 pub(crate) struct SharedTypePool {
     generation: u64,
@@ -198,29 +264,27 @@ impl SharedTypePool {
     }
 
     /// Build and publish one graph. `build` receives the base index and
-    /// returns the node descriptors (with levels) and layouts, which must
-    /// match the reserved sizes, and the graph's location table.
-    /// Publish a graph of `nodes` type nodes, `list_items` type-list elements,
-    /// `arg_items` arrow parameters and `layouts` variant layouts. `build`
-    /// gets the graph's base index: node `i` is `base + i`, the type lists
-    /// start at `base + nodes` and the parameter lists follow them.
+    /// returns the graph's parts, which must match `sizes`.
     pub(crate) fn publish(
         &self,
-        nodes: usize,
-        list_items: usize,
-        arg_items: usize,
-        layouts: usize,
+        sizes: SharedGraphSizes,
         build: impl FnOnce(u32) -> SharedGraphParts,
     ) -> Option<u32> {
-        let indices = nodes.checked_add(list_items)?.checked_add(arg_items)?;
-        let (base, end) = self.reserve(indices, layouts)?;
-        let (descs, lists, args, built_layouts, locations) = build(base);
-        assert_eq!(descs.len(), nodes, "shared graph node count changed");
-        assert_eq!(lists.len(), list_items, "shared graph list size changed");
-        assert_eq!(args.len(), arg_items, "shared graph parameter count changed");
+        let (base, end) = self.reserve(sizes.indices(), sizes.layouts)?;
+        let SharedGraphParts {
+            nodes: descs,
+            payloads,
+            layouts: built_layouts,
+            locations,
+        } = build(base);
+        assert_eq!(descs.len(), sizes.nodes, "shared graph node count changed");
+        assert_eq!(payloads.lists.len(), sizes.list_items, "shared graph list size changed");
+        assert_eq!(payloads.args.len(), sizes.arg_items, "shared graph parameter count changed");
+        assert_eq!(payloads.rows.len(), sizes.rows, "shared graph row count changed");
+        assert_eq!(payloads.lids.len(), sizes.lids, "shared graph package count changed");
         assert_eq!(
             built_layouts.len(),
-            layouts,
+            sizes.layouts,
             "shared graph layout count changed"
         );
         let graph = Arc::new(SharedGraph {
@@ -234,8 +298,10 @@ impl SharedTypePool {
                     id: SHARED_TYPE_ID_BASE + (base as i32) + offset as i32,
                 })
                 .collect(),
-            lists: lists.into_boxed_slice(),
-            args: args.into_boxed_slice(),
+            lists: payloads.lists.into_boxed_slice(),
+            args: payloads.args.into_boxed_slice(),
+            rows: payloads.rows.into_boxed_slice(),
+            lids: payloads.lids.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
             locations: locations.into_boxed_slice(),
         });
@@ -320,24 +386,36 @@ mod tests {
     fn published_graphs_are_readable_from_other_threads() {
         let pool = Arc::new(SharedTypePool::new(u64::MAX));
         let base = pool
-            .publish(3, 0, 0, 0, |_| {
-                (
-                    vec![
+            .publish(
+                SharedGraphSizes {
+                    nodes: 3,
+                    ..Default::default()
+                },
+                |_| SharedGraphParts {
+                    nodes: vec![
                         (TypeDesc::Tnil, 7),
                         (TypeDesc::Tvar(Some("a".into())), 8),
                         (TypeDesc::Tnil, 9),
                     ],
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
-                )
-            })
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
+                },
+            )
             .unwrap();
         let second = pool
-            .publish(1, 0, 0, 0, |_| {
-                (vec![(TypeDesc::Tnil, 1)], Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            })
+            .publish(
+                SharedGraphSizes {
+                    nodes: 1,
+                    ..Default::default()
+                },
+                |_| SharedGraphParts {
+                    nodes: vec![(TypeDesc::Tnil, 1)],
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: Vec::new(),
+                },
+            )
             .unwrap();
         assert_eq!(second % PAGE_SIZE, 0);
         assert_ne!(base, second);

@@ -923,7 +923,7 @@ fn mcomp_rec(
         }
         (TypeDesc::Tpackage { .. }, TypeDesc::Tpackage { .. }) => Ok(()),
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
-            mcomp_row(ctx, env, state, row1, row2)
+            mcomp_row(ctx, env, state, &ctx.row_desc(row1), &ctx.row_desc(row2))
         }
         (TypeDesc::Tobject { fields: fi1 }, TypeDesc::Tobject { fields: fi2 }) => {
             mcomp_fields(ctx, env, state, *fi1, *fi2)
@@ -1694,7 +1694,7 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
             // abstract row variable (or recurse into the fixed row_more), then
             // only the row's field types are visited through `iter_row`.
             TypeDesc::Tvariant(row) => {
-                let row = super::btype::row_repr(ctx, row);
+                let row = super::btype::row_repr(ctx, &ctx.row_desc(row));
                 drop(desc);
                 if !super::btype::static_row(ctx, &row) {
                     if row.row_fixed {
@@ -1718,8 +1718,10 @@ fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) 
                             row_more: t,
                             ..row.clone()
                         };
-                        let fixed = ctx
-                            .alloc_type_at_level(TypeDesc::Tvariant(Box::new(fixed_row)), m_level);
+                        let fixed = ctx.alloc_type_at_level(
+                            TypeDesc::Tvariant(ctx.new_row_desc(fixed_row)),
+                            m_level,
+                        );
                         link_type(ctx, m, fixed);
                         if m_level < newtype_level {
                             let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), m_level);
@@ -2553,7 +2555,7 @@ fn update_level_expand_with_lookup_capture(
                 );
             }
             TypeDesc::Tvariant(row) => {
-                let name_path = row_repr_ref(ctx, row)
+                let name_path = row_repr_ref(ctx, &ctx.row_desc(row))
                     .row_name
                     .as_ref()
                     .map(|(path, _)| path.clone());
@@ -2568,11 +2570,11 @@ fn update_level_expand_with_lookup_capture(
                         < get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths)
                 {
                     let mut row = match &*ctx.borrow_desc(ty) {
-                        TypeDesc::Tvariant(row) => row_repr(ctx, row),
+                        TypeDesc::Tvariant(row) => row_repr(ctx, &ctx.row_desc(row)),
                         _ => unreachable!("update_level: variant descriptor changed"),
                     };
                     row.row_name = None;
-                    ctx.set_desc(ty, TypeDesc::Tvariant(Box::new(row)));
+                    ctx.set_desc(ty, TypeDesc::Tvariant(ctx.new_row_desc(row)));
                 }
                 ctx.set_level(ty, level);
                 return update_level_children(
@@ -5343,7 +5345,7 @@ impl BuildSubtype<'_, '_> {
                 }
             }
             TypeDesc::Tvariant(row) => {
-                let row = btype::row_repr(ctx, &row);
+                let row = btype::row_repr(ctx, &ctx.row_desc(row));
                 if self.memq_warn(t, visited) || !btype::static_row(ctx, &row) {
                     return (t, SubtypeChange::Unchanged);
                 }
@@ -5962,14 +5964,22 @@ fn subtype_rec(
         }
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
             let mut row_cstrs = cstrs.clone();
-            match subtype_row(ctx, env, subtypes, trace, row1, row2, &mut row_cstrs)? {
+            match subtype_row(
+                ctx,
+                env,
+                subtypes,
+                trace,
+                &ctx.row_desc(row1),
+                &ctx.row_desc(row2),
+                &mut row_cstrs,
+            )? {
                 true => *cstrs = row_cstrs,
                 false => push_subtype_cstr(cstrs, trace, t1, t2, None),
             }
             Ok(())
         }
         (TypeDesc::Tvariant(row), TypeDesc::Tconstr { args, .. })
-            if row_repr(ctx, row).row_closed
+            if row_repr(ctx, &ctx.row_desc(row)).row_closed
                 && args.is_empty()
                 && matches!(
                     extract_concrete_typedecl(ctx, env, t2).map(|(_, _, decl)| decl.type_kind),
@@ -5977,7 +5987,7 @@ fn subtype_rec(
                 ) =>
         {
             // Polymorphic variant to variant.
-            let row = row_repr(ctx, row);
+            let row = row_repr(ctx, &ctx.row_desc(row));
             if let Some((_, _, decl)) = extract_concrete_typedecl(ctx, env, t2)
                 && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
                     &decl.type_kind
@@ -5994,7 +6004,11 @@ fn subtype_rec(
             push_subtype_cstr(cstrs, trace, t1, t2, None);
             Ok(())
         }
-        (TypeDesc::Tvariant(row), _) if variant_row_is_subtype_of_primitive(ctx, row, t2) => Ok(()),
+        (TypeDesc::Tvariant(row), _)
+            if variant_row_is_subtype_of_primitive(ctx, &ctx.row_desc(row), t2) =>
+        {
+            Ok(())
+        }
         (
             TypeDesc::Tpoly {
                 body: u1,
@@ -7270,7 +7284,7 @@ fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
                 }
             }
             TypeDesc::Tvariant(row) => {
-                let row = crate::types::btype::row_repr(ctx, &row);
+                let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
                 let more = ctx.repr(row.row_more);
                 if matches!(&*ctx.borrow_desc(more), TypeDesc::Tvar(_))
                     && !crate::types::btype::row_fixed(ctx, &row)
@@ -7283,7 +7297,7 @@ fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
                         row_fixed: true,
                         ..row.clone()
                     };
-                    let variant = ctx.new_type(TypeDesc::Tvariant(Box::new(fixed_row)));
+                    let variant = ctx.new_type(TypeDesc::Tvariant(ctx.new_row_desc(fixed_row)));
                     ctx.set_level(variant, ctx.get_level(ty));
                     link_type(ctx, more, variant);
                 }
@@ -8158,8 +8172,8 @@ fn unify_types(
         // Variant types
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
             let original_desc1 = (*desc1).clone();
-            let row1 = row1.clone();
-            let row2 = row2.clone();
+            let row1 = ctx.row_desc(row1);
+            let row2 = ctx.row_desc(row2);
             drop(desc1);
             drop(desc2);
 
@@ -8231,8 +8245,8 @@ fn unify_types(
         ) => {
             let path1 = path1.clone();
             let path2 = path2.clone();
-            let lids1 = lids1.clone();
-            let lids2 = lids2.clone();
+            let lids1 = ctx.package_lids(lids1);
+            let lids2 = ctx.package_lids(lids2);
             let args1 = args1.clone();
             let args2 = args2.clone();
             drop(desc1);
@@ -8748,7 +8762,7 @@ fn unify_rows<'a>(
             return unify(ctx, state, rm, more);
         }
 
-        let ty = ctx.new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
+        let ty = ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
             row_fields: rest.into(),
             ..row0.clone()
         })));
@@ -8806,7 +8820,7 @@ fn unify_rows<'a>(
 /// variable, used for unification traces.
 fn mkvariant(ctx: &TypeContext, fields: Vec<(Label, RowField)>, closed: bool) -> TypeExprRef {
     let row_more = ctx.new_var(None);
-    ctx.new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
+    ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
         row_fields: fields.into(),
         row_more,
         row_closed: closed,
@@ -9296,13 +9310,15 @@ fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> T
                 return Err(TypeError::Unify(vec![]));
             }
             let static_variant_row = match &*desc {
-                TypeDesc::Tvariant(row) if btype::static_row(ctx, row) => Some(row.clone()),
+                TypeDesc::Tvariant(row) if btype::static_row(ctx, &ctx.row_desc(row)) => {
+                    Some(row.clone())
+                }
                 _ => None,
             };
             drop(desc);
             if let Some(row) = static_variant_row {
                 let mut children = Vec::new();
-                btype::iter_row(ctx, &row, |child| children.push(child));
+                btype::iter_row(ctx, &ctx.row_desc(row), |child| children.push(child));
                 for child in children {
                     occur(ctx, level, child, seen)?;
                 }
@@ -9455,7 +9471,7 @@ fn moregen_row(
         _ if may_inst => {
             drop(rm1_desc);
             drop(rm2_desc);
-            let ext = ctx.new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
+            let ext = ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
                 row_fields: r2.into(),
                 row_name: None,
                 ..row2.clone()
@@ -9707,8 +9723,8 @@ fn moregen(
         ) => {
             let path1 = path1.clone();
             let path2 = path2.clone();
-            let lids1 = lids1.clone();
-            let lids2 = lids2.clone();
+            let lids1 = ctx.package_lids(lids1);
+            let lids2 = ctx.package_lids(lids2);
             let args1 = args1.clone();
             let args2 = args2.clone();
             drop(desc1);
@@ -9745,8 +9761,8 @@ fn moregen(
             )
         }
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
-            let row1 = row1.clone();
-            let row2 = row2.clone();
+            let row1 = ctx.row_desc(row1);
+            let row2 = ctx.row_desc(row2);
             drop(desc1);
             drop(desc2);
             moregen_row(ctx, inst_nongen, type_pairs, env, &row1, &row2)
@@ -9852,7 +9868,7 @@ fn closed_schema_rec(
                 typ: *typ,
                 rest: *rest,
             },
-            TypeDesc::Tvariant(row) => Action::Tvariant(*row.clone()),
+            TypeDesc::Tvariant(row) => Action::Tvariant(ctx.row_desc(row)),
             _ => {
                 let mut children = Vec::new();
                 iter_type_expr(ctx, ty, |child| children.push(child));
@@ -10898,8 +10914,8 @@ fn equal_type_exprs_without_renaming_rec(
         ) => {
             let left_path = left_path.clone();
             let right_path = right_path.clone();
-            let left_lids = left_lids.clone();
-            let right_lids = right_lids.clone();
+            let left_lids = ctx.package_lids(left_lids);
+            let right_lids = ctx.package_lids(right_lids);
             let left_args = left_args.clone();
             let right_args = right_args.clone();
             drop(left_desc);
@@ -10930,8 +10946,8 @@ fn equal_type_exprs_without_renaming_rec(
             )
         }
         (TypeDesc::Tvariant(left_row), TypeDesc::Tvariant(right_row)) => {
-            let left_row = left_row.clone();
-            let right_row = right_row.clone();
+            let left_row = ctx.row_desc(left_row);
+            let right_row = ctx.row_desc(right_row);
             drop(left_desc);
             drop(right_desc);
             equal_rows_without_renaming(ctx, env, type_pairs, &left_row, &right_row)
@@ -11044,7 +11060,13 @@ fn equal_rows_without_renaming(
         _ => None,
     };
     if let Some(expanded_right) = expanded_right {
-        return equal_rows_without_renaming(ctx, env, type_pairs, left, &expanded_right);
+        return equal_rows_without_renaming(
+            ctx,
+            env,
+            type_pairs,
+            left,
+            &ctx.row_desc(expanded_right),
+        );
     }
     let left = row_repr_ref(ctx, left);
     let right = row_repr_ref(ctx, right);
@@ -11321,6 +11343,7 @@ fn compute_variance_rec(
             compute_variance_rec(ctx, env, visited, vari, rest, depth + 1);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             let row_fields = row.row_fields.clone();
             let row_more = row.row_more;
             drop(desc);
@@ -11837,7 +11860,8 @@ fn copy_sep_inner(
         }
         TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
         TypeDesc::Tvariant(row0) => {
-            let row = row_repr_ref(ctx, &row0);
+            let row_desc = ctx.row_desc(row0);
+            let row = row_repr_ref(ctx, &row_desc);
             let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             let keep = super::btype::is_tvar(ctx, more) && ctx.get_level(more) != GENERIC_LEVEL;
@@ -11851,7 +11875,7 @@ fn copy_sep_inner(
                 delayed_copy,
             );
             let fixed_prime = fixed && super::btype::is_tvar(ctx, ctx.repr(more_copy));
-            TypeDesc::Tvariant(Box::new(copy_sep_row(
+            TypeDesc::Tvariant(ctx.new_row_desc(copy_sep_row(
                 ctx,
                 row,
                 fixed_prime,
@@ -12316,7 +12340,8 @@ pub fn copy_type_deep(
         TypeDesc::Tvariant(row) => {
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let row = row_repr_ref(ctx, row);
+            let row_desc = ctx.row_desc(row);
+            let row = row_repr_ref(ctx, &row_desc);
             let row = row.as_ref();
             let new_row_more = copy_type_deep(ctx, row.row_more, cache);
             let new_row_fields: Vec<_> = row
@@ -12791,7 +12816,7 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tvariant(row) => {
                     let row = row.clone();
                     drop(desc);
-                    let mut row = row_repr(ctx, &row);
+                    let mut row = row_repr(ctx, &ctx.row_desc(row));
                     let more = ctx.repr(row.row_more);
                     if let Some(marker) = row_more_markers.get(&more).copied() {
                         // OCaml Subst.typexp fast-path:
@@ -12953,7 +12978,7 @@ fn subst_identity_copy_rec(
                             )
                         });
 
-                        TypeDesc::Tvariant(Box::new(RowDesc {
+                        TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
                             row_fields: fields_copy.into(),
                             row_more: more_copy,
                             row_closed: row.row_closed,
@@ -13025,7 +13050,8 @@ pub(crate) fn copy_type_cached(
     // already-registered variant copy directly.
     if !cache.row_more_markers.is_empty() && ctx.get_level(ty) == GENERIC_LEVEL {
         if let TypeDesc::Tvariant(row0) = &*ctx.borrow_desc(ty) {
-            let row = row_repr_ref(ctx, row0);
+            let row_desc = ctx.row_desc(row0);
+            let row = row_repr_ref(ctx, &row_desc);
             let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
@@ -13066,7 +13092,7 @@ pub(crate) fn copy_type_cached(
         Variant(RowDesc),
         Package {
             path: Path,
-            lids: Vec<crate::parser::longident::Longident>,
+            lids: super::type_expr::PackageLidsRef,
             args: super::type_expr::TypeRefList,
         },
         Link(TypeExprRef),
@@ -13145,10 +13171,10 @@ pub(crate) fn copy_type_cached(
                     body: *body,
                     vars: vars.clone(),
                 },
-                TypeDesc::Tvariant(row) => CopyAction::Variant(*row.clone()),
+                TypeDesc::Tvariant(row) => CopyAction::Variant(ctx.row_desc(row)),
                 TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
                     path: path.clone(),
-                    lids: *lids.clone(),
+                    lids: *lids,
                     args: args.clone(),
                 },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
@@ -13397,7 +13423,7 @@ pub(crate) fn copy_type_cached(
                             }
                         }
                     }
-                    TypeDesc::Tvariant(Box::new(row_copy))
+                    TypeDesc::Tvariant(ctx.new_row_desc(row_copy))
                 }
                 CopyAction::Package { path, lids, args } => {
                     let args_copy: Vec<_> = ctx
@@ -13407,7 +13433,7 @@ pub(crate) fn copy_type_cached(
                         .collect();
                     TypeDesc::Tpackage {
                         path,
-                        lids: Box::new(lids),
+                        lids,
                         args: ctx.new_type_list(&args_copy),
                     }
                 }
@@ -13626,7 +13652,7 @@ pub fn normalize_all_types(ctx: &TypeContext) {
         let desc = ctx.get_desc(ty);
         match &*desc {
             TypeDesc::Tvariant(row) => {
-                let row = row_repr(ctx, row);
+                let row = row_repr(ctx, &ctx.row_desc(row));
                 let mut fields: Vec<(Label, RowField)> = row
                     .row_fields
                     .iter()
@@ -13640,7 +13666,7 @@ pub fn normalize_all_types(ctx: &TypeContext) {
                 drop(desc);
                 ctx.set_desc(
                     ty,
-                    TypeDesc::Tvariant(Box::new(RowDesc {
+                    TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
                         row_fields: fields.into(),
                         row_more: row.row_more,
                         row_closed: row.row_closed,
@@ -13706,7 +13732,7 @@ fn normalize_type_rec(
         let desc = ctx.get_desc(ty);
         match &*desc {
             TypeDesc::Tvariant(row) => {
-                let row = row_repr(ctx, row);
+                let row = row_repr(ctx, &ctx.row_desc(row));
                 drop(desc);
                 // ctype.ml:4069-4092: drop conjuncts `equal` to an earlier one.
                 // `row_field_repr` always rebuilds a `Reither`, so OCaml's
@@ -13746,7 +13772,7 @@ fn normalize_type_rec(
                 fields.sort_by(|(a, _), (b, _)| a.cmp(b));
                 ctx.set_desc(
                     ty,
-                    TypeDesc::Tvariant(Box::new(RowDesc {
+                    TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
                         row_fields: fields.into(),
                         row_more: row.row_more,
                         row_closed: row.row_closed,
@@ -13961,7 +13987,8 @@ fn nondep_type_rec(
             }
         }
         TypeDesc::Tvariant(row) => {
-            let row = row_repr_ref(ctx, row);
+            let row_desc = ctx.row_desc(row);
+            let row = row_repr_ref(ctx, &row_desc);
             let row = row.as_ref();
             let new_more = nondep_type_rec(ctx, env, mid, row.row_more, cache)?;
             let new_fields: Option<Vec<_>> = row
@@ -14010,7 +14037,7 @@ fn nondep_type_rec(
                 }
                 _ => None,
             };
-            TypeDesc::Tvariant(Box::new(super::type_expr::RowDesc {
+            TypeDesc::Tvariant(ctx.new_row_desc(super::type_expr::RowDesc {
                 row_fields: new_fields?.into(),
                 row_more: new_more,
                 row_closed: row.row_closed,

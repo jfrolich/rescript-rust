@@ -1003,7 +1003,7 @@ fn type_expr_is_immediate(
             find_type_decl_for_path(env, ctx, path).is_some_and(|decl| decl.type_immediate)
         }
         crate::types::type_expr::TypeDesc::Tvariant(row) => {
-            let row = crate::types::btype::row_repr(ctx, row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             row.row_closed
                 && !row.row_fields.iter().any(|(_, field)| {
                     matches!(
@@ -1547,13 +1547,14 @@ fn rewrite_type_paths_in_place(
             rewrite_type_paths_in_place(ctx, *rest, sites, visited, rewrite);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if sites.row_name
                 && let Some((name_path, name_args)) = &row.row_name
             {
                 if let Some(rewritten) = rewrite(name_path) {
                     let mut new_row = row.clone();
                     new_row.row_name = Some((rewritten, name_args.clone()));
-                    ctx.set_desc(ty_ref, TypeDesc::Tvariant(new_row));
+                    ctx.set_desc(ty_ref, TypeDesc::Tvariant(ctx.new_row_desc(new_row)));
                 }
                 for arg in name_args {
                     rewrite_type_paths_in_place(ctx, *arg, sites, visited, rewrite);
@@ -3072,6 +3073,7 @@ fn expand_record_spread_label(
                 }
             }
             crate::types::TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 let mut changed = false;
                 let new_fields: Vec<_> = row
                     .row_fields
@@ -4002,7 +4004,7 @@ fn collect_free_type_variables(
             collect_free_type_variables(ctx, rest, result, visited);
         }
         TypeDesc::Tvariant(row) => {
-            let row = crate::types::btype::row_repr(ctx, &row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             let mut children = Vec::new();
             crate::types::btype::iter_row(ctx, &row, |child| children.push(child));
             for child in children {
@@ -4961,7 +4963,7 @@ fn set_fixed_row(
         let desc = ctx.get_desc(manifest_repr);
         match &*desc {
             TypeDesc::Tvariant(row) => {
-                FixedRowTarget::Variant(crate::types::btype::row_repr(ctx, row))
+                FixedRowTarget::Variant(crate::types::btype::row_repr(ctx, &ctx.row_desc(row)))
             }
             TypeDesc::Tobject { fields, .. } => FixedRowTarget::Object(*fields),
             _ => FixedRowTarget::Other,
@@ -4976,7 +4978,7 @@ fn set_fixed_row(
                 crate::types::btype::row_more(ctx, &row)
             };
             row.row_fixed = true;
-            ctx.set_desc(manifest_repr, TypeDesc::Tvariant(Box::new(row)));
+            ctx.set_desc(manifest_repr, TypeDesc::Tvariant(ctx.new_row_desc(row)));
             row_var
         }
         FixedRowTarget::Object(fields) => object_field_rest(ctx, fields),
@@ -6519,7 +6521,7 @@ fn type_exprs_equal_for_abbrev_recursion(
             },
         ) => {
             left_path.same(&right_path)
-                && left_lids == right_lids
+                && ctx.package_lids(left_lids) == ctx.package_lids(right_lids)
                 && type_expr_lists_equal_for_abbrev_recursion(
                     ctx,
                     &ctx.type_list(left_args),
@@ -8921,6 +8923,7 @@ fn apply_with_type_constraints_to_module_type(
                 rewrite_type_with_substs(ctx, rest, substs, cache, visited);
             }
             TypeDesc::Tvariant(row) => {
+                let row = ctx.row_desc(row);
                 rewrite_type_with_substs(ctx, row.row_more, substs, cache, visited);
                 for (_label, field) in row.row_fields {
                     match field {
@@ -9766,7 +9769,7 @@ fn check_usage_of_path_of_substituted_item(
                     TypeAction::Path(path.clone(), tctx.type_ctx.type_list(args).to_vec())
                 }
                 TypeDesc::Tobject { fields } => TypeAction::Object(*fields),
-                TypeDesc::Tvariant(row) => TypeAction::Variant(*row.clone()),
+                TypeDesc::Tvariant(row) => TypeAction::Variant(tctx.type_ctx.row_desc(row)),
                 _ => {
                     let mut children = Vec::new();
                     crate::types::btype::iter_type_expr(tctx.type_ctx, ty, |child| {
@@ -10604,6 +10607,7 @@ fn rewrite_functor_param_type_paths_in_type(
             );
         }
         TypeDesc::Tvariant(row) => {
+            let row = ctx.row_desc(row);
             rewrite_functor_param_type_paths_in_type(
                 row.row_more,
                 param_name,
@@ -11475,7 +11479,7 @@ fn module_type_from_typed_unpack_expr<'a>(
     modtype_of_package(
         env,
         &package_path,
-        &package_lids,
+        &tctx.type_ctx.package_lids(package_lids),
         &tctx.type_ctx.type_list(package_args),
         arena,
         &mut tctx.persistent_env,
@@ -13343,7 +13347,7 @@ fn strip_self_module_prefix_in_sig(
                 rewrite_type(*rest, module_id, direct_items, type_ctx, visited);
             }
             TypeDesc::Tvariant(row0) => {
-                let row = crate::types::btype::row_repr(type_ctx, row0);
+                let row = crate::types::btype::row_repr(type_ctx, &type_ctx.row_desc(row0));
                 rewrite_type(row.row_more, module_id, direct_items, type_ctx, visited);
                 for (_, field) in &row.row_fields {
                     match field {
@@ -14465,7 +14469,7 @@ fn collect_unbound_type_vars_in_type_expr(
             collect_unbound_type_vars_in_type_expr(ctx, *rest, allowed, visited, vars);
         }
         TypeDesc::Tvariant(row) => {
-            let row = crate::types::btype::row_repr(ctx, row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             for (_, field) in &row.row_fields {
                 match crate::types::btype::row_field_repr(ctx, field) {
                     crate::types::RowField::Rpresent(Some(ty)) => {
@@ -14645,7 +14649,7 @@ fn find_unbound_type_var_detail_in_single_type(
             })
         }
         TypeDesc::Tvariant(row) => {
-            let row = crate::types::btype::row_repr(ctx, &row);
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
             if ctx.repr(row.row_more) == ctx.repr(unbound) {
                 return trivial();
             }
@@ -15521,7 +15525,7 @@ fn type_module_expr_with_alias_inner<'a>(
                             modtype_of_package(
                                 env,
                                 path,
-                                lids,
+                                &tctx.type_ctx.package_lids(lids),
                                 &tctx.type_ctx.type_list(args),
                                 arena,
                                 &mut tctx.persistent_env,

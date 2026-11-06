@@ -8596,7 +8596,7 @@ fn extract_row_from_type_with_env(
         let expanded = crate::types::ctype::expand_head(ctx_ref, env.as_ref(), ty);
         let desc = ctx_ref.get_desc(expanded);
         if let TypeDesc::Tvariant(row) = &*desc {
-            return btype::row_repr(ctx_ref, row);
+            return btype::row_repr(ctx_ref, &ctx_ref.row_desc(row));
         }
     }
 
@@ -8620,7 +8620,7 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
         let action = {
             let desc = ctx_ref.get_desc(current);
             match &*desc {
-                TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, row)),
+                TypeDesc::Tvariant(row) => Action::ReturnRow(btype::row_repr(ctx_ref, &ctx_ref.row_desc(row))),
                 TypeDesc::Tconstr { path, .. } => {
                     let stamp = match path.view() {
                         crate::types::path::PathView::Pident(id) => id.stamp(),

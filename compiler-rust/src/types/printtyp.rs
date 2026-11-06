@@ -509,7 +509,7 @@ impl<'a> Printtyp<'a> {
                 if self.visited_objects.contains(&px) {
                     self.add_alias(px);
                 } else {
-                    let row = btype::row_repr(self.ctx, &row);
+                    let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                     if !btype::static_row(self.ctx, &row) {
                         self.visited_objects.insert(0, px);
                     }
@@ -672,7 +672,7 @@ impl<'a> Printtyp<'a> {
                     this.tree_of_path(path),
                     this.tree_of_typlist(sch, &this.ctx.type_list(args)),
                 ),
-                TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, row),
+                TypeDesc::Tvariant(row) => this.tree_of_variant(sch, px, &this.ctx.row_desc(row)),
                 TypeDesc::Tobject { fields } => this.tree_of_typobject(sch, *fields),
                 TypeDesc::Tnil | TypeDesc::Tfield { .. } => this.tree_of_typobject(sch, ty),
                 TypeDesc::Tsubst(t) => this.tree_of_typexp(sch, *t),
@@ -701,7 +701,9 @@ impl<'a> Printtyp<'a> {
                 }
                 TypeDesc::Tunivar(_) => OutType::Otyp_var(false, this.name_of_type(false, ty)),
                 TypeDesc::Tpackage { path, lids, args } => {
-                    let n = lids
+                    let n = this
+                        .ctx
+                        .package_lids(lids)
                         .iter()
                         .map(|li| flatten_longident(this.ctx, li).join("."))
                         .collect();
@@ -946,7 +948,7 @@ impl<'a> Printtyp<'a> {
                     go(ctx, visited, vars, rest);
                 }
                 TypeDesc::Tvariant(row) => {
-                    let row = btype::row_repr(ctx, &row);
+                    let row = btype::row_repr(ctx, &ctx.row_desc(row));
                     let mut children = Vec::new();
                     btype::iter_row(ctx, &row, |t| children.push(t));
                     for t in children {
@@ -1026,11 +1028,11 @@ impl<'a> Printtyp<'a> {
             let desc = (*self.ctx.get_desc(repr)).clone();
             let ty = match desc {
                 TypeDesc::Tvariant(row) => {
-                    let row = btype::row_repr(self.ctx, &row);
+                    let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                     match &row.row_name {
                         Some((p, _)) if p.as_pident().is_some_and(|id2| id2.same(id)) => self
                             .ctx
-                            .new_generic_type(TypeDesc::Tvariant(Box::new(RowDesc {
+                            .new_generic_type(TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc {
                                 row_name: None,
                                 ..row
                             }))),
@@ -2595,7 +2597,7 @@ impl<'a> Printtyp<'a> {
     fn hide_variant_name(&self, t: TypeExprRef) -> TypeExprRef {
         let t = self.ctx.repr(t);
         let row = match &*self.ctx.borrow_desc(t) {
-            TypeDesc::Tvariant(row) => btype::row_repr(self.ctx, row),
+            TypeDesc::Tvariant(row) => btype::row_repr(self.ctx, &self.ctx.row_desc(row)),
             _ => return t,
         };
         if row.row_name.is_none() {
@@ -2607,7 +2609,7 @@ impl<'a> Printtyp<'a> {
             .alloc_type_at_level(TypeDesc::Tvar(None), more_level);
         let level = self.ctx.get_level(t);
         self.ctx.alloc_type_at_level(
-            TypeDesc::Tvariant(Box::new(RowDesc {
+            TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc {
                 row_name: None,
                 row_more,
                 ..row
@@ -2624,14 +2626,14 @@ impl<'a> Printtyp<'a> {
         match desc {
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => ty,
             TypeDesc::Tvariant(row) => {
-                let row = btype::row_repr(self.ctx, &row);
+                let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                 let more = self.ctx.repr(row.row_more);
                 let more_desc = (*self.ctx.get_desc(more)).clone();
                 let row_more = self
                     .ctx
                     .alloc_type_at_level(more_desc, self.ctx.get_level(more));
                 self.ctx.alloc_type_at_level(
-                    TypeDesc::Tvariant(Box::new(RowDesc { row_more, ..row })),
+                    TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc { row_more, ..row })),
                     level,
                 )
             }
@@ -3035,8 +3037,8 @@ impl<'a> Printtyp<'a> {
                 ppf.close_box();
             }
             (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
-                let row1 = btype::row_repr(self.ctx, row1);
-                let row2 = btype::row_repr(self.ctx, row2);
+                let row1 = btype::row_repr(self.ctx, &self.ctx.row_desc(row1));
+                let row2 = btype::row_repr(self.ctx, &self.ctx.row_desc(row2));
                 let f1: Vec<(String, RowField)> = row1
                     .row_fields
                     .iter()

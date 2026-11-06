@@ -91,6 +91,7 @@ impl Collector<'_> {
                 }
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
                 TypeDesc::Tvariant(row) => {
+                    let row = &ctx.row_desc(row);
                     if let Some((path, _)) = &row.row_name {
                         read_of_path(path, Kind::Type, None, &mut self.out);
                     }

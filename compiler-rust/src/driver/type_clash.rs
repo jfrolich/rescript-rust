@@ -1072,6 +1072,7 @@ fn print_extra_type_clash_help_by_types(
     if is(&p1, predef::path_string())
         && let TypeDesc::Tvariant(row) = &d2
     {
+        let row = &ctx.row_desc(row);
         let text = extract_text_at_loc(arena, source, loc);
         if let Some(string_value) = extract_string_constant(ctx, &text) {
             let variant_constructors: Vec<String> =

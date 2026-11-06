@@ -122,7 +122,7 @@ pub fn row_field_unmatched_reither_link(
 pub fn row_more(ctx: &TypeContext, row: &RowDesc) -> TypeExprRef {
     let more = ctx.repr(row.row_more);
     match &*ctx.borrow_desc(more) {
-        TypeDesc::Tvariant(inner_row) => row_more(ctx, inner_row),
+        TypeDesc::Tvariant(inner_row) => row_more(ctx, &ctx.row_desc(inner_row)),
         _ => more,
     }
 }
@@ -149,7 +149,7 @@ pub fn row_repr(ctx: &TypeContext, row: &RowDesc) -> RowDesc {
                 if !current.row_fields.is_empty() {
                     outer.push(current.row_fields.clone());
                 }
-                current = *inner_row;
+                current = ctx.row_desc(inner_row);
             }
             None => break,
         }
@@ -194,7 +194,7 @@ pub fn row_field(ctx: &TypeContext, tag: &str, row: &RowDesc) -> RowField {
     // Check nested variant
     let more = ctx.repr(row.row_more);
     match &*ctx.borrow_desc(more) {
-        TypeDesc::Tvariant(inner_row) => row_field(ctx, tag, inner_row),
+        TypeDesc::Tvariant(inner_row) => row_field(ctx, tag, &ctx.row_desc(inner_row)),
         _ => RowField::Rabsent,
     }
 }
@@ -207,7 +207,7 @@ pub fn row_fixed(ctx: &TypeContext, row: &RowDesc) -> bool {
 
     let more = ctx.repr(row.row_more);
     match &*ctx.borrow_desc(more) {
-        TypeDesc::Tvariant(inner_row) => row_fixed(ctx, inner_row),
+        TypeDesc::Tvariant(inner_row) => row_fixed(ctx, &ctx.row_desc(inner_row)),
         TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
         TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => true,
         _ => false,
@@ -255,7 +255,7 @@ where
     let action = {
         let desc = ctx.borrow_desc(more);
         match &*desc {
-            TypeDesc::Tvariant(inner_row) => MoreAction::Variant(*inner_row.clone()),
+            TypeDesc::Tvariant(inner_row) => MoreAction::Variant(ctx.row_desc(inner_row)),
             TypeDesc::Tvar(_)
             | TypeDesc::Tunivar(_)
             | TypeDesc::Tsubst(_)
@@ -315,9 +315,10 @@ where
             }
             TypeDesc::Tobject { fields } => Children::One(*fields),
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 let row_clone = row.clone();
                 let more = row.row_more;
-                Children::Variant(*row_clone, more)
+                Children::Variant(row_clone, more)
             }
             TypeDesc::Tfield { typ, rest, .. } => Children::Two(*typ, *rest),
             TypeDesc::Tnil => Children::None,
@@ -476,7 +477,7 @@ pub fn proxy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 // Clone the row to check static_row outside the borrow
-                ProxyAction::VariantRow(*row.clone())
+                ProxyAction::VariantRow(ctx.row_desc(row))
             }
             TypeDesc::Tobject { fields, .. } => ProxyAction::ObjectFields(*fields),
             _ => ProxyAction::Return,
@@ -530,7 +531,7 @@ pub fn row_of_type(ctx: &TypeContext, t: TypeExprRef) -> TypeExprRef {
         let desc = ctx.borrow_desc(t);
         match &*desc {
             TypeDesc::Tobject { fields, .. } => RowAction::ObjectFields(*fields),
-            TypeDesc::Tvariant(row) => RowAction::VariantRow(*row.clone()),
+            TypeDesc::Tvariant(row) => RowAction::VariantRow(ctx.row_desc(row)),
             _ => RowAction::Return,
         }
     };

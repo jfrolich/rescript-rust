@@ -489,7 +489,7 @@ fn sexp_type_expr_body_inline(
             let s = sexp_type_expr_inline(arena, ctx, state, *ty);
             Sexp::list(vec![Sexp::atom("Tsubst"), s])
         }
-        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, state, row),
+        TypeDesc::Tvariant(row) => sexp_row_desc(arena, ctx, state, &ctx.row_desc(row)),
         TypeDesc::Tpoly { body, vars } => {
             let body_sexp = sexp_type_expr_inline(arena, ctx, state, *body);
             let mut var_sexps = Vec::new();
@@ -507,7 +507,8 @@ fn sexp_type_expr_body_inline(
                 Sexp::atom("Tpackage"),
                 sexp_path(path),
                 Sexp::list(
-                    lids.iter()
+                    ctx.package_lids(lids)
+                        .iter()
                         .map(|li| sexp_longident(arena, ctx, li))
                         .collect(),
                 ),

@@ -5315,6 +5315,7 @@ fn substitute_type_expr_path(
                 work_stack.push(*rest);
             }
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 // OCaml compiler/ml/subst.ml:226-235 rewrites
                 // polymorphic-variant row_name paths while copying the row.
                 if let Some((path, _)) = &row.row_name {
@@ -5327,12 +5328,11 @@ fn substitute_type_expr_path(
                         protected_module_head,
                     );
                     if new_path != *path {
-                        let mut new_desc = (*desc).clone();
-                        if let TypeDesc::Tvariant(ref mut row) = new_desc
-                            && let Some((ref mut path, _)) = row.row_name
-                        {
+                        let mut new_row = (*row).clone();
+                        if let Some((ref mut path, _)) = new_row.row_name {
                             *path = new_path;
                         }
+                        let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                         replacement = Some(new_desc);
                     }
                 }
@@ -5492,6 +5492,7 @@ pub fn type_expr_mentions_path_prefixes(
                 walk(*typ, prefixes, ctx, visited) || walk(*rest, prefixes, ctx, visited)
             }
             TypeDesc::Tvariant(row) => {
+                let row = &ctx.row_desc(row);
                 row.row_name.as_ref().is_some_and(|(p, args)| {
                     hit(p) || args.iter().any(|a| walk(*a, prefixes, ctx, visited))
                 }) || walk(row.row_more, prefixes, ctx, visited)
@@ -5818,15 +5819,15 @@ fn rewrite_type_expr_prefix(
             rewrite_type_expr_prefix(*rest, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if let Some((path, _)) = &row.row_name
                 && let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix)
             {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
+                let mut new_row = (*row).clone();
+                if let Some((ref mut path, _)) = new_row.row_name {
                     *path = new_path;
                 }
+                let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                 ctx.set_desc(ty_ref, new_desc);
             }
             if let Some((_, args)) = &row.row_name {
@@ -6521,15 +6522,15 @@ fn rewrite_type_expr_by_path_prefix_in(
             rewrite_type_expr_by_path_prefix_in(*rest, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if let Some((path, _)) = &row.row_name
                 && let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
             {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
+                let mut new_row = (*row).clone();
+                if let Some((ref mut path, _)) = new_row.row_name {
                     *path = new_path;
                 }
+                let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                 ctx.set_desc(ty_ref, new_desc);
             }
             if let Some((_, args)) = &row.row_name {
@@ -6635,15 +6636,15 @@ fn rewrite_type_expr_by_path_prefixes(
             rewrite_type_expr_by_path_prefixes(*rest, prefixes, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            let row = &ctx.row_desc(row);
             if let Some((path, _)) = &row.row_name
                 && let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes)
             {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
+                let mut new_row = (*row).clone();
+                if let Some((ref mut path, _)) = new_row.row_name {
                     *path = new_path;
                 }
+                let new_desc = TypeDesc::Tvariant(ctx.new_row_desc(new_row));
                 ctx.set_desc(ty_ref, new_desc);
             }
             if let Some((_, args)) = &row.row_name {
